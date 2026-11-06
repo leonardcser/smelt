@@ -2,13 +2,13 @@ use super::*;
 
 impl TestApp {
     pub(super) fn assert_prompt_cursor_projection(&self) {
-        let Some(win) = self.app.ui.win(crate::app::PROMPT_WIN) else {
+        let Some(win) = self.tui.ui.win(crate::app::PROMPT_WIN) else {
             return;
         };
         if win.effective_endpoint() != win.cpos() {
             return;
         }
-        let Some(buf) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) else {
+        let Some(buf) = self.tui.ui.buf(crate::app::PROMPT_EDIT_BUF) else {
             return;
         };
         let source = buf.source();
@@ -48,7 +48,7 @@ impl TestApp {
 
     pub(super) fn assert_render_layout_invariants(&self) {
         for win_id in [crate::app::PROMPT_WIN, crate::app::TRANSCRIPT_WIN] {
-            let Some(win) = self.app.ui.win(win_id) else {
+            let Some(win) = self.tui.ui.win(win_id) else {
                 continue;
             };
             let Some(viewport) = win.viewport else {
@@ -100,8 +100,8 @@ impl TestApp {
     /// could land inside a grapheme: window cpos and selection anchor, undo
     /// and redo entries, kill-ring source range, prompt completer anchor.
     pub fn assert_text_invariants(&self) {
-        for (wid, win) in self.app.ui.iter_wins() {
-            let Some(buf) = self.app.ui.buf(win.buf) else {
+        for (wid, win) in self.tui.ui.iter_wins() {
+            let Some(buf) = self.tui.ui.buf(win.buf) else {
                 continue;
             };
             // The buffer crate carries two representations: source-based
@@ -160,7 +160,7 @@ impl TestApp {
             }
         }
 
-        for (bid, buf) in self.app.ui.iter_bufs() {
+        for (bid, buf) in self.tui.ui.iter_bufs() {
             // Undo/redo snapshots are self-contained: each entry's `cpos`
             // is an offset into that entry's own `buf` string, not the
             // current source. A stale `cpos` lurking in an undo entry
@@ -214,7 +214,7 @@ impl TestApp {
         // mode, and overlay edits alike). `start <= end` is the only sound
         // floor; downstream consumers (`yank_flash_range` callers) snap
         // against the current buffer at read time to absorb stale offsets.
-        if let Some((start, end)) = self.app.core.clipboard.kill_ring.source_range() {
+        if let Some((start, end)) = self.tui.core.clipboard.kill_ring.source_range() {
             assert!(
                 start <= end,
                 "kill-ring source_range {} > {} (inverted)",
@@ -228,11 +228,11 @@ impl TestApp {
         // `visual_anchor_at`), but the stored offset can still drift past
         // `text().len()` if the buffer shrinks under the anchor without
         // the window noticing - that's the trap fuzzing should catch.
-        for (wid, win) in self.app.ui.iter_wins() {
+        for (wid, win) in self.tui.ui.iter_wins() {
             if !win.vim_enabled() {
                 continue;
             }
-            let Some(buf) = self.app.ui.buf(win.buf) else {
+            let Some(buf) = self.tui.ui.buf(win.buf) else {
                 continue;
             };
             let text = if buf.readonly {
@@ -260,7 +260,7 @@ impl TestApp {
         // the `\u{FFFC}` markers in the source. A divergence means an
         // insert/delete path didn't keep them in sync - the next paste or
         // copy will read off the end of the vec.
-        if let Some(prompt) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) {
+        if let Some(prompt) = self.tui.ui.buf(crate::app::PROMPT_EDIT_BUF) {
             let src = prompt.source();
             let marker_count = src.chars().filter(|c| *c == '\u{FFFC}').count();
             assert_eq!(
@@ -277,14 +277,14 @@ impl TestApp {
     /// stale, every live window's buf points at a live buffer, and the
     /// notification overlay (when set) points at a live window.
     pub fn assert_ui_invariants(&self) {
-        let (w, h) = self.app.ui.terminal_size();
+        let (w, h) = self.tui.ui.terminal_size();
         assert!(w > 0 && h > 0, "terminal size collapsed to {w}x{h}");
 
         // Focused window, when set, must still be alive. A stale `focus`
         // pointing at a closed leaf is a use-after-free in waiting.
-        if let Some(focused) = self.app.ui.focus() {
+        if let Some(focused) = self.tui.ui.focus() {
             assert!(
-                self.app.ui.win(focused).is_some(),
+                self.tui.ui.win(focused).is_some(),
                 "focus points at dead window {focused:?}"
             );
         }
@@ -293,9 +293,9 @@ impl TestApp {
         // buffer. A dangling buf ref means the rendering pass reads from
         // a phantom buffer - visually invisible until the cell layout
         // tries to query content.
-        for (wid, win) in self.app.ui.iter_wins() {
+        for (wid, win) in self.tui.ui.iter_wins() {
             assert!(
-                self.app.ui.buf(win.buf).is_some(),
+                self.tui.ui.buf(win.buf).is_some(),
                 "window {wid:?} buf {:?} points at non-existent buffer",
                 win.buf,
             );
@@ -308,7 +308,7 @@ impl TestApp {
         // Width-vs-layout checks live in `assert_render_layout_invariants`,
         // after render has rebuilt layouts for the current viewport.
         for win_id in [crate::app::PROMPT_WIN, crate::app::TRANSCRIPT_WIN] {
-            if let Some(win) = self.app.ui.win(win_id) {
+            if let Some(win) = self.tui.ui.win(win_id) {
                 assert_eq!(
                     win.scroll_left, 0,
                     "well-known window {win_id:?} has horizontal scroll_left {}",
@@ -321,9 +321,9 @@ impl TestApp {
         // `dismiss_notification` and `open_notification` always pair the
         // notification state with the underlying overlay leaf; if they ever
         // get out of sync, the next render walks a dead window.
-        if let Some(win) = self.app.notification_win() {
+        if let Some(win) = self.tui.notification_win() {
             assert!(
-                self.app.ui.win(win).is_some(),
+                self.tui.ui.win(win).is_some(),
                 "notification points at dead window {win:?}",
             );
         }
@@ -334,21 +334,21 @@ impl TestApp {
         // also carry a rendering extmark.
         let placeholder_ns =
             smelt_buffer::buffer::create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
-        for win in self.app.prompt.placeholder_option_windows() {
+        for win in self.tui.prompt.placeholder_option_windows() {
             assert!(
-                self.app.ui.win(win).is_some(),
+                self.tui.ui.win(win).is_some(),
                 "placeholder options point at dead window {win:?}",
             );
             assert!(
-                self.app.prompt.placeholder_text(win).is_some(),
+                self.tui.prompt.placeholder_text(win).is_some(),
                 "placeholder options for {win:?} have no placeholder text",
             );
             if win == crate::app::PROMPT_WIN {
                 continue;
             }
-            let buf_id = self.app.ui.win(win).map(|w| w.buf);
+            let buf_id = self.tui.ui.win(win).map(|w| w.buf);
             let extmark_count = buf_id
-                .and_then(|bid| self.app.ui.buf(bid))
+                .and_then(|bid| self.tui.ui.buf(bid))
                 .map(|b| b.extmarks(placeholder_ns).len())
                 .unwrap_or(0);
             assert_eq!(
@@ -361,7 +361,7 @@ impl TestApp {
     /// Agent / working / streaming coherence plus pending-tool bookkeeping.
     pub fn assert_session_invariants(&self) {
         // Every pending invocation has one distinct nonterminal transcript block.
-        if let Some(turn) = self.app.conversation.active() {
+        if let Some(turn) = self.tui.conversation.active() {
             let mut seen = std::collections::HashSet::with_capacity(turn.pending.len());
             for pending in &turn.pending {
                 assert!(
@@ -371,7 +371,7 @@ impl TestApp {
                     turn.turn_id
                 );
                 let block_id = self
-                    .app
+                    .tui
                     .conversation
                     .active_tool_block_id(pending.invocation_id)
                     .unwrap_or_else(|| {
@@ -381,7 +381,7 @@ impl TestApp {
                         )
                     });
                 assert!(
-                    self.app
+                    self.tui
                         .conversation
                         .transcript()
                         .history()
@@ -394,7 +394,7 @@ impl TestApp {
         }
 
         // Every tool sidecar belongs directly to a tool block.
-        let history = self.app.conversation.transcript().history();
+        let history = self.tui.conversation.transcript().history();
         for (block_id, _) in history.tool_states() {
             assert!(
                 matches!(
@@ -408,9 +408,9 @@ impl TestApp {
         // Animation belongs to an active turn or its pending durable submission.
         // Recovery hooks can pause animation while a turn remains active, so
         // the reverse implication does not hold.
-        if self.app.working.is_animating() {
+        if self.tui.working.is_animating() {
             assert!(
-                self.app.conversation.is_active() || self.app.turn_submission_is_pending(),
+                self.tui.conversation.is_active() || self.tui.turn_submission_is_pending(),
                 "working is animating without an active or pending agent turn",
             );
         }
@@ -419,8 +419,8 @@ impl TestApp {
         // already flushed `text` and `thinking` buffers; the idle event
         // handler never appends to them. `exec` is independent of turns
         // (vim bang-shell) so it's deliberately excluded.
-        if !self.app.conversation.is_active() {
-            let (text, thinking, _) = self.app.conversation.streaming_state();
+        if !self.tui.conversation.is_active() {
+            let (text, thinking, _) = self.tui.conversation.streaming_state();
             assert!(!text, "streaming text buffer non-empty with no agent turn");
             assert!(
                 !thinking,
@@ -437,15 +437,15 @@ impl TestApp {
         const PENDING_DIALOGS_CAP: usize = 64;
 
         assert!(
-            self.app.prompt.queued_len() <= crate::app::MAX_QUEUED_MESSAGES,
+            self.tui.prompt.queued_len() <= crate::app::MAX_QUEUED_MESSAGES,
             "queued_inputs {} > cap {}",
-            self.app.prompt.queued_len(),
+            self.tui.prompt.queued_len(),
             crate::app::MAX_QUEUED_MESSAGES,
         );
         assert!(
-            self.app.overlays.deferred_dialog_count() <= PENDING_DIALOGS_CAP,
+            self.tui.overlays.deferred_dialog_count() <= PENDING_DIALOGS_CAP,
             "deferred dialogs {} > cap {}",
-            self.app.overlays.deferred_dialog_count(),
+            self.tui.overlays.deferred_dialog_count(),
             PENDING_DIALOGS_CAP,
         );
 
@@ -454,7 +454,7 @@ impl TestApp {
         // both means some new registration path forgot which map to write
         // to, and auxiliary dispatch could invoke an unrelated handler
         // with ask-shaped args.
-        let shared = self.app.lua.shared();
+        let shared = self.tui.lua.shared();
         if let (Ok(cbs), Ok(ask)) = (shared.callbacks.lock(), shared.ask_callbacks.lock()) {
             for id in ask.keys() {
                 assert!(
@@ -471,11 +471,11 @@ impl TestApp {
         // and a stale `Some` after the last release would leave the
         // prompt indicator animating past 0 entries.
         assert_eq!(
-            self.app.busy_stack.is_busy(),
-            self.app.busy_stack.since().is_some(),
+            self.tui.busy_stack.is_busy(),
+            self.tui.busy_stack.since().is_some(),
             "busy_stack is_busy={} but since.is_some()={}",
-            self.app.busy_stack.is_busy(),
-            self.app.busy_stack.since().is_some(),
+            self.tui.busy_stack.is_busy(),
+            self.tui.busy_stack.since().is_some(),
         );
     }
 }

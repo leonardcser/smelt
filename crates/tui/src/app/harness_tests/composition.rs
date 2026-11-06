@@ -478,7 +478,7 @@ fn gallery_api_consumers() {
             app.render_silent();
         }
         let errors: Vec<_> = app
-            .app
+            .tui
             .lua
             .core_shared()
             .messages
@@ -544,7 +544,7 @@ fn tool_turns_extend_the_row_index_without_rebuilding_it() {
 fn transcript_cache_budgets_follow_the_viewport_until_pinned() {
     let budgets = |app: &TestApp| {
         let memory = app
-            .app
+            .tui
             .conversation
             .transcript_memory_snapshot_for_harness();
         (
@@ -570,7 +570,7 @@ fn transcript_cache_budgets_follow_the_viewport_until_pinned() {
         record_windows: 2 << 20,
         rendered_rows: 5 << 20,
     };
-    app.app
+    app.tui
         .conversation
         .set_transcript_memory_budget_for_harness(pinned);
     app.set_terminal_size(100, 30);

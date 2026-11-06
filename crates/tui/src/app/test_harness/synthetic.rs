@@ -8,13 +8,13 @@ fn next_synthetic_invocation_id() -> protocol::InvocationId {
 impl TestApp {
     pub fn push_context_recalculation(&mut self, label: impl Into<String>) {
         let _token = self
-            .app
+            .tui
             .busy_stack
             .push_context_recalculation_token(label.into());
     }
 
     pub(crate) fn push_transcript_block(&mut self, block: smelt_core::transcript_model::Block) {
-        self.app.push_block(block);
+        self.tui.push_block(block);
     }
 
     pub(crate) fn start_tool(
@@ -26,7 +26,7 @@ impl TestApp {
     ) -> protocol::InvocationId {
         let invocation_id = next_synthetic_invocation_id();
         let called_at_ms = self.tool_called_at_ms();
-        self.app
+        self.tui
             .start_tool_at(invocation_id, call_id, name, summary, args, called_at_ms);
         invocation_id
     }
@@ -38,12 +38,12 @@ impl TestApp {
         output: Option<smelt_core::transcript_model::ToolOutputRef>,
         engine_elapsed: Option<std::time::Duration>,
     ) {
-        self.app
+        self.tui
             .finish_tool(invocation_id, status, output, engine_elapsed);
     }
 
     pub(crate) fn dispatch_host_call(&mut self, call: engine::HostCall) {
-        self.app.dispatch_host_call(call);
+        self.tui.dispatch_host_call(call);
         self.wait_for_project_context();
     }
 
@@ -53,17 +53,17 @@ impl TestApp {
         pending: &mut Vec<crate::app::PendingTool>,
     ) -> crate::app::SessionControl {
         let mut turn = self
-            .app
+            .tui
             .conversation
             .clear_active()
             .expect("test turn is active");
         turn.pending = std::mem::take(pending);
-        let control = self.app.dispatch_control(
+        let control = self.tui.dispatch_control(
             crate::app::SessionControl::NeedsConfirm(Box::new(request)),
             &mut turn,
         );
         *pending = std::mem::take(&mut turn.pending);
-        self.app.conversation.set_active(Some(turn));
+        self.tui.conversation.set_active(Some(turn));
         control
     }
 
@@ -72,9 +72,9 @@ impl TestApp {
         command: smelt_core::custom_commands::CustomCommand,
     ) -> bool {
         self.ensure_writer_ready();
-        let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
-        let turn = self.app.begin_custom_command_turn(command, sent_at_ms);
-        self.app.conversation.set_active(turn);
+        let sent_at_ms = engine::clock::unix_time_ms(self.tui.core.clock.as_ref());
+        let turn = self.tui.begin_custom_command_turn(command, sent_at_ms);
+        self.tui.conversation.set_active(turn);
         self.wait_for_turn_dispatch();
         self.agent_running()
     }
@@ -87,7 +87,7 @@ impl TestApp {
         start: crate::app::CommandTurnStart,
     ) -> bool {
         self.ensure_writer_ready();
-        let turn = self.app.begin_command_request_turn(
+        let turn = self.tui.begin_command_request_turn(
             display,
             evaluated,
             crate::app::CommandScope {
@@ -95,9 +95,9 @@ impl TestApp {
                 overrides,
             },
             start,
-            engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
+            engine::clock::unix_time_ms(self.tui.core.clock.as_ref()),
         );
-        self.app.conversation.set_active(turn);
+        self.tui.conversation.set_active(turn);
         self.wait_for_turn_dispatch();
         self.agent_running()
     }
@@ -111,7 +111,7 @@ impl TestApp {
         blocks_agent: bool,
     ) -> Option<WinId> {
         crate::picker::open(
-            &mut self.app,
+            &mut self.tui,
             items,
             selected,
             placement,
@@ -126,19 +126,19 @@ impl TestApp {
         items: Vec<crate::picker::PickerItem>,
         selected: usize,
     ) {
-        crate::picker::set_items(&mut self.app, leaf, items, selected);
+        crate::picker::set_items(&mut self.tui, leaf, items, selected);
     }
 
     pub(crate) fn set_picker_selected(&mut self, leaf: WinId, selected: usize) {
-        crate::picker::set_selected(&mut self.app, leaf, selected);
+        crate::picker::set_selected(&mut self.tui, leaf, selected);
     }
 
     pub(crate) fn forget_picker(&mut self, leaf: WinId) {
-        crate::picker::forget(&mut self.app, leaf);
+        crate::picker::forget(&mut self.tui, leaf);
     }
 
     pub(crate) fn scroll_at(&mut self, x: u16, y: u16, rows: isize) -> bool {
-        self.app.ui.scroll_at(x, y, rows)
+        self.tui.ui.scroll_at(x, y, rows)
     }
 
     pub(crate) fn open_readonly_overlay_fixture(
@@ -147,11 +147,11 @@ impl TestApp {
         unselectable_prefix_len: Option<usize>,
     ) -> WinId {
         let buf = self
-            .app
+            .tui
             .ui
             .buf_create(crate::smelt_edit::BufCreateOpts::default());
         {
-            let buffer = self.app.ui.buf_mut(buf).expect("overlay buffer");
+            let buffer = self.tui.ui.buf_mut(buf).expect("overlay buffer");
             buffer.readonly = true;
             buffer.set_all_lines(lines);
             if let Some(end) = unselectable_prefix_len {
@@ -165,7 +165,7 @@ impl TestApp {
             }
         }
         let leaf = self
-            .app
+            .tui
             .ui
             .win_open_split(
                 buf,
@@ -174,11 +174,11 @@ impl TestApp {
                 },
             )
             .expect("overlay leaf");
-        if let Some(win) = self.app.ui.win_mut(leaf) {
+        if let Some(win) = self.tui.ui.win_mut(leaf) {
             win.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
             win.set_vim_enabled(true);
         }
-        self.app.ui.overlay_open(
+        self.tui.ui.overlay_open(
             crate::smelt_edit::Overlay::new(
                 crate::smelt_edit::LayoutTree::leaf(leaf),
                 crate::smelt_edit::Anchor::ScreenCenter,
@@ -190,8 +190,8 @@ impl TestApp {
     }
 
     pub(crate) fn set_window_lines(&mut self, win: WinId, lines: Vec<String>) {
-        let buf = self.app.ui.win(win).expect("window").buf;
-        self.app
+        let buf = self.tui.ui.win(win).expect("window").buf;
+        self.tui
             .ui
             .buf_mut(buf)
             .expect("window buffer")
@@ -199,7 +199,7 @@ impl TestApp {
     }
 
     pub(crate) fn set_window_cursor(&mut self, win: WinId, cpos: usize) {
-        self.app.ui.win_mut(win).expect("window").set_cpos(cpos);
+        self.tui.ui.win_mut(win).expect("window").set_cpos(cpos);
     }
 
     pub(crate) fn set_overlay_size_override(
@@ -207,7 +207,7 @@ impl TestApp {
         overlay: crate::smelt_edit::OverlayId,
         size: (u16, u16),
     ) {
-        if let Some(overlay) = self.app.ui.overlay_mut(overlay) {
+        if let Some(overlay) = self.tui.ui.overlay_mut(overlay) {
             overlay.size_override = Some(size);
         }
     }
@@ -221,8 +221,8 @@ impl TestApp {
     }
 
     pub(crate) fn insert_image_attachment(&mut self, label: String, data_url: String) {
-        let mut ctx = crate::input::prompt_ctx_mut(&mut self.app.ui);
-        self.app
+        let mut ctx = crate::input::prompt_ctx_mut(&mut self.tui.ui);
+        self.tui
             .prompt
             .insert_image_for_harness(&mut ctx, label, data_url);
     }
@@ -232,7 +232,7 @@ impl TestApp {
     /// the harness bypasses the timing gate so coverage doesn't depend on
     /// random key collisions.
     pub fn toggle_pane_focus(&mut self) {
-        self.app.toggle_pane_focus();
+        self.tui.toggle_pane_focus();
     }
 
     /// Side-channel: install a placeholder on the prompt window with given
@@ -246,13 +246,13 @@ impl TestApp {
         accept: Vec<crate::smelt_edit::KeyBind>,
         dismiss: Vec<crate::smelt_edit::KeyBind>,
     ) {
-        let win = self.app.well_known.prompt;
+        let win = self.tui.well_known.prompt;
         if text.is_empty() {
-            self.app.clear_placeholder(win);
+            self.tui.clear_placeholder(win);
             return;
         }
-        self.app.set_placeholder(win, text);
-        self.app.set_placeholder_options(
+        self.tui.set_placeholder(win, text);
+        self.tui.set_placeholder_options(
             win,
             crate::app::PlaceholderOpts {
                 accept_keys: accept,
@@ -263,8 +263,8 @@ impl TestApp {
 
     /// Side-channel: clear the prompt placeholder (both extmark and opts).
     pub fn clear_prompt_placeholder(&mut self) {
-        let win = self.app.well_known.prompt;
-        self.app.clear_placeholder(win);
+        let win = self.tui.well_known.prompt;
+        self.tui.clear_placeholder(win);
     }
 
     /// Side-channel: open a synthetic overlay via `smelt.overlay.new`.
@@ -336,15 +336,15 @@ impl TestApp {
             "#,
         ];
         let snippet = VARIANTS[(variant as usize) % VARIANTS.len()];
-        let lua = self.app.lua.lua().clone();
-        let _ = crate::lua::scope_app(&mut self.app, || lua.load(snippet).exec());
+        let lua = self.tui.lua.lua().clone();
+        let _ = crate::lua::scope_app(&mut self.tui, || lua.load(snippet).exec());
     }
 
     /// Append a canonical user turn and its transcript block without a real
     /// engine roundtrip.
     pub fn push_user_block(&mut self, text: &str) {
         let sent_at_ms = engine::clock::unix_time_ms(self.clock.as_ref());
-        self.app.stage_request_history_item(
+        self.tui.stage_request_history_item(
             protocol::HistoryItem::user(protocol::Content::text(text)).with_sent_at_ms(sent_at_ms),
             Some(smelt_core::transcript_model::Block::User {
                 text: text.to_string(),
@@ -358,7 +358,7 @@ impl TestApp {
     /// Append a command-marked user block to the transcript history.
     pub fn push_command_block(&mut self, text: &str) {
         let sent_at_ms = engine::clock::unix_time_ms(self.clock.as_ref());
-        self.app
+        self.tui
             .push_block(smelt_core::transcript_model::Block::User {
                 text: text.to_string(),
                 image_labels: Vec::new(),
@@ -378,7 +378,7 @@ impl TestApp {
     /// Push a compacted marker that repeats the entries the model still
     /// receives verbatim after the checkpoint.
     pub fn push_compacted_kept(&mut self, summary: &str, kept: Vec<smelt_core::KeptHistoryItem>) {
-        self.app
+        self.tui
             .push_block(smelt_core::transcript_model::Block::Compacted {
                 summary: summary.to_string(),
                 kept,
@@ -388,7 +388,7 @@ impl TestApp {
     /// Push or rewrite the transient compaction preview block shown while
     /// the compact plugin streams a checkpoint summary.
     pub fn push_compaction_preview(&mut self, summary: &str) {
-        self.app.update_compaction_preview(summary.to_string());
+        self.tui.update_compaction_preview(summary.to_string());
     }
 
     /// Push a process-status block without spawning a subprocess.
@@ -397,12 +397,12 @@ impl TestApp {
         let block = self
             .history_note_to_block(&note)
             .expect("process-status note has a transcript block");
-        self.app.push_block(block);
+        self.tui.push_block(block);
     }
 
     /// Push a `Block::Mode` into the transcript without restoring a fixture.
     pub fn push_mode_block(&mut self, text: &str, icon: &str, hl_group: &str) {
-        self.app
+        self.tui
             .push_block(smelt_core::transcript_model::Block::Mode {
                 text: text.to_string(),
                 icon: icon.to_string(),
@@ -412,7 +412,7 @@ impl TestApp {
 
     /// Push a `Block::CodeLine` into the transcript.
     pub fn push_code_line(&mut self, content: &str, lang: &str) {
-        self.app
+        self.tui
             .push_block(smelt_core::transcript_model::Block::CodeLine {
                 content: content.to_string(),
                 lang: lang.to_string(),
@@ -427,8 +427,8 @@ impl TestApp {
     /// the harness invokes the transcript hook and input-submit event
     /// directly.
     pub fn start_exec(&mut self, command: &str) {
-        self.app.start_exec(command.to_string());
-        self.app.publish_input_submit(format!("!{command}"));
+        self.tui.start_exec(command.to_string());
+        self.tui.publish_input_submit(format!("!{command}"));
         self.tick_signals();
     }
 
@@ -524,7 +524,7 @@ impl TestApp {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             args: args.clone(),
-            mode: self.app.core.config.mode.clone(),
+            mode: self.tui.core.config.mode.clone(),
         });
         self.wait_for_tool_evaluation(invocation_id.get());
         let called_at_ms = self.tool_called_at_ms();
@@ -544,26 +544,26 @@ impl TestApp {
     /// Cancel the active turn (or idle background tasks). Mirrors
     /// `EventOutcome::CancelAgent` → `discard_turn(true)`.
     pub fn cancel(&mut self) {
-        self.app.discard_turn(crate::app::TurnEnd::Cancelled);
+        self.tui.discard_turn(crate::app::TurnEnd::Cancelled);
         self.drain_cmd();
     }
 
     /// Push text that has already been promoted into the active turn's request queue.
     pub fn steer(&mut self, text: &str) {
         if !text.is_empty() {
-            self.app
+            self.tui
                 .prompt
                 .try_queue_request(crate::app::QueuedInput::request_from_text(
                     text.to_string(),
                     text.to_string(),
-                    engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
+                    engine::clock::unix_time_ms(self.tui.core.clock.as_ref()),
                 ));
         }
     }
 
     /// Remove up to `count` request-queued messages from the front.
     pub fn unsteer(&mut self, count: usize) {
-        self.app.prompt.acknowledge_requests(count);
+        self.tui.prompt.acknowledge_requests(count);
     }
 
     /// Send a `CallCoreTool` UiCommand to the engine channel.
@@ -572,7 +572,7 @@ impl TestApp {
         tool_name: &str,
         args: std::collections::HashMap<String, serde_json::Value>,
     ) {
-        self.app
+        self.tui
             .core
             .engine
             .send(protocol::UiCommand::CallCoreTool {
@@ -587,13 +587,13 @@ impl TestApp {
 
     /// Change the active agent mode.
     pub fn set_agent_mode(&mut self, mode: AgentMode) {
-        self.app.core.config.mode = mode;
+        self.tui.core.config.mode = mode;
     }
 
     /// Push an `assistant` text block onto the transcript history so
     /// flows that read message history see a multi-turn conversation.
     pub fn push_assistant_text(&mut self, text: &str) {
-        self.app
+        self.tui
             .conversation
             .append_history_item(protocol::HistoryItem::Assistant(
                 protocol::AssistantStep::terminal(
@@ -651,7 +651,7 @@ impl TestApp {
             session.display_context_token_identity = context.identity.clone();
         }
         session.history = history;
-        self.app
+        self.tui
             .core
             .sessions
             .save(&session)

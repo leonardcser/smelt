@@ -3023,7 +3023,7 @@ mod checkpoint_tests {
         app: &crate::app::test_harness::TestApp,
         session_id: &str,
     ) -> smelt_store::SessionReader {
-        app.app
+        app.tui
             .core
             .sessions
             .reader(session_id)
@@ -3049,7 +3049,7 @@ mod checkpoint_tests {
     #[test]
     fn missing_session_model_key_is_retained_as_pending_selection() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .core
             .config
             .providers
@@ -3059,24 +3059,24 @@ mod checkpoint_tests {
                 api_base: Some("https://chatgpt.com/backend-api/codex".into()),
                 ..Default::default()
             });
-        let revision = app.app.core.config.revision;
-        app.app.core.config.context_window = Some(128_000);
+        let revision = app.tui.core.config.revision;
+        app.tui.core.config.context_window = Some(128_000);
 
-        let session_id = app.app.conversation.session().id.clone();
-        app.app
+        let session_id = app.session_id();
+        app.tui
             .restore_session_model(&session_id, "managed/future-model");
 
         assert_eq!(
-            app.app.core.config.model_selection.requested_key.as_deref(),
+            app.tui.core.config.model_selection.requested_key.as_deref(),
             Some("managed/future-model")
         );
         assert_eq!(
-            app.app.core.config.model_selection.requested_by,
+            app.tui.core.config.model_selection.requested_by,
             smelt_core::ModelSelectionSource::Session
         );
-        assert!(app.app.core.config.active_model().is_none());
-        assert_eq!(app.app.core.config.context_window, None);
-        assert_eq!(app.app.core.config.revision, revision.wrapping_add(1));
+        assert!(app.tui.core.config.active_model().is_none());
+        assert_eq!(app.tui.core.config.context_window, None);
+        assert_eq!(app.tui.core.config.revision, revision.wrapping_add(1));
         assert!(app.run_lua(
             r#"
                 assert(smelt.model.current() == nil)
@@ -3093,15 +3093,15 @@ mod checkpoint_tests {
     #[test]
     fn missing_static_session_model_keeps_the_current_fallback() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let previous = app.app.core.config.model_selection.clone();
-        let revision = app.app.core.config.revision;
+        let previous = app.tui.core.config.model_selection.clone();
+        let revision = app.tui.core.config.revision;
 
-        let session_id = app.app.conversation.session().id.clone();
-        app.app.restore_session_model(&session_id, "removed/model");
+        let session_id = app.session_id();
+        app.tui.restore_session_model(&session_id, "removed/model");
 
-        assert_eq!(app.app.core.config.model_selection, previous);
-        assert_eq!(app.app.core.config.revision, revision);
-        assert!(app.app.overlays.notification().is_some_and(|notification| {
+        assert_eq!(app.tui.core.config.model_selection, previous);
+        assert_eq!(app.tui.core.config.revision, revision);
+        assert!(app.tui.overlays.notification().is_some_and(|notification| {
             matches!(
                 &notification.scope,
                 crate::app::NotificationScope::Session(owner_session_id)
@@ -3160,7 +3160,7 @@ mod checkpoint_tests {
 
     fn saved_session_app(history_len: usize, compacted: bool) -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         session.first_user_message = Some("old user 0".into());
         session.history = (0..history_len)
             .map(|idx| {
@@ -3182,19 +3182,19 @@ mod checkpoint_tests {
 
         let target_id = session.id.clone();
         app.load_session(session);
-        let close_deadline_notice = app.app.overlays.notification().is_some_and(|notice| {
+        let close_deadline_notice = app.tui.overlays.notification().is_some_and(|notice| {
             notice.summary.contains("deadline") || notice.summary.contains("before session close")
         });
         assert_eq!(
-            app.app.conversation.session().id,
+            app.tui.conversation.session().id,
             target_id,
             "large fixture was not adopted, close_deadline_notice={close_deadline_notice}"
         );
-        app.app.restore_screen();
-        app.app.save_session();
+        app.restore_screen();
+        app.save_session();
         // Fixture publication is a correctness barrier, not a latency assertion.
         let outcome = app
-            .app
+            .tui
             .flush_persist_until(std::time::Instant::now() + std::time::Duration::from_secs(30));
         assert!(
             matches!(outcome, crate::persist::PersistenceFlushOutcome::Durable),
@@ -3218,23 +3218,23 @@ mod checkpoint_tests {
     #[test]
     fn full_session_load_installs_document_transcript() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.show_user_message("stale visible block", Vec::new());
+        app.tui.show_user_message("stale visible block", Vec::new());
 
-        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         session.history = vec![user("loaded user"), assistant("loaded assistant")];
         let target_id = session.id.clone();
 
         app.load_session(session);
-        let close_deadline_notice = app.app.overlays.notification().is_some_and(|notice| {
+        let close_deadline_notice = app.tui.overlays.notification().is_some_and(|notice| {
             notice.summary.contains("deadline") || notice.summary.contains("before session close")
         });
         assert_eq!(
-            app.app.conversation.session().id,
+            app.tui.conversation.session().id,
             target_id,
             "session was not adopted, close_deadline_notice={close_deadline_notice}"
         );
 
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let visible_text = history
             .order
             .iter()
@@ -3251,23 +3251,23 @@ mod checkpoint_tests {
     fn full_session_load_close_deadline_preserves_source_and_allows_retry() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
-        let source_id = app.app.conversation.session().id.clone();
-        let clock_before = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
-        let release = app.app.conversation.pause_persistence();
-        app.app.show_user_message("stale visible block", Vec::new());
-        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let source_id = app.session_id();
+        let clock_before = engine::clock::unix_time_ms(app.tui.core.clock.as_ref());
+        let release = app.pause_persistence();
+        app.tui.show_user_message("stale visible block", Vec::new());
+        let mut session = app.new_session();
         session.history = vec![user("loaded user"), assistant("loaded assistant")];
         let target_id = session.id.clone();
 
-        app.app.load_session(session.clone());
-        let retained_id = app.app.conversation.session().id.clone();
+        app.tui.load_session(session.clone());
+        let retained_id = app.session_id();
         let retained_text = app.render_to_frame().text();
         let close_deadline_notice = app
-            .app
+            .tui
             .overlays
             .notification()
             .is_some_and(|notice| notice.summary.contains("did not finish in time"));
-        let unflushed = app.app.session_document_has_unflushed_work();
+        let unflushed = app.session_document_has_unflushed_work();
         release.send(()).unwrap();
         assert_eq!(retained_id, source_id);
         assert!(retained_text.contains("stale visible block"));
@@ -3275,7 +3275,7 @@ mod checkpoint_tests {
         assert!(close_deadline_notice);
         assert!(unflushed);
         assert_eq!(
-            engine::clock::unix_time_ms(app.app.core.clock.as_ref()),
+            engine::clock::unix_time_ms(app.tui.core.clock.as_ref()),
             clock_before
         );
         assert!(matches!(
@@ -3284,13 +3284,13 @@ mod checkpoint_tests {
         ));
 
         app.load_session(session);
-        assert_eq!(app.app.conversation.session().id, target_id);
+        assert_eq!(app.tui.conversation.session().id, target_id);
         let loaded_text = app.render_to_frame().text();
         assert!(loaded_text.contains("loaded user"));
         assert!(loaded_text.contains("loaded assistant"));
         assert!(!loaded_text.contains("stale visible block"));
         assert_eq!(
-            engine::clock::unix_time_ms(app.app.core.clock.as_ref()),
+            engine::clock::unix_time_ms(app.tui.core.clock.as_ref()),
             clock_before
         );
     }
@@ -3299,13 +3299,13 @@ mod checkpoint_tests {
     fn full_session_load_saves_the_source_before_adopting_the_target() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
-        app.app
+        app.tui
             .show_user_message("first source message", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let release = app.app.conversation.pause_persistence();
-        app.app.show_user_message("last source message", Vec::new());
-        let mut target = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let release = app.pause_persistence();
+        app.tui.show_user_message("last source message", Vec::new());
+        let mut target = app.new_session();
         target.history = vec![user("replacement user")];
         let target_id = target.id.clone();
 
@@ -3313,7 +3313,7 @@ mod checkpoint_tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             release.send(()).unwrap();
         });
-        app.app.load_session(target);
+        app.tui.load_session(target);
         release_thread.join().unwrap();
 
         assert_eq!(app.session_snapshot().id, target_id);
@@ -3331,24 +3331,24 @@ mod checkpoint_tests {
     #[test]
     fn full_session_load_replaces_same_length_stored_history() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut initial = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut initial = app.new_session();
         initial.history = vec![user("initial user"), assistant("initial assistant")];
         let id = initial.id.clone();
 
         app.load_session(initial.clone());
-        app.app.restore_screen();
-        app.app.save_session_and_flush();
+        app.restore_screen();
+        app.tui.save_session_and_flush();
 
         let mut replacement = app
-            .app
+            .tui
             .core
             .sessions
             .load_full(&id)
             .expect("load stored session");
         replacement.history = vec![user("replacement user"), assistant("replacement assistant")];
         app.load_session(replacement);
-        app.app.restore_screen();
-        app.app.save_session_and_flush();
+        app.restore_screen();
+        app.tui.save_session_and_flush();
 
         let reader = session_reader(&app, &id);
         let history = stored_history(&reader);
@@ -3363,13 +3363,13 @@ mod checkpoint_tests {
     }
 
     async fn add_background_process(app: &mut crate::app::test_harness::TestApp) -> String {
-        app.app
+        app.tui
             .core
             .jobs
             .spawn_background(
                 "sleep 30",
                 &smelt_core::process::ShellSpec::default(),
-                &app.app.core.env.cwd(),
+                &app.tui.core.env.cwd(),
                 std::time::Instant::now(),
             )
             .await
@@ -3419,22 +3419,22 @@ mod checkpoint_tests {
     #[test]
     fn display_only_request_append_preserves_persisted_history_prefix() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
         app.load_session(session);
-        app.app.restore_screen();
-        app.app
+        app.restore_screen();
+        app.tui
             .shutdown_persist()
             .expect("persist and close loaded fixture actor");
 
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         let loaded_transcript =
-            load_transcript_tail_from_sqlite_id(&app.app.core.sessions, &id, 80, 24)
+            load_transcript_tail_from_sqlite_id(&app.tui.core.sessions, &id, 80, 24)
                 .expect("display-only transcript tail should load");
         let resume = app
-            .app
+            .tui
             .core
             .sessions
             .load_resume(&id, 80, 24)
@@ -3454,7 +3454,7 @@ mod checkpoint_tests {
 
         app.load_store_backed_session(document.into_store_backed());
 
-        let source = app.app.commit_request_history_item(
+        let source = app.commit_request_history_item(
             user("new user"),
             Some(Block::User {
                 text: "new user".into(),
@@ -3466,16 +3466,16 @@ mod checkpoint_tests {
 
         assert_eq!(source.items.len(), 2, "the context precedes the new item");
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .live_session()
                 .map(|live| live.history_len()),
             Some(3)
         );
         assert!(
-            app.app.overlays.notification().is_none(),
+            app.tui.overlays.notification().is_none(),
             "display-only append should persist without error: {:?}",
-            app.app.overlays.notification()
+            app.tui.overlays.notification()
         );
 
         let reader = session_reader(&app, &id);
@@ -3495,18 +3495,18 @@ mod checkpoint_tests {
     #[test]
     fn normal_request_append_preserves_persisted_history_prefix() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
         app.load_session(session);
-        app.app.restore_screen();
-        app.app
+        app.restore_screen();
+        app.tui
             .shutdown_persist()
             .expect("persist and close loaded fixture actor");
 
-        let id = app.app.conversation.session().id.clone();
-        let source = app.app.commit_request_history_item(
+        let id = app.session_id();
+        let source = app.commit_request_history_item(
             user("new user"),
             Some(Block::User {
                 text: "new user".into(),
@@ -3517,7 +3517,7 @@ mod checkpoint_tests {
         );
 
         assert_eq!(source.items.len(), 2, "the context precedes the new item");
-        assert_eq!(app.app.conversation.session().history.len(), 3);
+        assert_eq!(app.tui.conversation.session().history.len(), 3);
 
         let reader = session_reader(&app, &id);
         let rows = stored_history(&reader);
@@ -3537,13 +3537,13 @@ mod checkpoint_tests {
     fn normal_request_append_persists_one_canonical_item() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
 
-        app.app.restore_screen();
+        app.restore_screen();
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        let source = app.app.commit_request_history_item(
+        let source = app.commit_request_history_item(
             user("new user"),
             Some(Block::User {
                 text: "new user".into(),
@@ -3560,7 +3560,7 @@ mod checkpoint_tests {
             "the context precedes the new item"
         );
         assert_eq!(
-            app.app.conversation.session().history.len(),
+            app.tui.conversation.session().history.len(),
             OLD_HISTORY_LEN + 1
         );
         assert_no_full_store_reads();
@@ -3588,10 +3588,10 @@ mod checkpoint_tests {
         let mut history = vec![user(&"α".repeat(4_096))];
         history.extend((0..16_384).map(|_| assistant("tool and assistant history")));
         history.push(user("last user"));
-        app.app.conversation.replace_history_for_harness(history);
+        app.tui.conversation.replace_history_for_harness(history);
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        let request = app.app.rewind_page_request(None);
+        let request = app.tui.rewind_page_request(None);
         assert!(!request.needs_storage());
         let page = request.read().unwrap();
         smelt_perf::perf::set_enabled(false);
@@ -3612,21 +3612,20 @@ mod checkpoint_tests {
     #[test]
     fn full_live_rewind_page_does_not_read_the_stored_prefix() {
         let mut app = large_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
         app.ensure_writer_ready();
         for index in 0..=REWIND_PAGE_SIZE {
-            app.app
-                .session_append_history(user(&format!("live user {index}")));
-            app.app.session_append_history(assistant("live assistant"));
+            app.session_append_history(user(&format!("live user {index}")));
+            app.session_append_history(assistant("live assistant"));
         }
-        let request = app.app.rewind_page_request(None);
+        let request = app.tui.rewind_page_request(None);
         assert!(!request.needs_storage());
         let page = request.read().unwrap();
         assert_eq!(page.turns.len(), REWIND_PAGE_SIZE);
         assert_eq!(page.turns[0].label, "live user 1");
         assert_eq!(page.next_before, Some(130));
-        let request = app.app.rewind_page_request(Some(0));
+        let request = app.tui.rewind_page_request(Some(0));
         assert!(!request.needs_storage());
         assert!(request.read().unwrap().turns.is_empty());
     }
@@ -3634,7 +3633,7 @@ mod checkpoint_tests {
     #[test]
     fn stalled_rewind_keeps_spinner_and_debug_panels_responsive() {
         let mut app = compacted_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
         // The harness freezes animation for snapshots. Animate against the virtual
         // wall clock for this frame-progress assertion.
@@ -3643,7 +3642,7 @@ mod checkpoint_tests {
         for _ in 0..2 {
             let (started, start) = std::sync::mpsc::channel();
             let (release, wait) = std::sync::mpsc::channel();
-            app.app
+            app.tui
                 .rewind_operations
                 .request(move |_| {
                     let _ = started.send(());
@@ -3658,7 +3657,7 @@ mod checkpoint_tests {
         app.press(crossterm::event::KeyCode::Up);
         app.press(crossterm::event::KeyCode::Enter);
         app.drive_lua_tasks();
-        assert!(app.app.pending_rewind.is_some());
+        assert!(app.tui.pending_rewind.is_some());
         let mut dots = std::collections::HashSet::new();
         let mut last_frame = String::new();
         for _ in 0..8 {
@@ -3685,7 +3684,7 @@ mod checkpoint_tests {
             assert!(started.elapsed() < Duration::from_millis(250));
             app.press(crossterm::event::KeyCode::F(key));
         }
-        assert!(app.app.pending_rewind.is_some());
+        assert!(app.tui.pending_rewind.is_some());
         assert_eq!(app.prompt_source(), "");
         for release in releases {
             release.send(()).unwrap();
@@ -3697,9 +3696,9 @@ mod checkpoint_tests {
     #[test]
     fn live_rewind_with_stored_dependencies_prepares_off_ui() {
         let mut app = compacted_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
-        app.app.stage_request_history_item(
+        app.tui.stage_request_history_item(
             user("live user"),
             Some(Block::User {
                 text: "live user".into(),
@@ -3718,19 +3717,19 @@ mod checkpoint_tests {
             "",
             "stored dependencies must prepare off UI"
         );
-        assert!(app.app.pending_rewind.is_some());
+        assert!(app.tui.pending_rewind.is_some());
         app.wait_for_rewind();
         assert_eq!(app.prompt_source(), "live user");
-        assert_eq!(app.app.session_history_len(), 128);
+        assert_eq!(app.session_message_count(), 128);
     }
 
     #[test]
     fn stored_rewind_installs_prepared_counts_without_ui_history_reads() {
         let mut app = large_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
         app.ensure_writer_ready();
-        let prepared = match app.app.prepare_rewind(64).unwrap() {
+        let prepared = match app.tui.prepare_rewind(64).unwrap() {
             RewindPreparation::Stored(request) => request.prepare(&|| false).unwrap(),
             RewindPreparation::Ready(_) => panic!("stored target requires worker preparation"),
         };
@@ -3739,7 +3738,7 @@ mod checkpoint_tests {
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         let started = std::time::Instant::now();
-        let input = app.app.apply_prepared_rewind(prepared);
+        let input = app.tui.apply_prepared_rewind(prepared);
         assert_eq!(input.text, "old user 64");
         for _ in 0..8 {
             assert_eq!(
@@ -3774,17 +3773,17 @@ mod checkpoint_tests {
     #[test]
     fn rewind_before_checkpoint_keeps_model_context_in_memory() {
         let mut app = compacted_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
         app.ensure_writer_ready();
-        let prepared = match app.app.prepare_rewind(64).unwrap() {
+        let prepared = match app.tui.prepare_rewind(64).unwrap() {
             RewindPreparation::Stored(request) => request.prepare(&|| false).unwrap(),
             RewindPreparation::Ready(_) => panic!("stored target requires worker preparation"),
         };
-        app.app.apply_prepared_rewind(prepared);
+        app.tui.apply_prepared_rewind(prepared);
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        let history = app.app.model_history();
+        let history = app.model_history();
         smelt_perf::perf::set_enabled(false);
         assert_eq!(history.len(), 64);
         assert_eq!(history[0], user("old user 0"));
@@ -3794,14 +3793,14 @@ mod checkpoint_tests {
     #[test]
     fn failed_stored_count_preparation_leaves_history_and_navigation_unchanged() {
         let mut app = compacted_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
         app.ensure_writer_ready();
-        let mut live = app.app.conversation.live_session().unwrap().clone();
+        let mut live = app.tui.conversation.live_session().unwrap().clone();
         live.store_address.as_mut().unwrap().session_id = "0".repeat(64);
-        app.app.conversation.install_live_session_for_harness(live);
-        assert!(app.app.session_truncate_from(64).is_err());
-        assert_eq!(app.app.session_history_len(), 128);
+        app.tui.conversation.install_live_session_for_harness(live);
+        assert!(app.tui.session_truncate_from(64).is_err());
+        assert_eq!(app.session_message_count(), 128);
         assert_eq!(
             app.eval_lua::<usize>("return smelt.session.info().turn_count")
                 .unwrap(),
@@ -3815,10 +3814,10 @@ mod checkpoint_tests {
             .with_ephemeral(true)
             .build();
         for _ in 0..64 {
-            app.app.session_append_history(user("user"));
-            app.app.session_append_history(assistant("assistant"));
+            app.session_append_history(user("user"));
+            app.session_append_history(assistant("assistant"));
         }
-        assert!(!app.app.conversation.has_live_session());
+        assert!(!app.tui.conversation.has_live_session());
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         let counts: (usize, usize) = app
@@ -3829,13 +3828,13 @@ mod checkpoint_tests {
         smelt_perf::perf::set_enabled(false);
         assert_eq!(counts, (64, 128));
         assert_perf_value_absent("session:history:scanned_items");
-        app.app.session_append_history(user("new user"));
+        app.session_append_history(user("new user"));
         assert_eq!(
             app.eval_lua::<usize>("return smelt.session.info().turn_count")
                 .unwrap(),
             65
         );
-        app.app.session_truncate_from(100).unwrap();
+        app.tui.session_truncate_from(100).unwrap();
         let counts: (usize, usize) = app
             .eval_lua(
                 "local info = smelt.session.info(); return info.turn_count, info.message_count",
@@ -3848,16 +3847,16 @@ mod checkpoint_tests {
     fn rewind_pages_preserve_history_coordinates_without_decoding_assistant_output() {
         const HISTORY_LEN: usize = 1_024;
         let mut app = large_saved_session_app(HISTORY_LEN);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
-        app.app.session_append_history(user("live user"));
+        app.session_append_history(user("live user"));
         app.ensure_writer_ready();
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         let mut before = None;
         let mut indices = Vec::new();
         loop {
-            let page = app.app.rewind_page_request(before).read().unwrap();
+            let page = app.tui.rewind_page_request(before).read().unwrap();
             assert!(page.turns.len() <= REWIND_PAGE_SIZE);
             assert!(page
                 .turns
@@ -3885,20 +3884,20 @@ mod checkpoint_tests {
                 .filter(|index| index % 2 == 0)
                 .collect::<Vec<_>>()
         );
-        assert!(app.app.conversation.session().history.is_empty());
+        assert!(app.tui.conversation.session().history.is_empty());
     }
 
     #[test]
     fn resumed_session_keeps_every_user_turn_rewindable() {
         const HISTORY_LEN: usize = 1_024;
         let mut app = large_saved_session_app(HISTORY_LEN);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
 
         assert!(app.load_session_by_id(&id));
-        assert!(app.app.conversation.has_live_session());
-        assert!(app.app.conversation.session().history.is_empty());
+        assert!(app.tui.conversation.has_live_session());
+        assert!(app.tui.conversation.session().history.is_empty());
 
-        let turns = app.app.rewind_turns().unwrap();
+        let turns = app.tui.rewind_turns().unwrap();
         assert_eq!(turns.len(), HISTORY_LEN / 2);
         assert_eq!(
             turns.first(),
@@ -3909,10 +3908,10 @@ mod checkpoint_tests {
         );
         assert_eq!(turns.last().map(|turn| turn.history_idx), Some(1_022));
 
-        app.app.rewind_to_history_index(Some(0), false);
+        app.rewind_to_history_index(Some(0), false);
         app.wait_for_rewind();
         assert_eq!(app.prompt_source(), "old user 0");
-        app.app.flush_persist();
+        app.flush_persist();
 
         let snapshot = session_reader(&app, &id)
             .state()
@@ -3923,13 +3922,13 @@ mod checkpoint_tests {
         assert!(app.load_session_by_id(&id));
         assert_eq!(app.session_message_count(), 0);
         assert!(app.model_history().is_empty());
-        assert!(app.app.rewind_turns().unwrap().is_empty());
+        assert!(app.tui.rewind_turns().unwrap().is_empty());
     }
 
     #[test]
     fn stored_rewind_selection_keeps_input_responsive_and_preserves_a_new_draft() {
         let mut app = compacted_saved_session_app(128);
-        let session_id = app.app.conversation.session().id.clone();
+        let session_id = app.session_id();
         assert!(app.load_session_by_id(&session_id));
         app.apply_lua_command("rewind");
         app.wait_for_lua_dialog();
@@ -3942,17 +3941,17 @@ mod checkpoint_tests {
         assert_eq!(app.prompt_source(), "new draft");
         app.wait_for_rewind();
         assert_eq!(app.prompt_source(), "new draft");
-        assert_eq!(app.app.session_history_len(), 128);
-        assert!(!app.app.busy_stack.is_busy());
+        assert_eq!(app.session_message_count(), 128);
+        assert!(!app.tui.busy_stack.is_busy());
     }
 
     fn take_rewind_result(app: &mut crate::app::test_harness::TestApp) -> RewindWorkerResult {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(event) = app.app.platform.try_recv_app_event() {
+            if let Some(event) = app.tui.platform.try_recv_app_event() {
                 match event {
                     super::super::AppEvent::RewindPrepared(result) => return *result,
-                    event => app.app.handle_app_event(event),
+                    event => app.handle_app_event(event),
                 }
             }
             assert!(
@@ -3966,50 +3965,50 @@ mod checkpoint_tests {
     #[test]
     fn double_escape_cancels_stored_rewind_without_applying_a_late_result() {
         let mut app = compacted_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
-        app.app.rewind_to_history_index(Some(100), false);
+        app.rewind_to_history_index(Some(100), false);
         let result = take_rewind_result(&mut app);
         app.press(crossterm::event::KeyCode::Esc);
         app.press(crossterm::event::KeyCode::Esc);
         app.drive_lua_tasks();
-        assert!(app.app.pending_rewind.is_none());
-        app.app.handle_rewind_worker_result(result);
-        assert_eq!(app.app.session_history_len(), 128);
+        assert!(app.tui.pending_rewind.is_none());
+        app.tui.handle_rewind_worker_result(result);
+        assert_eq!(app.session_message_count(), 128);
         assert_eq!(app.prompt_source(), "");
-        assert!(!app.app.busy_stack.is_busy());
+        assert!(!app.tui.busy_stack.is_busy());
     }
 
     #[test]
     fn stored_rewind_result_cannot_replace_a_newer_selection() {
         let mut app = compacted_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
-        app.app.rewind_to_history_index(Some(100), false);
+        app.rewind_to_history_index(Some(100), false);
         let result = take_rewind_result(&mut app);
-        app.app.rewind_to_history_index(Some(50), false);
-        app.app.handle_rewind_worker_result(result);
-        assert!(app.app.pending_rewind.is_some());
-        assert_eq!(app.app.session_history_len(), 128);
+        app.rewind_to_history_index(Some(50), false);
+        app.tui.handle_rewind_worker_result(result);
+        assert!(app.tui.pending_rewind.is_some());
+        assert_eq!(app.session_message_count(), 128);
         app.wait_for_rewind();
-        assert_eq!(app.app.session_history_len(), 50);
+        assert_eq!(app.session_message_count(), 50);
         assert_eq!(app.prompt_source(), "old user 50");
-        assert!(!app.app.busy_stack.is_busy());
+        assert!(!app.tui.busy_stack.is_busy());
     }
 
     #[test]
     fn session_replacement_rejects_a_late_stored_rewind_result() {
         let mut app = compacted_saved_session_app(128);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
-        app.app.rewind_to_history_index(Some(100), false);
+        app.rewind_to_history_index(Some(100), false);
         let result = take_rewind_result(&mut app);
         app.apply_lua_command("clear");
-        assert_ne!(app.app.conversation.session().id, id);
-        app.app.handle_rewind_worker_result(result);
-        assert_eq!(app.app.session_history_len(), 0);
+        assert_ne!(app.tui.conversation.session().id, id);
+        app.tui.handle_rewind_worker_result(result);
+        assert_eq!(app.session_message_count(), 0);
         assert_eq!(app.prompt_source(), "");
-        assert!(!app.app.busy_stack.is_busy());
+        assert!(!app.tui.busy_stack.is_busy());
     }
 
     #[test]
@@ -4018,7 +4017,7 @@ mod checkpoint_tests {
         const TARGET_HISTORY_INDEX: usize = 100;
         const PREVIOUS_USER_INDEX: usize = TARGET_HISTORY_INDEX - 2;
         let mut app = large_saved_session_app(HISTORY_LEN);
-        let session_id = app.app.conversation.session().id.clone();
+        let session_id = app.session_id();
 
         assert!(app.load_session_by_id(&session_id));
         let slice = session_reader(&app, &session_id)
@@ -4031,7 +4030,7 @@ mod checkpoint_tests {
             .expect("load deterministic sparse window");
         let address = {
             let store = app
-                .app
+                .tui
                 .conversation
                 .live_session()
                 .and_then(|live| live.store_address.as_ref())
@@ -4040,11 +4039,11 @@ mod checkpoint_tests {
         };
         let loaded = crate::app::transcript::LoadedTranscript::from_record_slice(slice, address)
             .expect("install deterministic sparse window");
-        app.app
+        app.tui
             .conversation
             .replace_loaded_transcript_for_harness(loaded);
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .transcript()
                 .history()
@@ -4066,7 +4065,7 @@ mod checkpoint_tests {
             format!("old user {TARGET_HISTORY_INDEX}")
         );
         let retained_origins = {
-            let transcript = app.app.conversation.transcript().history();
+            let transcript = app.tui.conversation.transcript().history();
             transcript
                 .order
                 .iter()
@@ -4077,7 +4076,7 @@ mod checkpoint_tests {
         assert!(retained_origins.iter().all(|origin| {
             !matches!(origin, smelt_core::BlockOrigin::History(index) if *index >= TARGET_HISTORY_INDEX)
         }));
-        app.app.flush_persist();
+        app.flush_persist();
         let rewound = session_reader(&app, &session_id)
             .state()
             .expect("read first rewind");
@@ -4103,18 +4102,18 @@ mod checkpoint_tests {
             format!("old user {PREVIOUS_USER_INDEX}")
         );
         assert!(
-            app.app.overlays.notification().is_none(),
+            app.tui.overlays.notification().is_none(),
             "repeated rewind should not report an error: {:?}",
-            app.app.overlays.notification()
+            app.tui.overlays.notification()
         );
     }
 
     #[test]
     fn rewind_turn_enumeration_reports_store_failure_without_partial_results() {
         let mut app = compacted_saved_session_app(1_024);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         assert!(app.load_session_by_id(&id));
-        std::fs::remove_file(app.app.core.sessions.store().database_path())
+        std::fs::remove_file(app.tui.core.sessions.store().database_path())
             .expect("remove session database");
 
         let error = app
@@ -4122,7 +4121,7 @@ mod checkpoint_tests {
             .expect_err("turn enumeration must fail as one operation");
 
         assert!(error.contains("open session"), "{error}");
-        assert!(app.app.overlays.notification().is_some_and(|notification| {
+        assert!(app.tui.overlays.notification().is_some_and(|notification| {
             notification
                 .summary
                 .contains("failed to enumerate rewindable session turns")
@@ -4140,27 +4139,27 @@ mod checkpoint_tests {
         const INITIAL_HISTORY_INDEX: usize = 100;
         const TARGET_HISTORY_INDEX: usize = 98;
         let mut app = large_saved_session_app(HISTORY_LEN);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         let expected_record_prefix = stored_transcript(&session_reader(&app, &id))
             .into_iter()
             .take(TARGET_HISTORY_INDEX)
             .collect::<Vec<_>>();
 
         assert!(app.load_session_by_id(&id));
-        assert!(app.app.conversation.session().history.is_empty());
+        assert!(app.tui.conversation.session().history.is_empty());
         assert_eq!(
-            app.app.rewind_to_history(INITIAL_HISTORY_INDEX),
+            app.rewind_to_history(INITIAL_HISTORY_INDEX),
             Some(("old user 100".into(), Vec::new()))
         );
         assert!(app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .order
             .iter()
             .any(|id| {
-                app.app
+                app.tui
                     .conversation
                     .transcript()
                     .history()
@@ -4168,11 +4167,11 @@ mod checkpoint_tests {
                     == Some(smelt_core::BlockOrigin::History(TARGET_HISTORY_INDEX))
             }));
         assert_eq!(
-            app.app.rewind_to_history(TARGET_HISTORY_INDEX),
+            app.rewind_to_history(TARGET_HISTORY_INDEX),
             Some(("old user 98".into(), Vec::new()))
         );
 
-        let replacement_user_idx = app.app.conversation.commit_request_history_item(
+        let replacement_user_idx = app.tui.conversation.commit_request_history_item(
             user("replacement user"),
             Some(Block::User {
                 text: "replacement user".into(),
@@ -4182,7 +4181,7 @@ mod checkpoint_tests {
             }),
             None,
         );
-        let replacement_assistant_idx = app.app.conversation.commit_request_history_item(
+        let replacement_assistant_idx = app.tui.conversation.commit_request_history_item(
             assistant("replacement assistant"),
             Some(Block::Text {
                 content: "replacement assistant".into(),
@@ -4191,8 +4190,8 @@ mod checkpoint_tests {
         );
         assert_eq!(replacement_user_idx, TARGET_HISTORY_INDEX);
         assert_eq!(replacement_assistant_idx, TARGET_HISTORY_INDEX + 1);
-        app.app.sync_session_snapshot();
-        app.app.save_session_and_flush();
+        app.tui.sync_session_snapshot();
+        app.tui.save_session_and_flush();
 
         let reader = session_reader(&app, &id);
         let snapshot = reader.state().expect("read replaced session");
@@ -4228,7 +4227,7 @@ mod checkpoint_tests {
 
         assert!(app.load_session_by_id(&id));
         assert_eq!(
-            app.app
+            app.tui
                 .session_history_range(TARGET_HISTORY_INDEX..TARGET_HISTORY_INDEX + 2)
                 .unwrap(),
             vec![user("replacement user"), assistant("replacement assistant")]
@@ -4238,7 +4237,7 @@ mod checkpoint_tests {
     #[test]
     fn rewind_turns_use_history_identity_and_restore_original_user_input() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = app.app.conversation.session().clone();
+        let mut session = app.tui.conversation.session().clone();
         session.history = vec![
             HistoryItem::user(protocol::compaction_summary_content("compacted context")),
             HistoryItem::User {
@@ -4258,18 +4257,18 @@ mod checkpoint_tests {
             },
             assistant("done"),
         ];
-        app.app.conversation.install_session_for_harness(session);
-        app.app.restore_screen();
+        app.tui.conversation.install_session_for_harness(session);
+        app.restore_screen();
 
         assert_eq!(
-            app.app.rewind_turns().unwrap(),
+            app.tui.rewind_turns().unwrap(),
             vec![RewindTurn {
                 history_idx: 1,
                 label: "/inspect [diagram]".into(),
             }]
         );
         assert_eq!(
-            app.app.rewind_to_history(1),
+            app.rewind_to_history(1),
             Some((
                 "/inspect".into(),
                 vec![("diagram".into(), "data:image/png;base64,AAAA".into())],
@@ -4280,12 +4279,12 @@ mod checkpoint_tests {
     #[test]
     fn live_session_checkpoint_uses_store_history_coordinates() {
         let mut app = large_saved_session_app(32);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         app.load_session_by_id(&id);
-        assert!(app.app.conversation.has_live_session());
-        assert!(app.app.conversation.session().history.is_empty());
+        assert!(app.tui.conversation.has_live_session());
+        assert!(app.tui.conversation.session().history.is_empty());
 
-        let installed = app.app.install_context_checkpoint(
+        let installed = app.tui.install_context_checkpoint(
             "compaction".into(),
             "store summary".into(),
             4,
@@ -4293,51 +4292,51 @@ mod checkpoint_tests {
         );
 
         assert!(installed);
-        assert_eq!(app.app.conversation.session().history.len(), 0);
-        let checkpoint = app.app.conversation.session().checkpoint.as_ref().unwrap();
+        assert_eq!(app.tui.conversation.session().history.len(), 0);
+        let checkpoint = app.tui.conversation.session().checkpoint.as_ref().unwrap();
         assert_eq!(checkpoint.first_live_index, 4);
-        let source = app.app.model_history_source();
+        let source = app.tui.model_history_source();
         assert_eq!(
             source.coordinates,
             protocol::ModelHistoryCoordinates::projected(1, 4)
         );
         assert_eq!(source.items.len(), 1 + 32 - 4);
-        assert!(app.app.conversation.has_unflushed_work());
+        assert!(app.tui.conversation.has_unflushed_work());
     }
 
     #[test]
     fn clear_command_detaches_resumed_canonical_history_before_next_message() {
         const OLD_HISTORY_LEN: usize = 504;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
-        let old_id = app.app.conversation.session().id.clone();
+        let old_id = app.session_id();
         assert!(app.load_session_by_id(&old_id));
-        assert!(app.app.conversation.has_live_session());
-        assert_eq!(app.app.session_history_len(), OLD_HISTORY_LEN);
+        assert!(app.tui.conversation.has_live_session());
+        assert_eq!(app.session_message_count(), OLD_HISTORY_LEN);
 
         app.type_text("/clear");
         app.press(crossterm::event::KeyCode::Enter);
 
-        assert_ne!(app.app.conversation.session().id, old_id);
-        assert!(!app.app.conversation.has_live_session());
-        assert_eq!(app.app.session_history_len(), 0);
+        assert_ne!(app.tui.conversation.session().id, old_id);
+        assert!(!app.tui.conversation.has_live_session());
+        assert_eq!(app.session_message_count(), 0);
 
         app.type_text("fresh user");
         let submitted = user("fresh user")
-            .with_sent_at_ms(engine::clock::unix_time_ms(app.app.core.clock.as_ref()));
+            .with_sent_at_ms(engine::clock::unix_time_ms(app.tui.core.clock.as_ref()));
         app.press(crossterm::event::KeyCode::Enter);
         app.wait_for_turn_dispatch();
 
         let turn_id = app.current_turn_id().expect("fresh turn is active");
-        let submitted_history_idx = app.app.session_history_len() - 1;
-        let flush = app.app.flush_persist();
+        let submitted_history_idx = app.session_message_count() - 1;
+        let flush = app.flush_persist();
         assert!(matches!(
             flush,
             crate::persist::PersistenceFlushOutcome::Durable
         ));
 
         let history = app
-            .app
-            .session_history_range(0..app.app.session_history_len())
+            .tui
+            .session_history_range(0..app.session_message_count())
             .unwrap();
         assert_eq!(
             history
@@ -4362,9 +4361,9 @@ mod checkpoint_tests {
             },
         ));
 
-        assert!(app.app.overlays.notification().is_none());
+        assert!(app.tui.overlays.notification().is_none());
         assert_eq!(
-            app.app
+            app.tui
                 .session_history_range(submitted_history_idx..submitted_history_idx + 1)
                 .unwrap(),
             vec![submitted.clone()]
@@ -4375,21 +4374,21 @@ mod checkpoint_tests {
     fn live_session_save_persists_one_canonical_item() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         app.load_session_by_id(&id);
-        assert!(app.app.conversation.has_live_session());
-        assert!(app.app.conversation.session().history.is_empty());
+        assert!(app.tui.conversation.has_live_session());
+        assert!(app.tui.conversation.session().history.is_empty());
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        app.app
+        app.tui
             .append_engine_history_items(OLD_HISTORY_LEN, vec![assistant("new assistant")]);
-        app.app.save_session();
-        app.app.flush_persist();
+        app.save_session();
+        app.flush_persist();
         smelt_perf::perf::set_enabled(false);
 
-        assert_eq!(app.app.session_history_len(), OLD_HISTORY_LEN + 1);
-        assert!(app.app.conversation.session().history.is_empty());
+        assert_eq!(app.session_message_count(), OLD_HISTORY_LEN + 1);
+        assert!(app.tui.conversation.session().history.is_empty());
         assert_no_full_store_reads();
 
         let reader = session_reader(&app, &id);
@@ -4404,11 +4403,11 @@ mod checkpoint_tests {
     #[test]
     fn normal_preview_and_open_use_only_bounded_store_reads() {
         let mut app = large_saved_session_app(256);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        app.app
+        app.tui
             .lua
             .lua
             .globals()
@@ -4445,17 +4444,17 @@ mod checkpoint_tests {
     fn history_updated_save_persists_one_canonical_item() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        app.app
+        app.tui
             .set_history_from(OLD_HISTORY_LEN, vec![assistant("new assistant")]);
-        app.app.save_session();
-        app.app.flush_persist();
+        app.save_session();
+        app.flush_persist();
         smelt_perf::perf::set_enabled(false);
 
         assert_eq!(
-            app.app.conversation.session().history.len(),
+            app.tui.conversation.session().history.len(),
             OLD_HISTORY_LEN + 1
         );
         assert_no_full_store_reads();
@@ -4474,15 +4473,15 @@ mod checkpoint_tests {
     #[test]
     fn no_op_save_leaves_the_store_unchanged() {
         let mut app = large_saved_session_app(256);
-        let id = app.app.conversation.session().id.clone();
+        let id = app.session_id();
         let before = session_reader(&app, &id)
             .state()
             .expect("read canonical session before no-op save");
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        app.app.save_session();
-        app.app.flush_persist();
+        app.save_session();
+        app.flush_persist();
         smelt_perf::perf::set_enabled(false);
 
         let skipped = perf_value_max("session:save:skipped_unchanged");
@@ -4501,8 +4500,8 @@ mod checkpoint_tests {
     #[test]
     fn normal_request_append_persists_touched_metadata_suffix() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let id = app.app.conversation.session().id.clone();
-        app.app.commit_request_history_item_with_first_user(
+        let id = app.session_id();
+        app.tui.commit_request_history_item_with_first_user(
             user("new user"),
             Some(Block::User {
                 text: "new user".into(),
@@ -4527,20 +4526,20 @@ mod checkpoint_tests {
     #[test]
     fn rewind_to_start_persists_empty_history_and_record_delete() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
         app.load_session(session);
-        app.app.restore_screen();
-        app.app
+        app.restore_screen();
+        app.tui
             .shutdown_persist()
             .expect("persist and close loaded fixture actor");
 
-        let id = app.app.conversation.session().id.clone();
-        app.app.rewind_to_start();
-        app.app.save_session();
-        app.app.flush_persist();
+        let id = app.session_id();
+        app.rewind_to_start();
+        app.save_session();
+        app.flush_persist();
 
         let reader = session_reader(&app, &id);
         let state = reader.state().expect("read rewound state");
@@ -4554,41 +4553,41 @@ mod checkpoint_tests {
     fn compaction_preview_rewrites_and_clears_one_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app.update_compaction_preview("one".into());
+        app.tui.update_compaction_preview("one".into());
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_to_frame();
         let id = app
-            .app
+            .tui
             .conversation
             .transcript()
             .compaction_preview_id()
             .expect("preview id");
         assert!(matches!(
-            app.app.conversation.transcript().history().block(id),
+            app.tui.conversation.transcript().history().block(id),
             Some(Block::CompactionPreview { summary }) if summary == "one"
         ));
 
-        app.app.update_compaction_preview("one\ntwo".into());
+        app.tui.update_compaction_preview("one\ntwo".into());
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_to_frame();
         assert_eq!(
-            app.app.conversation.transcript().compaction_preview_id(),
+            app.tui.conversation.transcript().compaction_preview_id(),
             Some(id)
         );
         assert!(matches!(
-            app.app.conversation.transcript().history().block(id),
+            app.tui.conversation.transcript().history().block(id),
             Some(Block::CompactionPreview { summary }) if summary == "one\ntwo"
         ));
 
-        app.app.clear_compaction_preview();
+        app.tui.clear_compaction_preview();
         assert!(app
-            .app
+            .tui
             .conversation
             .transcript()
             .compaction_preview_id()
             .is_none());
         assert!(app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
@@ -4599,7 +4598,7 @@ mod checkpoint_tests {
     #[test]
     fn restore_screen_preserves_command_display_and_semantics() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![HistoryItem::User {
                 content: Content::text("expanded command body"),
@@ -4609,9 +4608,9 @@ mod checkpoint_tests {
                 image_placement: None,
             }]);
 
-        app.app.restore_screen();
+        app.restore_screen();
 
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let id = history.order[0];
         assert!(matches!(
             history.block(id),
@@ -4627,13 +4626,13 @@ mod checkpoint_tests {
     fn restore_screen_rebuilds_process_status_notes_as_process_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let note = "background process 123 completed successfully";
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user(&protocol::process_status_note(note))]);
 
-        app.app.restore_screen();
+        app.restore_screen();
 
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let id = history.order[0];
         assert!(matches!(
             history.block(id),
@@ -4645,13 +4644,13 @@ mod checkpoint_tests {
     fn restore_screen_rebuilds_mode_notes_as_mode_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let note = protocol::mode_change_note("now in apply mode");
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user(&note)]);
 
-        app.app.restore_screen();
+        app.restore_screen();
 
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let id = history.order[0];
         assert!(matches!(history.block(id), Some(Block::Mode { .. })));
     }
@@ -4659,13 +4658,13 @@ mod checkpoint_tests {
     #[test]
     fn restore_screen_rejects_sqlite_tail_behind_in_memory_history() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
-        app.app.restore_screen();
-        app.app.save_session_and_flush();
+        app.restore_screen();
+        app.tui.save_session_and_flush();
 
-        app.app.conversation.replace_history_for_harness(vec![
+        app.tui.conversation.replace_history_for_harness(vec![
             user("hello"),
             HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
                 "normal",
@@ -4673,9 +4672,9 @@ mod checkpoint_tests {
                 "now in apply mode",
             )),
         ]);
-        app.app.restore_screen();
+        app.restore_screen();
 
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         assert!(history
             .order
             .iter()
@@ -4685,7 +4684,7 @@ mod checkpoint_tests {
     #[test]
     fn resumed_mode_removal_executes_the_shared_append_plan() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.replace_history_for_harness(vec![
+        app.tui.conversation.replace_history_for_harness(vec![
             HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
                 "normal",
                 "plan",
@@ -4698,14 +4697,14 @@ mod checkpoint_tests {
                 "yolo mode",
             )),
         ]);
-        app.app.restore_screen();
-        app.app.save_session_and_flush();
-        let session_id = app.app.conversation.session().id.clone();
+        app.restore_screen();
+        app.tui.save_session_and_flush();
+        let session_id = app.session_id();
         app.resume_session(&session_id);
-        assert!(app.app.conversation.has_live_session());
+        assert!(app.tui.conversation.has_live_session());
 
         let result =
-            app.app
+            app.tui
                 .apply_history_append_to_history(&protocol::HistoryAppend::mode_change(
                     HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
                         "normal",
@@ -4716,9 +4715,9 @@ mod checkpoint_tests {
                 ));
 
         assert_eq!(result, protocol::HistoryAppendResult::RemovedLast);
-        assert_eq!(app.app.session_history_len(), 2);
+        assert_eq!(app.session_message_count(), 2);
         assert!(matches!(
-            app.app.session_history_range(1..2).unwrap().as_slice(),
+            app.tui.session_history_range(1..2).unwrap().as_slice(),
             [HistoryItem::User { .. }]
         ));
     }
@@ -4726,33 +4725,33 @@ mod checkpoint_tests {
     #[test]
     fn checkpoint_commit_inserts_marker_without_rebuilding_transcript() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.replace_history_for_harness(vec![
+        app.tui.conversation.replace_history_for_harness(vec![
             user("old"),
             assistant("old reply"),
             user("recent"),
             assistant("recent reply"),
         ]);
-        app.app.restore_screen();
-        let before = app.app.conversation.transcript().history().order.clone();
+        app.restore_screen();
+        let before = app.tui.conversation.transcript().history().order.clone();
 
         let installed =
-            app.app
+            app.tui
                 .install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
 
         assert!(installed);
         assert_eq!(
-            app.app.conversation.session().display_context_tokens(),
+            app.tui.conversation.session().display_context_tokens(),
             Some(0)
         );
         let usage = app
-            .app
+            .tui
             .core
             .signals
             .get::<protocol::TokenUsage>("tokens_used")
             .expect("tokens_used reset");
         assert_eq!(usage.context_tokens, Some(0));
         assert_eq!(usage.prompt_tokens, Some(0));
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         assert_eq!(history.order.len(), before.len() + 1);
         assert_eq!(history.order[0], before[0]);
         assert_eq!(history.order[1], before[1]);
@@ -4767,14 +4766,14 @@ mod checkpoint_tests {
     #[test]
     fn checkpoint_commit_preserves_existing_marker_at_historical_boundary() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.replace_history_for_harness(vec![
+        app.tui.conversation.replace_history_for_harness(vec![
             user("old"),
             assistant("old reply"),
             user("kept user"),
             assistant("kept reply"),
             user("newest"),
         ]);
-        app.app.conversation.set_checkpoint(Some(ContextCheckpoint {
+        app.tui.conversation.set_checkpoint(Some(ContextCheckpoint {
             kind: "compaction".to_string(),
             summary: "old summary".into(),
             first_live_index: 2,
@@ -4783,9 +4782,9 @@ mod checkpoint_tests {
             tokens_after_estimate: None,
             ..Default::default()
         }));
-        app.app.restore_screen();
+        app.restore_screen();
 
-        let installed = app.app.install_context_checkpoint(
+        let installed = app.tui.install_context_checkpoint(
             "compaction".into(),
             "new summary".into(),
             2,
@@ -4793,7 +4792,7 @@ mod checkpoint_tests {
         );
 
         assert!(installed);
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let markers: Vec<_> = history
             .order
             .iter()
@@ -4804,13 +4803,13 @@ mod checkpoint_tests {
             })
             .collect();
         assert_eq!(markers, vec![(2, "old summary"), (6, "new summary")]);
-        assert!(app.app.conversation.has_unflushed_work());
+        assert!(app.tui.conversation.has_unflushed_work());
     }
 
     #[test]
     fn checkpoint_commit_places_marker_without_existing_provenance() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.replace_history_for_harness(vec![
+        app.tui.conversation.replace_history_for_harness(vec![
             user("old"),
             assistant("old reply"),
             user("recent"),
@@ -4836,15 +4835,15 @@ mod checkpoint_tests {
                 content: "recent reply".into(),
             },
         ] {
-            app.app.push_block(block);
+            app.tui.push_block(block);
         }
 
         let installed =
-            app.app
+            app.tui
                 .install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
 
         assert!(installed);
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         assert!(matches!(
             history.block(history.order[4]),
             Some(Block::Compacted { summary, .. }) if summary == "summary"
@@ -4867,15 +4866,15 @@ mod checkpoint_tests {
             },
             smelt_core::BlockOrigin::History(1),
         );
-        app.app
+        app.tui
             .conversation
             .replace_transcript_document_for_harness(
                 crate::app::transcript::TranscriptDocument::from_transcript(transcript),
             );
 
-        let index = app.app.suppress_duplicate_carried_tail_before(2);
+        let index = app.tui.suppress_duplicate_carried_tail_before(2);
 
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         assert_eq!(index, 1);
         assert_eq!(history.order.len(), 2);
         assert!(
@@ -4889,17 +4888,17 @@ mod checkpoint_tests {
     #[test]
     fn checkpoint_commit_places_completion_after_unoriginated_tail() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("restored"), assistant("restored reply")]);
-        app.app.restore_screen();
+        app.restore_screen();
         for item in [
             user("live old"),
             assistant("live old reply"),
             user("live recent"),
             assistant("live recent reply"),
         ] {
-            app.app.conversation.append_history_item(item);
+            app.tui.conversation.append_history_item(item);
         }
         for block in [
             Block::User {
@@ -4921,15 +4920,15 @@ mod checkpoint_tests {
                 content: "live recent reply".into(),
             },
         ] {
-            app.app.push_block(block);
+            app.tui.push_block(block);
         }
 
         let installed =
-            app.app
+            app.tui
                 .install_context_checkpoint("compaction".into(), "summary".into(), 4, Some(100));
 
         assert!(installed);
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         assert!(matches!(
             history.block(history.order[5]),
             Some(Block::Text { content }) if content == "live recent reply"
@@ -4943,14 +4942,14 @@ mod checkpoint_tests {
     #[test]
     fn checkpoint_commit_keeps_historical_and_user_compacted_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.replace_history_for_harness(vec![
+        app.tui.conversation.replace_history_for_harness(vec![
             HistoryItem::user(protocol::compaction_summary_content(
                 "user-written summary-looking block",
             )),
             assistant("reply"),
             user("recent"),
         ]);
-        app.app.conversation.set_checkpoint(Some(ContextCheckpoint {
+        app.tui.conversation.set_checkpoint(Some(ContextCheckpoint {
             kind: "compaction".to_string(),
             summary: "old summary".into(),
             first_live_index: 2,
@@ -4959,9 +4958,9 @@ mod checkpoint_tests {
             tokens_after_estimate: None,
             ..Default::default()
         }));
-        app.app.restore_screen();
+        app.restore_screen();
 
-        let installed = app.app.install_context_checkpoint(
+        let installed = app.tui.install_context_checkpoint(
             "compaction".into(),
             "new summary".into(),
             2,
@@ -4969,7 +4968,7 @@ mod checkpoint_tests {
         );
 
         assert!(installed);
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let summaries: Vec<_> = history
             .order
             .iter()
@@ -4994,21 +4993,21 @@ mod checkpoint_tests {
             .with_ephemeral(true)
             .build();
         let persistent_dir = app
-            .app
+            .tui
             .core
             .sessions
-            .artifact_dir_for(app.app.conversation.session());
-        let temp_dir = app.app.current_artifact_dir();
-        app.app.session_append_history(user("temporary"));
+            .artifact_dir_for(app.tui.conversation.session());
+        let temp_dir = app.tui.current_artifact_dir();
+        app.session_append_history(user("temporary"));
 
-        app.app.save_session();
-        app.app.flush_persist();
+        app.save_session();
+        app.flush_persist();
 
-        assert!(app.app.ephemeral());
+        assert!(app.tui.ephemeral());
         assert!(temp_dir.exists());
         assert!(!persistent_dir.exists());
-        assert!(app.app.shutdown_context().ephemeral);
-        let shared = app.app.conversation.shared_state().unwrap();
+        assert!(app.tui.shutdown_context().ephemeral);
+        let shared = app.tui.conversation.shared_state().unwrap();
         assert!(shared.ephemeral);
     }
 
@@ -5016,46 +5015,46 @@ mod checkpoint_tests {
     async fn reset_session_stops_background_processes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         add_background_process(&mut app).await;
-        assert_eq!(app.app.core.jobs.running_count(), 1);
+        assert_eq!(app.tui.core.jobs.running_count(), 1);
 
-        app.app.reset_session();
+        app.reset_session();
 
-        assert_eq!(app.app.core.jobs.running_count(), 0);
-        assert!(app.app.core.jobs.list().is_empty());
+        assert_eq!(app.tui.core.jobs.running_count(), 0);
+        assert!(app.tui.core.jobs.list().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn load_session_stops_background_processes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         add_background_process(&mut app).await;
-        assert_eq!(app.app.core.jobs.running_count(), 1);
+        assert_eq!(app.tui.core.jobs.running_count(), 1);
 
         let loaded = smelt_core::session::Session::new(99, std::path::PathBuf::from("/tmp/loaded"));
         app.load_session(loaded);
 
-        assert_eq!(app.app.core.jobs.running_count(), 0);
-        assert!(app.app.core.jobs.list().is_empty());
+        assert_eq!(app.tui.core.jobs.running_count(), 0);
+        assert!(app.tui.core.jobs.list().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn fork_session_stops_background_processes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
         add_background_process(&mut app).await;
-        assert_eq!(app.app.core.jobs.running_count(), 1);
+        assert_eq!(app.tui.core.jobs.running_count(), 1);
 
-        app.app.fork_session();
+        app.tui.fork_session();
 
-        assert_eq!(app.app.core.jobs.running_count(), 0);
-        assert!(app.app.core.jobs.list().is_empty());
+        assert_eq!(app.tui.core.jobs.running_count(), 0);
+        assert!(app.tui.core.jobs.list().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn fork_session_cancels_all_lua_tasks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
         app.exec_lua_entry(
@@ -5069,11 +5068,11 @@ mod checkpoint_tests {
         )
         .expect("start session-bound Lua task");
 
-        app.app.fork_session();
+        app.tui.fork_session();
 
-        let now = app.app.core.clock.instant_now() + std::time::Duration::from_secs(20);
-        let lua = app.app.lua.execution();
-        let outputs = crate::lua::scope_app(&mut app.app, || lua.drive_tasks(now));
+        let now = app.tui.core.clock.instant_now() + std::time::Duration::from_secs(20);
+        let lua = app.tui.lua.execution();
+        let outputs = crate::lua::scope_app(&mut app.tui, || lua.drive_tasks(now));
         assert!(outputs.is_empty(), "cancelled task produced output");
         let completed: bool = app
             .eval_lua("return _G.__fork_task_completed__")
@@ -5085,12 +5084,12 @@ mod checkpoint_tests {
     async fn quit_cleanup_stops_background_processes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         add_background_process(&mut app).await;
-        assert_eq!(app.app.core.jobs.running_count(), 1);
+        assert_eq!(app.tui.core.jobs.running_count(), 1);
 
-        app.app.stop_shell_jobs();
+        app.tui.stop_shell_jobs();
 
-        assert_eq!(app.app.core.jobs.running_count(), 0);
-        assert!(app.app.core.jobs.list().is_empty());
+        assert_eq!(app.tui.core.jobs.running_count(), 0);
+        assert!(app.tui.core.jobs.list().is_empty());
     }
 
     #[test]
@@ -5445,7 +5444,7 @@ mod checkpoint_tests {
     #[test]
     fn app_rewind_restores_context_snapshot_without_rewinding_cumulative_spend() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = app.app.conversation.session().clone();
+        let mut session = app.tui.conversation.session().clone();
         session.history = vec![user("a"), assistant("b")];
         session.session_usage.prompt_tokens = Some(10);
         session.session_usage.completion_tokens = Some(1);
@@ -5461,32 +5460,32 @@ mod checkpoint_tests {
         session.context_tokens_history_len = Some(4);
         session.session_cost_usd = 1.0;
         session.snapshot_context();
-        app.app.conversation.install_session_for_harness(session);
-        app.app.restore_screen();
+        app.tui.conversation.install_session_for_harness(session);
+        app.restore_screen();
 
-        let restored = app.app.rewind_to_history(2).expect("second user turn");
+        let restored = app.rewind_to_history(2).expect("second user turn");
 
         assert_eq!(restored.0, "c");
-        assert_eq!(app.app.conversation.session().history.len(), 2);
-        assert_eq!(app.app.conversation.session().session_cost_usd, 1.0);
+        assert_eq!(app.tui.conversation.session().history.len(), 2);
+        assert_eq!(app.tui.conversation.session().session_cost_usd, 1.0);
         assert_eq!(
-            app.app.conversation.session().session_usage.prompt_tokens,
+            app.tui.conversation.session().session_usage.prompt_tokens,
             Some(30)
         );
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .session()
                 .session_usage
                 .completion_tokens,
             Some(3)
         );
-        assert_eq!(app.app.conversation.session().context_tokens, Some(50));
+        assert_eq!(app.tui.conversation.session().context_tokens, Some(50));
         assert_eq!(
-            app.app.conversation.session().context_tokens_history_len,
+            app.tui.conversation.session().context_tokens_history_len,
             Some(2)
         );
-        assert_eq!(app.app.conversation.session().context_snapshots.len(), 1);
+        assert_eq!(app.tui.conversation.session().context_snapshots.len(), 1);
     }
 
     #[test]
@@ -5495,7 +5494,7 @@ mod checkpoint_tests {
         const FAR_HISTORY_INDEX: usize = 1_000;
         let expected = "exact first line\nexact second line\nexact final line";
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.replace_history_for_harness(
+        app.tui.conversation.replace_history_for_harness(
             (0usize..1_200)
                 .map(|index| {
                     if index == TARGET_HISTORY_INDEX || index.is_multiple_of(2) {
@@ -5510,9 +5509,9 @@ mod checkpoint_tests {
                 })
                 .collect(),
         );
-        app.app.restore_screen();
+        app.restore_screen();
         let target_id = app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
@@ -5520,17 +5519,17 @@ mod checkpoint_tests {
             .iter()
             .copied()
             .find(|id| {
-                app.app
+                app.tui
                     .conversation
                     .transcript()
                     .history()
                     .block_origin(*id)
                     == Some(smelt_core::BlockOrigin::History(TARGET_HISTORY_INDEX))
-                    && app.app.conversation.transcript().history().block_kind(*id) == Some("user")
+                    && app.tui.conversation.transcript().history().block_kind(*id) == Some("user")
             })
             .expect("rewind target block");
         let far_id = app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
@@ -5538,7 +5537,7 @@ mod checkpoint_tests {
             .iter()
             .copied()
             .find(|id| {
-                app.app
+                app.tui
                     .conversation
                     .transcript()
                     .history()
@@ -5548,34 +5547,34 @@ mod checkpoint_tests {
             .expect("far sparse block");
         app.save_session_and_flush();
 
-        let session_id = app.app.conversation.session().id.clone();
+        let session_id = app.session_id();
         let expected_record_prefix = stored_transcript(&session_reader(&app, &session_id))
             .into_iter()
             .take(TARGET_HISTORY_INDEX)
             .collect::<Vec<_>>();
         assert_eq!(expected_record_prefix.len(), TARGET_HISTORY_INDEX);
         let loaded =
-            load_transcript_tail_from_sqlite_id(&app.app.core.sessions, &session_id, 100, 32)
+            load_transcript_tail_from_sqlite_id(&app.tui.core.sessions, &session_id, 100, 32)
                 .expect("load sparse transcript");
-        app.app.clear_transcript();
-        app.app
+        app.clear_transcript();
+        app.tui
             .conversation
             .replace_loaded_transcript_for_harness(loaded);
         assert!(!app
-            .app
+            .tui
             .conversation
             .activate_transcript_search_record_window(100, target_id.get(), 32));
         let request = app
-            .app
+            .tui
             .conversation
             .take_pending_transcript_hydration_request()
             .expect("target record hydration request");
         let result = crate::app::transcript_hydration::execute_hydration_request_for_test(request)
             .expect("target record hydration result");
-        app.app
+        app.tui
             .conversation
             .install_transcript_hydration_result(result);
-        app.app
+        app.tui
             .conversation
             .set_transcript_memory_budget_for_harness(
                 crate::app::transcript::TranscriptMemoryBudget {
@@ -5584,25 +5583,24 @@ mod checkpoint_tests {
                 },
             );
         assert!(!app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .is_materialized(target_id));
-        let release_commit = app.app.conversation.pause_persistence();
-        app.app
-            .rewind_to_history_index(Some(TARGET_HISTORY_INDEX), false);
+        let release_commit = app.pause_persistence();
+        app.rewind_to_history_index(Some(TARGET_HISTORY_INDEX), false);
         app.render_silent();
         assert_eq!(app.prompt_source(), expected);
         let remaining_origins = app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .order
             .iter()
             .filter_map(|id| {
-                app.app
+                app.tui
                     .conversation
                     .transcript()
                     .history()
@@ -5617,7 +5615,7 @@ mod checkpoint_tests {
         );
 
         assert!(!app
-            .app
+            .tui
             .conversation
             .activate_transcript_search_record_window(100, far_id.get(), 32));
         app.push_transcript_block(Block::Thinking {
@@ -5668,7 +5666,7 @@ mod checkpoint_tests {
             api_base: Some("https://old.example".into()),
             provider_type: Some("old-provider".into()),
         };
-        let mut session = app.app.conversation.session().clone();
+        let mut session = app.tui.conversation.session().clone();
         session.history = vec![user("a"), assistant("b")];
         session.context_tokens = Some(50);
         session.context_tokens_history_len = Some(2);
@@ -5677,28 +5675,28 @@ mod checkpoint_tests {
         session.display_context_token_identity = Some(old_identity);
         session.snapshot_context();
         session.history.extend([user("c"), assistant("d")]);
-        app.app.conversation.install_session_for_harness(session);
-        app.app.restore_screen();
+        app.tui.conversation.install_session_for_harness(session);
+        app.restore_screen();
 
-        let restored = app.app.rewind_to_history(2).expect("second user turn");
+        let restored = app.rewind_to_history(2).expect("second user turn");
 
         assert_eq!(restored.0, "c");
         assert_eq!(
-            app.app.conversation.session().display_context_tokens(),
+            app.tui.conversation.session().display_context_tokens(),
             Some(50)
         );
         assert!(app
-            .app
+            .tui
             .conversation
             .session()
-            .display_context_tokens_stale(&app.app.active_context_token_identity()));
-        assert!(app.app.conversation.session().context_tokens.is_none());
+            .display_context_tokens_stale(&app.active_context_token_identity()));
+        assert!(app.tui.conversation.session().context_tokens.is_none());
     }
 
     #[test]
     fn app_rewind_restores_turn_tps_snapshot() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = app.app.conversation.session().clone();
+        let mut session = app.tui.conversation.session().clone();
         session.history = vec![user("a"), assistant("b")];
         session.turn_metas.push((
             2,
@@ -5719,22 +5717,22 @@ mod checkpoint_tests {
                 interrupted: false,
             },
         ));
-        app.app.conversation.install_session_for_harness(session);
-        app.app.restore_screen();
-        assert_eq!(app.app.working.display_tps(), Some(50.0));
+        app.tui.conversation.install_session_for_harness(session);
+        app.restore_screen();
+        assert_eq!(app.tui.working.display_tps(), Some(50.0));
 
-        let restored = app.app.rewind_to_history(2).expect("second user turn");
+        let restored = app.rewind_to_history(2).expect("second user turn");
 
         assert_eq!(restored.0, "c");
-        assert_eq!(app.app.conversation.session().history.len(), 2);
-        assert_eq!(app.app.conversation.session().turn_metas.len(), 1);
-        assert_eq!(app.app.working.display_tps(), Some(20.0));
+        assert_eq!(app.tui.conversation.session().history.len(), 2);
+        assert_eq!(app.tui.conversation.session().turn_metas.len(), 1);
+        assert_eq!(app.tui.working.display_tps(), Some(20.0));
     }
 
     #[test]
     fn app_rewind_restores_carried_tps_snapshot_without_turn_samples() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = app.app.conversation.session().clone();
+        let mut session = app.tui.conversation.session().clone();
         session.history = vec![user("a"), assistant("b")];
         session.turn_metas.push((
             2,
@@ -5765,17 +5763,17 @@ mod checkpoint_tests {
                 interrupted: false,
             },
         ));
-        app.app.conversation.install_session_for_harness(session);
-        app.app.restore_screen();
-        assert_eq!(app.app.working.display_tps(), Some(50.0));
+        app.tui.conversation.install_session_for_harness(session);
+        app.restore_screen();
+        assert_eq!(app.tui.working.display_tps(), Some(50.0));
 
-        let restored = app.app.rewind_to_history(4).expect("third user turn");
+        let restored = app.rewind_to_history(4).expect("third user turn");
 
         assert_eq!(restored.0, "e");
-        assert_eq!(app.app.conversation.session().history.len(), 4);
-        assert_eq!(app.app.conversation.session().turn_metas.len(), 2);
-        assert_eq!(app.app.working.turn_meta().unwrap().avg_tps, None);
-        assert_eq!(app.app.working.display_tps(), Some(20.0));
+        assert_eq!(app.tui.conversation.session().history.len(), 4);
+        assert_eq!(app.tui.conversation.session().turn_metas.len(), 2);
+        assert_eq!(app.tui.working.turn_meta().unwrap().avg_tps, None);
+        assert_eq!(app.tui.working.display_tps(), Some(20.0));
     }
 
     #[test]

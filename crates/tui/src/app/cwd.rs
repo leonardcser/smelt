@@ -697,7 +697,7 @@ mod tests {
             .with_cwd(&original)
             .build_with_test_environment_guard(&environment);
         app.start_turn(42);
-        app.app.lua.core_shared().hooks.prepare_request.clear();
+        app.tui.lua.core_shared().hooks.prepare_request.clear();
 
         let command = format!(
             "if [ -e '{}' ]; then printf 'Destination already exists; not renaming.\\n'; exit 1; fi; mv '{}' '{}'",
@@ -742,7 +742,7 @@ mod tests {
             .any(|command| matches!(command,
             protocol::UiCommand::UpdateAgentProjectContext(context) if context.cwd == renamed)));
         assert!(app
-            .app
+            .tui
             .model_history_messages()
             .iter()
             .any(
@@ -825,7 +825,7 @@ mod tests {
                         app.type_text("/reload");
                         app.press(KeyCode::Enter);
                     }
-                    "auto_reload" => app.app.reload_lua_config(),
+                    "auto_reload" => app.tui.reload_lua_config(),
                     "switch" => assert!(app.run_lua("smelt.session.switch_cwd('.')")),
                     _ => unreachable!(),
                 }
@@ -895,7 +895,7 @@ mod tests {
                 app.schedule_lua_reload();
                 app.wait_for_workspace();
                 assert!(app
-                    .app
+                    .tui
                     .lua_reload_failure()
                     .unwrap()
                     .message
@@ -990,7 +990,7 @@ mod tests {
             let original_cwd = app.core_probe().env.cwd();
             let original_generation = app.lua_probe().id;
             let prepared = app
-                .app
+                .tui
                 .prepare_lua_inputs(target.clone(), true)
                 .unwrap()
                 .recv_timeout(std::time::Duration::from_secs(10))
@@ -1002,12 +1002,12 @@ mod tests {
                 execution_mode: protocol::ToolExecutionMode::Sequential,
             };
             app.start_turn(1);
-            app.app
+            app.tui
                 .workspace
                 .schedule(target.clone(), true, Some(invocation));
             app.complete_lua_tool(invocation, "prepared-cwd".into(), "ok".into(), false, None);
             let (tx, rx) = std::sync::mpsc::channel();
-            app.app
+            app.tui
                 .workspace
                 .pending_change
                 .as_mut()
@@ -1030,11 +1030,11 @@ mod tests {
                 app.feed_one(SourceEvent::LuaWakeup);
                 assert_eq!(app.core_probe().env.cwd(), original_cwd);
                 assert_eq!(app.lua_probe().id, original_generation);
-                assert!(!app.app.workspace.has_pending_change());
+                assert!(!app.tui.workspace.has_pending_change());
                 assert!(!app.actions().iter().any(|action| matches!(action,
                     Action::EngineSend(command) if matches!(command.as_ref(), protocol::UiCommand::ToolResult { .. }))));
             } else {
-                app.app
+                app.tui
                     .core
                     .permission_store
                     .add_tool(
@@ -1064,15 +1064,15 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let mut app = TestApp::builder().build_with_test_environment_guard(&environment);
         let original_cwd = app.core_probe().env.cwd();
-        app.app
+        app.tui
             .workspace
             .schedule(target.path().to_owned(), true, None);
         assert_eq!(
-            app.app.restore_session_cwd(original_cwd.to_str()),
+            app.tui.restore_session_cwd(original_cwd.to_str()),
             super::SessionCwdRestore::Current
         );
         app.drain_idle_work();
-        assert!(!app.app.workspace.has_pending_change());
+        assert!(!app.tui.workspace.has_pending_change());
         assert_eq!(app.core_probe().env.cwd(), original_cwd);
     }
 

@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn shell_panel_open_output_finish_and_close_lifecycle() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
 
         app.open_shell_panel("printf hello");
         let panel = app.overlays.shell_panel().expect("shell panel opens");
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn shell_panel_displays_typed_termination_status() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.open_shell_panel("oom");
         let panel = app.overlays.shell_panel().expect("shell panel opens");
 
@@ -208,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn closing_shell_panel_cancels_overlay_job_once() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.open_shell_panel("sleep 10");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         drop(tx);
@@ -230,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn real_shell_panel_streams_stdout_stderr_and_exit_status() {
         let mut test_app = crate::app::test_harness::TestApp::builder().build();
-        let app = &mut test_app.app;
+        let app = &mut test_app.tui;
         let handle = app
             .start_shell_escape_with_sink(
                 "printf 'stdout-line\\n'; printf 'stderr-line\\n' >&2; exit 7",
@@ -274,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn real_shell_transcript_replaces_live_preview_with_final_output() {
         let mut test_app = crate::app::test_harness::TestApp::builder().build();
-        let app = &mut test_app.app;
+        let app = &mut test_app.tui;
         let handle = app
             .start_shell_escape(
                 "i=1; while [ $i -le 300 ]; do printf 'line-%03d\\n' $i; i=$((i + 1)); done",
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn shell_panel_enforces_the_retained_line_cap() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.open_shell_panel("many lines");
         for index in 0..SHELL_PANEL_MAX_LINES + 17 {
             app.append_shell_panel_line(&format!("line-{index}"));
@@ -344,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_real_shell_command_kills_and_reaps_its_process_group() {
         let mut test_app = crate::app::test_harness::TestApp::builder().build();
-        let app = &mut test_app.app;
+        let app = &mut test_app.tui;
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("shell.pid");
         let command = format!("echo $$ > '{}'; sleep 30 & wait", pid_file.display());

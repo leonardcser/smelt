@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use smelt_test_support::bench::Stats;
 
 fn transcript_row_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
-    app.app
+    app.tui
         .transcript_win()
         .row_cursor()
         .expect("row-document transcript cursor")
@@ -13,8 +13,8 @@ fn transcript_row_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
 }
 
 fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
-    let win = app.app.transcript_win();
-    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    let win = app.tui.transcript_win();
+    let buf = app.tui.ui.buf(win.buf).expect("transcript buffer");
     win.scroll_row_total(buf)
 }
 
@@ -56,7 +56,7 @@ fn default_ui_frame_benchmark_suite() {
         smelt_perf::alloc::set_enabled(true);
         for i in 0..samples + 32 {
             app.clock.advance(std::time::Duration::from_millis(16));
-            app.app
+            app.tui
                 .lua
                 .lua()
                 .globals()
@@ -78,7 +78,7 @@ fn default_ui_frame_benchmark_suite() {
                 }
                 "scrolling" => {
                     use crossterm::event::{Event, MouseEvent, MouseEventKind};
-                    let rect = app.app.layout.transcript;
+                    let rect = app.tui.layout.transcript;
                     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
                         kind: if i % 2 == 0 {
                             MouseEventKind::ScrollUp
@@ -162,9 +162,9 @@ fn benchmark_runs() -> usize {
 
 fn transcript_navigation_bench_app() -> TestApp {
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     for i in 0..4_000 {
-        app.app
+        app.tui
             .push_block(smelt_core::transcript_model::Block::User {
                 text: format!("navigation bench prompt {i:04}"),
                 image_labels: Vec::new(),
@@ -188,15 +188,15 @@ fn transcript_navigation_bench_app() -> TestApp {
                 "alpha beta gamma delta ".repeat(3)
             )
         };
-        app.app
+        app.tui
             .push_block(smelt_core::transcript_model::Block::Text {
                 content: content.into(),
             });
     }
     app.render_silent();
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
+    app.tui.app_focus = AppFocus::Content;
+    app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.tui.transcript_win_mut();
     win.set_vim_enabled(true);
     win.set_vim_mode(VimMode::Normal);
     app
@@ -214,7 +214,7 @@ fn run_navigation_sample() -> NavSample {
     app.press(KeyCode::Enter);
     app.render_silent();
     let search_ms = elapsed_ms(search_start.elapsed());
-    assert!(app.app.overlays.search_session().is_some());
+    assert!(app.tui.overlays.search_session().is_some());
     assert!(transcript_row_cursor_row(&app) > rows / 2);
 
     app.type_char('g');
@@ -292,7 +292,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
             "common-token transcript search cached navigation ".repeat(10)
         );
         approx_bytes += user.len();
-        app.app
+        app.tui
             .push_block(smelt_core::transcript_model::Block::User {
                 text: user,
                 image_labels: vec![],
@@ -306,7 +306,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
             "tail rows remain searchable through the transcript trigram index ".repeat(18),
         );
         approx_bytes += assistant.len();
-        app.app
+        app.tui
             .push_block(smelt_core::transcript_model::Block::Text {
                 content: assistant.into(),
             });
@@ -323,7 +323,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
                 .collect::<Vec<_>>()
                 .join("\n");
             approx_bytes += command.len() + output.len();
-            app.app
+            app.tui
                 .push_block(smelt_core::transcript_model::Block::Exec {
                     command,
                     output: output.into(),
@@ -458,12 +458,12 @@ fn assert_scroll_pill_operation_gates(snapshot: &smelt_perf::perf::Snapshot, lab
 /// over the fixture heap costs about as much as one pill click, and where it
 /// lands depends on earlier allocations, not on the operation measured.
 fn collect_lua_garbage(app: &mut TestApp) {
-    app.app.lua.lua.gc_collect().expect("collect Lua garbage");
+    app.tui.lua.lua.gc_collect().expect("collect Lua garbage");
 }
 
 fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
     app.render_silent();
-    let tail_scroll = app.app.transcript_win().scroll_top();
+    let tail_scroll = app.tui.transcript_win().scroll_top();
     assert!(app
         .ui_probe()
         .named_win("smelt.scroll_pills.top.win")
@@ -478,7 +478,7 @@ fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
     let previous_user_snapshot = smelt_perf::perf::snapshot();
     assert_scroll_pill_operation_gates(&previous_user_snapshot, "previous_user_pill");
     assert!(
-        app.app.transcript_win().scroll_top() < tail_scroll,
+        app.tui.transcript_win().scroll_top() < tail_scroll,
         "previous-user pill did not move above the transcript tail"
     );
     assert!(app
@@ -495,8 +495,8 @@ fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
     let bottom_pill_ms = elapsed_ms(bottom_start.elapsed());
     let bottom_snapshot = smelt_perf::perf::snapshot();
     assert_scroll_pill_operation_gates(&bottom_snapshot, "bottom_pill");
-    assert!(app.app.transcript_win().is_following_tail());
-    assert!(app.app.transcript_win().scroll_top() >= tail_scroll);
+    assert!(app.tui.transcript_win().is_following_tail());
+    assert!(app.tui.transcript_win().scroll_top() >= tail_scroll);
 
     (previous_user_pill_ms, bottom_pill_ms)
 }
@@ -760,16 +760,16 @@ enum BurstBenchPosition {
 
 fn save_bench_fixture(app: &mut TestApp, label: &str) -> smelt_store::StoreHead {
     app.ensure_writer_ready();
-    app.app.save_session();
+    app.save_session();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         app.render_silent();
-        app.app.save_deferred_session_batch_if_ready();
-        let outcome = app.app.flush_persist();
+        app.tui.save_deferred_session_batch_if_ready();
+        let outcome = app.flush_persist();
         match outcome {
             crate::persist::PersistenceFlushOutcome::Durable => {
                 break app
-                    .app
+                    .tui
                     .conversation
                     .persistence_status()
                     .and_then(|status| status.durable)
@@ -790,7 +790,7 @@ fn wait_for_sparse_reader_metrics(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         app.render_silent();
-        let metrics = app.app.transcript_reader_metrics_for_harness();
+        let metrics = app.tui.transcript_reader_metrics_for_harness();
         if metrics.metadata_readers == 1 && metrics.hydration_readers == 1 {
             assert_eq!(metrics.total_readers, 2);
             return metrics;
@@ -805,20 +805,20 @@ fn wait_for_sparse_reader_metrics(
 
 fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_id(
-        &app.app.core.sessions,
-        &app.app.conversation.session().id,
+        &app.tui.core.sessions,
+        &app.tui.conversation.session().id,
         100,
         32,
     )
     .expect("load sparse bench transcript tail");
-    app.app.clear_transcript();
-    app.app
+    app.clear_transcript();
+    app.tui
         .conversation
         .replace_loaded_transcript_for_harness(loaded);
-    app.app.handle_resize(100, 32);
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
+    app.tui.handle_resize(100, 32);
+    app.tui.app_focus = AppFocus::Content;
+    app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.tui.transcript_win_mut();
     win.set_vim_enabled(true);
     win.set_vim_mode(VimMode::Normal);
     app.render_silent();
@@ -832,7 +832,7 @@ fn prepare_burst_bench_position(app: &mut TestApp, position: BurstBenchPosition)
         }
         BurstBenchPosition::Middle => {
             let record = app
-                .app
+                .tui
                 .conversation
                 .transcript()
                 .record_total_count()
@@ -840,7 +840,7 @@ fn prepare_burst_bench_position(app: &mut TestApp, position: BurstBenchPosition)
                 / 2;
             let block_id = smelt_core::transcript_model::BlockId::new(record as u64);
             assert!(
-                app.app
+                app.tui
                     .reveal_transcript_target_at_top(record, block_id, 1, true),
                 "middle record reveal failed for record {record} and block {block_id:?}"
             );
@@ -904,18 +904,18 @@ fn measure_transcript_burst_operation(
 
     prepare_burst_bench_position(app, position);
     let viewport_rows = app
-        .app
+        .tui
         .transcript_win()
         .viewport
         .expect("transcript viewport")
         .rect
         .height
         .max(1);
-    let before_scroll = app.app.transcript_win().scroll_top();
-    app.app
+    let before_scroll = app.tui.transcript_win().scroll_top();
+    app.tui
         .conversation
         .set_transcript_scroll_trace_timings_for_harness(true);
-    app.app
+    app.tui
         .conversation
         .take_transcript_scroll_trace_frames_for_harness();
     smelt_perf::perf::clear();
@@ -924,14 +924,14 @@ fn measure_transcript_burst_operation(
         key.press(app);
     }
     assert_eq!(
-        app.app.transcript_win().scroll_top(),
+        app.tui.transcript_win().scroll_top(),
         before_scroll,
         "{label} mutated Window::scroll_top before projection"
     );
     app.render_silent();
     let ms = elapsed_ms(start.elapsed());
     let frames = app
-        .app
+        .tui
         .conversation
         .take_transcript_scroll_trace_frames_for_harness();
     let max_burst_rows = key
@@ -965,8 +965,8 @@ fn measure_transcript_burst_operation_without_trace(
     const BURST_EVENTS: usize = 80;
 
     prepare_burst_bench_position(app, position);
-    let before_scroll = app.app.transcript_win().scroll_top();
-    app.app
+    let before_scroll = app.tui.transcript_win().scroll_top();
+    app.tui
         .conversation
         .set_transcript_scroll_trace_for_harness(false);
     smelt_perf::perf::clear();
@@ -975,7 +975,7 @@ fn measure_transcript_burst_operation_without_trace(
         key.press(app);
     }
     assert_eq!(
-        app.app.transcript_win().scroll_top(),
+        app.tui.transcript_win().scroll_top(),
         before_scroll,
         "{label} mutated Window::scroll_top before projection"
     );
@@ -1029,7 +1029,7 @@ fn measure_transcript_copy_operation(
     smelt_perf::perf::clear();
     let start = std::time::Instant::now();
     let out = app
-        .app
+        .tui
         .copy_document_rows(crate::app::TRANSCRIPT_WIN, range)
         .expect("copy transcript rows");
     let ms = elapsed_ms(start.elapsed());
@@ -1044,12 +1044,12 @@ fn measure_transcript_copy_operation(
 }
 
 fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f64, f64, f64) {
-    app.app
+    app.tui
         .conversation
         .set_transcript_scroll_trace_for_harness(false);
     smelt_perf::perf::clear();
     let rare_start = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         "needle-target".into(),
@@ -1064,7 +1064,7 @@ fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f6
 
     smelt_perf::perf::clear();
     let common_start = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         "common-token".into(),
@@ -1104,7 +1104,7 @@ fn run_resumed_wheel_scroll_bench_sample(
     ticks_per_frame: usize,
 ) {
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
     save_bench_fixture(&mut app, "resumed wheel");
@@ -1112,10 +1112,10 @@ fn run_resumed_wheel_scroll_bench_sample(
     install_sparse_resume_bench_transcript(&mut app);
     app.type_char('G');
     app.render_silent();
-    app.app
+    app.tui
         .conversation
         .set_transcript_scroll_trace_timings_for_harness(true);
-    app.app
+    app.tui
         .conversation
         .take_transcript_scroll_trace_frames_for_harness();
 
@@ -1132,7 +1132,7 @@ fn run_resumed_wheel_scroll_bench_sample(
     let snapshot = smelt_perf::perf::snapshot();
     smelt_perf::perf::set_enabled(false);
     let trace_frames = app
-        .app
+        .tui
         .conversation
         .take_transcript_scroll_trace_frames_for_harness();
     let record_loads = perf_duration_count(&snapshot, "store:transcript:read_record_slice");
@@ -1180,29 +1180,29 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
     save_bench_fixture(&mut app, "search");
     smelt_perf::perf::clear();
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
+    app.tui.app_focus = AppFocus::Content;
+    app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.tui.transcript_win_mut();
     win.set_vim_enabled(true);
     win.set_vim_mode(VimMode::Normal);
     let rows = transcript_total_rows(&app);
 
     let width_resize_ms =
         measure_transcript_view_operation(&mut app, "resize_width", report_perf, |app| {
-            app.app.handle_resize(140, 32)
+            app.tui.handle_resize(140, 32)
         });
     let height_resize_ms =
         measure_transcript_view_operation(&mut app, "resize_height", report_perf, |app| {
-            app.app.handle_resize(140, 48)
+            app.tui.handle_resize(140, 48)
         });
     let theme_color_ms =
         measure_transcript_view_operation(&mut app, "theme_color", report_perf, |app| {
-            app.app.mutate_theme(|theme| {
+            app.tui.mutate_theme(|theme| {
                 theme.set(
                     "SmeltAccent",
                     smelt_core::style::Style::new().fg(smelt_core::style::Color::Rgb {
@@ -1213,7 +1213,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
                 );
             });
         });
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     app.render_silent();
 
     let copy_start_row = rows.saturating_mul(2) / 3;
@@ -1258,7 +1258,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         app.type_char('G');
     });
     let row = transcript_row_cursor_row(&app);
-    let total_rows_after_g = app.app.transcript_total_rows();
+    let total_rows_after_g = app.transcript_total_rows();
     assert_eq!(
         row,
         total_rows_after_g.saturating_sub(1),
@@ -1271,7 +1271,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
 
     smelt_perf::perf::clear();
     let rare_start = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         "needle-target".into(),
@@ -1291,7 +1291,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.render_silent();
     smelt_perf::perf::clear();
     let short_common_start = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         "e".into(),
@@ -1306,7 +1306,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
 
     smelt_perf::perf::clear();
     let short_absent_start = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         "§".into(),
@@ -1321,7 +1321,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
 
     smelt_perf::perf::clear();
     let common_start = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         "common-token".into(),
@@ -1348,12 +1348,12 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     );
 
     smelt_perf::perf::clear();
-    app.app
+    app.tui
         .push_block(smelt_core::transcript_model::Block::Text {
             content: "append after index common-token incremental-index-probe".into(),
         });
     let after_append_start = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         "incremental-index-probe".into(),
@@ -1594,14 +1594,14 @@ fn seed_resume_bench_preview_session(
     let mut app = TestApp::builder()
         .with_vim(true)
         .build_with_test_home_guard(guard);
-    app.app.handle_resize(120, 32);
+    app.tui.handle_resize(120, 32);
     let bytes = push_search_bench_transcript(&mut app, preview_bytes);
     app.render_silent();
     save_bench_fixture(&mut app, "resume preview");
-    let id = app.app.conversation.session().id.clone();
+    let id = app.session_id();
     assert!(
         crate::app::history::load_transcript_tail_from_sqlite_id(
-            &app.app.core.sessions,
+            &app.tui.core.sessions,
             &id,
             80,
             12,
@@ -1623,7 +1623,7 @@ fn run_resume_command_to_dialog(app: &mut TestApp) -> f64 {
 fn run_resume_preview_timer(app: &mut TestApp) -> f64 {
     let start = std::time::Instant::now();
     app.feed_one(SourceEvent::Tick(50));
-    app.app.tick_timers();
+    app.tick_timers();
     app.settle_lua();
     app.render_silent();
     elapsed_ms(start.elapsed())
@@ -1674,7 +1674,7 @@ fn resume_dialog_open_benchmark_suite() {
     let mut app = TestApp::builder()
         .with_vim(true)
         .build_without_test_home_reset(&guard);
-    app.app.handle_resize(120, 32);
+    app.tui.handle_resize(120, 32);
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
     let open_ms = run_resume_command_to_dialog(&mut app);
@@ -1875,7 +1875,7 @@ fn measure_tall_write_scroll(
     kind: crossterm::event::MouseEventKind,
     expanded: bool,
 ) -> f64 {
-    let before = app.app.transcript_win().scroll_top();
+    let before = app.tui.transcript_win().scroll_top();
     smelt_perf::perf::clear();
     let start = std::time::Instant::now();
     for _ in 0..TALL_WRITE_SCROLL_FRAMES {
@@ -1883,7 +1883,7 @@ fn measure_tall_write_scroll(
         app.render_silent();
     }
     let ms = elapsed_ms(start.elapsed());
-    let after = app.app.transcript_win().scroll_top();
+    let after = app.tui.transcript_win().scroll_top();
     match kind {
         crossterm::event::MouseEventKind::ScrollDown => assert!(after > before),
         crossterm::event::MouseEventKind::ScrollUp => assert!(after < before),
@@ -1905,9 +1905,9 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
         .with_ephemeral(true)
         .with_vim(true)
         .build();
-    app.app.handle_resize(120, 40);
+    app.tui.handle_resize(120, 40);
     for i in 0..80 {
-        app.app
+        app.tui
             .push_block(smelt_core::transcript_model::Block::Text {
                 content: format!("collapsed transcript row before tool {i:03}").into(),
             });
@@ -1936,15 +1936,15 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
         Some(std::time::Duration::from_millis(250)),
     );
     for i in 0..80 {
-        app.app
+        app.tui
             .push_block(smelt_core::transcript_model::Block::Text {
                 content: format!("collapsed transcript row after tool {i:03}").into(),
             });
     }
     app.render_silent();
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
+    app.tui.app_focus = AppFocus::Content;
+    app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.tui.transcript_win_mut();
     win.set_vim_enabled(true);
     win.set_vim_mode(VimMode::Normal);
     assert!(app.run_lua("smelt.transcript.fold_all('close')"));
@@ -1971,8 +1971,8 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
         expanded_rows > collapsed_rows.saturating_add(line_count as u64 / 2),
         "Enter did not expand the tall write_file body: collapsed={collapsed_rows}, expanded={expanded_rows}"
     );
-    let tool_top = app.app.transcript_win().scroll_top();
-    let transcript_buf = app.app.transcript_win().buf;
+    let tool_top = app.tui.transcript_win().scroll_top();
+    let transcript_buf = app.tui.transcript_win().buf;
     let expanded_lines = app
         .ui_probe()
         .buf(transcript_buf)
@@ -2121,9 +2121,9 @@ fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
         .with_ephemeral(true)
         .with_vim(false)
         .build();
-    app.app.handle_resize(120, 40);
+    app.tui.handle_resize(120, 40);
     for i in 0..100 {
-        app.app
+        app.tui
             .push_block(smelt_core::transcript_model::Block::Text {
                 content: format!("retained diff history row {i:03}").into(),
             });
@@ -2196,7 +2196,7 @@ fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
     let metadata_compiles =
         perf_duration_count(&first_perf, "transcript:layout_cache:block_render_metadata");
 
-    let transcript_buf = app.app.transcript_win().buf;
+    let transcript_buf = app.tui.transcript_win().buf;
     let visible_lines = app
         .ui_probe()
         .buf(transcript_buf)
@@ -2224,7 +2224,7 @@ fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
         "unchanged retained diff recompiled Lua renderer metadata"
     );
 
-    let memory = app.app.conversation.transcript().memory_snapshot();
+    let memory = app.tui.conversation.transcript().memory_snapshot();
     let total_rows = transcript_total_rows(&app);
     smelt_perf::alloc::set_enabled(false);
     smelt_perf::perf::set_enabled(false);
@@ -2461,7 +2461,7 @@ fn transcript_sparse_watcher_benchmark_suite() {
     let block_count = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_WATCHER_BLOCKS", 5_000);
     let runs = env_positive_usize("SMELT_TRANSCRIPT_BENCH_RUNS", 1_001);
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     for index in 0..block_count {
         let block = if index.is_multiple_of(10) {
             smelt_core::transcript_model::Block::User {
@@ -2475,7 +2475,7 @@ fn transcript_sparse_watcher_benchmark_suite() {
                 content: format!("sparse watcher response {index}").into(),
             }
         };
-        app.app.push_block(block);
+        app.tui.push_block(block);
     }
     app.render_silent();
     save_bench_fixture(&mut app, "sparse watcher");
@@ -2525,7 +2525,7 @@ fn transcript_sparse_watcher_benchmark_suite() {
             > calls_before,
         "sparse scrolling must publish committed-view revisions"
     );
-    let readers_after = app.app.transcript_reader_metrics_for_harness();
+    let readers_after = app.tui.transcript_reader_metrics_for_harness();
     assert_eq!(
         readers_after, readers_before,
         "committed-view watcher dispatch must reuse both retained sparse readers"
@@ -2568,11 +2568,11 @@ struct AutonomousFrameSample {
 fn render_autonomous_frames(app: &mut TestApp, frames: usize) {
     let mut rendered = 0usize;
     for _ in 0..frames {
-        app.app
+        app.tui
             .request_animation_render(std::time::Duration::from_millis(16));
         app.clock.advance(std::time::Duration::from_millis(16));
         rendered += usize::from(
-            app.app
+            app.tui
                 .render_requested_transient_frame_to(&mut std::io::sink()),
         );
     }
@@ -2581,12 +2581,12 @@ fn render_autonomous_frames(app: &mut TestApp, frames: usize) {
 
 fn begin_autonomous_text_turn(app: &mut TestApp, turn_id: u64, warmup_frames: usize) {
     app.start_turn(turn_id);
-    app.app.dispatch_engine_event_in_render_loop_to(
+    app.tui.dispatch_engine_event_in_render_loop_to(
         protocol::EngineEvent::TextDelta { delta: "x".into() },
         &mut std::io::sink(),
         |_| {},
     );
-    app.app.request_urgent_render();
+    app.tui.request_urgent_render();
     app.render_silent();
     render_autonomous_frames(app, warmup_frames);
 }
@@ -2644,14 +2644,14 @@ fn transcript_sparse_autonomous_frame_benchmark_suite() {
     let frames = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_FRAMES", 600);
     let warmup_frames = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_WARMUP", 32);
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     let fixture_bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
     save_bench_fixture(&mut app, "sparse autonomous frames");
 
     begin_autonomous_text_turn(&mut app, 42, warmup_frames);
     let hydrated = measure_autonomous_frames(&mut app, frames);
-    app.app.dispatch_engine_event_in_render_loop_to(
+    app.tui.dispatch_engine_event_in_render_loop_to(
         protocol::EngineEvent::TurnComplete {
             turn_id: 42,
             history: None,
@@ -2665,7 +2665,7 @@ fn transcript_sparse_autonomous_frame_benchmark_suite() {
     begin_autonomous_text_turn(&mut app, 43, warmup_frames);
     let readers_before = wait_for_sparse_reader_metrics(&mut app, "sparse autonomous frames");
     let sparse = measure_autonomous_frames(&mut app, frames);
-    let readers_after = app.app.transcript_reader_metrics_for_harness();
+    let readers_after = app.tui.transcript_reader_metrics_for_harness();
     assert_eq!(
         readers_after, readers_before,
         "autonomous sparse frames must reuse both retained session readers"
@@ -3065,7 +3065,7 @@ fn push_stream_boundary_transcript(app: &mut TestApp, record_bytes: usize) -> us
                 content: content.into(),
             }
         };
-        app.app.push_block(block);
+        app.tui.push_block(block);
     }
     generated_bytes
 }
@@ -3079,7 +3079,7 @@ fn stream_benchmark_app(
     terminal_height: u16,
 ) -> (TestApp, usize) {
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(terminal_width, terminal_height);
+    app.tui.handle_resize(terminal_width, terminal_height);
     let resumed_bytes = if let Some(target_bytes) = resumed_bytes {
         let boundary_record_bytes = stream_benchmark_boundary_record_bytes();
         let bytes = if boundary_record_bytes == 0 {
@@ -3101,7 +3101,7 @@ fn stream_benchmark_app(
                 prepare_burst_bench_position(&mut app, BurstBenchPosition::Bottom)
             }
         }
-        app.app.handle_resize(terminal_width, terminal_height);
+        app.tui.handle_resize(terminal_width, terminal_height);
         bytes
     } else {
         for index in 0..history_blocks {
@@ -3135,7 +3135,7 @@ fn stream_benchmark_app(
                     .into(),
                 },
             };
-            app.app.push_block(block);
+            app.tui.push_block(block);
         }
         0
     };
@@ -3143,9 +3143,9 @@ fn stream_benchmark_app(
         app.start_turn(42);
     }
     app.render_silent();
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
+    app.tui.app_focus = AppFocus::Content;
+    app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.tui.transcript_win_mut();
     win.set_vim_enabled(true);
     win.set_vim_mode(VimMode::Normal);
     (app, resumed_bytes)
@@ -3732,7 +3732,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
     let readers_before = if resumed_bytes > 0 {
         wait_for_sparse_reader_metrics(&mut app, "resumed stream")
     } else {
-        app.app.transcript_reader_metrics_for_harness()
+        app.tui.transcript_reader_metrics_for_harness()
     };
     let mut dispatch_ms = Vec::with_capacity(event_count);
     let mut render_ms = Vec::with_capacity(event_count + chunks.div_ceil(8));
@@ -3759,15 +3759,15 @@ fn run_stream_benchmark_sample() -> StreamSample {
         let mut pre_dispatch_frames = 0usize;
         match event {
             StreamBenchmarkEvent::Engine { event, .. } => {
-                app.app.dispatch_engine_event_in_render_loop_to(
+                app.tui.dispatch_engine_event_in_render_loop_to(
                     *event,
                     &mut std::io::sink(),
                     |_| pre_dispatch_frames += 1,
                 );
             }
-            StreamBenchmarkEvent::ExecStarted { command } => app.app.start_exec(command),
-            StreamBenchmarkEvent::ExecOutput { chunk } => app.app.append_exec_output(chunk),
-            StreamBenchmarkEvent::ExecFinished => app.app.finish_exec(None),
+            StreamBenchmarkEvent::ExecStarted { command } => app.tui.start_exec(command),
+            StreamBenchmarkEvent::ExecOutput { chunk } => app.tui.append_exec_output(chunk),
+            StreamBenchmarkEvent::ExecFinished => app.tui.finish_exec(None),
         }
         let dispatch_elapsed_ms = elapsed_ms(dispatch_start.elapsed());
         traced_frames += pre_dispatch_frames;
@@ -3775,7 +3775,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
         if scheduled {
             let render_start = std::time::Instant::now();
             if app
-                .app
+                .tui
                 .render_requested_transient_frame_to(&mut std::io::sink())
             {
                 render_ms.push(elapsed_ms(render_start.elapsed()));
@@ -3800,7 +3800,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
                 KeyCode::Char('G')
             };
             app.press_mod(key, modifiers);
-            app.app.request_urgent_render();
+            app.tui.request_urgent_render();
             let render_start = std::time::Instant::now();
             app.render_silent();
             render_ms.push(elapsed_ms(render_start.elapsed()));
@@ -3819,8 +3819,8 @@ fn run_stream_benchmark_sample() -> StreamSample {
     }
     if scheduled {
         let mut drain_frames = 0usize;
-        while app.app.transcript_work_pending_for_harness()
-            || app.app.scheduled_frame_delay().is_some()
+        while app.tui.transcript_work_pending_for_harness()
+            || app.tui.scheduled_frame_delay().is_some()
         {
             drain_frames = drain_frames.saturating_add(1);
             assert!(
@@ -3830,7 +3830,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
             app.clock.advance(std::time::Duration::from_millis(20));
             let render_start = std::time::Instant::now();
             if app
-                .app
+                .tui
                 .render_requested_transient_frame_to(&mut std::io::sink())
             {
                 render_ms.push(elapsed_ms(render_start.elapsed()));
@@ -3840,11 +3840,11 @@ fn run_stream_benchmark_sample() -> StreamSample {
     }
     for _ in 0..idle_frames {
         app.clock.advance(std::time::Duration::from_millis(16));
-        app.app
+        app.tui
             .request_animation_render(std::time::Duration::from_millis(16));
         let render_start = std::time::Instant::now();
         if app
-            .app
+            .tui
             .render_requested_transient_frame_to(&mut std::io::sink())
         {
             render_ms.push(elapsed_ms(render_start.elapsed()));
@@ -3855,7 +3855,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
     let (allocs_after, bytes_after) = smelt_perf::alloc::thread_snapshot();
     let process_after = smelt_perf::alloc::snapshot();
     let process_delta = smelt_perf::alloc::delta(process_before, process_after);
-    let readers_after = app.app.transcript_reader_metrics_for_harness();
+    let readers_after = app.tui.transcript_reader_metrics_for_harness();
     if resumed_bytes > 0 {
         assert_eq!(
             readers_after, readers_before,
@@ -3864,7 +3864,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
     }
     let perf_snapshot = smelt_perf::perf::snapshot();
     let memory_snapshot = app
-        .app
+        .tui
         .conversation
         .transcript_memory_snapshot_for_harness();
     assert_stream_operation_gates(&perf_snapshot, memory_snapshot, workload.label());
@@ -4218,8 +4218,7 @@ fn saved_hot_path_app(
     checkpoint_first_live: Option<usize>,
 ) -> TestApp {
     let mut app = TestApp::builder().build();
-    let mut session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    let mut session = app.new_session();
     session.id = hot_path_session_id(label);
     session.first_user_message = Some("hot path old user 0".into());
     let item_bytes = hot_path_history_item_bytes();
@@ -4246,7 +4245,7 @@ fn saved_hot_path_app(
     let session_id = session.id.clone();
     // Seed durable history and records before opening the bounded UI projection.
     {
-        let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
+        let transcript = crate::app::history::build_transcript_from_session(&app.tui.lua, &session);
         let records = transcript
             .history
             .block_records_with_ids()
@@ -4264,7 +4263,7 @@ fn saved_hot_path_app(
         let mut commit =
             smelt_core::session::full_commit(&session).expect("prepare hot path fixture");
         commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
-        app.app
+        app.tui
             .core
             .sessions
             .store()
@@ -4286,7 +4285,7 @@ fn copied_hot_path_fixture_app(fixture: &std::path::Path) -> TestApp {
     );
     let session_id = hot_path_fixture_session_id();
     let mut app = TestApp::builder().build();
-    let destination_root = app.app.core.sessions.state_root().to_path_buf();
+    let destination_root = app.tui.core.sessions.state_root().to_path_buf();
     let started = std::time::Instant::now();
     let copied_bytes = copy_fixture_tree(fixture, &destination_root);
     eprintln!(
@@ -4296,15 +4295,15 @@ fn copied_hot_path_fixture_app(fixture: &std::path::Path) -> TestApp {
         elapsed_ms(started.elapsed())
     );
     app.resume_session(&session_id);
-    assert_eq!(app.app.conversation.session().id, session_id);
+    assert_eq!(app.tui.conversation.session().id, session_id);
     assert!(
-        !app.app.conversation.is_read_only(),
+        !app.tui.conversation.is_read_only(),
         "copied hot-path fixture opened read-only"
     );
     // Fixture providers need not exist in the isolated harness configuration.
     app.apply_model("test/test-model", false);
     assert_eq!(
-        app.app
+        app.tui
             .core
             .config
             .active_model()
@@ -4399,8 +4398,8 @@ fn capture_hot_path_sample(
 fn run_noop_save_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let mut app = saved_hot_path_app("noop-save", history_len, None);
     let (sample, snapshot) = capture_hot_path_sample("noop_save", history_len, || {
-        app.app.save_session();
-        app.app.flush_persist();
+        app.save_session();
+        app.flush_persist();
     });
     assert_eq!(
         perf_value_max(&snapshot, "session:save:skipped_unchanged"),
@@ -4421,7 +4420,7 @@ fn run_noop_save_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::per
 fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let mut app = saved_hot_path_app("request-append", history_len, None);
     let (sample, snapshot) = capture_hot_path_sample("request_append", history_len, || {
-        let source = app.app.commit_request_history_item(
+        let source = app.commit_request_history_item(
             hot_path_user("hot path new user"),
             Some(smelt_core::Block::User {
                 text: "hot path new user".into(),
@@ -4460,12 +4459,11 @@ fn run_history_appended_hot_path(
     app.start_turn(1);
     let item = hot_path_assistant("hot path assistant update");
     let (sample, snapshot) = capture_hot_path_sample("history_appended", history_len, || {
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::HistoryAppended {
-                turn_id: 1,
-                delta: protocol::CanonicalHistoryDelta::new(history_len, vec![item]),
-            });
-        app.app.flush_persist();
+        app.dispatch_engine_event(protocol::EngineEvent::HistoryAppended {
+            turn_id: 1,
+            delta: protocol::CanonicalHistoryDelta::new(history_len, vec![item]),
+        });
+        app.flush_persist();
     });
     assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 1);
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
@@ -4482,13 +4480,12 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         interrupted: false,
     };
     let (sample, snapshot) = capture_hot_path_sample("turn_complete", history_len, || {
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::TurnComplete {
-                turn_id: 1,
-                history: None,
-                meta: Some(meta),
-            });
-        app.app.flush_persist();
+        app.dispatch_engine_event(protocol::EngineEvent::TurnComplete {
+            turn_id: 1,
+            history: None,
+            meta: Some(meta),
+        });
+        app.flush_persist();
     });
     assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 0);
     assert_hot_path_at_most(
@@ -4504,7 +4501,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         16,
     );
     assert!(
-        app.app.conversation.has_unflushed_work(),
+        app.tui.conversation.has_unflushed_work(),
         "{} did not defer completion metadata for the next save point",
         sample.operation
     );
@@ -4532,7 +4529,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
 
 fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let mut app = saved_hot_path_app("rewind-delete", history_len, None);
-    let transcript = app.app.conversation.transcript().history();
+    let transcript = app.tui.conversation.transcript().history();
     let rewind_history_idx = transcript
         .order
         .iter()
@@ -4550,13 +4547,13 @@ fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         .expect("rewind benchmark history requires a user block");
     let expected_deleted = history_len.saturating_sub(rewind_history_idx) as u64;
     let (sample, snapshot) = capture_hot_path_sample("rewind_delete_suffix", history_len, || {
-        let rewound = app.app.rewind_to_history(rewind_history_idx);
+        let rewound = app.rewind_to_history(rewind_history_idx);
         assert!(
             rewound.is_some(),
             "rewind benchmark target must be a user block"
         );
-        app.app.save_session();
-        app.app.flush_persist();
+        app.save_session();
+        app.flush_persist();
     });
     assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 0);
     assert_hot_path_at_most(
@@ -4575,7 +4572,7 @@ fn run_provider_history_hot_path(
     let first_live = history_len.saturating_sub(32);
     let app = saved_hot_path_app("provider-history", history_len, Some(first_live));
     let (sample, snapshot) = capture_hot_path_sample("provider_history_read", history_len, || {
-        let history = app.app.model_history_source().items;
+        let history = app.tui.model_history_source().items;
         assert_eq!(history.len(), history_len - first_live + 1);
     });
     assert_hot_path_at_most(&snapshot, sample.operation, "store:history:rows_read", 0);
@@ -4589,7 +4586,7 @@ fn run_uncheckpointed_provider_history_hot_path(
     let app = saved_hot_path_app("provider-history-uncheckpointed", history_len, None);
     let (sample, snapshot) =
         capture_hot_path_sample("provider_history_uncheckpointed_read", history_len, || {
-            let history = app.app.model_history_source().items;
+            let history = app.tui.model_history_source().items;
             assert_eq!(history.len(), history_len);
         });
     assert_hot_path_at_most(&snapshot, sample.operation, "store:history:rows_read", 0);
@@ -4603,7 +4600,7 @@ fn run_engine_request_materialization_hot_path(
     let app = saved_hot_path_app("engine-request-materialization", history_len, None);
     let (sample, snapshot) =
         capture_hot_path_sample("engine_request_materialization", history_len, || {
-            let history = app.app.model_history_source().items;
+            let history = app.tui.model_history_source().items;
             let mut engine_history = {
                 let _perf = smelt_perf::perf::begin("bench:engine_request:install_history");
                 let mut installed = Vec::with_capacity(history.len() + 1);
@@ -4651,8 +4648,8 @@ fn run_submit_hot_paths(
         || saved_hot_path_app("submit", configured_history_len, None),
         copied_hot_path_fixture_app,
     );
-    let history_len = app.app.session_history_len();
-    app.app.handle_resize(100, 32);
+    let history_len = app.session_message_count();
+    app.tui.handle_resize(100, 32);
     app.render_silent();
     app.type_text("hot path submitted user message");
     app.clear_actions();
@@ -4673,7 +4670,7 @@ fn run_submit_hot_paths(
     let Some(started) = started else {
         print_hot_path_perf(submit.operation, &submit_snapshot);
         let notification = app
-            .app
+            .tui
             .overlays
             .notification()
             .map(|notification| notification.summary.as_str());
@@ -4982,11 +4979,11 @@ fn transcript_layout_hot_path_benchmark_suite() {
 fn saved_archive_bench_app(
     checkpoint_count: usize,
 ) -> (TestApp, smelt_store::SessionReader, usize) {
-    use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent, Session};
+    use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent};
 
     let mut app = TestApp::builder().build();
     let history_len = 1024;
-    let mut session = Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    let mut session = app.new_session();
     session.history = (0..history_len)
         .map(|idx| hot_path_history_item(idx, 0))
         .collect();
@@ -5035,12 +5032,12 @@ fn saved_archive_bench_app(
         .iter()
         .map(|event| event.summary.len())
         .sum();
-    app.app.load_session(session);
-    app.app.restore_screen();
+    app.tui.load_session(session);
+    app.restore_screen();
     save_bench_fixture(&mut app, "archive acceptance");
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     app.render_silent();
-    let address = app.app.conversation.transcript().store_address().unwrap();
+    let address = app.tui.conversation.transcript().store_address().unwrap();
     let reader = address.reader().unwrap();
     (app, reader, archive_bytes)
 }
@@ -5056,12 +5053,12 @@ fn session_storage_store_fork_is_independent_of_archive_bytes() {
         let source_id = reader.session_id().to_owned();
         let original = reader.state().unwrap();
         let target = app
-            .app
+            .tui
             .conversation
             .session()
-            .fork_target(app.app.core.env.pid());
-        let release = app.app.conversation.pause_persistence();
-        let store = app.app.core.sessions.store();
+            .fork_target(app.tui.core.env.pid());
+        let release = app.pause_persistence();
+        let store = app.tui.core.sessions.store();
         let mut head = None;
         let (sample, _) = capture_hot_path_sample("store_fork", checkpoints, || {
             head = Some(
@@ -5098,13 +5095,13 @@ fn session_storage_store_fork_is_independent_of_archive_bytes() {
 #[test]
 #[ignore = "manual resource acceptance; see TESTING.md"]
 fn session_storage_clean_fork_capture_is_independent_of_record_count() {
-    use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent, Session};
+    use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent};
 
     smelt_perf::alloc::enable();
     let mut samples = Vec::new();
     for checkpoints in [0, 4096, 16_384] {
         let mut app = TestApp::builder().build();
-        let mut session = Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         let texts = [
             "synthetic user",
             "synthetic assistant",
@@ -5172,7 +5169,7 @@ fn session_storage_clean_fork_capture_is_independent_of_record_count() {
                 })
                 .collect(),
         });
-        let store = app.app.core.sessions.store().clone();
+        let store = app.tui.core.sessions.store().clone();
         store
             .writer(&session.id)
             .unwrap()
@@ -5282,7 +5279,7 @@ fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
         assert_ne!(fork_id, source_id);
         assert!(!app.session_is_read_only());
         assert!(!app.session_document_has_unflushed_work());
-        let fork = app.app.core.sessions.reader(&fork_id).unwrap();
+        let fork = app.tui.core.sessions.reader(&fork_id).unwrap();
         let saved = fork.state().unwrap();
         assert_eq!(
             saved.identity.parent_id.as_deref(),
@@ -5403,7 +5400,7 @@ fn session_storage_title_saves_do_not_grow_with_archives() {
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
         let (mut app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let store = app.app.core.sessions.store().clone();
+        let store = app.tui.core.sessions.store().clone();
         let before = reader
             .storage_stats(&store)
             .expect("initial storage accounting");
@@ -5472,16 +5469,16 @@ fn session_storage_title_saves_do_not_store_the_initial_message_again() {
         app.wait_for_turn_dispatch();
         app.feed_one(SourceEvent::Tick(0));
         assert_eq!(
-            app.app.conversation.session().first_user_message.as_deref(),
+            app.tui.conversation.session().first_user_message.as_deref(),
             Some(message.as_str()),
             "terminal paste submission must retain the complete initial message"
         );
-        app.app.discard_turn(crate::app::TurnEnd::Complete);
+        app.discard_turn(crate::app::TurnEnd::Complete);
         app.wait_for_turn_dispatch();
         save_bench_fixture(&mut app, "initial message growth");
-        let store = app.app.core.sessions.store().clone();
+        let store = app.tui.core.sessions.store().clone();
         let reader = app
-            .app
+            .tui
             .conversation
             .transcript()
             .store_address()
@@ -5570,7 +5567,7 @@ fn transcript_active_memory_benchmark_suite() {
     let body = "active transcript canonical payload with markdown wrapping and exact hydration. "
         .repeat(BLOCK_BYTES / 72);
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     let mut generated_bytes = 0usize;
     let mut block_count = 0usize;
     let mut batch_count = 0usize;
@@ -5587,14 +5584,14 @@ fn transcript_active_memory_benchmark_suite() {
             };
             let content = format!("# Active block {block_count}\n\n{marker}\n\n{body}");
             generated_bytes = generated_bytes.saturating_add(content.len());
-            app.app
+            app.tui
                 .push_block(smelt_core::transcript_model::Block::Text {
                     content: content.into(),
                 });
             block_count += 1;
         }
         save_bench_fixture(&mut app, "active memory");
-        while app.app.conversation.drain_transcript_compaction_slice() {}
+        while app.tui.conversation.drain_transcript_compaction_slice() {}
         batch_count += 1;
         if generated_bytes >= target_bytes {
             break;
@@ -5603,7 +5600,7 @@ fn transcript_active_memory_benchmark_suite() {
     assert!(marker_written);
     let seeded_ms = elapsed_ms(started_at.elapsed());
     let after_compaction = app
-        .app
+        .tui
         .conversation
         .transcript_memory_snapshot_for_harness();
     // Compaction keeps blocks on screen live. Each block is taller than the
@@ -5616,10 +5613,10 @@ fn transcript_active_memory_benchmark_suite() {
         block_count - 1
     );
 
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    app.app.transcript_win_mut().set_vim_enabled(true);
-    app.app.transcript_win_mut().set_vim_mode(VimMode::Normal);
+    app.tui.app_focus = AppFocus::Content;
+    app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    app.tui.transcript_win_mut().set_vim_enabled(true);
+    app.tui.transcript_win_mut().set_vim_mode(VimMode::Normal);
     let render_started_at = std::time::Instant::now();
     app.render_silent();
     let first_render_ms = elapsed_ms(render_started_at.elapsed());
@@ -5636,7 +5633,7 @@ fn transcript_active_memory_benchmark_suite() {
 
     smelt_perf::perf::clear();
     let search_started_at = std::time::Instant::now();
-    app.app.submit_search(
+    app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         crate::app::search::SearchDirection::Forward,
         SEARCH_TARGET.to_string(),
@@ -5651,7 +5648,7 @@ fn transcript_active_memory_benchmark_suite() {
     let next_ms = elapsed_ms(next_started_at.elapsed());
 
     let churn_ids = app
-        .app
+        .tui
         .conversation
         .transcript()
         .history()
@@ -5668,7 +5665,7 @@ fn transcript_active_memory_benchmark_suite() {
         .rev()
         .copied()
         .find(|id| {
-            app.app
+            app.tui
                 .conversation
                 .transcript()
                 .history()
@@ -5676,14 +5673,14 @@ fn transcript_active_memory_benchmark_suite() {
         })
         .expect("hydration churn should leave a bounded working set");
     let reads_before_reuse = app
-        .app
+        .tui
         .conversation
         .transcript()
         .memory_snapshot()
         .hydration_reads;
     assert!(app.hydrate_transcript_blocks(&[newest_hydrated_id]));
     let working_set_rereads = app
-        .app
+        .tui
         .conversation
         .transcript()
         .memory_snapshot()
@@ -5692,7 +5689,7 @@ fn transcript_active_memory_benchmark_suite() {
     assert_eq!(working_set_rereads, 0);
 
     let memory = app
-        .app
+        .tui
         .conversation
         .transcript_memory_snapshot_for_harness();
     let process_end = smelt_perf::alloc::snapshot();
@@ -5922,7 +5919,7 @@ fn directory_files(path: &std::path::Path, out: &mut Vec<(u64, String)>) {
 fn scaling_save(app: &mut TestApp, save_ms: &mut Vec<f64>) {
     let started_at = std::time::Instant::now();
     save_bench_fixture(app, "scaling");
-    while app.app.conversation.drain_transcript_compaction_slice() {}
+    while app.tui.conversation.drain_transcript_compaction_slice() {}
     save_ms.push(elapsed_ms(started_at.elapsed()));
 }
 
@@ -5942,12 +5939,12 @@ fn scaling_bench_app(
     let mut save_ms = Vec::new();
     let started_at = std::time::Instant::now();
     let mut app = TestApp::builder().build();
-    app.app.handle_resize(100, 32);
+    app.tui.handle_resize(100, 32);
     let mut content_bytes = 0usize;
     for index in 0..blocks {
         let block = block_at(index);
         content_bytes += scaling_bench_block_bytes(&block);
-        app.app.push_block(block);
+        app.tui.push_block(block);
         if (index + 1) % RENDER_EVERY_BLOCKS == 0 {
             app.render_silent();
         }
@@ -6030,7 +6027,7 @@ fn scaling_measure(
 
 fn scaling_focus_transcript(app: &mut TestApp) {
     app.focus_transcript();
-    let win = app.app.transcript_win_mut();
+    let win = app.tui.transcript_win_mut();
     win.set_vim_enabled(true);
     win.set_vim_mode(VimMode::Normal);
 }
@@ -6064,7 +6061,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         save_ms,
     } = scaling_bench_app(blocks, compacted, scaling_bench_block);
     if compacted {
-        let disk_bytes = directory_bytes(app.app.core.sessions.store().root());
+        let disk_bytes = directory_bytes(app.tui.core.sessions.store().root());
         let first = save_ms.first().copied().unwrap_or_default();
         let last = save_ms.iter().rev().nth(1).copied().unwrap_or(first);
         eprintln!(
@@ -6074,7 +6071,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
             disk_bytes as f64 / content_bytes as f64,
         );
         let mut files = Vec::new();
-        directory_files(app.app.core.sessions.store().root(), &mut files);
+        directory_files(app.tui.core.sessions.store().root(), &mut files);
         files.sort_by(|a, b| b.cmp(a));
         for (bytes, name) in files.iter().take(6) {
             eprintln!("TRANSCRIPT_SCALING_STORAGE_FILE blocks={blocks} bytes={bytes} name={name}");
@@ -6089,7 +6086,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         );
     }
     let memory = app
-        .app
+        .tui
         .conversation
         .transcript_memory_snapshot_for_harness();
     eprintln!(
@@ -6112,7 +6109,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         app.render_silent();
     }));
     samples.push(scaling_measure(&mut app, reps, |app, _| {
-        app.app.request_urgent_render();
+        app.tui.request_urgent_render();
         app.render_silent();
     }));
 
@@ -6133,17 +6130,17 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         app.render_silent();
     }));
 
-    let order = &app.app.conversation.transcript().history().order;
+    let order = &app.tui.conversation.transcript().history().order;
     let mid = blocks / 2;
     let fold_id = order[mid - mid % 4 + 2];
     samples.push(scaling_measure(&mut app, reps, |app, _| {
-        app.app
+        app.tui
             .fold_transcript_node(RenderNodeId::Block(fold_id), FoldAction::Toggle);
         app.render_silent();
     }));
     samples.push(scaling_measure(&mut app, reps, |app, rep| {
         let width = if rep.is_multiple_of(2) { 120 } else { 100 };
-        app.app.handle_resize(width, 32);
+        app.tui.handle_resize(width, 32);
         app.render_silent();
     }));
     app.type_char('/');
@@ -6163,7 +6160,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
     app.type_char('G');
     app.render_silent();
     samples.push(scaling_measure(&mut app, reps, |app, rep| {
-        app.app
+        app.tui
             .push_block(scaling_bench_block(blocks + rep * 4 + 3));
         app.render_silent();
     }));
@@ -6192,14 +6189,14 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
 
     begin_autonomous_text_turn(&mut app, 9_001, 4);
     samples.push(scaling_measure(&mut app, reps, |app, rep| {
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::TextDelta {
                 delta: format!(" streamed token {rep}"),
             },
             &mut std::io::sink(),
             |_| {},
         );
-        app.app.request_urgent_render();
+        app.tui.request_urgent_render();
         app.render_silent();
     }));
     samples.push(scaling_measure(&mut app, reps, |app, _| {

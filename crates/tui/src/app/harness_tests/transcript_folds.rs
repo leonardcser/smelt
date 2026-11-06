@@ -39,19 +39,19 @@ fn compaction_draft_rejection_clears_queued_preview() {
     });
     app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
     assert!(app.render_to_frame().text().contains("rejected summary"));
-    app.app
+    app.tui
         .queue_engine_continuation(EngineEvent::EngineAskDelta {
             id,
             delta: " rejected queued".into(),
         });
     app.dispatch_engine_event(EngineEvent::EngineAskDraftRejected { id });
-    app.app
+    app.tui
         .queue_engine_continuation(EngineEvent::EngineAskDelta {
             id,
             delta: "recovered summary".into(),
         });
-    while !app.app.transcript_work.is_empty() {
-        app.app.apply_pending_transcript_work();
+    while !app.tui.transcript_work.is_empty() {
+        app.tui.apply_pending_transcript_work();
     }
     app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
     let frame = app.render_to_frame().text();
@@ -89,7 +89,7 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     focus_transcript_in_normal_mode(&mut app);
 
     let collapsed = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("collapsed group at cursor");
     assert_eq!(collapsed.view_state, ViewState::Collapsed);
@@ -97,7 +97,7 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let expanded = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("expanded group at cursor");
     assert_eq!(expanded.id, collapsed.id);
@@ -118,7 +118,7 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
 
     let cursor_row = transcript_row_cursor_row(&app);
     let current = app
-        .app
+        .tui
         .transcript_node_at_row(cursor_row)
         .expect("node at cursor after collapse");
     assert_eq!(current.id, collapsed.id);
@@ -130,7 +130,7 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     app.type_char('a');
     app.render_silent();
     let reopened = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("reopened group at cursor");
     assert_eq!(reopened.id, collapsed.id);
@@ -142,7 +142,7 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     let closed_all_row = transcript_row_cursor_row(&app);
     let closed_all_total_rows = transcript_total_rows(&app);
     let closed_all = app
-        .app
+        .tui
         .transcript_node_at_row(closed_all_row)
         .unwrap_or_else(|| {
             panic!(
@@ -156,7 +156,7 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     app.type_char('R');
     app.render_silent();
     let opened_all = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("group at cursor after opening all folds");
     assert_eq!(opened_all.id, collapsed.id);
@@ -196,7 +196,7 @@ fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
 
     let total_before = transcript_total_rows(&app);
     let preview = app
-        .app
+        .tui
         .transcript_node_at_row(total_before.saturating_sub(1))
         .expect("streaming compaction preview at transcript tail");
     assert_eq!(preview.view_state, ViewState::Peek);
@@ -234,7 +234,7 @@ fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
     app.render_silent();
 
     let expanded = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("expanded compaction preview at cursor");
     assert_eq!(expanded.id, preview.id);
@@ -307,7 +307,7 @@ fn collapsing_bottom_pinned_block_hides_jump_to_bottom_pill() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let collapsed = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("collapsed bottom tool at cursor");
     assert_eq!(collapsed.view_state, ViewState::Collapsed);
@@ -357,7 +357,7 @@ fn streaming_thinking_honors_peek_and_enter_toggles() {
 
     focus_transcript_in_normal_mode(&mut app);
     let initial_peek = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("streaming thinking block at cursor");
     assert_eq!(initial_peek.view_state, ViewState::Peek);
@@ -369,7 +369,7 @@ fn streaming_thinking_honors_peek_and_enter_toggles() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let expanded = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("expanded streaming thinking block at cursor");
     assert_eq!(expanded.id, initial_peek.id);
@@ -384,14 +384,14 @@ fn streaming_thinking_honors_peek_and_enter_toggles() {
     });
     app.render_silent();
     let updated_expanded = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("updated streaming thinking block at cursor");
 
     app.press(KeyCode::Enter);
     app.render_silent();
     let restored_peek = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("streaming thinking block restored to peek at cursor");
     assert_eq!(restored_peek.id, initial_peek.id);
@@ -411,7 +411,7 @@ fn streaming_thinking_honors_peek_and_enter_toggles() {
     });
     app.render_silent();
     let updated_peek = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("updated streaming thinking block in peek state at cursor");
     assert_eq!(updated_peek.id, initial_peek.id);
@@ -421,7 +421,7 @@ fn streaming_thinking_honors_peek_and_enter_toggles() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let reopened = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("reopened streaming thinking block at cursor");
     assert_eq!(reopened.id, initial_peek.id);
@@ -450,7 +450,7 @@ fn fold_keys_work_while_compaction_preview_is_streaming() {
     app.type_char('G');
     app.render_silent();
     let preview = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("compaction preview at cursor");
     assert_eq!(preview.view_state, ViewState::Peek);
@@ -458,7 +458,7 @@ fn fold_keys_work_while_compaction_preview_is_streaming() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let expanded = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("expanded compaction preview at cursor");
     assert_eq!(expanded.id, preview.id);
@@ -468,7 +468,7 @@ fn fold_keys_work_while_compaction_preview_is_streaming() {
     app.type_char('c');
     app.render_silent();
     let collapsed = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("collapsed compaction preview at cursor");
     assert_eq!(collapsed.id, preview.id);
@@ -478,7 +478,7 @@ fn fold_keys_work_while_compaction_preview_is_streaming() {
     app.type_char('o');
     app.render_silent();
     let reopened = app
-        .app
+        .tui
         .transcript_node_at_row(transcript_row_cursor_row(&app))
         .expect("reopened compaction preview at cursor");
     assert_eq!(reopened.id, preview.id);

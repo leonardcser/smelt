@@ -14,7 +14,7 @@ fn commit_session_fixture(
 ) -> smelt_store::StoreHead {
     let mut commit = smelt_core::session::full_commit(session).unwrap();
     commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
-    app.app
+    app.tui
         .core
         .sessions
         .store()
@@ -27,8 +27,7 @@ fn commit_session_fixture(
 #[test]
 fn stored_session_info_counts_canonical_users_without_opening_history() {
     let mut app = TestApp::builder().build();
-    let mut session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    let mut session = app.new_session();
     session
         .history
         .push(HistoryItem::user(Content::text("recorded request")));
@@ -47,7 +46,7 @@ fn stored_session_info_counts_canonical_users_without_opening_history() {
         .history
         .push(HistoryItem::user(Content::text("unrecorded request")));
     let id = session.id.clone();
-    let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
+    let transcript = crate::app::history::build_transcript_from_session(&app.tui.lua, &session);
     let record = transcript.history.block_records_with_ids_from(0).remove(0);
     commit_session_fixture(
         &app,
@@ -63,7 +62,7 @@ fn stored_session_info_counts_canonical_users_without_opening_history() {
     );
     assert!(app.resume_session(&id));
     app.ensure_writer_ready();
-    assert!(app.app.conversation.has_live_session());
+    assert!(app.tui.conversation.has_live_session());
     let perf_enabled = smelt_perf::perf::enabled();
     smelt_perf::perf::set_enabled(true);
     smelt_perf::perf::clear();
@@ -88,7 +87,7 @@ fn stored_session_info_counts_canonical_users_without_opening_history() {
 fn enter_dispatches_and_repaints_while_the_writer_is_paused() {
     let mut app = TestApp::builder().build();
     app.ensure_writer_ready();
-    let release = app.app.conversation.pause_persistence();
+    let release = app.pause_persistence();
     app.type_text("submitted request α");
     let started = std::time::Instant::now();
     app.press(KeyCode::Enter);
@@ -113,7 +112,7 @@ fn enter_dispatches_and_repaints_while_the_writer_is_paused() {
     );
     assert_eq!(app.state().prompt_text, "draft while saving");
     let id = app.session_snapshot().id.clone();
-    let reader = app.app.core.sessions.reader(&id).unwrap();
+    let reader = app.tui.core.sessions.reader(&id).unwrap();
     let head = reader.head().unwrap();
     let total = head.transcript_record_count.as_usize();
     let records = reader
@@ -130,8 +129,7 @@ fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
     for retained in [0, 128, 4096] {
         let mut app = TestApp::builder().with_vim(false).build();
         if retained > 0 {
-            let mut session =
-                smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+            let mut session = app.new_session();
             session.history = (0..retained)
                 .map(|index| {
                     if index % 2 == 0 {
@@ -145,7 +143,7 @@ fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
                     }
                 })
                 .collect();
-            app.app.load_session(session);
+            app.tui.load_session(session);
             app.ensure_writer_ready();
             save_full_history_fixture(&mut app);
             app.save_session_and_flush();
@@ -155,7 +153,7 @@ fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
         app.ensure_writer_ready();
         let mut enters = Vec::new();
         for sample in 0..10 {
-            let release = app.app.conversation.pause_persistence();
+            let release = app.pause_persistence();
             app.type_text(&format!("measured request {sample}"));
             let entered = std::time::Instant::now();
             app.press(KeyCode::Enter);
@@ -183,7 +181,7 @@ fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
 fn file_expansion_accepts_input_before_reading_and_keeps_the_ui_responsive() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.ensure_writer_ready();
-    let (input_started, release) = app.app.conversation.submissions.pause_input();
+    let (input_started, release) = app.tui.conversation.submissions.pause_input();
     app.type_text("summarize @missing-responsive-fixture.txt");
     app.press(KeyCode::Esc);
     let started = std::time::Instant::now();
@@ -193,7 +191,7 @@ fn file_expansion_accepts_input_before_reading_and_keeps_the_ui_responsive() {
         "Enter waited for file expansion"
     );
     input_started.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(app.app.turn_submission_is_pending());
+    assert!(app.tui.turn_submission_is_pending());
     assert_eq!(app.state().prompt_text, "");
     assert!(app
         .render_unsettled_silent()
@@ -244,7 +242,7 @@ fn file_expansion_includes_turn_start_context_changes() {
         end)
         "#
     ));
-    let (input_started, release) = app.app.conversation.submissions.pause_input();
+    let (input_started, release) = app.tui.conversation.submissions.pause_input();
     app.type_text("summarize @missing-context-fixture.txt");
     app.press(KeyCode::Esc);
     app.press(KeyCode::Enter);
@@ -283,12 +281,12 @@ fn history_change_during_file_expansion_cancels_submission_and_keeps_callback_wo
             end)
             "#
         ));
-        let (input_started, release) = app.app.conversation.submissions.pause_input();
+        let (input_started, release) = app.tui.conversation.submissions.pause_input();
         app.type_text("summarize @missing-failure-fixture.txt");
         app.press(KeyCode::Esc);
         app.press(KeyCode::Enter);
         input_started.recv_timeout(Duration::from_secs(5)).unwrap();
-        app.app.push_block(Block::Text {
+        app.tui.push_block(Block::Text {
             content: "keep callback display".into(),
         });
         app.session_append_history(HistoryItem::Note(protocol::HistoryNote::Context {
@@ -298,7 +296,7 @@ fn history_change_during_file_expansion_cancels_submission_and_keeps_callback_wo
         release.send(()).unwrap();
         app.wait_for_turn_dispatch();
         assert!(!app.agent_running());
-        assert!(!app.app.turn_submission_is_pending());
+        assert!(!app.tui.turn_submission_is_pending());
         assert_eq!(
             app.state().prompt_text,
             "summarize @missing-failure-fixture.txt"
@@ -332,22 +330,22 @@ fn file_expansion_display_is_not_saved_until_promoted_in_place() {
     app.wait_for_turn_dispatch();
     app.save_session_and_flush();
     let id = app.session_snapshot().id.clone();
-    let reader = app.app.core.sessions.reader(&id).unwrap();
+    let reader = app.tui.core.sessions.reader(&id).unwrap();
     let baseline = reader.head().unwrap();
-    let (input_started, release) = app.app.conversation.submissions.pause_input();
+    let (input_started, release) = app.tui.conversation.submissions.pause_input();
     app.type_text("summarize @fixture.txt");
     app.press(KeyCode::Esc);
     app.press(KeyCode::Enter);
     input_started.recv_timeout(Duration::from_secs(5)).unwrap();
     let block_id = app
-        .app
+        .tui
         .conversation
         .transcript()
         .history()
         .last_block_id()
         .unwrap();
     assert!(!app
-        .app
+        .tui
         .conversation
         .transcript()
         .history()
@@ -360,18 +358,18 @@ fn file_expansion_display_is_not_saved_until_promoted_in_place() {
         baseline.transcript_record_count
     );
     assert!(!app
-        .app
+        .tui
         .core
         .files
         .has(&tmp.path().join("fixture.txt").to_string_lossy()));
     release.send(()).unwrap();
     app.wait_for_turn_dispatch();
     assert_eq!(
-        app.app.conversation.transcript().history().last_block_id(),
+        app.tui.conversation.transcript().history().last_block_id(),
         Some(block_id)
     );
     assert!(app
-        .app
+        .tui
         .conversation
         .transcript()
         .history()
@@ -391,7 +389,7 @@ fn file_expansion_display_is_not_saved_until_promoted_in_place() {
         .text_content()
         .contains("synthetic file content"));
     assert!(app
-        .app
+        .tui
         .core
         .files
         .has(&tmp.path().join("fixture.txt").to_string_lossy()));
@@ -408,7 +406,7 @@ fn file_expansion_cancellation_and_force_ignore_stale_results() {
             .with_vim(false)
             .build();
         app.ensure_writer_ready();
-        let (input_started, release) = app.app.conversation.submissions.pause_input();
+        let (input_started, release) = app.tui.conversation.submissions.pause_input();
         app.type_text("summarize @old.txt");
         app.press(KeyCode::Esc);
         app.press(KeyCode::Enter);
@@ -429,12 +427,12 @@ fn file_expansion_cancellation_and_force_ignore_stale_results() {
             app.press(KeyCode::Esc);
             app.press(KeyCode::Esc);
             assert_eq!(app.state().prompt_text, "summarize @old.txt");
-            assert!(!app.app.turn_submission_is_pending());
+            assert!(!app.tui.turn_submission_is_pending());
         }
         release.send(()).unwrap();
         app.wait_for_turn_dispatch();
         assert!(!app
-            .app
+            .tui
             .core
             .files
             .has(&tmp.path().join("old.txt").to_string_lossy()));
@@ -466,7 +464,7 @@ fn scoped_preparation_errors_cannot_stop_another_turn_or_session() {
     app.type_text("active request");
     app.press(KeyCode::Enter);
     app.wait_for_turn_dispatch();
-    let turn_id = app.app.conversation.active().unwrap().turn_id;
+    let turn_id = app.tui.conversation.active().unwrap().turn_id;
     let session_id = app.session_snapshot().id.clone();
     for stale in 0..2 {
         app.engine_event(EngineEvent::TurnPreparationError {
@@ -502,13 +500,13 @@ fn forced_queued_submission_starts_while_the_writer_is_paused() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_submitted_turn("initial request");
     app.drain_engine_sends();
-    let release = app.app.conversation.pause_persistence();
+    let release = app.pause_persistence();
     app.type_text("forced replacement");
     app.press(KeyCode::Enter);
     app.press(KeyCode::Enter);
     app.press(KeyCode::Enter);
     let frame = app.render_to_frame().text();
-    let history = app.app.conversation.transcript().history();
+    let history = app.tui.conversation.transcript().history();
     let visible = history.order.iter().filter_map(|id| history.block(*id)).any(|block| {
         matches!(block, smelt_core::Block::User { text, .. } if text == "forced replacement")
     });
@@ -530,7 +528,7 @@ fn large_response_starts_follow_up_while_the_writer_is_paused() {
     app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
         delta: body.clone(),
     }));
-    let release = app.app.conversation.pause_persistence();
+    let release = app.pause_persistence();
 
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
         turn_id,
@@ -577,7 +575,7 @@ fn completion_dispatches_queued_work_while_the_writer_is_busy() {
         if queued {
             app.push_queued_message("next request".into());
         }
-        let release = app.app.conversation.pause_persistence();
+        let release = app.pause_persistence();
         app.clear_actions();
         assert!(app.finish_turn());
         app.render_silent();
@@ -618,7 +616,7 @@ fn session_reader(id: &str) -> smelt_store::SessionReader {
 
 /// How many saves of the current session reached the store.
 fn durable_saves(app: &TestApp) -> u64 {
-    app.app
+    app.tui
         .conversation
         .persistence_status()
         .and_then(|status| status.durable)
@@ -627,8 +625,8 @@ fn durable_saves(app: &TestApp) -> u64 {
 
 fn save_full_history_fixture(app: &mut TestApp) {
     let transcript =
-        crate::app::history::build_transcript_from_session(&app.app.lua, &app.session_snapshot());
-    app.app
+        crate::app::history::build_transcript_from_session(&app.tui.lua, &app.session_snapshot());
+    app.tui
         .conversation
         .replace_transcript_from_history(transcript);
     app.save_session_and_flush();
@@ -637,7 +635,7 @@ fn save_full_history_fixture(app: &mut TestApp) {
 fn save_and_close_full_history_fixture(mut app: TestApp) -> String {
     save_full_history_fixture(&mut app);
     let session_id = app.session_snapshot().id.clone();
-    app.app
+    app.tui
         .shutdown_persist()
         .expect("close saved fixture persistence");
     assert!(
@@ -656,7 +654,7 @@ fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) ->
 fn wait_for_session_load(app: &mut TestApp, id: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while app.session_snapshot().id != id {
-        app.app.drain_persist_reports();
+        app.tui.drain_persist_reports();
         if let Some(event) = app.try_recv_app_event() {
             app.handle_app_event(event);
         } else {
@@ -840,7 +838,7 @@ fn user_timestamp_survives_submission_save_resume_and_history_rebuild() {
                 ..
             }
         )));
-        let rebuilt = crate::app::history::build_transcript_from_session(&app.app.lua, &saved);
+        let rebuilt = crate::app::history::build_transcript_from_session(&app.tui.lua, &saved);
         assert!(rebuilt.history.order.iter().any(|id| matches!(
             rebuilt.history.block(*id),
             Some(Block::User {
@@ -848,7 +846,7 @@ fn user_timestamp_survives_submission_save_resume_and_history_rebuild() {
                 ..
             })
         )));
-        app.app.shutdown_persist().expect("close saved session");
+        app.tui.shutdown_persist().expect("close saved session");
         session_id
     };
 
@@ -859,7 +857,7 @@ fn user_timestamp_survives_submission_save_resume_and_history_rebuild() {
         .build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
     resumed.render_silent();
-    let history = resumed.app.conversation.transcript().history();
+    let history = resumed.tui.conversation.transcript().history();
     assert!(history.order.iter().any(|id| matches!(
         history.block(*id),
         Some(Block::User {
@@ -1742,7 +1740,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
         "source branch should load"
     );
     assert_eq!(resumed.session_snapshot().id, source_id);
-    assert_eq!(resumed.app.session_history_len(), 1);
+    assert_eq!(resumed.session_message_count(), 1);
     assert_eq!(session_reader(&source_id).head().unwrap(), source_head);
 
     assert!(
@@ -1751,7 +1749,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
         resumed.overlays_probe().notification()
     );
     assert_eq!(resumed.session_snapshot().id, fork_id);
-    assert_eq!(resumed.app.session_history_len(), 2);
+    assert_eq!(resumed.session_message_count(), 2);
     assert_eq!(session_reader(&fork_id).head().unwrap(), fork_head);
 }
 
@@ -1932,7 +1930,7 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
     assert!(app.session_document_has_unflushed_work());
 
     let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
-    app.app.fork_session();
+    app.tui.fork_session();
     let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
 
@@ -2026,7 +2024,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     );
 
     let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
-    resumed.app.fork_session();
+    resumed.tui.fork_session();
     let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
 
@@ -2054,7 +2052,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
         assert!(resumed.run_lua("smelt.session.load(__switch_target)"));
         resumed.wait_for_session_lifecycle();
         assert_eq!(resumed.session_snapshot().id.as_str(), target.as_str());
-        assert_eq!(resumed.app.session_history_len(), 700);
+        assert_eq!(resumed.session_message_count(), 700);
     }
 }
 
@@ -2230,7 +2228,7 @@ fn store_backed_resume_uses_provider_snapshot_for_pre_request_compaction() {
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
     assert!(resumed.conversation_probe().has_live_session());
-    assert!(resumed.app.conversation.session().history.is_empty());
+    assert!(resumed.tui.conversation.session().history.is_empty());
 
     let mut settings = resumed.core_probe().config.settings.clone();
     settings.auto_compact = true;
@@ -2691,7 +2689,7 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
 
     assert_eq!(resumed.session_snapshot().id, session_id);
     assert!(
-        resumed.app.conversation.session().history.is_empty(),
+        resumed.tui.conversation.session().history.is_empty(),
         "resume should use the production sparse SQLite session path"
     );
     assert_eq!(resumed.session_message_count(), 2);
@@ -2752,7 +2750,7 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
         resumed.session_append_history(HistoryItem::user(Content::text(format!("cycle {cycle}"))));
         resumed.save_session_and_flush();
         resumed
-            .app
+            .tui
             .shutdown_persist()
             .expect("close resumed fixture persistence");
     }
@@ -2772,7 +2770,7 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
 fn wait_for_fork(app: &mut TestApp, source_id: &str) -> String {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while app.session_snapshot().id == source_id {
-        app.app.drain_persist_reports();
+        app.tui.drain_persist_reports();
         if let Some(event) = app.try_recv_app_event() {
             app.handle_app_event(event);
         } else {
@@ -2843,10 +2841,10 @@ fn resume_recovery_contention_does_not_block_the_ui() {
             blocker.execute_batch("ROLLBACK").unwrap();
         });
         let started = std::time::Instant::now();
-        assert!(resumed.app.load_session_by_id(&source_id));
+        assert!(resumed.tui.load_session_by_id(&source_id));
         let elapsed = started.elapsed();
-        assert!(resumed.app.conversation.writer_is_opening());
-        assert!(resumed.app.session_is_read_only());
+        assert!(resumed.tui.conversation.writer_is_opening());
+        assert!(resumed.session_is_read_only());
         elapsed
     });
     assert!(
@@ -2856,7 +2854,7 @@ fn resume_recovery_contention_does_not_block_the_ui() {
     resumed.wait_for_session_lifecycle();
     assert!(!resumed.session_is_read_only());
     assert_eq!(
-        resumed.app.conversation.last_terminal_turn_id(),
+        resumed.tui.conversation.last_terminal_turn_id(),
         Some(turn_id)
     );
 }
@@ -3066,9 +3064,9 @@ fn read_only_session_becomes_writable_after_owner_closes() {
 fn wait_for_ownership_recovery(app: &mut TestApp) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while app.session_is_read_only() {
-        app.app.drain_persist_reports();
-        if let Some(event) = app.app.platform.try_recv_app_event() {
-            app.app.handle_app_event(event);
+        app.tui.drain_persist_reports();
+        if let Some(event) = app.tui.platform.try_recv_app_event() {
+            app.handle_app_event(event);
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -3107,9 +3105,9 @@ fn failed_manual_load_does_not_cancel_ownership_recovery() {
     let session_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(reader.load_session_by_id(&session_id));
-    let observer = reader.app.conversation.take_ownership_observer();
+    let observer = reader.tui.conversation.take_ownership_observer();
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
-    reader.app.request_session_load("missing-session");
+    reader.tui.request_session_load("missing-session");
     reader.wait_for_session_lifecycle();
     assert_eq!(reader.session_snapshot().id, session_id);
     assert!(reader.session_is_read_only());
@@ -3128,17 +3126,17 @@ fn leaving_read_only_session_cancels_ownership_wait() {
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(reader.load_session_by_id(&owner.session_snapshot().id));
     assert!(reader.session_is_read_only());
-    let observer = reader.app.conversation.take_ownership_observer();
+    let observer = reader.tui.conversation.take_ownership_observer();
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
-    reader.app.reset_session();
+    reader.reset_session();
     let new_id = reader.session_snapshot().id.clone();
     reader.type_text("new session draft");
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Stopped);
     drop(owner);
 
-    reader.app.drain_persist_reports();
-    while let Some(event) = reader.app.platform.try_recv_app_event() {
-        reader.app.handle_app_event(event);
+    reader.tui.drain_persist_reports();
+    while let Some(event) = reader.tui.platform.try_recv_app_event() {
+        reader.handle_app_event(event);
     }
     assert_eq!(reader.session_snapshot().id, new_id);
     assert_eq!(reader.prompt_source(), "new session draft");
@@ -3154,7 +3152,7 @@ fn ownership_recovery_keeps_lease_until_writer_startup() {
     let session_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(reader.load_session_by_id(&session_id));
-    let observer = reader.app.conversation.take_ownership_observer();
+    let observer = reader.tui.conversation.take_ownership_observer();
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
     drop(owner);
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Ready);
@@ -3185,12 +3183,12 @@ fn successful_manual_load_discards_ready_ownership_recovery() {
     let source_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(reader.load_session_by_id(&source_id));
-    let observer = reader.app.conversation.take_ownership_observer();
+    let observer = reader.tui.conversation.take_ownership_observer();
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
     drop(owner);
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Ready);
 
-    reader.app.request_session_load(&target_id);
+    reader.tui.request_session_load(&target_id);
     reader.wait_for_session_lifecycle();
     assert_eq!(reader.session_snapshot().id, target_id);
     assert!(!reader.session_is_read_only());
@@ -3212,7 +3210,7 @@ fn competing_readers_recover_latest_history_in_sequence() {
     let mut second = TestApp::builder().build_without_test_home_reset(&guard);
     for reader in [&mut first, &mut second] {
         assert!(reader.load_session_by_id(&session_id));
-        let observer = reader.app.conversation.take_ownership_observer();
+        let observer = reader.tui.conversation.take_ownership_observer();
         wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
     }
     drop(owner);
@@ -3220,7 +3218,7 @@ fn competing_readers_recover_latest_history_in_sequence() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while first.session_is_read_only() && second.session_is_read_only() {
         for reader in [&mut first, &mut second] {
-            reader.app.drain_persist_reports();
+            reader.tui.drain_persist_reports();
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -3236,7 +3234,7 @@ fn competing_readers_recover_latest_history_in_sequence() {
     assert!(waiter.session_is_read_only());
     winner.session_append_history(HistoryItem::user(Content::text("winner continues")));
     winner.save_session_and_flush();
-    winner.app.reset_session();
+    winner.reset_session();
     wait_for_ownership_recovery(waiter);
     assert_eq!(waiter.session_message_count(), 2);
     assert_eq!(
@@ -3262,7 +3260,7 @@ fn ownership_recovery_loads_interrupted_turn_before_writer_startup() {
     drop(owner);
     wait_for_ownership_recovery(&mut reader);
     assert_eq!(
-        reader.app.conversation.last_terminal_turn_id(),
+        reader.tui.conversation.last_terminal_turn_id(),
         Some(interrupted_turn)
     );
     reader.start_submitted_turn("continue after interruption");
@@ -3513,7 +3511,7 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
     assert_ne!(fork_id, session_id);
     assert!(!resumed.session_is_read_only());
     assert!(!resumed.session_document_has_unflushed_work());
-    assert!(resumed.app.conversation.session().history.is_empty());
+    assert!(resumed.tui.conversation.session().history.is_empty());
     assert!(resumed.conversation_probe().has_live_session());
     let reader = session_reader(&fork_id);
     let state = reader.state().unwrap();
@@ -3557,7 +3555,7 @@ fn saved_new_session_keeps_only_model_context_in_memory() {
     }));
     app.save_session_and_flush();
 
-    assert!(app.app.conversation.session().history.is_empty());
+    assert!(app.tui.conversation.session().history.is_empty());
     let live = app
         .conversation_probe()
         .live_session()
@@ -3835,7 +3833,7 @@ fn sparse_resume_compaction_keeps_completed_marker_at_tail() {
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
-    assert!(resumed.app.conversation.session().history.is_empty());
+    assert!(resumed.tui.conversation.session().history.is_empty());
     let initial_loaded_len = resumed.conversation_probe().transcript().history().len();
     assert!(
         initial_loaded_len < HISTORY_LEN,
@@ -3940,7 +3938,7 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
     resumed.session_append_history(HistoryItem::user(Content::text("new after rewind")));
     resumed.save_session();
     let hydration_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while resumed.app.pending_session_save {
+    while resumed.tui.pending_session_save {
         assert!(
             std::time::Instant::now() < hydration_deadline,
             "transcript record hydration did not complete"

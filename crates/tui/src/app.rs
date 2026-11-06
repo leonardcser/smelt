@@ -4152,61 +4152,61 @@ mod tests {
     #[test]
     fn stale_context_window_update_does_not_overwrite_current_generation() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        set_active_model(&mut app.app, "gpt-5.5", "https://codex.example", "codex");
-        app.app.core.config.context_window = Some(272_000);
-        let target = active_context_target(&app.app);
+        set_active_model(&mut app.tui, "gpt-5.5", "https://codex.example", "codex");
+        app.tui.core.config.context_window = Some(272_000);
+        let target = active_context_target(&app.tui);
         let stale_revision = app
-            .app
+            .tui
             .prepare_context_window_for_test(target.clone())
             .unwrap();
         let mut newer_target = target.clone();
         newer_target.config.max_tokens = Some(16_384);
-        app.app
+        app.tui
             .prepare_context_window_for_test(newer_target)
             .unwrap();
 
-        app.app.apply_context_window_update(ContextWindowUpdate {
+        app.tui.apply_context_window_update(ContextWindowUpdate {
             revision: stale_revision,
             target,
             result: Ok(None),
         });
 
-        assert_eq!(app.app.core.config.context_window, Some(272_000));
+        assert_eq!(app.tui.core.config.context_window, Some(272_000));
     }
 
     #[test]
     fn current_context_window_update_applies_even_when_value_is_none() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         set_active_model(
-            &mut app.app,
+            &mut app.tui,
             "Qwen/Qwen3.6-27B",
             "https://openai-compatible.example",
             "openai-compatible",
         );
-        app.app.core.config.context_window = Some(272_000);
-        let target = active_context_target(&app.app);
+        app.tui.core.config.context_window = Some(272_000);
+        let target = active_context_target(&app.tui);
         let revision = app
-            .app
+            .tui
             .prepare_context_window_for_test(target.clone())
             .unwrap();
 
-        app.app.apply_context_window_update(ContextWindowUpdate {
+        app.tui.apply_context_window_update(ContextWindowUpdate {
             revision,
             target,
             result: Ok(None),
         });
 
-        assert_eq!(app.app.core.config.context_window, None);
+        assert_eq!(app.tui.core.config.context_window, None);
     }
 
     #[test]
     fn matching_revision_with_stale_model_identity_does_not_apply() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        set_active_model(&mut app.app, "gpt-5.5", "https://codex.example", "codex");
-        app.app.core.config.context_window = Some(272_000);
-        let desired = active_context_target(&app.app);
+        set_active_model(&mut app.tui, "gpt-5.5", "https://codex.example", "codex");
+        app.tui.core.config.context_window = Some(272_000);
+        let desired = active_context_target(&app.tui);
         let revision = app
-            .app
+            .tui
             .prepare_context_window_for_test(desired.clone())
             .unwrap();
         let mut stale = desired;
@@ -4215,37 +4215,37 @@ mod tests {
         stale.api_base = "https://openai-compatible.example".into();
         stale.provider_type = "openai-compatible".into();
 
-        app.app.apply_context_window_update(ContextWindowUpdate {
+        app.tui.apply_context_window_update(ContextWindowUpdate {
             revision,
             target: stale,
             result: Ok(None),
         });
 
-        assert_eq!(app.app.core.config.context_window, Some(272_000));
+        assert_eq!(app.tui.core.config.context_window, Some(272_000));
     }
 
     #[test]
     fn failed_context_window_update_keeps_the_known_limit_and_records_error() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.config.context_window = Some(32_768);
-        let target = active_context_target(&app.app);
-        app.app
+        app.tui.core.config.context_window = Some(32_768);
+        let target = active_context_target(&app.tui);
+        app.tui
             .request_context_window(ContextWindowRequest::Refresh);
         let revision = app
-            .app
+            .tui
             .runtime_controller_status()
             .context_window
             .desired_revision;
 
-        app.app.apply_context_window_update(ContextWindowUpdate {
+        app.tui.apply_context_window_update(ContextWindowUpdate {
             revision,
             target,
             result: Err("model discovery unavailable".into()),
         });
 
-        assert_eq!(app.app.core.config.context_window, Some(32_768));
+        assert_eq!(app.tui.core.config.context_window, Some(32_768));
         assert_eq!(
-            app.app.runtime_controller_status().context_window,
+            app.tui.runtime_controller_status().context_window,
             ControllerRevisionStatus {
                 desired_revision: revision,
                 observed_revision: revision,

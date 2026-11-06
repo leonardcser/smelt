@@ -2107,7 +2107,7 @@ mod tests {
             KeyEventKind::Repeat,
             KeyEventKind::Release,
         ] {
-            app.app
+            app.tui
                 .dispatch_terminal_event(Event::Key(KeyEvent::new_with_kind(
                     KeyCode::Char('a'),
                     KeyModifiers::NONE,
@@ -2158,12 +2158,12 @@ mod tests {
     }
 
     fn queue_stages(app: &TestApp) -> Vec<String> {
-        app.app.prompt.queued_kinds()
+        app.tui.prompt.queued_kinds()
     }
 
     fn insert_prompt_image(app: &mut TestApp, label: &str) {
-        let mut pctx = crate::input::prompt_ctx_mut(&mut app.app.ui);
-        app.app.prompt.insert_image_for_harness(
+        let mut pctx = crate::input::prompt_ctx_mut(&mut app.tui.ui);
+        app.tui.prompt.insert_image_for_harness(
             &mut pctx,
             label.to_string(),
             format!("data:image/png;base64,{label}"),
@@ -2241,11 +2241,11 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
         let _dispatch = app
-            .app
+            .tui
             .conversation
             .begin_dispatch()
             .expect("test turn enters dispatch");
-        app.app.working.begin(TurnPhase::Compacting);
+        app.tui.working.begin(TurnPhase::Compacting);
 
         app.type_text("check this first");
         app.press(KeyCode::Enter);
@@ -2308,8 +2308,8 @@ mod tests {
 
         app.clear_actions();
         assert!(app.finish_turn());
-        let _ = app.app.flush_persist();
-        app.app.start_next_queued_input_if_idle();
+        let _ = app.flush_persist();
+        app.start_next_queued_input_if_idle();
         app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
@@ -2358,10 +2358,10 @@ mod tests {
             format!("see {}", crate::input::ATTACHMENT_MARKER)
         );
         assert_eq!(
-            app.app
+            app.tui
                 .prompt
                 .render_input()
-                .build_content(app.app.prompt_buf())
+                .build_content(app.tui.prompt_buf())
                 .image_count(),
             1
         );
@@ -2392,8 +2392,8 @@ mod tests {
             app.state().prompt_text,
             format!("first {marker}\nsecond {marker}\ndraft{marker}")
         );
-        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
-        let store = app.app.prompt.attachment_store();
+        let pctx = crate::input::prompt_ctx_ref(&app.tui.ui);
+        let store = app.tui.prompt.attachment_store();
         let store = store.lock().unwrap();
         assert_eq!(pctx.buf.attachment_ids.len(), 3);
         assert_eq!(store.display_label(pctx.buf.attachment_ids[0]), "[one.png]");
@@ -2446,13 +2446,13 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("original");
         app.press(KeyCode::Enter);
-        let _ = app.app.flush_persist();
+        let _ = app.flush_persist();
         app.type_text("literal [pic.png] before ");
         insert_prompt_image(&mut app, "pic.png");
-        let id = app.app.prompt_buf().attachment_ids[0];
+        let id = app.tui.prompt_buf().attachment_ids[0];
         app.type_text(" between ");
         {
-            let pctx = crate::input::prompt_ctx_mut(&mut app.app.ui);
+            let pctx = crate::input::prompt_ctx_mut(&mut app.tui.ui);
             let pos = pctx.buf.source().len();
             pctx.buf.text_mut().insert_marker(pos, id);
             pctx.win.set_cpos(pctx.buf.source().len());
@@ -2466,11 +2466,11 @@ mod tests {
         app.press(KeyCode::Esc);
 
         assert_eq!(app.state().prompt_text, expected);
-        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
+        let pctx = crate::input::prompt_ctx_ref(&app.tui.ui);
         assert_eq!(pctx.buf.attachment_ids.len(), 2);
         assert_eq!(pctx.buf.attachment_ids[0], pctx.buf.attachment_ids[1]);
         assert_eq!(
-            app.app
+            app.tui
                 .prompt
                 .render_input()
                 .build_content(pctx.buf)
@@ -2484,7 +2484,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("original");
         app.press(KeyCode::Enter);
-        let _ = app.app.flush_persist();
+        let _ = app.flush_persist();
         app.type_text("inspect ");
         insert_prompt_image(&mut app, "first.png");
         app.type_text(" then ");
@@ -2510,10 +2510,10 @@ mod tests {
             format!("inspect {0} then {0}", crate::input::ATTACHMENT_MARKER)
         );
         let content = app
-            .app
+            .tui
             .prompt
             .render_input()
-            .build_content(app.app.prompt_buf());
+            .build_content(app.tui.prompt_buf());
         assert_eq!(content.image_count(), 2);
         assert_eq!(content.image_labels(), vec!["[first.png]", "[second.png]"]);
     }
@@ -2523,7 +2523,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("original");
         app.press(KeyCode::Enter);
-        let _ = app.app.flush_persist();
+        let _ = app.flush_persist();
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
             protocol::EngineEvent::TurnError {
                 message: "connection failed".into(),
@@ -2533,7 +2533,7 @@ mod tests {
         ));
         app.wait_for_turn_dispatch();
         assert_eq!(
-            app.app.prompt_work_state(),
+            app.tui.prompt_work_state(),
             crate::app::PromptWorkState::Paused
         );
         app.type_text("retry with ");
@@ -2543,7 +2543,7 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
-        assert!(app.agent_running() || app.app.turn_submission_is_pending());
+        assert!(app.agent_running() || app.tui.turn_submission_is_pending());
         assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
         assert!(!app.actions().iter().any(|action| matches!(
             action,
@@ -2554,7 +2554,7 @@ mod tests {
         app.wait_for_turn_dispatch();
         assert!(app.finish_turn());
         app.wait_for_turn_dispatch();
-        app.app.start_next_queued_input_if_idle();
+        app.start_next_queued_input_if_idle();
         app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.actions().iter().any(|action| matches!(
@@ -2569,10 +2569,10 @@ mod tests {
             format!("retry with {}", crate::input::ATTACHMENT_MARKER)
         );
         assert_eq!(
-            app.app
+            app.tui
                 .prompt
                 .render_input()
-                .build_content(app.app.prompt_buf())
+                .build_content(app.tui.prompt_buf())
                 .image_count(),
             1
         );
@@ -2589,7 +2589,7 @@ mod tests {
         app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
 
         assert_eq!(
-            app.app.prompt.queued_len(),
+            app.tui.prompt.queued_len(),
             crate::app::queue::MAX_QUEUED_MESSAGES
         );
         assert_eq!(
@@ -2597,10 +2597,10 @@ mod tests {
             crate::input::ATTACHMENT_MARKER.to_string()
         );
         assert_eq!(
-            app.app
+            app.tui
                 .prompt
                 .render_input()
-                .build_content(app.app.prompt_buf())
+                .build_content(app.tui.prompt_buf())
                 .image_count(),
             1
         );
@@ -2712,21 +2712,21 @@ mod tests {
         app.press(KeyCode::Enter);
         app.wait_for_turn_dispatch();
         assert!(app.finish_turn());
-        let _ = app.app.flush_persist();
+        let _ = app.flush_persist();
 
-        let release_persistence = app.app.conversation.pause_persistence();
+        let release_persistence = app.pause_persistence();
         app.type_text("next request");
         app.press(KeyCode::Enter);
 
         assert!(app.agent_running());
-        assert!(!app.app.turn_submission_is_pending());
+        assert!(!app.tui.turn_submission_is_pending());
         assert!(!app.session_is_read_only());
         assert_eq!(app.state().prompt_text, "");
         release_persistence
             .send(())
             .expect("release session writer");
         assert!(matches!(
-            app.app.flush_persist(),
+            app.flush_persist(),
             crate::persist::PersistenceFlushOutcome::Durable
         ));
         assert!(!app.session_is_read_only());
@@ -2739,15 +2739,15 @@ mod tests {
         app.press(KeyCode::Enter);
         app.wait_for_turn_dispatch();
         assert!(app.finish_turn());
-        let _ = app.app.flush_persist();
+        let _ = app.flush_persist();
 
-        let release_persistence = app.app.conversation.pause_persistence();
+        let release_persistence = app.pause_persistence();
         let queued = crate::app::QueuedInput::ProcessStatus(protocol::HistoryNote::process_status(
             "background process finished",
         ));
-        assert!(app.app.start_queued_input(queued).is_ok());
+        assert!(app.tui.start_queued_input(queued).is_ok());
         assert!(app.agent_running());
-        assert!(!app.app.turn_submission_is_pending());
+        assert!(!app.tui.turn_submission_is_pending());
         release_persistence
             .send(())
             .expect("release session writer");
@@ -2758,9 +2758,9 @@ mod tests {
         for cancelled in [false, true] {
             let mut app = TestApp::builder().build();
             app.start_submitted_turn("initial request");
-            app.app.flush_persist();
-            let release = app.app.conversation.pause_persistence();
-            app.app.discard_turn(if cancelled {
+            app.flush_persist();
+            let release = app.pause_persistence();
+            app.discard_turn(if cancelled {
                 crate::app::TurnEnd::Cancelled
             } else {
                 crate::app::TurnEnd::Complete
@@ -2786,19 +2786,19 @@ mod tests {
         for cancelled in [false, true] {
             let mut app = TestApp::builder().build();
             app.start_submitted_turn("initial request");
-            app.app.flush_persist();
-            let release = app.app.conversation.pause_persistence();
-            app.app.discard_turn(if cancelled {
+            app.flush_persist();
+            let release = app.pause_persistence();
+            app.discard_turn(if cancelled {
                 crate::app::TurnEnd::Cancelled
             } else {
                 crate::app::TurnEnd::Complete
             });
-            assert!(app.app.dispatch_terminal_event(Event::Key(KeyEvent::new(
+            assert!(app.tui.dispatch_terminal_event(Event::Key(KeyEvent::new(
                 KeyCode::Char('c'),
                 KeyModifiers::CONTROL,
             ))));
             release.send(()).unwrap();
-            app.app.flush_persist();
+            app.flush_persist();
         }
     }
 
@@ -2822,10 +2822,10 @@ mod tests {
                         kind,
                         retry_at_ms: Some(123_000),
                     };
-                    app.app.conversation.set_turn_pause(Some(pause));
+                    app.tui.conversation.set_turn_pause(Some(pause));
                     if full {
                         for _ in 0..crate::app::queue::MAX_QUEUED_MESSAGES {
-                            assert!(app.app.prompt.try_queue_turn(QueuedInput::request(
+                            assert!(app.tui.prompt.try_queue_turn(QueuedInput::request(
                                 "queued",
                                 protocol::Content::text("queued"),
                                 0,
@@ -2833,7 +2833,7 @@ mod tests {
                         }
                     }
                     assert_eq!(
-                        app.app.queue_explicit_submission(
+                        app.tui.queue_explicit_submission(
                             QueuedInput::request(
                                 "follow-up",
                                 protocol::Content::text("follow-up"),
@@ -2844,7 +2844,7 @@ mod tests {
                         !full,
                     );
                     assert_eq!(
-                        app.app.conversation.turn_pause(),
+                        app.tui.conversation.turn_pause(),
                         if !full && kind == Some(EngineAskErrorKind::Cancelled) {
                             None
                         } else {
@@ -2880,9 +2880,9 @@ mod tests {
                 end, {{ busy = "{busy}" }})"#
             )));
             app.start_submitted_turn("initial request");
-            app.app.flush_persist();
-            let release = app.app.conversation.pause_persistence();
-            app.app.discard_turn(crate::app::TurnEnd::Cancelled);
+            app.flush_persist();
+            let release = app.pause_persistence();
+            app.discard_turn(crate::app::TurnEnd::Cancelled);
             app.type_text("/follow-up");
             app.press_mod(KeyCode::Enter, modifiers);
             assert!(queue_stages(&app).is_empty());
@@ -2899,7 +2899,7 @@ mod tests {
         app.press(KeyCode::Enter);
         app.wait_for_turn_dispatch();
         assert!(app.agent_running());
-        let _ = app.app.flush_persist();
+        let _ = app.flush_persist();
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
             protocol::EngineEvent::ToolStarted {
                 invocation_id: protocol::InvocationId::new(1),
@@ -2915,7 +2915,7 @@ mod tests {
         app.press(KeyCode::Enter);
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
 
-        let release_persistence = app.app.conversation.pause_persistence();
+        let release_persistence = app.pause_persistence();
 
         app.press(KeyCode::Enter);
         assert!(app.agent_running(), "queued request did not start");
@@ -2924,7 +2924,7 @@ mod tests {
         release_persistence
             .send(())
             .expect("release terminal transition");
-        let flush = app.app.flush_persist();
+        let flush = app.flush_persist();
         assert!(
             matches!(flush, crate::persist::PersistenceFlushOutcome::Durable),
             "terminal transition did not become durable: {flush:?}"
@@ -2933,7 +2933,7 @@ mod tests {
         assert!(
             !app.session_is_read_only(),
             "queued request made the session read-only: {}",
-            app.app.conversation.read_only_reason()
+            app.tui.conversation.read_only_reason()
         );
         assert!(app.session_snapshot().history.iter().any(|item| {
             matches!(item, protocol::HistoryItem::User { content, .. }
@@ -2945,7 +2945,7 @@ mod tests {
             "writable-after-interrupt".into(),
             None,
         );
-        let _ = app.app.flush_persist();
+        let _ = app.flush_persist();
         assert_eq!(
             app.session_snapshot().title.as_deref(),
             Some("Writable after interrupt")
@@ -3105,7 +3105,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
         let note = protocol::HistoryNote::process_status("Background process 42 exited.");
-        app.app
+        app.tui
             .prompt
             .try_queue_turn(crate::app::QueuedInput::ProcessStatus(note));
 
@@ -3226,13 +3226,13 @@ mod tests {
             },
         ));
         let user_blocks_before = app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .order
             .iter()
-            .filter_map(|id| app.app.conversation.transcript().history().block(*id))
+            .filter_map(|id| app.tui.conversation.transcript().history().block(*id))
             .filter(|block| matches!(block, smelt_core::Block::User { .. }))
             .count();
         app.clear_actions();
@@ -3243,7 +3243,7 @@ mod tests {
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.agent_running());
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let user_blocks_after = history
             .order
             .iter()
@@ -3267,26 +3267,26 @@ mod tests {
                 end)
             "#
         ));
-        app.app.handle_resize(80, 16);
-        app.app
+        app.tui.handle_resize(80, 16);
+        app.tui
             .push_block(smelt_core::transcript_model::Block::Text {
                 content: "transcript row".to_string().into(),
             });
         app.render_silent();
-        app.app.app_focus = crate::app::AppFocus::Content;
-        app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-        app.app.transcript_win_mut().set_vim_enabled(true);
-        app.app
+        app.tui.app_focus = crate::app::AppFocus::Content;
+        app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        app.tui.transcript_win_mut().set_vim_enabled(true);
+        app.tui
             .transcript_win_mut()
             .set_vim_mode(crate::smelt_edit::VimMode::Insert);
 
         app.press(KeyCode::Esc);
 
         assert_eq!(
-            app.app.transcript_win().vim_mode(),
+            app.tui.transcript_win().vim_mode(),
             crate::smelt_edit::VimMode::Normal
         );
-        assert!(app.app.timers.pending_chord.is_none());
+        assert!(app.tui.timers.pending_chord.is_none());
         assert_eq!(app.lua_int_global("esc_esc_hit"), None);
     }
 
@@ -3301,17 +3301,17 @@ mod tests {
                 end)
             "#
         ));
-        app.app
+        app.tui
             .prompt_win_mut()
             .set_vim_mode(crate::smelt_edit::VimMode::Normal);
 
         app.press(KeyCode::Char(' '));
 
         assert_eq!(app.state().prompt_text, "");
-        assert!(app.app.timers.pending_chord.is_some());
-        app.app.publish_diff_signals();
+        assert!(app.tui.timers.pending_chord.is_some());
+        app.tui.publish_diff_signals();
         assert_eq!(
-            app.app
+            app.tui
                 .core
                 .signals
                 .get::<String>("keymap_pending")
@@ -3322,7 +3322,7 @@ mod tests {
         app.press(KeyCode::Char('r'));
 
         assert_eq!(app.lua_int_global("leader_hit"), Some(1));
-        assert!(app.app.timers.pending_chord.is_none());
+        assert!(app.tui.timers.pending_chord.is_none());
     }
 
     #[test]
@@ -3336,17 +3336,17 @@ mod tests {
                 end)
             "#
         ));
-        app.app
+        app.tui
             .prompt_win_mut()
             .set_vim_mode(crate::smelt_edit::VimMode::Normal);
 
         app.press(KeyCode::Char(' '));
         app.press(KeyCode::Esc);
-        app.app.publish_diff_signals();
+        app.tui.publish_diff_signals();
 
-        assert!(app.app.timers.pending_chord.is_none());
+        assert!(app.tui.timers.pending_chord.is_none());
         assert_eq!(
-            app.app
+            app.tui
                 .core
                 .signals
                 .get::<String>("keymap_pending")
@@ -3365,11 +3365,11 @@ mod tests {
 
         app.press(KeyCode::Esc);
 
-        assert!(app.app.timers.pending_chord.is_some());
+        assert!(app.tui.timers.pending_chord.is_some());
 
         app.press(KeyCode::Char('a'));
 
-        assert!(app.app.timers.pending_chord.is_none());
+        assert!(app.tui.timers.pending_chord.is_none());
         assert_eq!(app.state().prompt_text, "a");
         assert_eq!(app.prompt_cpos(), 1);
     }
@@ -3383,7 +3383,7 @@ mod tests {
 
         app.press(KeyCode::Char('<'));
 
-        assert!(app.app.timers.pending_chord.is_none());
+        assert!(app.tui.timers.pending_chord.is_none());
         assert_eq!(app.state().prompt_text, "<");
         assert_eq!(app.prompt_cpos(), 1);
     }
@@ -3400,16 +3400,16 @@ mod tests {
         ));
 
         app.press(KeyCode::Esc);
-        assert!(app.app.timers.pending_chord.is_some());
+        assert!(app.tui.timers.pending_chord.is_some());
 
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(
             crate::app::ESC_CHORD_TIMEOUT_MS + 1,
         ));
-        app.app.publish_diff_signals();
+        app.tui.publish_diff_signals();
 
-        assert!(app.app.timers.pending_chord.is_none());
+        assert!(app.tui.timers.pending_chord.is_none());
         assert_eq!(
-            app.app
+            app.tui
                 .core
                 .signals
                 .get::<String>("keymap_pending")
@@ -3420,7 +3420,7 @@ mod tests {
         app.press(KeyCode::Esc);
 
         assert_eq!(app.lua_int_global("esc_esc_hit"), None);
-        assert!(app.app.timers.pending_chord.is_some());
+        assert!(app.tui.timers.pending_chord.is_some());
     }
 
     #[test]
@@ -3434,11 +3434,11 @@ mod tests {
             }],
             Vec::new(),
         );
-        assert_eq!(app.app.core.config.mode, AgentMode::normal());
+        assert_eq!(app.tui.core.config.mode, AgentMode::normal());
 
         app.press(KeyCode::BackTab);
 
-        assert_eq!(app.app.core.config.mode, AgentMode::parse("plan").unwrap());
+        assert_eq!(app.tui.core.config.mode, AgentMode::parse("plan").unwrap());
         assert_eq!(
             app.state().prompt_text,
             "",
@@ -3450,11 +3450,11 @@ mod tests {
     fn modal_overlay_swallows_cmdline_open_key() {
         let mut app = TestApp::builder().build();
         let buf = app
-            .app
+            .tui
             .ui
             .buf_create(crate::smelt_edit::BufCreateOpts::default());
         let win = app
-            .app
+            .tui
             .ui
             .win_open_split(
                 buf,
@@ -3463,7 +3463,7 @@ mod tests {
                 },
             )
             .expect("overlay test window opens");
-        app.app.ui.overlay_open(
+        app.tui.ui.overlay_open(
             crate::smelt_edit::Overlay::new(
                 crate::smelt_edit::LayoutTree::leaf(win),
                 crate::smelt_edit::Anchor::ScreenCenter,
@@ -3486,7 +3486,7 @@ mod tests {
     #[test]
     fn busy_submit_queues_without_starting_agent_turn() {
         let mut app = TestApp::builder().build();
-        app.app.busy_stack.push("background".to_string());
+        app.tui.busy_stack.push("background".to_string());
         app.type_text("run later");
 
         app.press(KeyCode::Enter);

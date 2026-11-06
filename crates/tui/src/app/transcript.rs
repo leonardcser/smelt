@@ -11467,14 +11467,14 @@ mod tests {
     #[test]
     fn selection_highlights_subtract_materialized_row_base() {
         let mut harness = TestApp::builder().build();
-        let buf_id = harness.app.transcript_win().buf;
+        let buf_id = harness.tui.transcript_win().buf;
         {
-            let buf = harness.app.ui.buf_mut(buf_id).expect("transcript buffer");
+            let buf = harness.tui.ui.buf_mut(buf_id).expect("transcript buffer");
             buf.set_all_lines((30..40).map(|i| format!("line {i}")).collect());
         }
 
         let (line_idx, start, end, line_count) = {
-            let buf = harness.app.ui.buf(buf_id).expect("transcript buffer");
+            let buf = harness.tui.ui.buf(buf_id).expect("transcript buffer");
             let line_idx = buf
                 .lines()
                 .iter()
@@ -11485,12 +11485,12 @@ mod tests {
             (line_idx, start, start + "line 39".len(), buf.lines().len())
         };
         {
-            let win = harness.app.transcript_win_mut();
+            let win = harness.tui.transcript_win_mut();
             win.set_selection_anchor(Some(start));
             win.set_cpos(end);
         }
 
-        let ranges = harness.app.transcript_selection_highlights(39, 30, 5);
+        let ranges = harness.transcript_selection_highlights(39, 30, 5);
         assert!(
             ranges.iter().any(|(line, _, _)| *line == line_idx),
             "selection range should be expressed in materialized buffer rows"
@@ -11537,7 +11537,7 @@ mod tests {
 
     #[test]
     fn fold_preserves_transcript_document_anchors() {
-        let mut app = TestApp::builder().build().app;
+        let mut app = TestApp::builder().build().tui;
         app.push_block(smelt_core::Block::Thinking {
             title: None,
             summary_titles: Vec::new(),
@@ -11621,7 +11621,7 @@ mod tests {
 
     #[test]
     fn fold_preserves_transcript_tail_follow() {
-        let mut app = TestApp::builder().build().app;
+        let mut app = TestApp::builder().build().tui;
         for i in 0..40 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("tail line {i}").into(),

@@ -897,8 +897,8 @@ mod tests {
 
     fn normal_app() -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.config.mode = AgentMode::parse("normal").unwrap();
-        app.app
+        app.tui.core.config.mode = AgentMode::parse("normal").unwrap();
+        app.tui
             .conversation
             .set_session_mode_for_harness(Some("normal".into()));
         app
@@ -924,9 +924,9 @@ mod tests {
         "#,
         )
         .unwrap();
-        app.app.pump_lua();
+        app.pump_lua();
         assert!(
-            app.app.core.signals.has_pending(),
+            app.tui.core.signals.has_pending(),
             "feedback must yield before reaching a fixpoint"
         );
         let started = std::time::Instant::now();
@@ -969,7 +969,7 @@ mod tests {
                 app.settle_lua();
             }
             assert_eq!(app.lua_int_global("parked_tasks"), Some(300));
-            let shared = std::sync::Arc::clone(app.app.lua.core_shared());
+            let shared = std::sync::Arc::clone(app.tui.lua.core_shared());
             if cross_thread {
                 let ids: Vec<u64> = app.eval_lua("return _G.resume_ids").unwrap();
                 let sink = shared.resume_sink();
@@ -991,7 +991,7 @@ mod tests {
             }
             let main_before = shared.task_inbox.lock().unwrap().len();
             let json_before = shared.json_inbox.lock().unwrap().len();
-            app.app.lua.pump_task_events();
+            app.tui.lua.pump_task_events();
             if owner_thread && cross_thread {
                 assert!(shared.task_inbox.lock().unwrap().len() < main_before);
                 assert!(shared.json_inbox.lock().unwrap().len() < json_before);
@@ -1084,10 +1084,10 @@ mod tests {
 
         let runs = app.lua_int_global("fuzz_command_runs").unwrap();
         assert!(runs > 0 && runs <= smelt_core::lua::MAX_LUA_WORK_PER_PUMP as i64);
-        assert!(app.app.lua.shared().has_pending_commands());
-        app.app.flush_lua_callbacks();
+        assert!(app.tui.lua.shared().has_pending_commands());
+        app.tui.flush_lua_callbacks();
         assert!(app.lua_int_global("fuzz_command_runs").unwrap() > runs);
-        assert!(app.app.lua.shared().has_pending_commands());
+        assert!(app.tui.lua.shared().has_pending_commands());
     }
 
     fn set_active_model(
@@ -1120,8 +1120,8 @@ mod tests {
         app: &mut crate::app::test_harness::TestApp,
         history: Vec<protocol::HistoryItem>,
     ) {
-        app.app.conversation.replace_history_for_harness(history);
-        app.app.restore_screen();
+        app.tui.conversation.replace_history_for_harness(history);
+        app.restore_screen();
     }
 
     #[test]
@@ -1130,8 +1130,8 @@ mod tests {
         app.start_turn(1);
 
         let note = app.mode_note("apply");
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        assert!(mode_blocks(&app.app).is_empty());
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert!(mode_blocks(&app.tui).is_empty());
 
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
@@ -1145,7 +1145,7 @@ mod tests {
             },
         ));
 
-        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
     }
 
     #[test]
@@ -1153,9 +1153,9 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
         let note = app.mode_note("yolo");
-        app.app.set_mode(AgentMode::parse("yolo").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("yolo").unwrap(), false);
 
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
@@ -1169,64 +1169,64 @@ mod tests {
             },
         ));
 
-        assert_eq!(mode_blocks(&app.app), vec!["now in yolo mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in yolo mode"]);
     }
 
     #[test]
     fn mode_pending_clears_when_cycling_back_to_applied_mode() {
         let mut app = normal_app();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
         app.start_turn(1);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        assert!(app.app.mode_pending());
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert!(app.mode_pending());
 
-        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
-        assert!(!app.app.mode_pending());
+        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
+        assert!(!app.mode_pending());
     }
 
     #[test]
     fn recorded_mode_change_during_turn_sets_pending_marker() {
         let mut app = normal_app();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
         app.start_turn(1);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
 
-        assert!(app.app.mode_pending());
-        assert_eq!(pending_mode_appends(&app.app).len(), 1);
+        assert!(app.mode_pending());
+        assert_eq!(pending_mode_appends(&app.tui).len(), 1);
     }
 
     #[test]
     fn recorded_mode_pending_clears_when_cycling_back_to_applied_mode() {
         let mut app = normal_app();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
         app.start_turn(1);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
-        assert!(app.app.mode_pending());
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
+        assert!(app.mode_pending());
 
-        app.app.set_mode(AgentMode::parse("normal").unwrap(), true);
-        assert!(!app.app.mode_pending());
-        assert!(pending_mode_appends(&app.app).is_empty());
+        app.tui.set_mode(AgentMode::parse("normal").unwrap(), true);
+        assert!(!app.mode_pending());
+        assert!(pending_mode_appends(&app.tui).is_empty());
     }
 
     #[test]
     fn recorded_mode_change_with_history_pushes_mode_block() {
         let mut app = normal_app();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
 
-        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
     }
 
     #[test]
@@ -1234,10 +1234,10 @@ mod tests {
         let mut app = normal_app();
         app.start_turn(1);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
-        app.app.discard_turn(crate::app::TurnEnd::Complete);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.discard_turn(crate::app::TurnEnd::Complete);
 
-        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
     }
 
     #[test]
@@ -1283,7 +1283,7 @@ mod tests {
         for effort in ["low", "medium", "xhigh", "off"] {
             let _ = app.drain_engine_sends();
             app.run_lua_result("smelt.reasoning.cycle()").unwrap();
-            assert_eq!(app.app.core.config.reasoning_effort.label(), effort);
+            assert_eq!(app.tui.core.config.reasoning_effort.label(), effort);
             assert!(app.drain_engine_sends().iter().any(|command| matches!(
                 command,
                 protocol::UiCommand::SetReasoningEffort { effort: selected } if selected.label() == effort
@@ -1292,13 +1292,13 @@ mod tests {
         app.run_lua_result(r#"smelt.cmd.run("reasoning medium")"#)
             .unwrap();
         assert_eq!(
-            app.app.core.config.reasoning_effort,
+            app.tui.core.config.reasoning_effort,
             protocol::ReasoningEffort::Medium
         );
         app.run_lua_result(r#"smelt.cmd.run("reasoning off")"#)
             .unwrap();
         assert_eq!(
-            app.app.core.config.reasoning_effort,
+            app.tui.core.config.reasoning_effort,
             protocol::ReasoningEffort::Off
         );
         assert!(app
@@ -1309,26 +1309,26 @@ mod tests {
     #[test]
     fn reasoning_pending_clears_when_cycling_back_to_applied_effort() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.config.reasoning_effort = protocol::ReasoningEffort::Off;
-        app.app.sync_reasoning_effort_applied();
+        app.tui.core.config.reasoning_effort = protocol::ReasoningEffort::Off;
+        app.tui.sync_reasoning_effort_applied();
         app.start_turn(1);
 
-        app.app
+        app.tui
             .set_reasoning_effort(protocol::ReasoningEffort::High, false)
             .unwrap();
-        assert!(app.app.reasoning_effort_pending());
+        assert!(app.tui.reasoning_effort_pending());
 
-        app.app
+        app.tui
             .set_reasoning_effort(protocol::ReasoningEffort::Off, false)
             .unwrap();
-        assert!(!app.app.reasoning_effort_pending());
+        assert!(!app.tui.reasoning_effort_pending());
     }
 
     #[test]
     fn restored_reasoning_is_reconciled_to_the_active_model() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut active = app
-            .app
+            .tui
             .core
             .config
             .active_model()
@@ -1340,15 +1340,15 @@ mod tests {
             protocol::ReasoningEffort::High,
         ];
         app.replace_active_model_for_harness(active);
-        app.app.core.config.reasoning_effort = protocol::ReasoningEffort::High;
+        app.tui.core.config.reasoning_effort = protocol::ReasoningEffort::High;
         let _ = app.drain_engine_sends();
 
-        app.app
+        app.tui
             .set_reasoning_effort(protocol::ReasoningEffort::Ultra, false)
             .unwrap();
 
         assert_eq!(
-            app.app.core.config.reasoning_effort,
+            app.tui.core.config.reasoning_effort,
             protocol::ReasoningEffort::Low
         );
         let commands = app.drain_engine_sends();
@@ -1370,13 +1370,13 @@ mod tests {
     fn switching_back_to_context_token_identity_clears_stale_marker() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         set_active_model(
-            &mut app.app,
+            &mut app.tui,
             "old-model",
             "https://old.example",
             "OLD_KEY",
             "openai",
         );
-        app.app.core.config.available_models = vec![
+        app.tui.core.config.available_models = vec![
             smelt_core::config::ResolvedModel {
                 key: "new/new-model".into(),
                 provider_name: "new".into(),
@@ -1400,40 +1400,40 @@ mod tests {
                 catalog: protocol::ModelCatalogMetadata::default(),
             },
         ];
-        let old_identity = app.app.active_context_token_identity();
-        app.app
+        let old_identity = app.active_context_token_identity();
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
-        app.app
+        app.tui
             .conversation
             .record_context_tokens_for_harness(100, old_identity);
 
-        app.app.apply_model("new/new-model", false);
+        app.apply_model("new/new-model", false);
         assert!(app
-            .app
+            .tui
             .conversation
             .session()
-            .display_context_tokens_stale(&app.app.active_context_token_identity()));
+            .display_context_tokens_stale(&app.active_context_token_identity()));
 
-        app.app.apply_model("old/old-model", false);
+        app.apply_model("old/old-model", false);
         assert!(!app
-            .app
+            .tui
             .conversation
             .session()
-            .display_context_tokens_stale(&app.app.active_context_token_identity()));
+            .display_context_tokens_stale(&app.active_context_token_identity()));
     }
 
     #[test]
     fn apply_model_clears_context_baseline_when_provider_identity_changes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         set_active_model(
-            &mut app.app,
+            &mut app.tui,
             "same-model",
             "https://old.example",
             "OLD_KEY",
             "openai",
         );
-        app.app.core.config.available_models = vec![smelt_core::config::ResolvedModel {
+        app.tui.core.config.available_models = vec![smelt_core::config::ResolvedModel {
             key: "new/same-model".into(),
             provider_name: "new".into(),
             model_name: "same-model".into(),
@@ -1444,43 +1444,43 @@ mod tests {
             config: smelt_core::config::ModelConfig::default(),
             catalog: protocol::ModelCatalogMetadata::default(),
         }];
-        let old_identity = app.app.active_context_token_identity();
-        app.app
+        let old_identity = app.active_context_token_identity();
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
-        app.app
+        app.tui
             .conversation
             .record_context_tokens_for_harness(100, old_identity);
 
-        app.app.apply_model("new/same-model", false);
+        app.apply_model("new/same-model", false);
 
-        assert!(app.app.conversation.session().context_tokens.is_none());
+        assert!(app.tui.conversation.session().context_tokens.is_none());
         assert_eq!(
-            app.app.conversation.session().display_context_tokens(),
+            app.tui.conversation.session().display_context_tokens(),
             Some(100)
         );
         assert!(app
-            .app
+            .tui
             .conversation
             .session()
-            .display_context_tokens_stale(&app.app.active_context_token_identity()));
+            .display_context_tokens_stale(&app.active_context_token_identity()));
     }
 
     #[test]
     fn returning_to_history_mode_removes_mode_change_note() {
         let mut app = normal_app();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
 
-        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
 
-        assert!(mode_blocks(&app.app).is_empty());
+        assert!(mode_blocks(&app.tui).is_empty());
         assert!(app
-            .app
+            .tui
             .conversation
             .session()
             .history
@@ -1491,22 +1491,22 @@ mod tests {
     #[test]
     fn returning_to_history_mode_clears_pending_mode_change_during_turn() {
         let mut app = normal_app();
-        app.app
+        app.tui
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
         app.start_turn(1);
 
         let before = app
-            .app
+            .tui
             .conversation
             .pending_history_appends()
             .iter()
             .map(|append| append.history_item())
             .collect::<Vec<_>>();
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
         let after_apply = app
-            .app
+            .tui
             .conversation
             .pending_history_appends()
             .iter()
@@ -1520,20 +1520,20 @@ mod tests {
             ));
         assert_eq!(&after_apply[..before.len()], before.as_slice());
         assert_eq!(&after_apply[before.len()..], [expected_apply]);
-        assert_eq!(pending_mode_appends(&app.app).len(), 1);
+        assert_eq!(pending_mode_appends(&app.tui).len(), 1);
 
-        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
 
         let after_normal = app
-            .app
+            .tui
             .conversation
             .pending_history_appends()
             .iter()
             .map(|append| append.history_item())
             .collect::<Vec<_>>();
         assert_eq!(after_normal, before);
-        assert!(pending_mode_appends(&app.app).is_empty());
-        assert!(mode_blocks(&app.app).is_empty());
+        assert!(pending_mode_appends(&app.tui).is_empty());
+        assert!(mode_blocks(&app.tui).is_empty());
     }
 
     #[test]
@@ -1541,10 +1541,10 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        app.app.discard_turn(crate::app::TurnEnd::Complete);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.discard_turn(crate::app::TurnEnd::Complete);
 
-        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
     }
 
     #[test]
@@ -1553,19 +1553,19 @@ mod tests {
         set_history(&mut app, vec![user("hello")]);
         app.start_turn(1);
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        assert_eq!(app.app.conversation.pending_history_appends().len(), 1);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert_eq!(app.tui.conversation.pending_history_appends().len(), 1);
 
-        app.app.discard_turn(crate::app::TurnEnd::Cancelled);
-        assert_eq!(app.app.conversation.pending_history_appends().len(), 1);
+        app.discard_turn(crate::app::TurnEnd::Cancelled);
+        assert_eq!(app.tui.conversation.pending_history_appends().len(), 1);
         assert_eq!(
-            app.app.conversation.pending_history_appends()[0].mode(),
+            app.tui.conversation.pending_history_appends()[0].mode(),
             Some("apply")
         );
 
-        app.app.apply_pending_history_appends_for_request();
+        app.tui.apply_pending_history_appends_for_request();
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .session()
                 .history
@@ -1574,11 +1574,11 @@ mod tests {
                 .and_then(protocol::HistoryNote::mode),
             Some("apply")
         );
-        app.app.restore_screen();
+        app.restore_screen();
 
-        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .session()
                 .history
@@ -1593,10 +1593,10 @@ mod tests {
     fn mode_change_before_first_user_message_does_not_push_mode_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
 
-        assert!(app.app.conversation.session().history.is_empty());
-        assert!(mode_blocks(&app.app).is_empty());
+        assert!(app.tui.conversation.session().history.is_empty());
+        assert!(mode_blocks(&app.tui).is_empty());
     }
 
     #[test]
@@ -1612,14 +1612,14 @@ mod tests {
                 assistant("reply"),
             ],
         );
-        let first_turn = app.app.rewind_turns().unwrap()[0].history_idx;
+        let first_turn = app.tui.rewind_turns().unwrap()[0].history_idx;
 
-        app.app.rewind_to_history(first_turn);
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.rewind_to_history(first_turn);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
 
-        assert!(mode_blocks(&app.app).is_empty());
+        assert!(mode_blocks(&app.tui).is_empty());
         assert_eq!(
-            app.app.conversation.session().history,
+            app.tui.conversation.session().history,
             vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
                 "Current working directory: /tmp.",
             ))]
@@ -1638,66 +1638,66 @@ mod tests {
                 assistant("second reply"),
             ],
         );
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        app.app.conversation.append_history_item(user("third"));
-        app.app
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.conversation.append_history_item(user("third"));
+        app.tui
             .conversation
             .append_history_item(assistant("third reply"));
-        app.app.sync_session_snapshot();
-        app.app.restore_screen();
-        let second_turn = app.app.rewind_turns().unwrap()[1].history_idx;
+        app.tui.sync_session_snapshot();
+        app.restore_screen();
+        let second_turn = app.tui.rewind_turns().unwrap()[1].history_idx;
 
-        let restored = app.app.rewind_to_history(second_turn).expect("second turn");
+        let restored = app.rewind_to_history(second_turn).expect("second turn");
 
         assert_eq!(restored.0, "second");
-        assert_eq!(app.app.core.config.mode.as_str(), "normal");
+        assert_eq!(app.tui.core.config.mode.as_str(), "normal");
 
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
 
-        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
     }
 
     #[test]
     fn rewind_to_first_message_restores_session_base_mode() {
         let mut app = normal_app();
         set_history(&mut app, vec![user("first"), assistant("first reply")]);
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        app.app
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui
             .conversation
             .set_session_mode_for_harness(Some("apply".into()));
-        app.app.conversation.append_history_item(user("second"));
-        app.app
+        app.tui.conversation.append_history_item(user("second"));
+        app.tui
             .conversation
             .append_history_item(assistant("second reply"));
-        app.app.sync_session_snapshot();
-        app.app.restore_screen();
-        let first_turn = app.app.rewind_turns().unwrap()[0].history_idx;
+        app.tui.sync_session_snapshot();
+        app.restore_screen();
+        let first_turn = app.tui.rewind_turns().unwrap()[0].history_idx;
 
-        let restored = app.app.rewind_to_history(first_turn).expect("first turn");
+        let restored = app.rewind_to_history(first_turn).expect("first turn");
 
         assert_eq!(restored.0, "first");
-        assert_eq!(app.app.core.config.mode.as_str(), "normal");
+        assert_eq!(app.tui.core.config.mode.as_str(), "normal");
     }
 
     #[test]
     fn returning_to_mode_note_base_after_rewind_removes_mode_block() {
         let mut app = normal_app();
         set_history(&mut app, vec![user("first"), assistant("first reply")]);
-        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        app.app.conversation.append_history_item(user("second"));
-        app.app
+        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.conversation.append_history_item(user("second"));
+        app.tui
             .conversation
             .append_history_item(assistant("second reply"));
-        app.app.sync_session_snapshot();
-        app.app.restore_screen();
-        let second_turn = app.app.rewind_turns().unwrap()[1].history_idx;
+        app.tui.sync_session_snapshot();
+        app.restore_screen();
+        let second_turn = app.tui.rewind_turns().unwrap()[1].history_idx;
 
-        app.app.rewind_to_history(second_turn);
-        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
+        app.rewind_to_history(second_turn);
+        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
 
-        assert!(mode_blocks(&app.app).is_empty());
+        assert!(mode_blocks(&app.tui).is_empty());
         assert!(app
-            .app
+            .tui
             .conversation
             .session()
             .history
@@ -1717,7 +1717,7 @@ mod tests {
             .with_cwd(&shell_cwd)
             .build_with_test_environment_guard(&environment_guard);
         let mut handle = app
-            .app
+            .tui
             .start_shell_escape("pwd")
             .expect("shell escape starts");
         environment_guard
@@ -1747,7 +1747,7 @@ mod tests {
     async fn shell_escape_preserves_unicode_and_replaces_invalid_utf8() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut handle = app
-            .app
+            .tui
             .start_shell_escape("printf 'besta\\314\\210tigt\\n\\377x\\n'")
             .expect("shell escape starts");
 

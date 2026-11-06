@@ -130,7 +130,7 @@ fn clear_goal_tool_removes_goal_and_context_without_interrupting_turn() {
         app.press(KeyCode::Enter);
         app.clear_actions();
 
-        app.app.handle_tool_call(
+        app.tui.handle_tool_call(
             1,
             protocol::InvocationId::new(1),
             "clear-goal".into(),
@@ -181,7 +181,7 @@ fn call_update_goal(app: &mut TestApp, args: serde_json::Value) -> (String, bool
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    app.app.handle_tool_call(
+    app.tui.handle_tool_call(
         1,
         protocol::InvocationId::new(1),
         "update-goal".into(),
@@ -255,7 +255,7 @@ fn clear_goal_prevents_pending_auto_continuation() {
     app.discard_turn(crate::app::TurnEnd::Complete);
     app.wait_for_turn_dispatch();
 
-    app.app.handle_tool_call(
+    app.tui.handle_tool_call(
         1,
         protocol::InvocationId::new(1),
         "clear-goal".into(),

@@ -747,22 +747,22 @@ mod tests {
                 .with_cwd(&original)
                 .build_with_test_environment_guard(&environment);
             app.start_turn(42);
-            app.app.lua.core_shared().hooks.prepare_request.clear();
+            app.tui.lua.core_shared().hooks.prepare_request.clear();
             let prepared = app
-                .app
+                .tui
                 .prepare_project_context(original.clone())
                 .unwrap()
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
             let (reply, mut response) = oneshot::channel();
-            app.app.dispatch_host_call(HostCall::PrepareRequest {
+            app.tui.dispatch_host_call(HostCall::PrepareRequest {
                 turn_id: 42,
                 messages: PreparedRequestMessages::model_only(Vec::new()),
                 estimated_tokens: 0,
                 reply,
             });
             let (tx, rx) = std::sync::mpsc::channel();
-            app.app
+            app.tui
                 .host_work
                 .project_request
                 .as_mut()
@@ -788,16 +788,16 @@ mod tests {
     fn project_request_reuses_workspace_inputs_until_they_change() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(42);
-        app.app.lua.core_shared().hooks.prepare_request.clear();
+        app.tui.lua.core_shared().hooks.prepare_request.clear();
         let request = |app: &mut crate::app::test_harness::TestApp| {
             let (reply, response) = oneshot::channel();
-            app.app.dispatch_host_call(HostCall::PrepareRequest {
+            app.tui.dispatch_host_call(HostCall::PrepareRequest {
                 turn_id: 42,
                 messages: PreparedRequestMessages::model_only(Vec::new()),
                 estimated_tokens: 0,
                 reply,
             });
-            let preparing = app.app.project_context_pending();
+            let preparing = app.tui.project_context_pending();
             app.wait_for_project_context();
             let mut response = response;
             assert!(matches!(
@@ -822,7 +822,7 @@ mod tests {
         assert!(status.success());
         assert!(request(&mut app), "a new repository is discovered again");
         assert!(
-            app.app.workspace.project_context().repository_key.is_some(),
+            app.tui.workspace.project_context().repository_key.is_some(),
             "the request installed the new repository"
         );
     }
@@ -851,9 +851,9 @@ mod tests {
     fn retained_reply_callback_defers_without_scoped_host_access() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(42);
-        let lua = app.app.lua.lua().clone();
+        let lua = app.tui.lua.lua().clone();
         let (reply, mut response) = tokio::sync::oneshot::channel();
-        let owner = app.app.begin_request_hook(42, reply);
+        let owner = app.tui.begin_request_hook(42, reply);
         let callback = create_message_reply_fn(&lua, owner).unwrap();
         let value = lua.create_table().unwrap();
         value.set("action", "continue").unwrap();
@@ -864,7 +864,7 @@ mod tests {
             response.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ));
-        crate::lua::scope_app(&mut app.app, || ());
+        crate::lua::scope_app(&mut app.tui, || ());
         assert!(matches!(
             response.try_recv().expect("deferred reply"),
             HostRequestDecision::Continue
@@ -875,16 +875,16 @@ mod tests {
     fn malformed_request_reply_restores_owning_phase() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(42);
-        let lua = app.app.lua.lua().clone();
+        let lua = app.tui.lua.lua().clone();
         let (reply, mut response) = oneshot::channel();
-        let owner = app.app.begin_request_hook(42, reply);
-        let _compaction = app.app.begin_context_recalculation("compacting".into());
+        let owner = app.tui.begin_request_hook(42, reply);
+        let _compaction = app.tui.begin_context_recalculation("compacting".into());
         let callback = create_message_reply_fn(&lua, owner).unwrap();
         let value = lua.create_table().unwrap();
         value.set("action", "abort").unwrap();
 
         assert!(callback.call::<()>(value).is_err());
-        crate::lua::scope_app(&mut app.app, || ());
+        crate::lua::scope_app(&mut app.tui, || ());
 
         assert_eq!(app.working_probe().phase_label(), Some("working"));
         assert!(matches!(
@@ -901,10 +901,10 @@ mod tests {
         for cancel in [false, true] {
             let mut app = crate::app::test_harness::TestApp::builder().build();
             app.start_turn(42);
-            let lua = app.app.lua.lua().clone();
+            let lua = app.tui.lua.lua().clone();
             let (reply, mut response) = oneshot::channel();
-            let owner = app.app.begin_request_hook(42, reply);
-            let _compaction = app.app.begin_context_recalculation("compacting".into());
+            let owner = app.tui.begin_request_hook(42, reply);
+            let _compaction = app.tui.begin_context_recalculation("compacting".into());
             let callback = create_message_reply_fn(&lua, owner).unwrap();
             assert!(app.run_lua(
                 r#"
@@ -923,7 +923,7 @@ mod tests {
             if cancel {
                 app.discard_turn(crate::app::TurnEnd::Cancelled);
             }
-            crate::lua::scope_app(&mut app.app, || callback.call::<()>(mlua::Value::Nil)).unwrap();
+            crate::lua::scope_app(&mut app.tui, || callback.call::<()>(mlua::Value::Nil)).unwrap();
             assert!(matches!(
                 response.try_recv().unwrap(),
                 HostRequestDecision::Stop
@@ -965,7 +965,7 @@ mod tests {
             for finish in ["reply", "drop", "reload", "malformed", "abort", "cancel"] {
                 let mut app = crate::app::test_harness::TestApp::builder().build();
                 app.start_turn(42);
-                app.app.lua.core_shared().hooks.prepare_request.clear();
+                app.tui.lua.core_shared().hooks.prepare_request.clear();
                 assert!(app.run_bundled_lua(
                     r#"
                     smelt.engine.on_prepare_request(function(_, reply)
@@ -1004,7 +1004,7 @@ mod tests {
                         "pending_reply({action = 'abort', message = 'terminal failure'})"
                     )),
                     "cancel" => {
-                        app.app.finish_turn(crate::app::TurnEnd::Cancelled);
+                        app.tui.finish_turn(crate::app::TurnEnd::Cancelled);
                     }
                     _ => unreachable!(),
                 }
@@ -1021,10 +1021,10 @@ mod tests {
                     _ => assert!(matches!(decision, HostRequestDecision::Continue)),
                 }
                 assert!(
-                    app.app.host_work.pending.is_none(),
+                    app.tui.host_work.pending.is_none(),
                     "{finish}, handoff={handoff}"
                 );
-                assert!(!app.app.busy_stack.context_recalculating());
+                assert!(!app.tui.busy_stack.context_recalculating());
                 assert!(!app.working_probe().is_compacting());
                 assert!(
                     app.conversation_probe()
@@ -1038,7 +1038,7 @@ mod tests {
                     ));
                 }
                 if matches!(finish, "abort" | "cancel") {
-                    assert!(app.app.host_work.handoff_turn.is_none());
+                    assert!(app.tui.host_work.handoff_turn.is_none());
                     if finish == "abort" {
                         app.dispatch_engine_event(EngineEvent::TurnError {
                             message: "terminal failure".into(),
@@ -1076,7 +1076,7 @@ mod tests {
         for error in [false, true] {
             let mut app = crate::app::test_harness::TestApp::builder().build();
             app.start_turn(42);
-            app.app.lua.core_shared().hooks.prepare_request.clear();
+            app.tui.lua.core_shared().hooks.prepare_request.clear();
             assert!(app.run_bundled_lua(&format!(
                 r#"
                 smelt.engine.on_prepare_request(function(_, reply)
@@ -1096,12 +1096,12 @@ mod tests {
             });
             if !error {
                 assert!(app.run_lua("compaction = nil; collectgarbage('collect')"));
-                assert!(app.app.host_work.pending.is_some());
+                assert!(app.tui.host_work.pending.is_some());
             } else {
                 assert!(app.run_lua("assert(not compaction:alive())"));
             }
             assert_eq!(app.working_probe().phase_label(), Some("working"));
-            assert!(!app.app.busy_stack.context_recalculating());
+            assert!(!app.tui.busy_stack.context_recalculating());
             assert!(app
                 .conversation_probe()
                 .transcript_compaction_preview_id()
@@ -1111,7 +1111,7 @@ mod tests {
                 response.try_recv().unwrap(),
                 HostRequestDecision::Continue
             ));
-            assert!(app.app.host_work.pending.is_none());
+            assert!(app.tui.host_work.pending.is_none());
         }
     }
 
@@ -1119,7 +1119,7 @@ mod tests {
     fn prepare_request_messages_are_released_when_the_hook_replies() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(42);
-        app.app.lua.core_shared().hooks.prepare_request.clear();
+        app.tui.lua.core_shared().hooks.prepare_request.clear();
         assert!(app.run_lua(
             r#"
             smelt.engine.on_prepare_request(function(request, reply)

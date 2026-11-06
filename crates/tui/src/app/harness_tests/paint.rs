@@ -16,7 +16,7 @@ fn pointer_move(app: &mut TestApp, x: u16, y: u16) {
 
 /// Whether the event loop paints a frame for this motion event.
 fn motion_redraws(app: &mut TestApp, x: u16, y: u16) -> bool {
-    app.app.event_needs_frame(&Event::Mouse(moved(x, y)))
+    app.tui.event_needs_frame(&Event::Mouse(moved(x, y)))
 }
 
 fn overlay_paint(app: &mut TestApp, body: &str, opts: &str) {
@@ -189,7 +189,7 @@ fn invalidate_after_animates_while_the_paint_asks() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 12);
     app.render_silent();
-    assert!(app.app.scheduled_frame_delay().is_none());
+    assert!(app.tui.scheduled_frame_delay().is_none());
 
     assert!(app.run_lua(
         r#"_G.__on = true
@@ -199,17 +199,17 @@ fn invalidate_after_animates_while_the_paint_asks() {
     ));
     app.render_silent();
     let delay = app
-        .app
+        .tui
         .scheduled_frame_delay()
         .expect("a paint that asks keeps frames coming");
     assert!(delay <= Duration::from_millis(20), "{delay:?}");
     app.render_silent();
-    assert!(app.app.scheduled_frame_delay().is_some());
+    assert!(app.tui.scheduled_frame_delay().is_some());
 
     assert!(app.run_lua("_G.__on = false"));
     app.render_silent();
     assert!(
-        app.app.scheduled_frame_delay().is_none(),
+        app.tui.scheduled_frame_delay().is_none(),
         "a paint that stops asking goes idle"
     );
 
@@ -298,16 +298,16 @@ fn invalidate_requests_one_frame() {
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(r#"_G.__fx = smelt.paint.frame(function() end)"#));
     app.render_silent();
-    assert!(app.app.scheduled_frame_delay().is_none());
+    assert!(app.tui.scheduled_frame_delay().is_none());
 
     assert!(app.eval_lua::<bool>("return _G.__fx:invalidate()").unwrap());
     assert!(
-        app.app.scheduled_frame_delay().is_some(),
+        app.tui.scheduled_frame_delay().is_some(),
         "invalidate asks for a frame"
     );
     app.render_silent();
     assert!(
-        app.app.scheduled_frame_delay().is_none(),
+        app.tui.scheduled_frame_delay().is_none(),
         "invalidate is one frame, not an animation"
     );
 
@@ -434,7 +434,7 @@ fn frame_paints_see_terminal_focus_and_repaint_when_it_changes() {
 
     app.feed_one(SourceEvent::Term(Event::FocusLost));
     assert!(
-        app.app.scheduled_frame_delay().is_some(),
+        app.tui.scheduled_frame_delay().is_some(),
         "losing focus asks for a frame"
     );
     app.render_silent();
@@ -679,7 +679,7 @@ fn dissolve_fades_deleted_text_then_goes_idle() {
         app.render_silent();
     }
     assert!(
-        app.app.scheduled_frame_delay().is_none(),
+        app.tui.scheduled_frame_delay().is_none(),
         "idle once fades end"
     );
 
@@ -693,7 +693,7 @@ fn dissolve_fades_deleted_text_then_goes_idle() {
         .unwrap_or_else(|| panic!("the deleted q fades out:\n{}", frame.text()));
     let x = row.chars().position(|c| c == 'q').unwrap();
     assert!(frame.styles[y][x].dim, "the fading glyph is dim");
-    assert!(app.app.scheduled_frame_delay().is_some(), "fading animates");
+    assert!(app.tui.scheduled_frame_delay().is_some(), "fading animates");
 
     for _ in 0..6 {
         app.render_silent();
@@ -701,7 +701,7 @@ fn dissolve_fades_deleted_text_then_goes_idle() {
     let frame = app.render_to_frame();
     assert!(!frame.text().contains("zq"), "{}", frame.text());
     assert!(
-        app.app.scheduled_frame_delay().is_none(),
+        app.tui.scheduled_frame_delay().is_none(),
         "the paint goes idle once nothing fades"
     );
 }
@@ -906,7 +906,7 @@ fn every_color_argument_rejects_unknown_theme_groups() {
 }
 
 fn error_count(app: &TestApp) -> usize {
-    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    let messages = app.tui.lua.core_shared().messages.lock().unwrap();
     messages
         .entries()
         .iter()

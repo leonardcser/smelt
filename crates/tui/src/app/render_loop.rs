@@ -1815,13 +1815,13 @@ mod tests {
             app.set_terminal_size(100, 32);
             app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(input)));
             app.render_silent();
-            let expected = app.app.measure_prompt_input_rows(100);
+            let expected = app.tui.measure_prompt_input_rows(100);
             assert!(expected > 600);
             let enabled = smelt_perf::alloc::enabled();
             smelt_perf::alloc::set_enabled(true);
             let before = smelt_perf::alloc::thread_snapshot();
             for _ in 0..10 {
-                assert_eq!(app.app.measure_prompt_input_rows(100), expected);
+                assert_eq!(app.tui.measure_prompt_input_rows(100), expected);
             }
             let after = smelt_perf::alloc::thread_snapshot();
             smelt_perf::alloc::set_enabled(enabled);
@@ -1836,7 +1836,7 @@ mod tests {
         let mut app = TestApp::builder().with_vim(false).build();
         let width = 80;
         let usable = app
-            .app
+            .tui
             .ui
             .win(crate::app::PROMPT_WIN)
             .unwrap()
@@ -1844,37 +1844,37 @@ mod tests {
             .gutters
             .content_width(width);
         let text = "x".repeat(usable as usize);
-        app.app
+        app.tui
             .set_placeholder(crate::app::PROMPT_WIN, text.clone());
-        assert_eq!(app.app.measure_prompt_input_rows(width), 1);
+        assert_eq!(app.tui.measure_prompt_input_rows(width), 1);
         assert!(
-            !app.app
+            !app.tui
                 .ui
                 .win(crate::app::PROMPT_WIN)
                 .unwrap()
                 .wrap_cursor_padding
         );
         app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(text)));
-        assert_eq!(app.app.measure_prompt_input_rows(width), 2);
+        assert_eq!(app.tui.measure_prompt_input_rows(width), 2);
         assert!(
-            app.app
+            app.tui
                 .ui
                 .win(crate::app::PROMPT_WIN)
                 .unwrap()
                 .wrap_cursor_padding
         );
         app.press(crossterm::event::KeyCode::Backspace);
-        assert_eq!(app.app.measure_prompt_input_rows(width), 1);
-        app.app
+        assert_eq!(app.tui.measure_prompt_input_rows(width), 1);
+        app.tui
             .ui
             .win_mut(crate::app::PROMPT_WIN)
             .unwrap()
             .config
             .gutters
             .pad_left += 2;
-        assert_eq!(app.app.measure_prompt_input_rows(width), 2);
+        assert_eq!(app.tui.measure_prompt_input_rows(width), 2);
         assert_eq!(
-            app.app
+            app.tui
                 .ui
                 .win(crate::app::PROMPT_WIN)
                 .unwrap()
@@ -1892,7 +1892,7 @@ mod tests {
         app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
             "\n".repeat(u16::MAX as usize),
         )));
-        assert_eq!(app.app.measure_prompt_input_rows(80), u16::MAX);
+        assert_eq!(app.tui.measure_prompt_input_rows(80), u16::MAX);
     }
 
     #[test]
@@ -1991,23 +1991,23 @@ mod tests {
         app.start_turn(1);
         let mut sink = std::io::sink();
 
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::TextDelta {
                 delta: "first".into(),
             },
             &mut sink,
             |_| {},
         );
-        app.app.render_pending_transient_frame_to(&mut sink);
+        app.tui.render_pending_transient_frame_to(&mut sink);
 
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::TextDelta {
                 delta: " second".into(),
             },
             &mut sink,
             |_| {},
         );
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::TextDelta {
                 delta: " third".into(),
             },
@@ -2017,14 +2017,14 @@ mod tests {
 
         fn streamed_text(app: &crate::app::test_harness::TestApp) -> String {
             let id = app
-                .app
+                .tui
                 .conversation
                 .transcript()
                 .history()
                 .last_block_id()
                 .expect("streamed text block");
             let smelt_core::transcript_model::Block::Text { content } = app
-                .app
+                .tui
                 .conversation
                 .transcript()
                 .history()
@@ -2038,16 +2038,16 @@ mod tests {
         assert_eq!(streamed_text(&app), "first");
 
         app.clock.advance(6 * CONTINUATION_FRAME_INTERVAL);
-        assert!(app.app.render_pending_transient_frame_to(&mut sink));
+        assert!(app.tui.render_pending_transient_frame_to(&mut sink));
         assert_eq!(streamed_text(&app), "first second third");
-        let screen = app.app.ui.flushed_snapshot().text();
+        let screen = app.tui.ui.flushed_snapshot().text();
         assert!(
             screen.contains('f') && !screen.contains("first second third"),
             "the new text types in over later frames: {screen}"
         );
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
-        assert!(app.app.render_pending_transient_frame_to(&mut sink));
-        let screen = app.app.ui.flushed_snapshot().text();
+        assert!(app.tui.render_pending_transient_frame_to(&mut sink));
+        let screen = app.tui.ui.flushed_snapshot().text();
         assert!(screen.contains("first second third"), "{screen}");
     }
 
@@ -2055,21 +2055,19 @@ mod tests {
     fn response_draft_rejection_waits_for_queued_stream_continuations() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::TextDelta {
-                delta: "rejected first".into(),
-            });
-        app.app
+        app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+            delta: "rejected first".into(),
+        });
+        app.tui
             .queue_engine_continuation(protocol::EngineEvent::TextDelta {
                 delta: " rejected queued".into(),
             });
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::ResponseDraftRejected);
-        app.app
+        app.dispatch_engine_event(protocol::EngineEvent::ResponseDraftRejected);
+        app.tui
             .queue_engine_continuation(protocol::EngineEvent::TextDelta {
                 delta: "valid answer".into(),
             });
-        app.app.apply_pending_transcript_work();
+        app.tui.apply_pending_transcript_work();
         app.render_to_frame();
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         let frame = app.render_to_frame().text();
@@ -2082,23 +2080,20 @@ mod tests {
     fn response_draft_acceptance_waits_for_queued_stream_continuations() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::TextDelta {
-                delta: "accepted first".into(),
-            });
-        app.app
+        app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+            delta: "accepted first".into(),
+        });
+        app.tui
             .queue_engine_continuation(protocol::EngineEvent::TextDelta {
                 delta: " accepted queued".into(),
             });
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::ResponseDraftAccepted);
-        app.app
+        app.dispatch_engine_event(protocol::EngineEvent::ResponseDraftAccepted);
+        app.tui
             .queue_engine_continuation(protocol::EngineEvent::TextDelta {
                 delta: "rejected next".into(),
             });
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::ResponseDraftRejected);
-        app.app.apply_pending_transcript_work();
+        app.dispatch_engine_event(protocol::EngineEvent::ResponseDraftRejected);
+        app.tui.apply_pending_transcript_work();
         let frame = app.render_to_frame().text();
         assert!(frame.contains("accepted first accepted queued"));
         assert!(!frame.contains("rejected"));
@@ -2148,7 +2143,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut sink = std::io::sink();
 
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::EngineAskDelta {
                 id: 7,
                 delta: "first".into(),
@@ -2156,12 +2151,12 @@ mod tests {
             &mut sink,
             |_| {},
         );
-        assert!(app.app.continuing_engine_ask_ids.contains(&7));
-        assert!(app.app.transcript_work.is_empty());
-        assert!(app.app.render_pending_transient_frame_to(&mut sink));
+        assert!(app.tui.continuing_engine_ask_ids.contains(&7));
+        assert!(app.tui.transcript_work.is_empty());
+        assert!(app.tui.render_pending_transient_frame_to(&mut sink));
 
         for delta in [" second", " third"] {
-            app.app.dispatch_engine_event_in_render_loop_to(
+            app.tui.dispatch_engine_event_in_render_loop_to(
                 protocol::EngineEvent::EngineAskDelta {
                     id: 7,
                     delta: delta.into(),
@@ -2170,9 +2165,9 @@ mod tests {
                 |_| {},
             );
         }
-        assert_eq!(app.app.transcript_work.len(), 2);
+        assert_eq!(app.tui.transcript_work.len(), 2);
 
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::EngineAskResponse {
                 id: 7,
                 message: None,
@@ -2181,8 +2176,8 @@ mod tests {
             &mut sink,
             |_| {},
         );
-        assert!(app.app.transcript_work.is_empty());
-        assert!(!app.app.continuing_engine_ask_ids.contains(&7));
+        assert!(app.tui.transcript_work.is_empty());
+        assert!(!app.tui.continuing_engine_ask_ids.contains(&7));
     }
 
     #[test]
@@ -2191,15 +2186,15 @@ mod tests {
         app.start_turn(1);
         let mut sink = std::io::sink();
 
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::TextDelta {
                 delta: "visible before cancellation".into(),
             },
             &mut sink,
             |_| {},
         );
-        app.app.render_pending_transient_frame_to(&mut sink);
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.render_pending_transient_frame_to(&mut sink);
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::ReasoningPartStarted {
                 id: "reasoning".into(),
                 kind: protocol::ReasoningKind::Raw,
@@ -2207,7 +2202,7 @@ mod tests {
             &mut sink,
             |_| {},
         );
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::ToolCallDraftStarted {
                 stream_id: "draft".into(),
                 call_id: None,
@@ -2217,14 +2212,14 @@ mod tests {
             &mut sink,
             |_| {},
         );
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::TextDelta {
                 delta: " queued text".into(),
             },
             &mut sink,
             |_| {},
         );
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::ReasoningPartDelta {
                 id: "reasoning".into(),
                 kind: protocol::ReasoningKind::Raw,
@@ -2234,7 +2229,7 @@ mod tests {
             &mut sink,
             |_| {},
         );
-        app.app.dispatch_engine_event_in_render_loop_to(
+        app.tui.dispatch_engine_event_in_render_loop_to(
             protocol::EngineEvent::ToolCallDraftDelta {
                 stream_id: "draft".into(),
                 call_id: None,
@@ -2244,10 +2239,10 @@ mod tests {
             &mut sink,
             |_| {},
         );
-        assert_eq!(app.app.transcript_work.len(), 3);
+        assert_eq!(app.tui.transcript_work.len(), 3);
 
-        app.app.cancel_agent();
-        assert!(app.app.transcript_work.is_empty());
+        app.tui.cancel_agent();
+        assert!(app.tui.transcript_work.is_empty());
         let frame = app.render_to_frame();
         assert!(frame.text().contains("visible before cancellation"));
         assert!(!frame.text().contains("queued text"));
@@ -2258,19 +2253,19 @@ mod tests {
     #[test]
     fn exec_continuations_share_the_frame_boundary_queue() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.start_exec("printf test".into());
+        app.tui.start_exec("printf test".into());
         let block_id = app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .last_block_id()
             .expect("exec block");
 
-        app.app.append_exec_output("first".into());
-        app.app.append_exec_output(" second".into());
+        app.tui.append_exec_output("first".into());
+        app.tui.append_exec_output(" second".into());
         let smelt_core::transcript_model::Block::Exec { output, .. } = app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
@@ -2281,12 +2276,12 @@ mod tests {
         };
         assert!(output.is_empty());
 
-        app.app.finish_exec(None);
+        app.tui.finish_exec(None);
         assert!(app
-            .app
+            .tui
             .render_pending_transient_frame_to(&mut std::io::sink()));
 
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         let smelt_core::transcript_model::Block::Exec { output, .. } =
             history.block(block_id).expect("completed exec block")
         else {
@@ -2320,7 +2315,7 @@ mod tests {
 
         app.render_normal_to(&mut std::io::sink());
         let projection_count = app
-            .app
+            .tui
             .conversation
             .transcript()
             .projection_count_for_harness();
@@ -2330,17 +2325,17 @@ mod tests {
             .expect("animation renderer call count");
 
         for _ in 0..3 {
-            app.app
+            app.tui
                 .request_animation_render(std::time::Duration::from_millis(16));
             app.clock.advance(std::time::Duration::from_millis(16));
-            app.app.tick_timers();
+            app.tick_timers();
             assert!(app
-                .app
+                .tui
                 .render_requested_transient_frame_to(&mut std::io::sink()));
         }
 
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .transcript()
                 .projection_count_for_harness(),
@@ -2365,22 +2360,22 @@ mod tests {
             "#,
         )
         .expect("install animated renderer");
-        app.app.schedule_win_repaint();
+        app.tui.schedule_win_repaint();
         app.render_normal_to(&mut std::io::sink());
-        app.app.schedule_win_repaint();
-        assert_eq!(app.app.scheduled_frame_delay(), None);
+        app.tui.schedule_win_repaint();
+        assert_eq!(app.tui.scheduled_frame_delay(), None);
 
         app.clock.advance(std::time::Duration::from_millis(16));
-        app.app.tick_runtime();
-        app.app.schedule_win_repaint();
+        app.tui.tick_runtime();
+        app.tui.schedule_win_repaint();
         assert!(
-            app.app.scheduled_frame_delay().is_some(),
+            app.tui.scheduled_frame_delay().is_some(),
             "a renderer invalidated outside a frame must schedule its repaint"
         );
 
         app.render_normal_to(&mut std::io::sink());
-        app.app.schedule_win_repaint();
-        assert_eq!(app.app.scheduled_frame_delay(), None);
+        app.tui.schedule_win_repaint();
+        assert_eq!(app.tui.scheduled_frame_delay(), None);
     }
 
     #[test]
@@ -2400,7 +2395,7 @@ mod tests {
         let initial = app.render_to_frame();
         assert!(initial.text().contains("1.0s"));
         let initial_projection_count = app
-            .app
+            .tui
             .conversation
             .transcript()
             .projection_count_for_harness();
@@ -2409,7 +2404,7 @@ mod tests {
         let before_deadline = app.render_to_frame();
         assert!(before_deadline.text().contains("1.0s"));
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .transcript()
                 .projection_count_for_harness(),
@@ -2421,7 +2416,7 @@ mod tests {
         let at_deadline = app.render_to_frame();
         assert!(at_deadline.text().contains("1.1s"));
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .transcript()
                 .projection_count_for_harness(),
@@ -2454,7 +2449,7 @@ mod tests {
             .lua_int_global("retained_renderer_id")
             .expect("retained renderer window id") as u64;
         assert!(
-            app.app
+            app.tui
                 .lua
                 .shared()
                 .win_renderers
@@ -2565,7 +2560,7 @@ mod tests {
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(1));
 
         assert!(app
-            .app
+            .tui
             .prompt
             .try_queue_turn(crate::app::QueuedInput::request_from_text(
                 "queued", "queued", 0
@@ -2602,7 +2597,7 @@ mod tests {
         app.render_silent();
         assert_eq!(app.lua_int_global("retained_layout_calls"), Some(2));
 
-        app.app.handle_resize(120, 40);
+        app.tui.handle_resize(120, 40);
         assert_eq!(app.lua_int_global("retained_layout_calls"), Some(3));
     }
 
@@ -2613,29 +2608,27 @@ mod tests {
         app.render_to_frame();
         assert!(app.render_to_frame().text().contains('\u{25CF}'));
 
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::TextDelta {
-                delta: "answer".into(),
-            });
-        app.app
+        app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+            delta: "answer".into(),
+        });
+        app.tui
             .queue_engine_continuation(protocol::EngineEvent::TextDelta {
                 delta: " tail".into(),
             });
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::TurnComplete {
-                turn_id: 1,
-                history: None,
-                meta: None,
-            });
+        app.dispatch_engine_event(protocol::EngineEvent::TurnComplete {
+            turn_id: 1,
+            history: None,
+            meta: None,
+        });
         assert!(app.agent_running());
 
         let mut sink = std::io::sink();
-        app.app.render_normal_to(&mut sink);
+        app.render_normal_to(&mut sink);
         assert!(!app.agent_running());
         let state: String = app
             .eval_lua(r#"return smelt.signal.get("work_state")"#)
             .expect("work_state");
         assert_eq!(state, "done");
-        assert!(app.app.ui.flushed_snapshot().text().contains("done"));
+        assert!(app.tui.ui.flushed_snapshot().text().contains("done"));
     }
 }

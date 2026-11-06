@@ -4411,8 +4411,17 @@ pub(crate) mod tests {
         )
     }
 
+    /// Runtime on a frozen clock so refresh deadlines never expire between
+    /// projection passes, however slowly the test runs.
     fn test_lua() -> smelt_core::lua::runtime::LuaRuntime {
-        smelt_core::lua::runtime::LuaRuntime::new()
+        let lua = smelt_core::lua::runtime::LuaRuntime::new();
+        let clock: std::sync::Arc<dyn engine::clock::Clock> =
+            std::sync::Arc::new(engine::clock::VirtualClock::new(
+                std::time::Instant::now(),
+                std::time::SystemTime::now(),
+            ));
+        lua.shared().set_clock(clock);
+        lua
     }
 
     #[test]

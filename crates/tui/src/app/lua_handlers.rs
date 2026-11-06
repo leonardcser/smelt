@@ -1145,14 +1145,14 @@ mod controller_tests {
                 .build_with_test_environment_guard(&environment);
             let generation = app.lua_probe().id;
             let prepared = app
-                .app
+                .tui
                 .prepare_lua_inputs(original.clone(), true)
                 .unwrap()
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
-            app.app.reload_lua_inner(LuaReloadKind::Manual);
+            app.tui.reload_lua_inner(LuaReloadKind::Manual);
             let (tx, rx) = std::sync::mpsc::channel();
-            app.app.lua.reload_preparation.as_mut().unwrap().preparation = rx;
+            app.tui.lua.reload_preparation.as_mut().unwrap().preparation = rx;
             std::fs::rename(&original, &renamed).unwrap();
             tx.send(if stale_error {
                 Err("stale missing cwd".into())
@@ -1163,7 +1163,7 @@ mod controller_tests {
             app.wait_for_workspace();
             assert_eq!(app.core_probe().env.cwd(), renamed);
             assert_eq!(app.lua_probe().id, generation.wrapping_add(1));
-            assert!(app.app.lua_reload_failure().is_none());
+            assert!(app.tui.lua_reload_failure().is_none());
         }
     }
 
@@ -1183,30 +1183,30 @@ mod controller_tests {
     #[test]
     fn failed_reload_replacement_retires_previous_preparation() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let generation = app.app.lua.id;
+        let generation = app.tui.lua.id;
         let (tx, rx) = std::sync::mpsc::channel();
-        app.app.lua.reload_preparation = Some(LuaReloadPreparation {
+        app.tui.lua.reload_preparation = Some(LuaReloadPreparation {
             kind: LuaReloadKind::AutoConfig,
             generation,
             target_cwd: app.core_probe().env.cwd(),
             preparation: rx,
         });
-        app.app.schedule_lua_reload();
-        app.app
+        app.schedule_lua_reload();
+        app.tui
             .replace_reload_preparation(Err("thread creation failed".into()));
 
-        assert!(!app.app.lua_reload_pending());
+        assert!(!app.tui.lua_reload_pending());
         assert!(app
-            .app
+            .tui
             .lua_reload_failure()
             .unwrap()
             .message
             .contains("thread creation failed"));
         assert!(tx.send(Err("obsolete result".into())).is_err());
-        app.app.drain_idle_work();
-        assert_eq!(app.app.lua.id, generation);
+        app.drain_idle_work();
+        assert_eq!(app.tui.lua.id, generation);
         assert!(app
-            .app
+            .tui
             .lua_reload_failure()
             .unwrap()
             .message

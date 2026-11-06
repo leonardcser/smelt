@@ -16,7 +16,7 @@ impl TestApp {
         {
             match ev {
                 SourceEvent::Term(ev) => {
-                    let quit = self.app.dispatch_terminal_event(ev);
+                    let quit = self.tui.dispatch_terminal_event(ev);
                     if quit {
                         self.quit = true;
                         self.actions.push(Action::Quit);
@@ -24,7 +24,7 @@ impl TestApp {
                 }
                 SourceEvent::Engine { event } => {
                     let mut sink = std::io::sink();
-                    self.app.dispatch_engine_event_in_render_loop_to(
+                    self.tui.dispatch_engine_event_in_render_loop_to(
                         *event,
                         &mut sink,
                         on_transient_frame,
@@ -34,22 +34,22 @@ impl TestApp {
                     self.clock.advance(Duration::from_millis(ms));
                 }
                 SourceEvent::LuaWakeup => {
-                    self.app.flush_lua_callbacks();
-                    self.app.drive_lua_tasks();
+                    self.tui.flush_lua_callbacks();
+                    self.tui.drive_lua_tasks();
                 }
                 SourceEvent::ExecOutput(line) => {
-                    self.app.append_exec_output(line);
+                    self.tui.append_exec_output(line);
                 }
                 SourceEvent::ExecDone(_) => {
-                    self.app.finish_exec(None);
-                    self.app.overlays.finish_execution();
+                    self.tui.finish_exec(None);
+                    self.tui.overlays.finish_execution();
                 }
                 SourceEvent::Resize { width, height } => {
-                    self.app.handle_resize(width, height);
+                    self.tui.handle_resize(width, height);
                 }
             }
-            self.app.pump_lua();
-            self.app.drain_idle_work();
+            self.tui.pump_lua();
+            self.tui.drain_idle_work();
         }
         self.drain_cmd();
         let (a1, b1) = smelt_perf::alloc::thread_snapshot();
@@ -90,7 +90,7 @@ impl TestApp {
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).
     pub fn render(&mut self) {
-        self.app.render_normal();
+        self.tui.render_normal();
         self.settle_transcript_hydration(&mut std::io::stdout());
     }
 
@@ -104,7 +104,7 @@ impl TestApp {
     /// libFuzzer's log file.
     pub fn render_silent(&mut self) {
         let mut sink = std::io::sink();
-        self.app.render_normal_to(&mut sink);
+        self.tui.render_normal_to(&mut sink);
         self.settle_transcript_hydration(&mut sink);
         self.assert_render_layout_invariants();
         self.assert_prompt_cursor_projection();
@@ -114,10 +114,10 @@ impl TestApp {
     /// transcript hydration. Tests use this to inspect the viewport users see
     /// while a sparse seek is still pending.
     pub fn render_unsettled_silent(&mut self) -> crate::smelt_edit::SnapshotFrame {
-        self.app.render_normal_to(&mut std::io::sink());
+        self.tui.render_normal_to(&mut std::io::sink());
         self.assert_render_layout_invariants();
         self.assert_prompt_cursor_projection();
-        self.app.ui.flushed_snapshot()
+        self.tui.ui.flushed_snapshot()
     }
 
     /// Render one frame and return the resulting `SnapshotFrame`. Used
@@ -127,9 +127,9 @@ impl TestApp {
     /// callback-free UI render. ANSI bytes are written to a sink so tests stay quiet.
     pub fn render_to_frame(&mut self) -> crate::smelt_edit::SnapshotFrame {
         let mut sink = std::io::sink();
-        self.app.render_normal_to(&mut sink);
+        self.tui.render_normal_to(&mut sink);
         self.settle_transcript_hydration(&mut sink);
-        self.app.ui.flushed_snapshot()
+        self.tui.ui.flushed_snapshot()
     }
 
     /// Run Lua animations against the virtual wall clock. The harness
@@ -144,17 +144,17 @@ impl TestApp {
     /// hydration.
     pub fn advance_animation(&mut self, ms: u64) -> crate::smelt_edit::SnapshotFrame {
         self.feed_one(SourceEvent::Tick(ms));
-        self.app
+        self.tui
             .lua
             .lua()
             .globals()
             .set(
                 "animation_now",
-                engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
+                engine::clock::unix_time_ms(self.tui.core.clock.as_ref()),
             )
             .unwrap();
-        self.app.tick_timers();
-        self.app.publish_diff_signals();
+        self.tui.tick_timers();
+        self.tui.publish_diff_signals();
         self.render_unsettled_silent()
     }
 
@@ -167,7 +167,7 @@ impl TestApp {
     /// Text of the cells painted with `group`'s background in a fresh frame,
     /// one line per screen row that has any, so tests assert what the user sees.
     pub fn highlighted_text(&mut self, group: &str) -> Vec<String> {
-        let bg = self.app.ui.theme().get(group).bg;
+        let bg = self.tui.ui.theme().get(group).bg;
         assert!(bg.is_some(), "highlight group {group} has no background");
         let frame = self.render_to_frame();
         frame
@@ -234,9 +234,9 @@ impl TestApp {
         col: u16,
         track: std::ops::Range<u16>,
     ) -> Option<u16> {
-        let thumb = self.app.ui.theme().get("SmeltScrollbarThumb");
+        let thumb = self.tui.ui.theme().get("SmeltScrollbarThumb");
         let thumb_bg = thumb.bg.or(thumb.fg)?;
-        let frame = self.app.ui.flushed_snapshot();
+        let frame = self.tui.ui.flushed_snapshot();
         track.clone().find_map(|row| {
             frame
                 .style_at(col, row)
@@ -250,8 +250,8 @@ impl TestApp {
         const HYDRATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
         let settle_deadline = std::time::Instant::now() + HYDRATION_SETTLE_TIMEOUT;
-        while self.app.conversation.transcript_hydration_is_pending()
-            || self.app.session_preview_is_pending()
+        while self.tui.conversation.transcript_hydration_is_pending()
+            || self.tui.session_preview_is_pending()
         {
             assert!(
                 std::time::Instant::now() < settle_deadline,
@@ -259,7 +259,7 @@ impl TestApp {
             );
             let idle_deadline = std::time::Instant::now() + HYDRATION_IDLE_TIMEOUT;
             let event = loop {
-                if let Some(event) = self.app.platform.try_recv_app_event() {
+                if let Some(event) = self.tui.platform.try_recv_app_event() {
                     break event;
                 }
                 assert!(
@@ -268,16 +268,16 @@ impl TestApp {
                 );
                 std::thread::sleep(super::POLL_INTERVAL);
             };
-            self.app.handle_app_event(event);
-            if self.app.frame_scheduler.has_pending() {
-                self.app.render_normal_to(out);
+            self.tui.handle_app_event(event);
+            if self.tui.frame_scheduler.has_pending() {
+                self.tui.render_normal_to(out);
             }
         }
     }
 
     /// The frame last presented to the terminal.
     pub(crate) fn presented_frame(&self) -> crate::smelt_edit::SnapshotFrame {
-        self.app.ui.flushed_snapshot()
+        self.tui.ui.flushed_snapshot()
     }
 
     /// Consume a scripted source through the event and compositor paths used
@@ -314,15 +314,15 @@ impl TestApp {
     /// drivers that own a real terminal and need to match the app's
     /// internal grid to the OS-reported size.
     pub fn set_terminal_size(&mut self, width: u16, height: u16) {
-        self.app.handle_resize(width, height);
+        self.tui.handle_resize(width, height);
     }
 
     pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {
-        self.app.render_normal_to(out);
+        self.tui.render_normal_to(out);
     }
 
     pub(crate) fn dispatch_engine_event(&mut self, event: EngineEvent) -> bool {
-        self.app.dispatch_engine_event(event)
+        self.tui.dispatch_engine_event(event)
     }
 
     pub(crate) fn dispatch_engine_event_in_render_loop_to<
@@ -334,7 +334,7 @@ impl TestApp {
         out: &mut W,
         on_transient_frame: F,
     ) -> bool {
-        self.app
+        self.tui
             .dispatch_engine_event_in_render_loop_to(event, out, |app| {
                 on_transient_frame(app.ui.flushed_snapshot());
             })
@@ -349,7 +349,7 @@ impl TestApp {
         out: &mut W,
         on_transient_frame: F,
     ) -> bool {
-        self.app
+        self.tui
             .dispatch_engine_output_in_render_loop_to(output, out, |app| {
                 on_transient_frame(app.ui.flushed_snapshot());
             })
@@ -363,7 +363,7 @@ impl TestApp {
         out: &mut W,
         mut on_transient_frame: F,
     ) -> crate::app::render_loop::EngineOutputDrainOutcome {
-        self.app
+        self.tui
             .drain_ready_engine_outputs_for_frame_to(out, |app| {
                 on_transient_frame(app.ui.flushed_snapshot());
             })
@@ -425,7 +425,7 @@ impl TestApp {
     pub(crate) fn try_receive_engine_output(
         &mut self,
     ) -> Result<engine::EngineOutput, tokio::sync::mpsc::error::TryRecvError> {
-        self.app.core.engine.try_recv_output()
+        self.tui.core.engine.try_recv_output()
     }
 
     /// Drain `UiCommand`s buffered on the engine channel into the action log.
@@ -472,39 +472,39 @@ impl TestApp {
 
     /// Snapshot the public-facing state at this instant.
     pub fn state(&self) -> AppSnapshot {
-        let cmdline_open = self.app.well_known.cmdline.is_some();
+        let cmdline_open = self.tui.well_known.cmdline.is_some();
         let cmdline_text = if cmdline_open {
-            cmdline_text(&self.app)
+            cmdline_text(&self.tui)
         } else {
             String::new()
         };
         let prompt_text = self
-            .app
+            .tui
             .ui
             .buf(crate::app::PROMPT_EDIT_BUF)
             .map(|b| b.source().to_string())
             .unwrap_or_default();
         let vim_mode = self
-            .app
+            .tui
             .ui
-            .win(self.app.well_known.prompt)
+            .win(self.tui.well_known.prompt)
             .map(|w| w.vim_mode())
             .unwrap_or(VimMode::Insert);
         AppSnapshot {
-            app_focus: self.app.app_focus,
+            app_focus: self.tui.app_focus,
             vim_mode,
             cmdline_open,
             cmdline_text,
-            focused_overlay: self.app.ui.focused_overlay(),
-            active_modal: self.app.ui.active_modal(),
-            picker_count: self.app.overlays.picker_count(),
+            focused_overlay: self.tui.ui.focused_overlay(),
+            active_modal: self.tui.ui.active_modal(),
+            picker_count: self.tui.overlays.picker_count(),
             prompt_text,
-            queued_inputs: self.app.prompt.queued_texts(),
-            agent_running: self.app.agent_is_running(),
-            term_focused: self.app.terminal_is_focused(),
+            queued_inputs: self.tui.prompt.queued_texts(),
+            agent_running: self.tui.agent_is_running(),
+            term_focused: self.tui.terminal_is_focused(),
             quit_requested: self.quit,
-            notification: self.app.notification_win(),
-            pending_quit: self.app.pending_quit,
+            notification: self.tui.notification_win(),
+            pending_quit: self.tui.pending_quit,
         }
     }
 }

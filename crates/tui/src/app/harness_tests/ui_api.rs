@@ -121,7 +121,7 @@ fn owned_layout_cleanup_preserves_existing_resources() {
     "#,
     )
     .expect("create unrelated resources");
-    let buffers = app.app.ui.iter_bufs().count();
+    let buffers = app.tui.ui.iter_bufs().count();
     app.exec_lua_entry(
         r#"
       local l = smelt.ui.layout
@@ -138,7 +138,7 @@ fn owned_layout_cleanup_preserves_existing_resources() {
     "#,
     )
     .expect("release only owned resources");
-    assert_eq!(app.app.ui.iter_bufs().count(), buffers);
+    assert_eq!(app.tui.ui.iter_bufs().count(), buffers);
 }
 
 #[test]
@@ -153,8 +153,8 @@ fn layout_owners_do_not_retain_existing_registry_capacity() {
     "#,
     )
     .expect("create unrelated buffers");
-    assert!(app.app.ui.iter_bufs().count() >= 4096);
-    app.app.lua.lua().gc_collect().unwrap();
+    assert!(app.tui.ui.iter_bufs().count() >= 4096);
+    app.tui.lua.lua().gc_collect().unwrap();
     let before = smelt_perf::alloc::snapshot().current_bytes;
     app.exec_lua_entry(
         r#"
@@ -164,7 +164,7 @@ fn layout_owners_do_not_retain_existing_registry_capacity() {
     "#,
     )
     .expect("build empty owned layouts");
-    app.app.lua.lua().gc_collect().unwrap();
+    app.tui.lua.lua().gc_collect().unwrap();
     let retained = smelt_perf::alloc::snapshot()
         .current_bytes
         .saturating_sub(before);
@@ -194,7 +194,7 @@ fn window_configuration_is_atomic_and_rejects_typos() {
         "#,
     ));
     assert_eq!(
-        app.app
+        app.tui
             .ui
             .win(crate::app::PROMPT_WIN)
             .unwrap()
@@ -221,7 +221,7 @@ fn window_options_are_read_once_before_host_mutation() {
     "#,
     )
     .expect("parse window options once");
-    assert!(!app.app.ui.win(crate::app::PROMPT_WIN).unwrap().wrap);
+    assert!(!app.tui.ui.win(crate::app::PROMPT_WIN).unwrap().wrap);
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn non_converging_layout_is_bounded_and_reported() {
     "#
         )
         .unwrap());
-    assert!(!app.app.lua.shared().layout_refresh_pending());
+    assert!(!app.tui.lua.shared().layout_refresh_pending());
 }
 
 #[test]
@@ -477,12 +477,12 @@ fn view_observer_layout_changes_wait_for_the_next_frame() {
     .expect("install layout observer");
     app.render_silent();
     let first = app.eval_lua::<u16>("return __view_height").unwrap();
-    assert_eq!(app.app.layout.transcript.height, first);
+    assert_eq!(app.tui.layout.transcript.height, first);
     assert_eq!(app.eval_lua::<u32>("return __view_calls").unwrap(), 1);
-    assert!(app.app.lua.shared().layout_refresh_pending());
+    assert!(app.tui.lua.shared().layout_refresh_pending());
     let frame = app.render_to_frame();
     assert!(frame.text().contains("observer row"), "{}", frame.text());
-    assert_eq!(app.app.layout.transcript.height, first - 1);
+    assert_eq!(app.tui.layout.transcript.height, first - 1);
     assert_eq!(app.eval_lua::<u32>("return __view_calls").unwrap(), 2);
 }
 
@@ -499,7 +499,7 @@ fn labels_and_sources_do_not_enable_paint_or_frame_tracking() {
     app.render_silent();
     assert!(app.paint_registry_probe().all_ids().next().is_none());
     assert!(!app.paint_registry_probe().tracks_pointer());
-    assert!(app.app.scheduled_frame_delay().is_none());
+    assert!(app.tui.scheduled_frame_delay().is_none());
 }
 
 #[test]
@@ -622,7 +622,7 @@ fn view_factories_own_nested_resources_and_registrations() {
 #[test]
 fn rejected_view_factory_preserves_active_view_and_cancels_work() {
     let mut app = TestApp::builder().build();
-    let renderers = app.app.lua.shared().win_renderers.lock().unwrap().len();
+    let renderers = app.tui.lua.shared().win_renderers.lock().unwrap().len();
     app.exec_lua_entry(r#"
       local l = smelt.ui.layout
       smelt.statusline:set_view(function()
@@ -643,7 +643,7 @@ fn rejected_view_factory_preserves_active_view_and_cancels_work() {
       assert(smelt.prompt.win:buf() ~= nil)
     "#).expect("reject construction atomically");
     assert_eq!(
-        app.app.lua.shared().win_renderers.lock().unwrap().len(),
+        app.tui.lua.shared().win_renderers.lock().unwrap().len(),
         renderers
     );
     assert!(app.render_to_frame().text().contains("active view"));
@@ -669,18 +669,18 @@ fn overlay_reservations_combine_geometry_with_numeric_minimum() {
       assert(not pcall(smelt.overlay.new, { anchor = 'center', reserve = true, layout = l.vbox({}) }))
     "#).expect("mount overlapping reservations");
     app.render_silent();
-    assert_eq!(app.app.transcript_top_inset(), 4);
+    assert_eq!(app.tui.transcript_top_inset(), 4);
     assert!(app.run_lua("__reserve_b:close()"));
-    assert_eq!(app.app.transcript_top_inset(), 2);
+    assert_eq!(app.tui.transcript_top_inset(), 2);
     assert!(app.run_lua("__reserve_a:close(); smelt.transcript.top_inset(0)"));
-    assert_eq!(app.app.transcript_top_inset(), 0);
+    assert_eq!(app.tui.transcript_top_inset(), 0);
 }
 
 #[test]
 fn closed_view_renderers_do_not_accumulate_across_frames() {
     let mut app = TestApp::builder().build();
     app.render_silent();
-    let before = app.app.lua.shared().win_renderers.lock().unwrap().len();
+    let before = app.tui.lua.shared().win_renderers.lock().unwrap().len();
     for _ in 0..16 {
         app.exec_lua_entry(
             r#"
@@ -697,7 +697,7 @@ fn closed_view_renderers_do_not_accumulate_across_frames() {
         app.render_silent();
     }
     assert_eq!(
-        app.app.lua.shared().win_renderers.lock().unwrap().len(),
+        app.tui.lua.shared().win_renderers.lock().unwrap().len(),
         before
     );
 }
@@ -817,7 +817,7 @@ fn replacement_views_can_reuse_their_retained_split() {
 fn rejected_view_factory_removes_decorations_on_external_windows() {
     let mut app = TestApp::builder().build();
     app.render_silent();
-    let trees = app.app.ui.layout_trees().count();
+    let trees = app.tui.ui.layout_trees().count();
     app.exec_lua_entry(
         r#"
       local ok = pcall(function()
@@ -831,7 +831,7 @@ fn rejected_view_factory_removes_decorations_on_external_windows() {
     "#,
     )
     .expect("reject view after attaching decoration");
-    assert_eq!(app.app.ui.layout_trees().count(), trees);
+    assert_eq!(app.tui.ui.layout_trees().count(), trees);
     app.exec_lua_entry(
         r#"
       smelt.statusline:set_view(function()
@@ -843,9 +843,9 @@ fn rejected_view_factory_removes_decorations_on_external_windows() {
     "#,
     )
     .expect("mount view with scoped decoration");
-    assert_eq!(app.app.ui.layout_trees().count(), trees + 1);
+    assert_eq!(app.tui.ui.layout_trees().count(), trees + 1);
     assert!(app.run_lua("smelt.statusline:set_view(nil)"));
-    assert_eq!(app.app.ui.layout_trees().count(), trees);
+    assert_eq!(app.tui.ui.layout_trees().count(), trees);
 }
 
 #[test]
@@ -870,7 +870,7 @@ fn view_factories_cannot_open_dialogs() {
     "#,
     )
     .expect("keep dialog hosting outside view construction");
-    assert!(app.app.ui.active_docked_surface().is_none());
+    assert!(app.tui.ui.active_docked_surface().is_none());
 }
 
 #[test]

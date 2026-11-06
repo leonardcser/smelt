@@ -15,21 +15,21 @@ impl TestApp {
     /// reach by submitting a prompt, without going through the full
     /// HTTP/auth-bearing `begin_agent_turn` flow.
     pub fn start_turn(&mut self, turn_id: u64) {
-        if self.app.conversation.is_active() {
+        if self.tui.conversation.is_active() {
             return;
         }
-        self.app.conversation.begin_turn();
-        self.app
+        self.tui.conversation.begin_turn();
+        self.tui
             .core
             .session_control
-            .begin_turn(&self.app.conversation.session().id, turn_id);
-        self.app
+            .begin_turn(&self.tui.conversation.session().id, turn_id);
+        self.tui
             .conversation
             .set_active(Some(crate::app::TurnState {
                 turn_id,
                 pending: Vec::new(),
-                permissions: self.app.core.permissions.snapshot(),
-                submitted_history_idx: self.app.session_history_len().saturating_sub(1),
+                permissions: self.tui.core.permissions.snapshot(),
+                submitted_history_idx: self.tui.session_history_len().saturating_sub(1),
                 rewind_history_idx: None,
                 assistant_output_started: false,
                 _perf: smelt_perf::perf::begin("test_harness:turn"),
@@ -38,23 +38,23 @@ impl TestApp {
         // and publishes `turn_start` before yielding an active turn. The
         // harness short-circuits the HTTP-bearing dispatch path; mirror those
         // side effects so plugins and invariants see the same lifecycle.
-        self.app
+        self.tui
             .working
             .begin(smelt_core::working::TurnPhase::Working);
-        self.app.core.signals.emit_dyn(
+        self.tui.core.signals.emit_dyn(
             "turn_start",
             std::rc::Rc::new(smelt_core::signals::EventStub),
         );
-        self.app.pump_lua();
+        self.tui.pump_lua();
     }
 
     pub fn start_submitted_turn(&mut self, text: &str) {
         self.ensure_writer_ready();
-        let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
+        let sent_at_ms = engine::clock::unix_time_ms(self.tui.core.clock.as_ref());
         let turn = self
-            .app
+            .tui
             .begin_agent_turn(text, protocol::Content::text(text), sent_at_ms);
-        self.app.conversation.set_active(turn);
+        self.tui.conversation.set_active(turn);
         self.wait_for_turn_dispatch();
         assert!(self.agent_running(), "test app has a usable model");
     }
@@ -81,10 +81,10 @@ impl TestApp {
     /// Settle a selected stored rewind without making key dispatch wait for it.
     pub fn wait_for_rewind(&mut self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while self.app.pending_rewind.is_some() {
-            if let Some(event) = self.app.platform.try_recv_app_event() {
-                self.app.handle_app_event(event);
-                self.app.pump_lua();
+        while self.tui.pending_rewind.is_some() {
+            if let Some(event) = self.tui.platform.try_recv_app_event() {
+                self.tui.handle_app_event(event);
+                self.tui.pump_lua();
             }
             assert!(std::time::Instant::now() < deadline, "rewind timed out");
             std::thread::sleep(super::POLL_INTERVAL);
@@ -93,15 +93,15 @@ impl TestApp {
 
     pub(crate) fn wait_for_turn_dispatch_until(&mut self, deadline: std::time::Instant) {
         loop {
-            self.app.drain_persist_reports();
-            if let Some(event) = self.app.platform.try_recv_app_event() {
-                self.app.handle_app_event(event);
+            self.tui.drain_persist_reports();
+            if let Some(event) = self.tui.platform.try_recv_app_event() {
+                self.tui.handle_app_event(event);
             }
-            self.app.pump_lua();
-            if self.app.frame_scheduler.has_pending() {
-                self.app.render_normal_to(&mut std::io::sink());
+            self.tui.pump_lua();
+            if self.tui.frame_scheduler.has_pending() {
+                self.tui.render_normal_to(&mut std::io::sink());
             }
-            if !self.app.turn_submission_is_pending() {
+            if !self.tui.turn_submission_is_pending() {
                 break;
             }
             assert!(
@@ -127,13 +127,13 @@ impl TestApp {
 
     /// Whether an agent turn is currently active.
     pub fn agent_running(&self) -> bool {
-        self.app.agent_is_running()
+        self.tui.agent_is_running()
     }
 
     /// Snapshot the pending invocation identities on the active turn. Returns
     /// an empty vector when no turn is active.
     pub fn pending_tool_invocation_ids(&self) -> Vec<protocol::InvocationId> {
-        self.app
+        self.tui
             .conversation
             .active()
             .map(|turn| turn.pending.iter().map(|tool| tool.invocation_id).collect())
@@ -144,7 +144,7 @@ impl TestApp {
     /// uncommitted content. Used by post-event invariants that assert a
     /// specific event flushed the relevant buffer.
     pub fn streaming_state(&self) -> StreamingState {
-        let (text, thinking, exec) = self.app.conversation.streaming_state();
+        let (text, thinking, exec) = self.tui.conversation.streaming_state();
         StreamingState {
             text,
             thinking,
@@ -155,23 +155,34 @@ impl TestApp {
     /// User-facing session history length. Used by post-event invariants that
     /// assert compaction or `set_history` replaced the conversation.
     pub fn session_message_count(&self) -> usize {
-        self.app.session_history_len()
+        self.tui.session_history_len()
     }
 
     /// Canonical session history as seen by the TUI. Focused engine-event and
     /// persistence state machines compare this against independent suffix and
     /// append models after every transition.
     pub fn session_history(&self) -> Vec<protocol::HistoryItem> {
-        let conversation = &self.app.conversation;
+        let conversation = &self.tui.conversation;
         conversation
             .history_range(0..conversation.history_len())
             .expect("read session history")
     }
 
+    /// Id of the live session.
+    pub fn session_id(&self) -> String {
+        self.tui.conversation.session().id.clone()
+    }
+
+    /// Fresh, unsaved session bound to this app's process id and working
+    /// directory.
+    pub fn new_session(&self) -> smelt_core::session::Session {
+        smelt_core::session::Session::new(self.tui.core.env.pid(), self.tui.core.env.cwd())
+    }
+
     /// Read-only copy of current session state, with its whole history, for
     /// integration assertions.
     pub fn session_snapshot(&self) -> smelt_core::session::Session {
-        let mut session = self.app.conversation.session().clone();
+        let mut session = self.tui.conversation.session().clone();
         session.history = self.session_history();
         session
     }
@@ -180,34 +191,34 @@ impl TestApp {
     /// synthesize engine events whose dispatch is gated on a matching id
     /// (e.g. `TurnComplete`, `Messages`).
     pub fn current_turn_id(&self) -> Option<u64> {
-        self.app.active_agent_turn_id()
+        self.tui.active_agent_turn_id()
     }
 
     /// Number of messages already promoted into the active turn's request
     /// queue. Used by `Steered` invariants that assert ack drain semantics.
     pub fn queued_message_count(&self) -> usize {
-        self.app.prompt.queued_request_len()
+        self.tui.prompt.queued_request_len()
     }
 
     /// The id the app allocates to its next turn.
     pub fn next_turn_id(&self) -> u64 {
-        self.app.conversation.next_turn_id()
+        self.tui.conversation.next_turn_id()
     }
 
     /// Whether the conversation is paused after an interrupted or failed turn.
     pub fn turn_is_paused(&self) -> bool {
-        self.app.conversation.turn_pause().is_some()
+        self.tui.conversation.turn_pause().is_some()
     }
 
     /// Whether no input of any stage waits behind the running work.
     pub fn queue_is_empty(&self) -> bool {
-        self.app.prompt.queue_is_empty()
+        self.tui.prompt.queue_is_empty()
     }
 
     /// Whether completing the active turn would immediately start a queued
     /// input with non-empty display text.
     pub fn next_queued_input_starts_turn(&self) -> bool {
-        self.app
+        self.tui
             .prompt
             .queued_texts()
             .first()
@@ -233,10 +244,10 @@ impl TestApp {
         if !self.next_queued_input_starts_turn() && !pending_follow_up {
             return false;
         }
-        let context = self.app.current_context_note_text();
+        let context = self.tui.current_context_note_text();
         if let Some(first_live_index) = self.checkpoint_first_live_index() {
             return !self
-                .app
+                .tui
                 .conversation
                 .session()
                 .history
@@ -261,19 +272,19 @@ impl TestApp {
         if text.is_empty() {
             return;
         }
-        self.app
+        self.tui
             .prompt
             .try_queue_turn(crate::app::QueuedInput::request_from_text(
                 text.clone(),
                 text,
-                engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
+                engine::clock::unix_time_ms(self.tui.core.clock.as_ref()),
             ));
     }
 
     /// Side-channel: seed prompt history without submitting through the engine.
     /// Storybook uses this to open reverse-history UI deterministically.
     pub fn push_history_entry(&mut self, text: String) {
-        self.app.prompt.push_history(text);
+        self.tui.prompt.push_history(text);
     }
 
     /// Snapshot of the working-status bar's live state. Used by fuzz
@@ -281,28 +292,28 @@ impl TestApp {
     /// `animating == false`, `Retrying` event leaves `animating == true`).
     pub fn working_state(&self) -> WorkingSnapshot {
         WorkingSnapshot {
-            animating: self.app.working.is_animating(),
-            busy: self.app.busy_stack.is_busy(),
+            animating: self.tui.working.is_animating(),
+            busy: self.tui.busy_stack.is_busy(),
         }
     }
 
     /// Accumulated session cost in USD. Used by `TokenUsage` invariants
     /// asserting cost is monotonically non-decreasing.
     pub fn session_cost_usd(&self) -> f64 {
-        self.app.conversation.session().session_cost_usd
+        self.tui.conversation.session().session_cost_usd
     }
 
     /// Current authoritative context-token snapshot for the live history, when
     /// a non-background usage report has set one.
     pub fn context_tokens(&self) -> Option<u32> {
-        self.app.conversation.session().current_context_tokens()
+        self.tui.conversation.session().current_context_tokens()
     }
 
     /// Active context checkpoint prefix length, if compaction installed one.
     /// `TuiApp::set_history` preserves this prefix and merges incoming model
     /// history after it.
     pub fn checkpoint_first_live_index(&self) -> Option<usize> {
-        self.app
+        self.tui
             .conversation
             .session()
             .checkpoint
@@ -313,7 +324,7 @@ impl TestApp {
     /// Number of deferred model-history notes that will be committed when the
     /// active turn finishes successfully.
     pub fn pending_history_append_count(&self) -> usize {
-        self.app.conversation.pending_history_append_count()
+        self.tui.conversation.pending_history_append_count()
     }
 
     /// Whether an unconsumed deferred note will start a follow-up turn after
@@ -332,7 +343,7 @@ impl TestApp {
 
     /// Session history index of the item the active turn submitted.
     pub fn submitted_history_idx(&self) -> Option<usize> {
-        self.app
+        self.tui
             .conversation
             .active()
             .map(|turn| turn.submitted_history_idx)
@@ -340,19 +351,19 @@ impl TestApp {
 
     fn pending_follow_up_appends(&self, skip_submitted: bool) -> bool {
         let submitted = self
-            .app
+            .tui
             .conversation
             .active()
             .filter(|_| skip_submitted)
             .and_then(|turn| {
                 let idx = turn.submitted_history_idx;
-                self.app
+                self.tui
                     .session_history_range(idx..idx + 1)
                     .ok()?
                     .into_iter()
                     .next()
             });
-        self.app
+        self.tui
             .conversation
             .pending_history_appends()
             .iter()
@@ -367,35 +378,35 @@ impl TestApp {
     /// Set the configured context window size used by the prompt bar's
     /// percentage display.
     pub fn set_context_window(&mut self, context_window: Option<u32>) {
-        self.app.core.config.context_window = context_window;
+        self.tui.core.config.context_window = context_window;
     }
 
     /// Restrict tool permissions to the app's injected workspace.
     pub fn restrict_permissions_to_cwd(&mut self) {
-        let mut permissions = self.app.core.permissions.snapshot().as_ref().clone();
-        permissions.set_workspace(std::path::PathBuf::from(self.app.workspace.cwd()));
+        let mut permissions = self.tui.core.permissions.snapshot().as_ref().clone();
+        permissions.set_workspace(std::path::PathBuf::from(self.tui.workspace.cwd()));
         permissions.set_restrict_to_workspace(true);
-        self.app.core.permissions.replace(permissions);
+        self.tui.core.permissions.replace(permissions);
     }
 
     /// Allow tool paths outside the injected workspace in focused harness flows.
     pub fn allow_permissions_outside_cwd(&mut self) {
-        let mut permissions = self.app.core.permissions.snapshot().as_ref().clone();
+        let mut permissions = self.tui.core.permissions.snapshot().as_ref().clone();
         permissions.set_restrict_to_workspace(false);
-        self.app.core.permissions.replace(permissions);
+        self.tui.core.permissions.replace(permissions);
     }
 
     pub(crate) fn replace_permissions_for_harness(
         &mut self,
         permissions: smelt_core::permissions::Permissions,
     ) {
-        self.app.core.permissions.replace(permissions);
+        self.tui.core.permissions.replace(permissions);
     }
 
     /// Force one tool through the confirmation path for deterministic harness flows.
     pub fn require_tool_confirmation(&mut self, tool: &str, patterns: &[String]) {
         let permissions =
-            self.app
+            self.tui
                 .core
                 .permissions
                 .snapshot()
@@ -414,15 +425,15 @@ impl TestApp {
                     .into_iter()
                     .collect(),
                 });
-        self.app.core.permissions.replace(permissions);
-        self.app
+        self.tui.core.permissions.replace(permissions);
+        self.tui
             .conversation
-            .refresh_active_permissions(self.app.core.permissions.snapshot());
+            .refresh_active_permissions(self.tui.core.permissions.snapshot());
     }
 
     /// Add one session-scoped blanket tool approval.
     pub fn approve_tool_for_session(&self, tool: &str) {
-        self.app
+        self.tui
             .core
             .permissions
             .approvals()
@@ -433,19 +444,19 @@ impl TestApp {
 
     /// Replace model-picker candidates without selecting a model.
     pub fn set_available_models(&mut self, models: Vec<smelt_core::config::ResolvedModel>) {
-        self.app.core.config.available_models = models;
+        self.tui.core.config.available_models = models;
     }
 
     /// Install and select one synthetic model for model-backed scenarios.
     pub fn use_model(&mut self, model: smelt_core::config::ResolvedModel) {
-        self.app.core.config.available_models = vec![model.clone()];
-        self.app.core.config.set_model_selection(
+        self.tui.core.config.available_models = vec![model.clone()];
+        self.tui.core.config.set_model_selection(
             smelt_core::ModelSelectionState {
                 requested_key: Some(model.key.clone()),
                 requested_by: smelt_core::ModelSelectionSource::CatalogDefault,
                 active: Some(smelt_core::ActiveModel::from_resolved(&model)),
             },
-            &self.app.core.startup_overrides,
+            &self.tui.core.startup_overrides,
         );
     }
 
@@ -453,60 +464,60 @@ impl TestApp {
         &mut self,
         selection: smelt_core::ModelSelectionState,
     ) {
-        self.app
+        self.tui
             .core
             .config
-            .set_model_selection(selection, &self.app.core.startup_overrides);
+            .set_model_selection(selection, &self.tui.core.startup_overrides);
     }
 
     pub(crate) fn replace_active_model_for_harness(&mut self, model: smelt_core::ActiveModel) {
-        let mut selection = self.app.core.config.model_selection.clone();
+        let mut selection = self.tui.core.config.model_selection.clone();
         selection.active = Some(model);
-        self.app
+        self.tui
             .core
             .config
-            .set_model_selection(selection, &self.app.core.startup_overrides);
+            .set_model_selection(selection, &self.tui.core.startup_overrides);
     }
 
     pub(crate) fn set_request_audit_for_harness(&mut self, mode: protocol::RequestAuditMode) {
-        self.app.core.config.request_audit = mode;
+        self.tui.core.config.request_audit = mode;
     }
 
     pub(crate) fn set_configured_agent_mode_for_harness(&mut self, mode: protocol::AgentMode) {
-        self.app.core.config.mode = mode;
+        self.tui.core.config.mode = mode;
     }
 
     pub(crate) fn install_skill_loader_for_harness(
         &mut self,
         loader: std::sync::Arc<engine::SkillLoader>,
     ) {
-        self.app.core.skills = Some(loader);
+        self.tui.core.skills = Some(loader);
     }
 
     /// Number of transcript blocks. Used by event invariants that assert
     /// a block was pushed.
     pub fn transcript_block_count(&self) -> usize {
-        self.app.conversation.transcript().history().len()
+        self.tui.conversation.transcript().history().len()
     }
 
     /// Number of confirm dialogs currently registered with the core. Used
     /// by `RequestPermission` invariants to assert the dispatch either
     /// auto-approved (no confirm registered) or registered exactly one.
     pub fn pending_confirm_count(&self) -> usize {
-        self.app.core.confirms.len()
+        self.tui.core.confirms.len()
     }
 
     /// Lowest-numbered pending confirm handle. Used by the resolve
     /// side-channel to pick a victim deterministically.
     pub fn first_pending_confirm(&self) -> Option<u64> {
-        self.app.core.confirms.first_handle()
+        self.tui.core.confirms.first_handle()
     }
 
     /// Number of dialogs deferred because a recent keystroke gated them.
     /// They get replayed on the next idle tick. Used to confirm the
     /// `should_queue` branch in `dispatch_control` was actually hit.
     pub fn pending_deferred_dialog_count(&self) -> usize {
-        self.app.overlays.deferred_dialog_count()
+        self.tui.overlays.deferred_dialog_count()
     }
 
     /// Slice of `Action`s appended since `idx`. PostChecks use this to
@@ -528,7 +539,7 @@ impl TestApp {
         let Some(handle_id) = self.first_pending_confirm() else {
             return false;
         };
-        let Some(entry) = self.app.core.confirms.take(handle_id) else {
+        let Some(entry) = self.tui.core.confirms.take(handle_id) else {
             return false;
         };
         let req = entry.req;
@@ -538,14 +549,14 @@ impl TestApp {
             smelt_core::transcript_model::ConfirmChoice::No
         };
         {
-            let cancel = self.app.resolve_confirm(
+            let cancel = self.tui.resolve_confirm(
                 (choice, message),
                 req.invocation_id,
                 req.request_id,
                 &req.tool_name,
             );
             if cancel {
-                self.app.discard_turn(crate::app::TurnEnd::Complete);
+                self.tui.discard_turn(crate::app::TurnEnd::Complete);
             }
         }
         self.drain_cmd();
@@ -571,7 +582,7 @@ impl TestApp {
             return false;
         };
         let Some(req) = self
-            .app
+            .tui
             .core
             .confirms
             .get(handle_id)
@@ -587,11 +598,11 @@ impl TestApp {
         else {
             return false;
         };
-        let Some(entry) = self.app.core.confirms.take(handle_id) else {
+        let Some(entry) = self.tui.core.confirms.take(handle_id) else {
             return false;
         };
         let req = entry.req;
-        let cancel = self.app.resolve_confirm(
+        let cancel = self.tui.resolve_confirm(
             (
                 smelt_core::transcript_model::ConfirmChoice::Grant(option),
                 None,
@@ -601,7 +612,7 @@ impl TestApp {
             &req.tool_name,
         );
         if cancel {
-            self.app.discard_turn(crate::app::TurnEnd::Complete);
+            self.tui.discard_turn(crate::app::TurnEnd::Complete);
         }
         self.drain_cmd();
         true
@@ -609,7 +620,7 @@ impl TestApp {
 
     /// Whether the engine ask with this id still has a response callback.
     pub fn ask_is_pending(&self, id: u64) -> bool {
-        let shared = self.app.lua.shared().core_arc();
+        let shared = self.tui.lua.shared().core_arc();
         shared
             .ask_callbacks
             .lock()
@@ -620,7 +631,7 @@ impl TestApp {
     /// Stories that drive `/btw` or other ask flows use this to
     /// pair their synthesised `EngineAskResponse` to the right id.
     pub fn pending_ask_id(&self) -> Option<u64> {
-        let shared = self.app.lua.shared().core_arc();
+        let shared = self.tui.lua.shared().core_arc();
         let cbs = shared.ask_callbacks.lock().ok()?;
         cbs.keys().min().copied()
     }
@@ -630,19 +641,19 @@ impl TestApp {
     /// match this value into catalog metadata so the resume dialog's
     /// workspace filter keeps the seeded entries.
     pub fn cwd_str(&self) -> &str {
-        self.app.workspace.cwd()
+        self.tui.workspace.cwd()
     }
 
     pub fn runtime_home(&self) -> &std::path::Path {
-        self.app.core.env.home()
+        self.tui.core.env.home()
     }
 
     pub fn runtime_dir(&self) -> &std::path::Path {
-        self.app.core.env.runtime_dir()
+        self.tui.core.env.runtime_dir()
     }
 
     pub fn runtime_cache_root(&self) -> std::path::PathBuf {
-        self.app.core.env.cache_dir().clone()
+        self.tui.core.env.cache_dir().clone()
     }
 
     pub fn shell_effect_paths(&self, command: &str) -> Vec<std::path::PathBuf> {
@@ -650,7 +661,7 @@ impl TestApp {
             "command".to_string(),
             serde_json::Value::String(command.to_string()),
         )]);
-        self.app
+        self.tui
             .core
             .permissions
             .snapshot()
@@ -665,27 +676,27 @@ impl TestApp {
     }
 
     pub fn publish_public_status(&mut self) {
-        self.app.publish_public_status();
+        self.tui.publish_public_status();
     }
 
     pub fn public_status_path(&self) -> Option<&std::path::Path> {
-        self.app.platform.public_status_path()
+        self.tui.platform.public_status_path()
     }
 
     pub fn session_storage_root(&self) -> &std::path::Path {
-        self.app.core.sessions.state_root()
+        self.tui.core.sessions.state_root()
     }
 
     /// Resume a canonical session through the app's normal storage path.
     pub fn resume_session(&mut self, id: &str) -> bool {
-        let loaded = self.app.load_session_by_id(id);
+        let loaded = self.tui.load_session_by_id(id);
         self.wait_for_session_lifecycle();
         loaded
     }
 
     pub(crate) fn ensure_writer_ready(&mut self) {
-        if !self.app.conversation.has_persistence() {
-            self.app
+        if !self.tui.conversation.has_persistence() {
+            self.tui
                 .conversation
                 .claim_writer_access()
                 .expect("start fixture writer");
@@ -695,8 +706,8 @@ impl TestApp {
 
     pub(super) fn wait_for_writer_startup(&mut self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.app.conversation.writer_is_opening() {
-            self.app.drain_persist_reports();
+        while self.tui.conversation.writer_is_opening() {
+            self.tui.drain_persist_reports();
             assert!(
                 std::time::Instant::now() < deadline,
                 "writer startup timed out"
@@ -709,10 +720,10 @@ impl TestApp {
         let deadline = std::time::Instant::now()
             + crate::persist::DEFAULT_PERSISTENCE_DEADLINE
             + std::time::Duration::from_secs(5);
-        while self.app.session_load.is_pending() || self.app.conversation.writer_is_opening() {
-            self.app.drain_persist_reports();
-            if let Some(event) = self.app.platform.try_recv_app_event() {
-                self.app.handle_app_event(event);
+        while self.tui.session_load.is_pending() || self.tui.conversation.writer_is_opening() {
+            self.tui.drain_persist_reports();
+            if let Some(event) = self.tui.platform.try_recv_app_event() {
+                self.tui.handle_app_event(event);
             } else {
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -724,12 +735,12 @@ impl TestApp {
     }
 
     pub fn mark_project_trusted(&self, cwd: &std::path::Path) -> Result<String, String> {
-        self.app.lua.mark_project_trusted(cwd)
+        self.tui.lua.mark_project_trusted(cwd)
     }
 
     /// Prompt cursor byte offset in source space.
     pub fn prompt_cpos(&self) -> usize {
-        self.app
+        self.tui
             .ui
             .win(crate::app::PROMPT_WIN)
             .map(|w| w.cpos())
@@ -737,11 +748,11 @@ impl TestApp {
     }
 
     pub fn prompt_endpoint(&self) -> usize {
-        self.app.prompt_win().effective_endpoint()
+        self.tui.prompt_win().effective_endpoint()
     }
 
     pub fn prompt_source(&self) -> String {
-        self.app
+        self.tui
             .ui
             .buf(crate::app::PROMPT_EDIT_BUF)
             .map(|buf| buf.source().to_string())
@@ -749,7 +760,7 @@ impl TestApp {
     }
 
     pub fn prompt_attachment_count(&self) -> usize {
-        self.app
+        self.tui
             .ui
             .buf(crate::app::PROMPT_EDIT_BUF)
             .map_or(0, |buf| buf.attachment_ids.len())
@@ -761,19 +772,19 @@ impl TestApp {
         instructions: Option<String>,
         skill_section: Option<String>,
     ) {
-        self.app.prompt_inputs.system_prompt_override = system_prompt_override;
-        self.app.prompt_inputs.instructions = instructions;
-        self.app.prompt_inputs.skill_section = skill_section;
+        self.tui.prompt_inputs.system_prompt_override = system_prompt_override;
+        self.tui.prompt_inputs.instructions = instructions;
+        self.tui.prompt_inputs.skill_section = skill_section;
     }
 
     pub(crate) fn task_label(&self) -> Option<&str> {
-        self.app.task_label.as_deref()
+        self.tui.task_label.as_deref()
     }
 
     /// Snapshot one well-known window without exposing the mutable UI tree.
     pub fn window_snapshot(&self, id: WinId) -> Option<WindowSnapshot> {
-        let win = self.app.ui.win(id)?;
-        let source_len = self.app.ui.buf(win.buf).map_or(0, |buf| buf.source().len());
+        let win = self.tui.ui.win(id)?;
+        let source_len = self.tui.ui.buf(win.buf).map_or(0, |buf| buf.source().len());
         Some(WindowSnapshot {
             cpos: win.cpos(),
             source_len,
@@ -788,17 +799,17 @@ impl TestApp {
         &self,
         id: crate::smelt_edit::PaintId,
     ) -> Option<crate::smelt_edit::Rect> {
-        self.app.ui.paint_rect(id)
+        self.tui.ui.paint_rect(id)
     }
 
     pub(crate) fn split_rect(&self, win: WinId) -> Option<crate::smelt_edit::Rect> {
-        self.app.ui.split_rect(win)
+        self.tui.ui.split_rect(win)
     }
 
     /// Effective prompt selection after Vim visual-mode normalization.
     pub fn prompt_selection_range(&self) -> Option<(usize, usize)> {
-        let buf = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF)?;
-        let win = self.app.ui.win(crate::app::PROMPT_WIN)?;
+        let buf = self.tui.ui.buf(crate::app::PROMPT_EDIT_BUF)?;
+        let win = self.tui.ui.win(crate::app::PROMPT_WIN)?;
         let endpoint = win.effective_endpoint();
         if win.vim_enabled() {
             if let Some(range) = crate::smelt_edit::vim::visual_range(
@@ -818,7 +829,7 @@ impl TestApp {
         if self.prompt_text_input_ready() {
             return true;
         }
-        if selection_range.is_none() || self.app.ui.any_drag_active() {
+        if selection_range.is_none() || self.tui.ui.any_drag_active() {
             return false;
         }
         let state = self.state();
@@ -843,7 +854,7 @@ impl TestApp {
         {
             return false;
         }
-        let Some(win) = self.app.ui.win(crate::app::PROMPT_WIN) else {
+        let Some(win) = self.tui.ui.win(crate::app::PROMPT_WIN) else {
             return false;
         };
         if win.vim_enabled() && !matches!(win.vim_mode(), VimMode::Insert) {
@@ -851,12 +862,12 @@ impl TestApp {
         }
         if win.selection_anchor().is_some()
             || win.effective_endpoint() != win.cpos()
-            || (!allow_pending_chord && self.app.timers.pending_chord.is_some())
-            || self.app.timers.pending_pane_chord.is_some()
+            || (!allow_pending_chord && self.tui.timers.pending_chord.is_some())
+            || self.tui.timers.pending_pane_chord.is_some()
         {
             return false;
         }
-        !self.app.ui.any_drag_active()
+        !self.tui.ui.any_drag_active()
     }
 
     /// Whether plain text input should edit the prompt. Unlike
@@ -881,68 +892,75 @@ impl TestApp {
     pub fn prompt_plain_insert_ready(&self) -> bool {
         self.prompt_input_ready_base(false)
             && !self
-                .app
+                .tui
                 .prompt
                 .has_placeholder_options(crate::app::PROMPT_WIN)
     }
 
     pub fn prompt_plain_char_has_lua_keymap(&self, ch: char) -> bool {
         let chord = ch.to_string();
-        let mode = self.app.current_vim_mode_label();
-        self.app.lua.chord_has_binding(&chord, mode.as_deref())
+        let mode = self.tui.current_vim_mode_label();
+        self.tui.lua.chord_has_binding(&chord, mode.as_deref())
     }
 
     pub fn model_history(&self) -> Vec<protocol::HistoryItem> {
-        self.app.model_history()
+        self.tui.model_history()
     }
 
     pub fn assemble_system_prompt(&self) -> String {
-        self.app.assemble_system_prompt()
+        self.tui.assemble_system_prompt()
     }
 
     pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) {
-        self.app.discard_turn(end);
+        self.tui.discard_turn(end);
     }
 
     pub fn save_session_and_flush(&mut self) {
         // Harness callers immediately inspect or reopen the exact generation.
         // Use one completion barrier that tolerates a contended test runner
         // instead of proceeding after the production persistence deadline.
-        self.app
+        self.tui
             .save_session_and_flush_with_timeout(std::time::Duration::from_secs(120));
     }
 
     pub(crate) fn finalize_graceful_shutdown(&mut self) -> Result<(), String> {
-        self.app.finalize_graceful_shutdown()
+        self.tui.finalize_graceful_shutdown()
     }
 
     pub(crate) fn save_session(&mut self) {
-        self.app.save_session();
+        self.tui.save_session();
     }
 
     pub(crate) fn set_transcript_store_for_harness(
         &mut self,
         store: Option<smelt_core::session::SessionStoreAddress>,
     ) {
-        self.app
+        self.tui
             .conversation
             .set_transcript_store_for_harness(store);
     }
 
+    /// Stalls the persistence actor until the returned sender is dropped or
+    /// sent to.
+    #[cfg(test)]
+    pub(crate) fn pause_persistence(&self) -> std::sync::mpsc::Sender<()> {
+        self.tui.conversation.pause_persistence()
+    }
+
     pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistenceFlushOutcome {
-        self.app.flush_persist()
+        self.tui.flush_persist()
     }
 
     pub(crate) fn session_document_has_unflushed_work(&self) -> bool {
-        self.app.session_document_has_unflushed_work()
+        self.tui.session_document_has_unflushed_work()
     }
 
     pub(crate) fn session_is_read_only(&self) -> bool {
-        self.app.session_is_read_only()
+        self.tui.session_is_read_only()
     }
 
     pub(crate) fn load_session(&mut self, session: smelt_core::session::Session) {
-        self.app.load_session(session);
+        self.tui.load_session(session);
         self.wait_for_session_lifecycle();
     }
 
@@ -950,7 +968,7 @@ impl TestApp {
         &mut self,
         document: crate::app::session_document::StoreBackedSessionDocument,
     ) {
-        self.app.load_store_backed_session(document);
+        self.tui.load_store_backed_session(document);
         self.wait_for_session_lifecycle();
     }
 
@@ -959,23 +977,23 @@ impl TestApp {
     }
 
     pub(crate) fn fork_session(&mut self) {
-        self.app.fork_session();
+        self.tui.fork_session();
         self.wait_for_session_lifecycle();
     }
 
     pub(crate) fn reset_session(&mut self) {
-        self.app.reset_session();
+        self.tui.reset_session();
     }
 
     pub(crate) fn restore_screen(&mut self) {
-        self.app.restore_screen();
+        self.tui.restore_screen();
     }
 
     pub(crate) fn set_settings_for_harness(
         &mut self,
         settings: smelt_core::config::ResolvedSettings,
     ) {
-        self.app.set_settings_for_harness(settings);
+        self.tui.set_settings_for_harness(settings);
     }
 
     pub(crate) fn set_startup_setting_override_for_harness(
@@ -983,7 +1001,7 @@ impl TestApp {
         key: String,
         value: smelt_core::config::SettingValue,
     ) {
-        self.app.core.startup_overrides.settings.insert(key, value);
+        self.tui.core.startup_overrides.settings.insert(key, value);
     }
 
     pub(crate) fn commit_request_history_item(
@@ -991,18 +1009,18 @@ impl TestApp {
         item: protocol::HistoryItem,
         block: Option<smelt_core::transcript_model::Block>,
     ) -> protocol::ModelHistorySource {
-        self.app.commit_request_history_item(item, block)
+        self.tui.commit_request_history_item(item, block)
     }
 
     pub(crate) fn history_note_to_block(
         &self,
         note: &protocol::HistoryNote,
     ) -> Option<smelt_core::transcript_model::Block> {
-        crate::app::history::history_note_to_block(&self.app.lua, note)
+        crate::app::history::history_note_to_block(&self.tui.lua, note)
     }
 
     pub(crate) fn session_append_history(&mut self, item: protocol::HistoryItem) {
-        self.app.session_append_history(item);
+        self.tui.session_append_history(item);
     }
 
     pub fn handle_job_completed(
@@ -1011,7 +1029,7 @@ impl TestApp {
         exit_code: Option<i32>,
         termination: protocol::JobTermination,
     ) {
-        self.app
+        self.tui
             .handle_job_completed(smelt_core::process::JobCompletion {
                 id,
                 exit_code,
@@ -1022,67 +1040,67 @@ impl TestApp {
     }
 
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
-        self.app.record_visible_token_usage(usage);
+        self.tui.record_visible_token_usage(usage);
     }
 
     pub(crate) fn active_permissions(
         &self,
     ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
-        self.app.active_permissions()
+        self.tui.active_permissions()
     }
 
     pub(crate) fn session_path_grants(&self) -> Vec<smelt_core::permissions::SessionPathGrant> {
-        self.app.session_path_grants()
+        self.tui.session_path_grants()
     }
 
     pub fn focus_transcript(&mut self) {
-        self.app.app_focus = AppFocus::Content;
-        self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        self.tui.app_focus = AppFocus::Content;
+        self.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
     }
 
     pub(crate) fn focus_prompt(&mut self) {
-        self.app.app_focus = AppFocus::Prompt;
-        self.app.ui.set_focus(crate::app::PROMPT_WIN);
+        self.tui.app_focus = AppFocus::Prompt;
+        self.tui.ui.set_focus(crate::app::PROMPT_WIN);
     }
 
     pub(crate) fn active_docked_dialog(&self) -> Option<crate::smelt_edit::ContainerId> {
-        self.app.active_docked_dialog()
+        self.tui.active_docked_dialog()
     }
 
     pub(crate) fn notification_win(&self) -> Option<WinId> {
-        self.app.overlays.notification_win()
+        self.tui.overlays.notification_win()
     }
 
     pub(crate) fn notify_error(&mut self, message: String) {
-        self.app.notify_error(message);
+        self.tui.notify_error(message);
     }
 
     pub(crate) fn notify_application_error_sticky(&mut self, message: String) {
-        self.app.notify_application_error_sticky(message);
+        self.tui.notify_application_error_sticky(message);
     }
 
     pub(crate) fn notify_workspace_error_sticky(&mut self, message: String) {
-        self.app.notify_workspace_error_sticky(message);
+        self.tui.notify_workspace_error_sticky(message);
     }
 
     pub(crate) fn notify_session_error_sticky(&mut self, message: String) {
-        self.app.notify_session_error_sticky(message);
+        self.tui.notify_session_error_sticky(message);
     }
 
     pub(crate) fn dismiss_expired_notification(&mut self) -> bool {
-        self.app.dismiss_expired_notification()
+        self.tui.dismiss_expired_notification()
     }
 
     pub(crate) fn resolve_open_confirm_for_current_mode(&mut self, handle_id: u64) -> bool {
-        self.app.resolve_open_confirm_for_current_mode(handle_id)
+        self.tui.resolve_open_confirm_for_current_mode(handle_id)
     }
 
     pub(crate) fn mode_pending(&self) -> bool {
-        self.app.mode_pending()
+        self.tui.mode_pending()
     }
 
     pub(crate) fn sync_agent_mode_applied(&mut self) {
-        self.app.sync_agent_mode_applied();
+        self.tui.sync_agent_mode_applied();
     }
 
     pub(crate) fn public_status_state_reason(
@@ -1091,27 +1109,27 @@ impl TestApp {
         smelt_core::public_status::PublicState,
         Option<smelt_core::public_status::PublicReason>,
     ) {
-        self.app.public_status_state_reason()
+        self.tui.public_status_state_reason()
     }
 
     pub(crate) fn set_terminal_focus_for_harness(&mut self, focused: bool) {
-        self.app.set_terminal_focus_for_harness(focused);
+        self.tui.set_terminal_focus_for_harness(focused);
     }
 
     pub(crate) fn apply_model(&mut self, key: &str, record: bool) {
-        self.app.apply_model(key, record);
+        self.tui.apply_model(key, record);
     }
 
     pub(crate) fn fast_mode(&self) -> bool {
-        self.app.fast_mode()
+        self.tui.fast_mode()
     }
 
     pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
-        self.app.set_fast_mode(enabled);
+        self.tui.set_fast_mode(enabled);
     }
 
     pub(crate) fn warn_if_api_base_normalized(&mut self) {
-        self.app.warn_if_api_base_normalized();
+        self.tui.warn_if_api_base_normalized();
     }
 
     pub(crate) fn handle_managed_auth_checked(
@@ -1122,67 +1140,67 @@ impl TestApp {
             Vec<protocol::ModelMetadata>,
         )>,
     ) {
-        self.app.handle_managed_auth_checked(snapshots);
+        self.tui.handle_managed_auth_checked(snapshots);
     }
 
     #[cfg(test)]
     pub(crate) fn install_http_client(&mut self, client: engine::HttpClient) {
-        self.app.install_http_client(client);
+        self.tui.install_http_client(client);
     }
 
     #[cfg(test)]
     pub(crate) fn refresh_context_window_twice_for_harness(&mut self, api_key_env: &str) {
-        self.app
+        self.tui
             .core
             .config
             .active_model_mut()
             .expect("test app has an active model")
             .api_key_env = api_key_env.into();
-        self.app
+        self.tui
             .platform
             .enable_context_window_refresh_for_harness();
-        self.app
+        self.tui
             .request_context_window(crate::app::ContextWindowRequest::Reconcile);
-        self.app
+        self.tui
             .request_context_window(crate::app::ContextWindowRequest::Reconcile);
     }
 
     pub(crate) fn active_context_token_identity(
         &self,
     ) -> smelt_core::session::ContextTokenIdentity {
-        self.app.active_context_token_identity()
+        self.tui.active_context_token_identity()
     }
 
     pub(crate) fn rewind_to_history(
         &mut self,
         history_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
-        self.app.rewind_to_history(history_idx)
+        self.tui.rewind_to_history(history_idx)
     }
 
     pub(crate) fn rewind_to_start(&mut self) {
-        self.app.rewind_to_start();
+        self.tui.rewind_to_start();
     }
 
     pub(crate) fn publish_shared_session_state(&self) {
-        self.app.publish_shared_session_state();
+        self.tui.publish_shared_session_state();
     }
 
     pub(crate) fn publish_history_delta(&mut self, kind: crate::app::history::HistoryDeltaKind) {
-        self.app.publish_history_delta(kind);
+        self.tui.publish_history_delta(kind);
     }
 
     pub(crate) fn bump_epoch(&mut self, name: &str) {
-        self.app.bump_epoch(name);
+        self.tui.bump_epoch(name);
     }
 
     pub(crate) fn publish_input_submit(&mut self, text: &str) {
-        self.app
+        self.tui
             .core
             .signals
             .emit_dyn("input_submit", std::rc::Rc::new(text.to_string()));
-        self.app.pump_lua();
-        self.app.drive_lua_tasks();
+        self.tui.pump_lua();
+        self.tui.drive_lua_tasks();
     }
 
     pub(crate) fn configure_active_model_fast_mode(
@@ -1191,7 +1209,7 @@ impl TestApp {
         supported: bool,
     ) {
         let model = self
-            .app
+            .tui
             .core
             .config
             .active_model_mut()
@@ -1201,7 +1219,7 @@ impl TestApp {
     }
 
     pub(crate) fn set_active_model_fast_mode_support(&mut self, supported: bool) {
-        self.app
+        self.tui
             .core
             .config
             .active_model_mut()
@@ -1211,23 +1229,23 @@ impl TestApp {
     }
 
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
-        self.app.model_history_messages()
+        self.tui.model_history_messages()
     }
 
     pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {
-        self.app.start_next_queued_input_if_idle()
+        self.tui.start_next_queued_input_if_idle()
     }
 
     pub(crate) fn placeholder_text(&mut self, win: WinId) -> Option<String> {
-        self.app.placeholder_text(win)
+        self.tui.placeholder_text(win)
     }
 
     pub(crate) fn clear_transcript(&mut self) {
-        self.app.clear_transcript();
+        self.tui.clear_transcript();
     }
 
     pub(crate) fn shutdown_context(&self) -> crate::app::ShutdownContext {
-        self.app.conversation.shutdown_context()
+        self.tui.conversation.shutdown_context()
     }
 
     pub(crate) fn grant_session_path(
@@ -1237,7 +1255,7 @@ impl TestApp {
         access: smelt_core::permissions::PathAccess,
         dir: std::path::PathBuf,
     ) {
-        self.app.grant_session_path(mode, tool, access, dir);
+        self.tui.grant_session_path(mode, tool, access, dir);
     }
 
     pub(crate) fn set_session_title(
@@ -1246,15 +1264,15 @@ impl TestApp {
         slug: String,
         target_history_len: Option<usize>,
     ) {
-        self.app.set_session_title(title, slug, target_history_len);
+        self.tui.set_session_title(title, slug, target_history_len);
     }
 
     pub(crate) fn notify_session_save_failure(&mut self, session_id: &str, message: &str) {
-        self.app.notify_session_save_failure(session_id, message);
+        self.tui.notify_session_save_failure(session_id, message);
     }
 
     pub(crate) fn dismiss_session_save_failure_notification(&mut self, session_id: &str) {
-        self.app
+        self.tui
             .dismiss_session_save_failure_notification(session_id);
     }
 
@@ -1262,7 +1280,7 @@ impl TestApp {
         &self,
         range: std::ops::Range<usize>,
     ) -> Vec<protocol::HistoryItem> {
-        self.app
+        self.tui
             .session_history_range(range)
             .expect("read session history range")
     }
@@ -1271,7 +1289,7 @@ impl TestApp {
         &mut self,
         append: &protocol::HistoryAppend,
     ) -> protocol::HistoryAppendResult {
-        self.app.apply_history_append_to_history(append)
+        self.tui.apply_history_append_to_history(append)
     }
 
     pub(crate) fn rewind_history_for_harness(
@@ -1280,7 +1298,7 @@ impl TestApp {
         truncate: bool,
         identity: smelt_core::session::ContextTokenIdentity,
     ) {
-        self.app
+        self.tui
             .conversation
             .rewind_history(index, truncate, identity)
             .expect("prepare harness rewind count");
@@ -1291,14 +1309,14 @@ impl TestApp {
         kind: crate::app::cmdline_history::CommandHistoryKind,
         command: String,
     ) {
-        self.app.overlays.push_cmdline_history(kind, command);
+        self.tui.overlays.push_cmdline_history(kind, command);
     }
 
     pub(crate) fn session_set_checkpoint(
         &mut self,
         checkpoint: Option<smelt_core::ContextCheckpoint>,
     ) {
-        self.app.session_set_checkpoint(checkpoint);
+        self.tui.session_set_checkpoint(checkpoint);
     }
 
     pub(crate) fn rewind_to_history_index(
@@ -1306,23 +1324,23 @@ impl TestApp {
         history_idx: Option<usize>,
         restore_vim_insert: bool,
     ) {
-        self.app
+        self.tui
             .rewind_to_history_index(history_idx, restore_vim_insert);
     }
 
     pub(crate) fn set_prompt_placeholder_text(&mut self, text: String) {
-        self.app.set_placeholder(crate::app::PROMPT_WIN, text);
+        self.tui.set_placeholder(crate::app::PROMPT_WIN, text);
     }
 
     pub(crate) fn managed_model_status(
         &self,
         provider: engine::auth::AuthProvider,
     ) -> smelt_core::ManagedModelsStatus {
-        self.app.managed_model_catalog().provider(provider).status
+        self.tui.managed_model_catalog().provider(provider).status
     }
 
     pub(crate) fn begin_managed_model_refreshes(&mut self) -> Vec<smelt_core::RefreshToken> {
-        self.app.begin_managed_model_refreshes()
+        self.tui.begin_managed_model_refreshes()
     }
 
     #[cfg(test)]
@@ -1331,7 +1349,7 @@ impl TestApp {
         token: smelt_core::RefreshToken,
         outcome: engine::auth::ManagedModelsRefreshOutcome,
     ) {
-        self.app.handle_managed_models_refresh(token, outcome);
+        self.tui.handle_managed_models_refresh(token, outcome);
     }
 
     #[cfg(test)]
@@ -1339,7 +1357,7 @@ impl TestApp {
         &mut self,
         token: smelt_core::RefreshToken,
     ) -> bool {
-        self.app.activate_managed_model_retry_for_harness(token)
+        self.tui.activate_managed_model_retry_for_harness(token)
     }
 
     #[cfg(test)]
@@ -1348,25 +1366,25 @@ impl TestApp {
         config: &smelt_core::config::Config,
         revision: u64,
     ) -> bool {
-        self.app.sync_managed_models_for_harness(config, revision)
+        self.tui.sync_managed_models_for_harness(config, revision)
     }
 
     pub(crate) fn handle_app_event(&mut self, event: crate::app::AppEvent) {
-        self.app.handle_app_event(event);
+        self.tui.handle_app_event(event);
     }
 
     #[cfg(test)]
     pub(crate) fn try_recv_app_event(&mut self) -> Option<crate::app::AppEvent> {
-        self.app.platform.try_recv_app_event()
+        self.tui.platform.try_recv_app_event()
     }
 
     /// Applies app events until the live search has its worker result.
     #[cfg(test)]
     pub(crate) fn settle_live_search(&mut self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.app.overlays.search_state().awaiting_worker() {
-            match self.app.platform.try_recv_app_event() {
-                Some(event) => self.app.handle_app_event(event),
+        while self.tui.overlays.search_state().awaiting_worker() {
+            match self.tui.platform.try_recv_app_event() {
+                Some(event) => self.tui.handle_app_event(event),
                 None => {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -1381,24 +1399,24 @@ impl TestApp {
     #[cfg(test)]
     pub(crate) fn set_context_token_baseline_for_harness(&mut self, tokens: Option<u32>) {
         if let Some(tokens) = tokens {
-            let identity = self.app.active_context_token_identity();
-            self.app
+            let identity = self.tui.active_context_token_identity();
+            self.tui
                 .conversation
                 .record_context_tokens_for_harness(tokens, identity);
         } else {
-            self.app
+            self.tui
                 .conversation
                 .set_context_token_baseline_for_harness(None);
         }
     }
 
     pub(crate) fn replace_history_for_harness(&mut self, history: Vec<protocol::HistoryItem>) {
-        self.app.conversation.replace_history_for_harness(history);
+        self.tui.conversation.replace_history_for_harness(history);
     }
 
     #[cfg(test)]
     pub(crate) fn set_session_id_for_harness(&mut self, id: String) {
-        self.app.conversation.set_session_id_for_harness(id);
+        self.tui.conversation.set_session_id_for_harness(id);
     }
 
     #[cfg(test)]
@@ -1406,74 +1424,74 @@ impl TestApp {
         &mut self,
         live_session: smelt_core::session_runtime::LiveSession,
     ) {
-        self.app
+        self.tui
             .conversation
             .install_live_session_for_harness(live_session);
     }
 
     #[cfg(test)]
     pub(crate) fn set_history_resave_from_for_harness(&mut self, history_index: usize) {
-        self.app
+        self.tui
             .conversation
             .set_history_resave_from_for_harness(history_index);
     }
 
     #[cfg(test)]
     pub(crate) fn inject_commit_failure(&self, failure: smelt_store::StoreError) {
-        self.app.conversation.inject_commit_failure(failure);
+        self.tui.conversation.inject_commit_failure(failure);
     }
 
     pub(crate) fn set_applied_mode(&mut self, mode: protocol::AgentMode) {
-        self.app.conversation.set_applied_mode(mode);
+        self.tui.conversation.set_applied_mode(mode);
     }
 
     // Focused white-box probes are read-only and domain-scoped. Integration
     // actions stay on TestApp so tests cannot mutate the whole application.
     pub(crate) fn ui_probe(&self) -> &crate::smelt_edit::Ui {
-        &self.app.ui
+        &self.tui.ui
     }
 
     pub(crate) fn conversation_probe(&self) -> &crate::app::conversation::ConversationRuntime {
-        &self.app.conversation
+        &self.tui.conversation
     }
 
     pub(crate) fn core_probe(&self) -> &smelt_core::Core {
-        &self.app.core
+        &self.tui.core
     }
 
     pub(crate) fn lua_probe(&self) -> &crate::app::lua_handlers::LuaRuntimeController {
-        &self.app.lua
+        &self.tui.lua
     }
 
     pub(crate) fn overlays_probe(&self) -> &crate::app::overlay_runtime::OverlayRuntime {
-        &self.app.overlays
+        &self.tui.overlays
     }
 
     pub(crate) fn workspace_probe(&self) -> &crate::app::cwd::WorkspaceState {
-        &self.app.workspace
+        &self.tui.workspace
     }
 
     pub(crate) fn prompt_probe(&self) -> &crate::app::prompt_runtime::PromptRuntime {
-        &self.app.prompt
+        &self.tui.prompt
     }
 
     pub(crate) fn working_probe(&self) -> &smelt_core::working::WorkingState {
-        &self.app.working
+        &self.tui.working
     }
 
     pub(crate) fn timers_probe(&self) -> &crate::app::Timers {
-        &self.app.timers
+        &self.tui.timers
     }
 
     pub(crate) fn well_known_probe(&self) -> &crate::app::WellKnown {
-        &self.app.well_known
+        &self.tui.well_known
     }
 
     pub(crate) fn auto_reload_probe(&self) -> &crate::auto_reload::AutoReloadController {
-        &self.app.auto_reload
+        &self.tui.auto_reload
     }
 
     pub(crate) fn paint_registry_probe(&self) -> &crate::lua::paint::PaintRegistry {
-        &self.app.paint_registry
+        &self.tui.paint_registry
     }
 }

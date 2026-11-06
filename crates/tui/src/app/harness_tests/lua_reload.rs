@@ -160,7 +160,7 @@ fn theme_metadata_tracks_launch_reload_and_failed_candidates() {
         let generation = app.lua_probe().id;
         std::fs::write(&init, source).unwrap();
         app.reload_lua();
-        assert_eq!(app.app.lua_reload_failure().is_none(), succeeds);
+        assert_eq!(app.tui.lua_reload_failure().is_none(), succeeds);
         assert_eq!(app.lua_probe().id, generation + u64::from(succeeds));
         app.set_terminal_size(79, 24);
         app.render_silent();
@@ -763,7 +763,7 @@ fn bundled_composition_uses_live_effect_guards() {
 
     assert_eq!(app.lua_probe().id, committed_generation);
     let failure = app
-        .app
+        .tui
         .lua_reload_failure()
         .expect("the direct effect should fail candidate loading");
     assert!(
@@ -792,7 +792,7 @@ fn bundled_composition_uses_live_effect_guards() {
     app.reload_lua();
 
     assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
-    assert!(app.app.lua_reload_failure().is_none());
+    assert!(app.tui.lua_reload_failure().is_none());
     assert!(app.run_lua("smelt.mode.cycle(); _G.__bundled_guard_called_after_commit = true"));
     assert!(app.run_lua("assert(_G.__bundled_guard_called_after_commit == true)"));
 }
@@ -1218,14 +1218,14 @@ fn manual_reload_refreshes_context_window_without_restarting_session() {
     let session_id = app.session_snapshot().id.clone();
     let history = app.model_history();
     let target = ContextWindowTarget::from_active(app.core_probe().config.active_model().unwrap());
-    app.app
+    app.tui
         .request_context_window(ContextWindowRequest::Reconcile);
     let mut revision = app
-        .app
+        .tui
         .runtime_controller_status()
         .context_window
         .desired_revision;
-    app.app.apply_context_window_update(ContextWindowUpdate {
+    app.tui.apply_context_window_update(ContextWindowUpdate {
         revision,
         target: target.clone(),
         result: Ok(Some(32_768)),
@@ -1234,15 +1234,15 @@ fn manual_reload_refreshes_context_window_without_restarting_session() {
     for window in [131_072, 16_384] {
         let previous = app.core_probe().config.context_window;
         app.reload_lua();
-        assert!(app.app.lua_reload_failure().is_none());
-        let status = app.app.runtime_controller_status().context_window;
+        assert!(app.tui.lua_reload_failure().is_none());
+        let status = app.tui.runtime_controller_status().context_window;
         assert_eq!(status.desired_revision, revision + 1);
         assert_eq!(status.observed_revision, revision);
         assert_eq!(app.core_probe().config.context_window, previous);
         assert_eq!(app.session_snapshot().id, session_id);
         assert_eq!(app.model_history(), history);
 
-        app.app.apply_context_window_update(ContextWindowUpdate {
+        app.tui.apply_context_window_update(ContextWindowUpdate {
             revision,
             target: target.clone(),
             result: Ok(Some(8_192)),
@@ -1250,7 +1250,7 @@ fn manual_reload_refreshes_context_window_without_restarting_session() {
         assert_eq!(app.core_probe().config.context_window, previous);
 
         revision = status.desired_revision;
-        app.app.apply_context_window_update(ContextWindowUpdate {
+        app.tui.apply_context_window_update(ContextWindowUpdate {
             revision,
             target: target.clone(),
             result: Ok(Some(window)),
@@ -1259,7 +1259,7 @@ fn manual_reload_refreshes_context_window_without_restarting_session() {
             "assert(smelt.session.context_window() == {window})"
         )));
         assert_eq!(
-            app.app
+            app.tui
                 .runtime_controller_status()
                 .context_window
                 .observed_revision,
@@ -1267,16 +1267,16 @@ fn manual_reload_refreshes_context_window_without_restarting_session() {
         );
     }
 
-    let status = app.app.runtime_controller_status().context_window;
+    let status = app.tui.runtime_controller_status().context_window;
     app.reload_lua_config();
-    assert!(app.app.lua_reload_failure().is_none());
-    assert_eq!(app.app.runtime_controller_status().context_window, status);
+    assert!(app.tui.lua_reload_failure().is_none());
+    assert_eq!(app.tui.runtime_controller_status().context_window, status);
     assert_eq!(app.core_probe().config.context_window, Some(16_384));
 
     std::fs::write(&init, "error('invalid candidate')").unwrap();
     app.reload_lua();
-    assert!(app.app.lua_reload_failure().is_some());
-    assert_eq!(app.app.runtime_controller_status().context_window, status);
+    assert!(app.tui.lua_reload_failure().is_some());
+    assert_eq!(app.tui.runtime_controller_status().context_window, status);
     assert_eq!(app.core_probe().config.context_window, Some(16_384));
     assert_eq!(app.session_snapshot().id, session_id);
     assert_eq!(app.model_history(), history);
@@ -4118,7 +4118,7 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
     .unwrap();
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let exists = |app: &TestApp, key: &str| app.app.lua.state_snapshot().get(key).is_some();
+    let exists = |app: &TestApp, key: &str| app.tui.lua.state_snapshot().get(key).is_some();
     {
         assert!(exists(&mut app, "kept"));
         assert!(exists(&mut app, "dropped"));
@@ -4344,7 +4344,7 @@ fn reload_clears_every_lua_surface() {
         "anonymous overlay reaped"
     );
     assert!(
-        app.app.lua.state_snapshot().get("seed_plugin").is_none(),
+        app.tui.lua.state_snapshot().get("seed_plugin").is_none(),
         "dropped-plugin state slot swept"
     );
 }
@@ -4567,7 +4567,7 @@ fn manual_reload_upgrades_in_flight_config_preparation_once() {
     )
     .unwrap();
 
-    app.app.reload_lua_config();
+    app.tui.reload_lua_config();
     assert!(app.pending_lua_reload());
     assert!(!app.schedule_lua_reload());
     assert!(!app.schedule_lua_reload());
@@ -4575,7 +4575,7 @@ fn manual_reload_upgrades_in_flight_config_preparation_once() {
 
     assert_eq!(app.lua_probe().id, generation.wrapping_add(1));
     assert!(app
-        .app
+        .tui
         .prompt_inputs
         .instructions
         .as_deref()
@@ -4594,7 +4594,7 @@ fn manual_reload_waits_for_active_turn() {
         app.start_turn(1);
         std::fs::write(&init, "_G.reload_version = 2\n").unwrap();
 
-        assert!(app.app.schedule_lua_config_reload());
+        assert!(app.tui.schedule_lua_config_reload());
         for _ in 0..2 {
             match entry {
                 "command" => {

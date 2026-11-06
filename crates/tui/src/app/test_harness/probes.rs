@@ -2,8 +2,8 @@ use super::*;
 
 impl TestApp {
     pub fn window_lines_containing(&self, needle: &str) -> Option<Vec<String>> {
-        self.app.ui.iter_wins().find_map(|(_, win)| {
-            let buf = self.app.ui.buf(win.buf)?;
+        self.tui.ui.iter_wins().find_map(|(_, win)| {
+            let buf = self.tui.ui.buf(win.buf)?;
             buf.lines()
                 .iter()
                 .any(|line| line.contains(needle))
@@ -15,7 +15,7 @@ impl TestApp {
         &self,
         needle: &str,
     ) -> Option<MaterializedWindowSnapshot> {
-        self.app.ui.iter_wins().find_map(|(id, _)| {
+        self.tui.ui.iter_wins().find_map(|(id, _)| {
             let snapshot = self.materialized_window(id)?;
             snapshot
                 .lines
@@ -26,10 +26,10 @@ impl TestApp {
     }
 
     pub fn materialized_window(&self, id: WinId) -> Option<MaterializedWindowSnapshot> {
-        let win = self.app.ui.win(id)?;
+        let win = self.tui.ui.win(id)?;
         let rows = win.materialized_rows()?;
         let viewport = win.viewport?;
-        let buf = self.app.ui.buf(win.buf)?;
+        let buf = self.tui.ui.buf(win.buf)?;
         Some(MaterializedWindowSnapshot {
             win: id,
             lines: buf.lines().to_vec(),
@@ -93,9 +93,9 @@ impl TestApp {
             overrides: smelt_core::custom_commands::CommandOverrides::default(),
         };
         self.ensure_writer_ready();
-        let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
-        let turn = self.app.begin_custom_command_turn(cmd, sent_at_ms);
-        self.app.conversation.set_active(turn);
+        let sent_at_ms = engine::clock::unix_time_ms(self.tui.core.clock.as_ref());
+        let turn = self.tui.begin_custom_command_turn(cmd, sent_at_ms);
+        self.tui.conversation.set_active(turn);
         self.wait_for_turn_dispatch();
         if !self.agent_running() {
             return None;
@@ -128,27 +128,27 @@ impl TestApp {
     }
 
     fn force_prompt_keyboard_focus(&mut self) {
-        if self.app.well_known.cmdline.is_some() {
-            self.app.close_cmdline();
+        if self.tui.well_known.cmdline.is_some() {
+            self.tui.close_cmdline();
         }
-        while self.app.close_active_modal() {}
-        while let Some(overlay) = self.app.ui.focused_overlay() {
-            self.app.close_overlay(overlay);
+        while self.tui.close_active_modal() {}
+        while let Some(overlay) = self.tui.ui.focused_overlay() {
+            self.tui.close_overlay(overlay);
         }
         // Prompt-docked pickers own the prompt through Lua registrations on
         // the prompt window, not through overlay focus. Reloading drops those
         // registrations before the probe installs its own clean prompt state.
-        if self.app.overlays.has_pickers() {
+        if self.tui.overlays.has_pickers() {
             self.reload_lua();
         }
-        self.app.timers.pending_chord = None;
-        self.app.timers.pending_pane_chord = None;
-        self.app.ui.cancel_pointer_interaction();
-        self.app.app_focus = AppFocus::Prompt;
-        self.app.set_terminal_focus_for_harness(true);
-        self.app.clear_prompt_prediction();
-        let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
-        if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
+        self.tui.timers.pending_chord = None;
+        self.tui.timers.pending_pane_chord = None;
+        self.tui.ui.cancel_pointer_interaction();
+        self.tui.app_focus = AppFocus::Prompt;
+        self.tui.set_terminal_focus_for_harness(true);
+        self.tui.clear_prompt_prediction();
+        let _ = self.tui.ui.set_focus(crate::app::PROMPT_WIN);
+        if let Some(win) = self.tui.ui.win_mut(crate::app::PROMPT_WIN) {
             if win.vim_enabled() {
                 win.set_vim_mode(VimMode::Insert);
             }
@@ -168,7 +168,7 @@ impl TestApp {
     }
 
     pub(crate) fn respond_ask_with_text(&mut self, id: u64, text: &str) {
-        self.app
+        self.tui
             .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
                 id,
                 message: Some(protocol::Message::assistant(
@@ -178,11 +178,11 @@ impl TestApp {
                 )),
                 error: None,
             });
-        self.app.drive_lua_tasks();
+        self.tui.drive_lua_tasks();
     }
 
     pub(crate) fn respond_ask_with_error(&mut self, id: u64, kind: protocol::EngineAskErrorKind) {
-        self.app
+        self.tui
             .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
                 id,
                 message: None,
@@ -191,11 +191,11 @@ impl TestApp {
                     message: kind.as_str().to_string(),
                 }),
             });
-        self.app.drive_lua_tasks();
+        self.tui.drive_lua_tasks();
     }
 
     pub(crate) fn respond_ask_with_tool_call(&mut self, id: u64, call_id: &str, name: &str) {
-        self.app
+        self.tui
             .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
                 id,
                 message: Some(protocol::Message::assistant(
@@ -211,11 +211,11 @@ impl TestApp {
                 )),
                 error: None,
             });
-        self.app.drive_lua_tasks();
+        self.tui.drive_lua_tasks();
     }
 
     pub(crate) fn publish_turn_end_for_probe(&mut self) {
-        self.app.core.signals.emit_dyn(
+        self.tui.core.signals.emit_dyn(
             "turn_end",
             std::rc::Rc::new(smelt_core::signals::TurnEnd {
                 cancelled: false,
@@ -224,25 +224,25 @@ impl TestApp {
                 retry_at_ms: None,
             }),
         );
-        self.app.pump_lua();
-        self.app.drive_lua_tasks();
+        self.tui.pump_lua();
+        self.tui.drive_lua_tasks();
     }
 
     fn bump_input_epoch_for_probe(&mut self) {
-        self.app.bump_epoch("input_epoch");
-        self.app.pump_lua();
+        self.tui.bump_epoch("input_epoch");
+        self.tui.pump_lua();
     }
 
     fn probe_stale_prompt_prediction_response(&mut self, variant: u8) {
-        let seq = self.app.conversation.session().history.len();
-        self.app
+        let seq = self.tui.conversation.session().history.len();
+        self.tui
             .conversation
             .append_history_item(protocol::HistoryItem::user(protocol::Content::text(
                 format!("fuzz stale prompt prediction {variant}/{seq}"),
             )));
         {
-            self.app.bump_epoch("history_epoch");
-            self.app.pump_lua();
+            self.tui.bump_epoch("history_epoch");
+            self.tui.pump_lua();
         }
         self.publish_turn_end_for_probe();
         let prediction_id = self
@@ -254,7 +254,7 @@ impl TestApp {
         self.bump_input_epoch_for_probe();
         self.respond_ask_with_text(prediction_id, "stale prompt placeholder");
         assert_eq!(
-            self.app.placeholder_text(crate::app::PROMPT_WIN),
+            self.tui.placeholder_text(crate::app::PROMPT_WIN),
             None,
             "stale prompt prediction response installed a placeholder in probe variant {variant}"
         );
@@ -270,13 +270,13 @@ impl TestApp {
         // Prompt-docked pickers can open from pending Lua tasks after the
         // probe's initial cleanup. Reloading drops their prompt keymaps while
         // leaving the prediction placeholder intact for the oracle below.
-        if self.app.overlays.has_pickers() {
+        if self.tui.overlays.has_pickers() {
             self.reload_lua();
         }
-        self.app.app_focus = AppFocus::Prompt;
-        self.app.set_terminal_focus_for_harness(true);
-        let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
-        if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
+        self.tui.app_focus = AppFocus::Prompt;
+        self.tui.set_terminal_focus_for_harness(true);
+        let _ = self.tui.ui.set_focus(crate::app::PROMPT_WIN);
+        if let Some(win) = self.tui.ui.win_mut(crate::app::PROMPT_WIN) {
             if win.vim_enabled() {
                 win.set_vim_mode(VimMode::Insert);
             }
@@ -306,10 +306,10 @@ impl TestApp {
                 state.focused_overlay,
                 state.cmdline_open,
                 state.agent_running,
-                self.app.timers.pending_chord.is_some(),
-                self.app.timers.pending_pane_chord.is_some(),
-                self.app.ui.overlay_count(),
-                self.app.overlays.picker_count(),
+                self.tui.timers.pending_chord.is_some(),
+                self.tui.timers.pending_pane_chord.is_some(),
+                self.tui.ui.overlay_count(),
+                self.tui.overlays.picker_count(),
             );
         }
         assert_eq!(self.state().prompt_text, "ab");
@@ -342,7 +342,7 @@ impl TestApp {
             self.cancel();
         }
         self.force_prompt_keyboard_focus();
-        self.app.prompt.clear_queue();
+        self.tui.prompt.clear_queue();
         let _ = self.run_lua(r#"smelt.prompt.set_text("")"#);
         if variant % 4 == 1 {
             self.install_prompt_cursor_trap(variant);
@@ -398,7 +398,7 @@ impl TestApp {
                 if let Some(id) = prediction_ids.last().copied() {
                     self.respond_ask_with_text(id, "predicted follow-up");
                     assert_eq!(
-                        self.app.placeholder_text(crate::app::PROMPT_WIN).as_deref(),
+                        self.tui.placeholder_text(crate::app::PROMPT_WIN).as_deref(),
                         Some("predicted follow-up"),
                         "turn-end prediction response did not install placeholder in probe variant {variant}"
                     );
@@ -420,21 +420,21 @@ impl TestApp {
     }
 
     fn install_compaction_prepare_fixture(&mut self) {
-        let mut settings = self.app.core.config.settings.clone();
+        let mut settings = self.tui.core.config.settings.clone();
         settings.auto_compact = true;
         settings.compact_threshold = 0.8;
         settings.compact_keep_recent_groups = 1.0;
-        self.app.set_settings_for_harness(settings);
+        self.tui.set_settings_for_harness(settings);
 
-        self.app.core.config.context_window = Some(100);
-        self.app.conversation.reset_context_accounting_for_harness();
-        self.app
+        self.tui.core.config.context_window = Some(100);
+        self.tui.conversation.reset_context_accounting_for_harness();
+        self.tui
             .conversation
             .replace_history_for_harness(vec![protocol::HistoryItem::user(
                 protocol::Content::text("u1"),
             )]);
         self.push_assistant_text("a1");
-        self.app
+        self.tui
             .conversation
             .append_history_item(protocol::HistoryItem::user(protocol::Content::text("u2")));
     }
@@ -448,8 +448,8 @@ impl TestApp {
         // compaction history so stale callbacks from earlier random input are
         // not attributed to the prepare-request lifecycle.
         {
-            self.app.flush_lua_callbacks();
-            self.app.drive_lua_tasks();
+            self.tui.flush_lua_callbacks();
+            self.tui.drive_lua_tasks();
         }
         let drained = self.drain_engine_sends();
         let drained_request = drained.iter().any(|cmd| {
@@ -469,8 +469,8 @@ impl TestApp {
         // hooks. Do that before deciding whether the probe should preserve an
         // active turn so a queued completion from an earlier synthetic submit
         // is not misattributed to compaction.
-        while let Ok(ev) = self.app.core.engine.try_recv() {
-            self.app.dispatch_engine_event(ev);
+        while let Ok(ev) = self.tui.core.engine.try_recv() {
+            self.tui.dispatch_engine_event(ev);
         }
         // Prepare-request runs before a model request is dispatched. Keep the
         // probe on that lifecycle edge rather than injecting compaction while
@@ -487,7 +487,7 @@ impl TestApp {
             self.start_turn(self.next_turn_id());
         }
 
-        let full_history = protocol::history_to_messages(&self.app.model_history());
+        let full_history = protocol::history_to_messages(&self.tui.model_history());
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         {
             self.dispatch_host_call(engine::HostCall::PrepareRequest {
@@ -517,7 +517,7 @@ impl TestApp {
         };
 
         {
-            self.app
+            self.tui
                 .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
                     id: ask_id,
                     message: Some(protocol::Message::assistant(
@@ -527,7 +527,7 @@ impl TestApp {
                     )),
                     error: None,
                 });
-            self.app.drive_lua_tasks();
+            self.tui.drive_lua_tasks();
         }
 
         let replacement = match rx

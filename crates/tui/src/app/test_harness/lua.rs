@@ -7,16 +7,16 @@ impl TestApp {
     /// resources keep stable ids while anonymous resources from the retired
     /// generation are reaped.
     pub fn reload_lua(&mut self) {
-        self.app.reload_lua();
+        self.tui.reload_lua();
         self.wait_for_workspace();
     }
 
     pub fn schedule_lua_reload(&mut self) -> bool {
-        self.app.schedule_lua_reload()
+        self.tui.schedule_lua_reload()
     }
 
     pub fn drain_idle_work(&mut self) -> bool {
-        self.app.drain_idle_work()
+        self.tui.drain_idle_work()
     }
 
     /// Pump a bounded batch of Lua wakeups so spawned callbacks reach their next wait point.
@@ -29,24 +29,24 @@ impl TestApp {
     /// Drive preparation wakeups until a requested workspace transition or reload finishes.
     pub fn wait_for_workspace(&mut self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while self.app.workspace.has_pending_change() || self.pending_lua_reload() {
+        while self.tui.workspace.has_pending_change() || self.pending_lua_reload() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "workspace transition stalled"
             );
-            self.app.drain_idle_work();
+            self.tui.drain_idle_work();
             std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
     pub fn wait_for_project_context(&mut self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while self.app.project_context_pending() {
+        while self.tui.project_context_pending() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "project context preparation stalled"
             );
-            self.app.drain_idle_work();
+            self.tui.drain_idle_work();
             std::thread::sleep(super::POLL_INTERVAL);
         }
     }
@@ -137,48 +137,48 @@ impl TestApp {
     }
 
     pub fn pending_lua_reload(&self) -> bool {
-        self.app.lua_reload_pending()
+        self.tui.lua_reload_pending()
     }
 
     pub(crate) fn reload_lua_config(&mut self) {
-        self.app.reload_lua_config();
+        self.tui.reload_lua_config();
         self.wait_for_workspace();
     }
 
     pub(crate) fn apply_lua_command(&mut self, command: &str) {
-        self.app.apply_lua_command(command);
+        self.tui.apply_lua_command(command);
     }
 
     pub(crate) fn drive_lua_tasks(&mut self) {
-        self.app.drive_lua_tasks();
+        self.tui.drive_lua_tasks();
     }
 
     pub(crate) fn drive_lua_tasks_once(&mut self) -> usize {
-        let now = self.app.core.clock.instant_now();
-        let lua = self.app.lua.execution();
-        crate::lua::scope_app(&mut self.app, || lua.drive_tasks(now)).len()
+        let now = self.tui.core.clock.instant_now();
+        let lua = self.tui.lua.execution();
+        crate::lua::scope_app(&mut self.tui, || lua.drive_tasks(now)).len()
     }
 
     #[cfg(test)]
     pub(crate) fn try_receive_lua_wakeup(&mut self) -> bool {
-        self.app.try_receive_lua_wakeup()
+        self.tui.try_receive_lua_wakeup()
     }
 
     pub(crate) fn shutdown_lua(&mut self) -> (Vec<String>, Option<String>) {
-        self.app.shutdown_lua()
+        self.tui.shutdown_lua()
     }
 
     pub(crate) fn drain_launch_ready_hooks(&mut self) {
-        self.app.drain_launch_ready_hooks_for_harness();
+        self.tui.drain_launch_ready_hooks_for_harness();
     }
 
     #[cfg(test)]
     pub(crate) fn lua_runtime_reconcile_pending(&self) -> bool {
-        self.app.lua_runtime_reconcile_pending()
+        self.tui.lua_runtime_reconcile_pending()
     }
 
     pub(crate) fn reconcile_committed_lua_runtime(&mut self) -> Result<(), String> {
-        self.app.reconcile_committed_lua_runtime()
+        self.tui.reconcile_committed_lua_runtime()
     }
 
     pub(crate) fn complete_lua_tool(
@@ -189,7 +189,7 @@ impl TestApp {
         is_error: bool,
         metadata: Option<serde_json::Value>,
     ) {
-        self.app.complete_lua_tool(
+        self.tui.complete_lua_tool(
             invocation,
             call_id,
             crate::app::agent::LuaToolCompletion {
@@ -210,8 +210,8 @@ impl TestApp {
     }
 
     pub(crate) fn run_bundled_lua(&mut self, snippet: &str) -> bool {
-        let lua = self.app.lua.lua().clone();
-        let result = crate::lua::scope_app(&mut self.app, || {
+        let lua = self.tui.lua.lua().clone();
+        let result = crate::lua::scope_app(&mut self.tui, || {
             let environment = smelt_core::lua::module::bundled_chunk_environment(&lua)
                 .map_err(|error| error.to_string())?;
             lua.load(snippet)
@@ -219,9 +219,9 @@ impl TestApp {
                 .exec()
                 .map_err(|error| error.to_string())
         });
-        self.app.pump_lua();
-        self.app.try_perform_scheduled_runtime_reconcile();
-        self.app.drain_deferred_layout();
+        self.tui.pump_lua();
+        self.tui.try_perform_scheduled_runtime_reconcile();
+        self.tui.drain_deferred_layout();
         result.is_ok()
     }
 
@@ -229,31 +229,31 @@ impl TestApp {
     /// require a valid call path to succeed.
     pub fn run_lua_result(&mut self, snippet: &str) -> Result<(), String> {
         let result = self.exec_lua_entry(snippet);
-        self.app.pump_lua();
-        self.app.try_perform_scheduled_runtime_reconcile();
-        self.app.drain_deferred_layout();
+        self.tui.pump_lua();
+        self.tui.try_perform_scheduled_runtime_reconcile();
+        self.tui.drain_deferred_layout();
         self.wait_for_writer_startup();
         result
     }
 
     /// Execute one Lua entry without pumping deferred callbacks or reconciliation.
     pub fn exec_lua_entry(&mut self, snippet: &str) -> Result<(), String> {
-        let lua = self.app.lua.lua().clone();
-        crate::lua::scope_app(&mut self.app, || {
+        let lua = self.tui.lua.lua().clone();
+        crate::lua::scope_app(&mut self.tui, || {
             lua.load(snippet).exec().map_err(|error| error.to_string())
         })
     }
 
     /// Evaluate a Lua expression while lending it the frontend host.
     pub fn eval_lua<T: mlua::FromLuaMulti>(&mut self, snippet: &str) -> Result<T, String> {
-        let lua = self.app.lua.lua().clone();
-        crate::lua::scope_app(&mut self.app, || {
+        let lua = self.tui.lua.lua().clone();
+        crate::lua::scope_app(&mut self.tui, || {
             lua.load(snippet).eval().map_err(|error| error.to_string())
         })
     }
 
     pub fn lua_int_global(&self, name: &str) -> Option<i64> {
-        self.app.lua.lua.globals().get(name).ok()
+        self.tui.lua.lua.globals().get(name).ok()
     }
 
     pub(crate) fn set_lua_string_global(
@@ -261,11 +261,11 @@ impl TestApp {
         name: &str,
         value: impl Into<String>,
     ) -> Result<(), mlua::Error> {
-        self.app.lua.lua.globals().set(name, value.into())
+        self.tui.lua.lua.globals().set(name, value.into())
     }
 
     pub(crate) fn clear_lua_messages(&mut self) {
-        self.app
+        self.tui
             .lua
             .core_shared()
             .messages
@@ -277,7 +277,7 @@ impl TestApp {
     #[cfg(test)]
     /// Times a message with `body` arrived, counting repeats folded into one entry.
     pub(crate) fn lua_message_count(&self, body: &str) -> usize {
-        self.app
+        self.tui
             .lua
             .core_shared()
             .messages
@@ -292,7 +292,7 @@ impl TestApp {
 
     #[cfg(test)]
     pub(crate) fn lua_messages_contain(&self, text: &str) -> bool {
-        self.app
+        self.tui
             .lua
             .core_shared()
             .messages
@@ -308,13 +308,13 @@ impl TestApp {
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
     ) -> protocol::StyledLines {
-        let lua = self.app.lua.execution();
-        crate::lua::scope_app(&mut self.app, || lua.tool_summary(tool_name, args))
+        let lua = self.tui.lua.execution();
+        crate::lua::scope_app(&mut self.tui, || lua.tool_summary(tool_name, args))
     }
 
     pub fn mode_note(&mut self, mode: &str) -> String {
-        let lua = self.app.lua.execution();
-        crate::lua::scope_app(&mut self.app, || lua.mode_note(mode))
+        let lua = self.tui.lua.execution();
+        crate::lua::scope_app(&mut self.tui, || lua.mode_note(mode))
     }
 
     /// Re-publish the signal diff + fire queued subscribers. Production
@@ -323,28 +323,28 @@ impl TestApp {
     /// the reactive `work_*` / `vim_mode` / `now` signals without driving
     /// a synthetic event.
     pub fn tick_signals(&mut self) {
-        self.app.publish_diff_signals();
-        self.app.drain_signals_pending();
+        self.tui.publish_diff_signals();
+        self.tui.drain_signals_pending();
     }
 
     pub(crate) fn drain_signals_pending(&mut self) {
-        self.app.drain_signals_pending();
+        self.tui.drain_signals_pending();
     }
 
     pub(crate) fn pump_lua(&mut self) {
-        self.app.pump_lua();
+        self.tui.pump_lua();
     }
 
     pub(crate) fn tick_timers(&mut self) {
-        self.app.tick_timers();
+        self.tui.tick_timers();
     }
 
     pub(crate) fn clear_timers(&mut self) {
-        self.app.core.timers.clear();
+        self.tui.core.timers.clear();
     }
 
     pub(crate) fn dispatch_ui_window_events(&mut self, include_tick: bool) {
-        self.app.dispatch_ui_window_events(include_tick);
+        self.tui.dispatch_ui_window_events(include_tick);
     }
 
     /// Counts of bound names across the four reload-managed registries:
@@ -353,8 +353,8 @@ impl TestApp {
     /// reloads may add declared resources and retire names omitted by the
     /// candidate.
     pub fn named_resource_counts(&self) -> (usize, usize, usize, usize) {
-        let (bufs, wins, overlays) = self.app.ui.named_counts();
-        (bufs, wins, overlays, self.app.paint_registry.named_count())
+        let (bufs, wins, overlays) = self.tui.ui.named_counts();
+        (bufs, wins, overlays, self.tui.paint_registry.named_count())
     }
 
     /// Enumerate every Lua function recorded by `LuaMod::fn_` at
@@ -379,7 +379,7 @@ impl TestApp {
     /// `lua_loop` between batches so leaks surface attached to the op
     /// that caused them rather than at scenario teardown.
     pub fn assert_lua_handles_alive(&self) {
-        let lua = &self.app.lua.lua;
+        let lua = &self.tui.lua.lua;
         lua.gc_collect().expect("lua gc_collect failed");
 
         let check = |label: &str, handle: &smelt_core::lua::LuaHandle| {
@@ -391,7 +391,7 @@ impl TestApp {
             }
         };
 
-        let shared = self.app.lua.shared();
+        let shared = self.tui.lua.shared();
         let core = &shared.core;
         if let Ok(cbs) = core.callbacks.lock() {
             for (id, h) in cbs.iter() {
@@ -458,7 +458,7 @@ impl TestApp {
     /// so it catches leaks the named walk can't see (anonymous closures
     /// stashed only in Lua tables, etc.).
     pub fn lua_handles_live(&self) -> u64 {
-        self.app.lua.core_shared().lua_handles_live()
+        self.tui.lua.core_shared().lua_handles_live()
     }
 
     /// Reload the Lua context once, snapshot the live handle count,
@@ -477,13 +477,13 @@ impl TestApp {
     /// scenario semantics.
     pub fn assert_no_handle_leak_across_reload(&mut self) {
         self.reload_lua();
-        self.app.lua.lua.gc_collect().ok();
-        self.app.lua.lua.gc_collect().ok();
-        let baseline = self.app.lua.core_shared().lua_handles_live();
+        self.tui.lua.lua.gc_collect().ok();
+        self.tui.lua.lua.gc_collect().ok();
+        let baseline = self.tui.lua.core_shared().lua_handles_live();
         self.reload_lua();
-        self.app.lua.lua.gc_collect().ok();
-        self.app.lua.lua.gc_collect().ok();
-        let after = self.app.lua.core_shared().lua_handles_live();
+        self.tui.lua.lua.gc_collect().ok();
+        self.tui.lua.lua.gc_collect().ok();
+        let after = self.tui.lua.core_shared().lua_handles_live();
         if after > baseline {
             panic!(
                 "FFI-LEDGER: handle leak across reload - count went {baseline} -> {after} on second consecutive reload (steady state should be stable)"
@@ -497,11 +497,11 @@ impl TestApp {
     /// baseline.
     pub fn assert_no_handle_leak_across_failed_reload(&mut self, init_path: &std::path::Path) {
         let original = std::fs::read(init_path).unwrap_or_default();
-        let generation = self.app.core.lua_generation;
+        let generation = self.tui.core.lua_generation;
         let named_resources = self.named_resource_counts();
-        self.app.lua.lua.gc_collect().ok();
-        self.app.lua.lua.gc_collect().ok();
-        let baseline = self.app.lua.core_shared().lua_handles_live();
+        self.tui.lua.lua.gc_collect().ok();
+        self.tui.lua.lua.gc_collect().ok();
+        let baseline = self.tui.lua.core_shared().lua_handles_live();
         let failing_candidate = r#"
             local buffer = smelt.buf.new({ name = "fuzz.failed.buffer" })
             buffer:source("discarded")
@@ -516,11 +516,11 @@ impl TestApp {
         for _ in 0..2 {
             std::fs::write(init_path, failing_candidate).expect("write failing Lua candidate");
             self.reload_lua();
-            self.app.lua.lua.gc_collect().ok();
-            self.app.lua.lua.gc_collect().ok();
-            assert_eq!(self.app.core.lua_generation, generation);
+            self.tui.lua.lua.gc_collect().ok();
+            self.tui.lua.lua.gc_collect().ok();
+            assert_eq!(self.tui.core.lua_generation, generation);
             assert_eq!(self.named_resource_counts(), named_resources);
-            let after = self.app.lua.core_shared().lua_handles_live();
+            let after = self.tui.lua.core_shared().lua_handles_live();
             if after > baseline {
                 panic!(
                     "FFI-LEDGER: handle leak across failed reload - count went {baseline} -> {after}"
@@ -536,7 +536,7 @@ impl TestApp {
     /// Consume the app and verify that Lua-owned registration userdata did not
     /// retain a strong reference to the VM during teardown.
     pub fn assert_lua_runtime_released(self) {
-        let lua = self.app.lua.lua.weak();
+        let lua = self.tui.lua.lua.weak();
         drop(self);
         assert!(
             lua.try_upgrade().is_none(),

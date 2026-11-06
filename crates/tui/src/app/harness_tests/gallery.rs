@@ -12,7 +12,7 @@ fn gallery_dir() -> PathBuf {
 }
 
 fn error_messages(app: &TestApp) -> Vec<String> {
-    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    let messages = app.tui.lua.core_shared().messages.lock().unwrap();
     messages
         .entries()
         .iter()
@@ -250,8 +250,8 @@ fn mono_recolors_visible_scroll_pill_without_scrolling() {
                     .named_win(&format!("smelt.scroll_pills.{pill}.win"))
                     .unwrap();
                 let rect = app.ui_probe().win(win).unwrap().viewport.unwrap().rect;
-                let expected = app.app.ui.theme().get("Comment");
-                let background = app.app.ui.theme().get("SmeltScrollPillBg");
+                let expected = app.tui.ui.theme().get("Comment");
+                let background = app.tui.ui.theme().get("SmeltScrollPillBg");
                 let style = frame.styles[rect.y as usize][rect.x as usize + 1];
                 assert_eq!(style.fg, expected.fg, "{tint} {pill} pill foreground");
                 assert_eq!(style.bg, background.bg, "{tint} {pill} pill background");

@@ -196,13 +196,13 @@ fn native_turn_keeps_working_until_its_background_agents_settle() {
     app.start_turn(1);
     native_session(&mut app, true, true);
     assert_eq!(work_label(&mut app), "working");
-    let since = app.app.busy_stack.since();
+    let since = app.tui.busy_stack.since();
     assert!(since.is_some());
 
     assert!(app.finish_turn());
     assert_eq!(work_label(&mut app), "working");
     assert_eq!(
-        app.app.busy_stack.since(),
+        app.tui.busy_stack.since(),
         since,
         "the work timer continues past the turn"
     );
@@ -210,12 +210,12 @@ fn native_turn_keeps_working_until_its_background_agents_settle() {
     native_session(&mut app, true, false);
     assert_eq!(work_label(&mut app), "");
     assert!(
-        app.app.core.native_session.is_some(),
+        app.tui.core.native_session.is_some(),
         "an idle native process stays bound to the session"
     );
 
     native_session(&mut app, false, false);
-    assert!(app.app.core.native_session.is_none());
+    assert!(app.tui.core.native_session.is_none());
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn a_prompt_queues_until_the_native_session_finishes_its_own_work() {
     app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
     assert_eq!(
-        app.app.prompt.queued_texts(),
+        app.tui.prompt.queued_texts(),
         vec!["next question".to_owned()]
     );
     assert!(!started_turn(&app));
@@ -236,7 +236,7 @@ fn a_prompt_queues_until_the_native_session_finishes_its_own_work() {
     native_session(&mut app, true, false);
     app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
-    assert!(app.app.prompt.queued_texts().is_empty());
+    assert!(app.tui.prompt.queued_texts().is_empty());
     assert!(started_turn(&app));
 }
 
@@ -244,7 +244,7 @@ fn a_prompt_queues_until_the_native_session_finishes_its_own_work() {
 fn esc_esc_on_a_clean_turn_interrupts_and_spares_native_background_work() {
     let mut app = TestApp::builder().build();
     let session_id = native_background_session(&mut app);
-    let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+    let now = engine::clock::unix_time_ms(app.tui.core.clock.as_ref());
     app.feed_one(SourceEvent::engine(native_shell(now, true)));
     native_session(&mut app, true, false);
     app.type_text("next question");
@@ -263,7 +263,7 @@ fn esc_esc_on_a_clean_turn_interrupts_and_spares_native_background_work() {
         command,
         protocol::UiCommand::EndNativeSession
     )));
-    assert_eq!(app.app.core.native_session, Some(session_id));
+    assert_eq!(app.tui.core.native_session, Some(session_id));
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn ctrl_c_interrupts_idle_native_background_work_and_keeps_its_session() {
         command,
         protocol::UiCommand::EndNativeSession
     )));
-    assert_eq!(app.app.core.native_session, Some(session_id));
+    assert_eq!(app.tui.core.native_session, Some(session_id));
 
     app.type_text("fresh prompt");
     app.press(KeyCode::Enter);
@@ -316,12 +316,12 @@ fn ctrl_c_interrupts_idle_native_background_work_and_keeps_its_session() {
 fn rewinding_ends_the_native_session() {
     let mut app = TestApp::builder().build();
     native_background_session(&mut app);
-    app.app.rewind_to_history_index(None, false);
+    app.rewind_to_history_index(None, false);
     assert!(sent(&mut app, |command| matches!(
         command,
         protocol::UiCommand::EndNativeSession
     )));
-    assert!(app.app.core.native_session.is_none());
+    assert!(app.tui.core.native_session.is_none());
 }
 
 #[test]
@@ -368,32 +368,26 @@ async fn native_background_shells_wait_without_blocking_completion() {
     use smelt_core::session_control::request_completion;
 
     let mut app = TestApp::builder().build();
-    app.app.core.session_control.initialize().unwrap();
-    let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+    app.tui.core.session_control.initialize().unwrap();
+    let now = engine::clock::unix_time_ms(app.tui.core.clock.as_ref());
     app.start_turn(1);
-    let socket = app.app.core.session_control.agent_env()[CONTROL_SOCKET_ENV].clone();
+    let socket = app.tui.core.session_control.agent_env()[CONTROL_SOCKET_ENV].clone();
     let session = native_session(&mut app, true, true);
     app.feed_one(SourceEvent::engine(native_shell(now, true)));
     native_session(&mut app, true, false);
     assert!(app.finish_turn());
-    assert_eq!(app.app.public_status_state_reason().0, PublicState::Waiting);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Waiting);
 
     app.start_turn(2);
     request_completion(&socket, &session, None).await.unwrap();
     assert!(app.finish_turn());
-    assert_eq!(
-        app.app.public_status_state_reason().0,
-        PublicState::Completed
-    );
+    assert_eq!(app.public_status_state_reason().0, PublicState::Completed);
 
     native_session(&mut app, true, true);
-    assert_eq!(app.app.public_status_state_reason().0, PublicState::Busy);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
     request_completion(&socket, &session, None).await.unwrap();
     native_session(&mut app, true, false);
-    assert_eq!(
-        app.app.public_status_state_reason().0,
-        PublicState::Completed
-    );
+    assert_eq!(app.public_status_state_reason().0, PublicState::Completed);
     assert!(
         request_completion(&socket, &session, None).await.is_err(),
         "nothing works once the wake ends"
@@ -404,7 +398,7 @@ async fn native_background_shells_wait_without_blocking_completion() {
 fn native_shells_join_the_process_list_and_stop_through_their_agent() {
     let mut app = TestApp::builder().build();
     let session_id = native_background_session(&mut app);
-    let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+    let now = engine::clock::unix_time_ms(app.tui.core.clock.as_ref());
     app.feed_one(SourceEvent::engine(native_shell(now - 65_000, true)));
     let (id, command, elapsed, text, running): (String, String, u64, String, bool) = app
         .eval_lua(

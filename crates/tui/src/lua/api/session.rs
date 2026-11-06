@@ -1279,7 +1279,7 @@ mod tests {
             .build();
         app.ensure_writer_ready();
         for text in ["first user", "second user"] {
-            app.app.stage_request_history_item(
+            app.tui.stage_request_history_item(
                 protocol::HistoryItem::user(protocol::Content::text(text)),
                 Some(smelt_core::Block::User {
                     text: text.into(),
@@ -1290,7 +1290,7 @@ mod tests {
             );
         }
         // Both turns precede the checkpoint, so a resume keeps them only in storage.
-        app.app
+        app.tui
             .session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
                 kind: "compaction".into(),
                 summary: "summary".into(),
@@ -1356,7 +1356,7 @@ mod tests {
             .build();
         app.ensure_writer_ready();
         for text in ["first user", "second user"] {
-            app.app.stage_request_history_item(
+            app.tui.stage_request_history_item(
                 protocol::HistoryItem::user(protocol::Content::text(text)),
                 Some(smelt_core::Block::User {
                     text: text.into(),

@@ -395,7 +395,7 @@ fn streaming_compaction_preview_keeps_sparse_projection_viewport_bounded() {
         delta: format!("# Goal\n{}\n{marker}", "streaming summary ".repeat(1_000)),
     });
     app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
-    app.app
+    app.tui
         .conversation
         .reset_transcript_projection_counters_for_harness();
     let frame = app.render_to_frame().text();
@@ -1136,8 +1136,8 @@ fn wheel_scroll_moves_while_compaction_preview_streams() {
     // Rows above the view can be measured while it streams, which moves
     // `scroll_top` without moving the content, so the content is the measure.
     let screen_row_of_top_block = |app: &mut TestApp| {
-        let scroll_top = app.app.transcript_scroll_top();
-        app.app
+        let scroll_top = app.tui.transcript_scroll_top();
+        app.tui
             .conversation
             .transcript()
             .visible_block_layout()
@@ -1304,7 +1304,7 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while streamed_frame.is_none() {
             let output = app
-                .app
+                .tui
                 .core
                 .engine
                 .recv_output()
@@ -1318,7 +1318,7 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
                 engine::EngineOutput::Event(protocol::EngineEvent::EngineAskDelta { .. })
             );
             let output_len_before = terminal_output.len();
-            app.app
+            app.tui
                 .dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
             if is_delta {
                 assert!(
@@ -1502,15 +1502,15 @@ async fn real_engine_context_failure_can_continue_with_archived_history() {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 tokio::select! {
-                    output = app.app.core.engine.recv_output() => {
+                    output = app.tui.core.engine.recv_output() => {
                         let output = output.expect("engine output");
                         let complete = matches!(&output, engine::EngineOutput::Event(protocol::EngineEvent::TurnComplete { .. }));
-                        app.app.dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
+                        app.tui.dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
                         if complete { break; }
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
                         while let Some(event) = app.try_recv_app_event() { app.handle_app_event(event); }
-                        app.app.drain_persist_reports();
+                        app.tui.drain_persist_reports();
                         app.drain_idle_work();
                         app.pump_lua();
                         app.drive_lua_tasks();
@@ -1701,7 +1701,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !saw_turn_complete {
             let output = app
-                .app
+                .tui
                 .core
                 .engine
                 .recv_output()
@@ -1728,7 +1728,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
                 engine::EngineOutput::Event(protocol::EngineEvent::TurnComplete { .. })
             );
 
-            app.app
+            app.tui
                 .dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
             app.wait_for_project_context();
             if is_compaction_delta {
@@ -1798,9 +1798,9 @@ fn delayed_host_calls_cannot_claim_a_replacement_turn() {
         for kind in ["prepare", "recover", "response"] {
             let mut app = TestApp::builder().build();
             app.start_turn(42);
-            app.app.lua.core_shared().hooks.prepare_request.clear();
-            app.app.lua.core_shared().hooks.context_limit.clear();
-            app.app.lua.core_shared().hooks.provider_response.clear();
+            app.tui.lua.core_shared().hooks.prepare_request.clear();
+            app.tui.lua.core_shared().hooks.context_limit.clear();
+            app.tui.lua.core_shared().hooks.provider_response.clear();
             assert!(app.run_bundled_lua(
                 r#"
                 _G.hook_calls = 0
@@ -1863,7 +1863,7 @@ fn delayed_host_calls_cannot_claim_a_replacement_turn() {
             }
             let turn_id = app.current_turn_id();
             let history = app.model_history();
-            app.app.dispatch_selected_engine_output_in_render_loop_to(
+            app.tui.dispatch_selected_engine_output_in_render_loop_to(
                 engine::EngineOutput::HostCall(delayed),
                 &mut std::io::sink(),
             );
@@ -1898,7 +1898,7 @@ fn delayed_host_calls_cannot_claim_a_replacement_turn() {
 fn request_hook_drop_clears_pending_work() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);
-    app.app.lua.core_shared().hooks.prepare_request.clear();
+    app.tui.lua.core_shared().hooks.prepare_request.clear();
     assert!(app.run_lua(
         r#"smelt.engine.on_prepare_request(function(_, reply) _G.pending_reply = reply end)"#
     ));
@@ -1921,7 +1921,7 @@ fn request_hook_drop_clears_pending_work() {
 fn non_compaction_request_hook_does_not_defer_force_pop() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);
-    app.app.lua.core_shared().hooks.prepare_request.clear();
+    app.tui.lua.core_shared().hooks.prepare_request.clear();
     assert!(app.run_lua(
         r#"smelt.engine.on_prepare_request(function(_, reply) _G.pending_reply = reply end)"#
     ));
@@ -2180,12 +2180,12 @@ async fn real_engine_compaction_preserves_queued_inputs() {
             tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 while completed < expected_turns {
                     let output = tokio::select! {
-                        output = app.app.core.engine.recv_output() => output.expect("engine output"),
+                        output = app.tui.core.engine.recv_output() => output.expect("engine output"),
                         _ = tokio::time::sleep(Duration::from_millis(1)) => {
                             while let Some(event) = app.try_recv_app_event() {
                                 app.handle_app_event(event);
                             }
-                            app.app.drain_persist_reports();
+                            app.tui.drain_persist_reports();
                             app.drain_idle_work();
                             app.pump_lua();
                             continue;
@@ -2200,7 +2200,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
                     ) {
                         completed += 1;
                     }
-                    app.app.dispatch_selected_engine_output_in_render_loop_to(
+                    app.tui.dispatch_selected_engine_output_in_render_loop_to(
                         output,
                         &mut terminal_output,
                     );

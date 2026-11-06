@@ -214,7 +214,7 @@ mod tests {
             .render_to_frame()
             .text()
             .contains("Archive and continue"));
-        let release = app.app.conversation.pause_persistence();
+        let release = app.pause_persistence();
         app.session_append_history(HistoryItem::user(protocol::Content::text(
             "unsaved request",
         )));
@@ -224,7 +224,7 @@ mod tests {
         app.press(crossterm::event::KeyCode::Enter);
         app.drive_lua_tasks();
         assert!(
-            app.app.session_load.is_pending(),
+            app.tui.session_load.is_pending(),
             "{}",
             app.render_to_frame().text()
         );
@@ -255,7 +255,7 @@ mod tests {
         let source = app.session_snapshot().id;
         let original = app.session_history_range(0..app.session_message_count());
         let selected = app.core_probe().config.active_model().unwrap().key.clone();
-        app.app
+        app.tui
             .continue_with_archived_history("ACTIVE_GOAL".into())
             .unwrap();
         app.wait_for_session_lifecycle();
@@ -334,7 +334,7 @@ mod tests {
             .state_root()
             .join("history-archives");
         std::fs::write(&dir, "block archive directory creation").unwrap();
-        app.app
+        app.tui
             .continue_with_archived_history(String::new())
             .unwrap();
         app.wait_for_session_lifecycle();
@@ -345,8 +345,8 @@ mod tests {
             .text()
             .contains("could not archive history"));
         std::fs::remove_file(dir).unwrap();
-        let release = app.app.conversation.pause_persistence();
-        app.app
+        let release = app.pause_persistence();
+        app.tui
             .continue_with_archived_history(String::new())
             .unwrap();
         app.session_append_history(HistoryItem::user(protocol::Content::text("new request")));
@@ -360,11 +360,11 @@ mod tests {
     fn cancelled_archive_keeps_source_writable() {
         let mut app = history_app(3);
         let source = app.session_snapshot().id;
-        let release = app.app.conversation.pause_persistence();
-        app.app
+        let release = app.pause_persistence();
+        app.tui
             .continue_with_archived_history(String::new())
             .unwrap();
-        assert!(app.app.cancel_session_handoff());
+        assert!(app.tui.cancel_session_handoff());
         release.send(()).unwrap();
         app.wait_for_session_lifecycle();
         assert_eq!(app.session_snapshot().id, source);
@@ -379,15 +379,15 @@ mod tests {
     fn archive_completion_preserves_prompt_drafts() {
         let mut app = history_app(3);
         let source = app.session_snapshot().id;
-        let release = app.app.conversation.pause_persistence();
-        app.app
+        let release = app.pause_persistence();
+        app.tui
             .continue_with_archived_history(String::new())
             .unwrap();
         app.type_text("new draft");
         release.send(()).unwrap();
         app.wait_for_session_lifecycle();
         assert_eq!(app.session_snapshot().id, source);
-        assert_eq!(app.app.prompt_buf().source(), "new draft");
+        assert_eq!(app.tui.prompt_buf().source(), "new draft");
     }
 
     #[test]
@@ -396,13 +396,13 @@ mod tests {
         let source = app.session_snapshot().id;
         app.push_queued_message("do not lose this".into());
         assert!(app
-            .app
+            .tui
             .continue_with_archived_history(String::new())
             .err()
             .unwrap()
             .contains("queued"));
         assert_eq!(app.session_snapshot().id, source);
-        assert_eq!(app.app.prompt.queued_texts(), ["do not lose this"]);
+        assert_eq!(app.tui.prompt.queued_texts(), ["do not lose this"]);
         let text = excerpt("你好你好", 7);
         assert!(text.starts_with("你好"));
         assert!(text.contains("truncated"));

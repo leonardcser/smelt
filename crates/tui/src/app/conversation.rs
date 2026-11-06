@@ -3006,7 +3006,7 @@ mod tests {
     fn streaming_save_keeps_deltas_that_arrive_after_its_capture() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_submitted_turn("initial request");
-        let release = app.app.conversation.pause_persistence();
+        let release = app.pause_persistence();
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::TextDelta {
                 delta: "captured streaming text α".into(),
@@ -3014,8 +3014,8 @@ mod tests {
         ));
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_silent();
-        app.app.save_session();
-        assert!(!app.app.conversation.document.has_uncaptured_work());
+        app.save_session();
+        assert!(!app.tui.conversation.document.has_uncaptured_work());
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::TextDelta {
                 delta: " newer text 界".into(),
@@ -3023,13 +3023,13 @@ mod tests {
         ));
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_silent();
-        assert!(app.app.conversation.document.has_uncaptured_work());
+        assert!(app.tui.conversation.document.has_uncaptured_work());
         release.send(()).unwrap();
         app.save_session_and_flush();
-        assert!(!app.app.conversation.has_unflushed_work());
+        assert!(!app.tui.conversation.has_unflushed_work());
 
         let reader = app
-            .app
+            .tui
             .core
             .sessions
             .reader(&app.session_snapshot().id)

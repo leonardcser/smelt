@@ -57,7 +57,7 @@ fn open_fixture(app: &mut TestApp, lines: usize) {
     assert!(
         frame.contains("first.rs"),
         "{frame}\nLua messages: {:?}",
-        app.app.lua.core_shared().messages.lock().unwrap().entries()
+        app.tui.lua.core_shared().messages.lock().unwrap().entries()
     );
     assert!(!frame.contains("feature/test"), "{frame}");
     assert!(app.ui_probe().named_win("smelt.diff.header").is_none());
@@ -369,7 +369,7 @@ fn click_diff_row(app: &mut TestApp, win: WinId, row: u16) {
         MouseEventKind::Up(MouseButton::Left),
     ] {
         // Match the terminal loop: observe native focus before flushing Lua callbacks.
-        app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
+        app.tui.dispatch_terminal_event(Event::Mouse(MouseEvent {
             kind,
             row: rect.y + row,
             column: rect.x + 3,
@@ -907,7 +907,7 @@ async fn diff_snapshot_updates_only_on_explicit_refresh() {
     assert!(git(&["commit", "-qm", "base"]).status.success());
     std::fs::write(dir.path().join("a.rs"), "first edit\n").unwrap();
     let mut app = TestApp::builder().with_cwd(dir.path()).build();
-    let watcher_count = |app: &TestApp| app.app.lua.core_shared().watchers.lock().unwrap().len();
+    let watcher_count = |app: &TestApp| app.tui.lua.core_shared().watchers.lock().unwrap().len();
     let watchers_before = watcher_count(&app);
     app.set_terminal_size(120, 35);
     app.type_text("/diff");
@@ -1935,7 +1935,7 @@ fn diff_tree_consecutive_folder_clicks_work_after_projection_changes() {
             MouseEventKind::Up(MouseButton::Left),
         ] {
             // The terminal loop publishes native focus changes before flushing Lua callbacks.
-            app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
+            app.tui.dispatch_terminal_event(Event::Mouse(MouseEvent {
                 kind,
                 row: rect.y + screen_row as u16,
                 column: rect.x + 1,
@@ -3032,16 +3032,16 @@ fn native_documents_do_not_overwrite_a_shared_backing_buffer() {
     let backing = app.ui_probe().win(left).unwrap().backing_buffer();
     assert_eq!(app.ui_probe().win(right).unwrap().backing_buffer(), backing);
     assert!(
-        app.app.ui.buf_destroy(backing).is_none(),
+        app.tui.ui.buf_destroy(backing).is_none(),
         "destroyed a retained backing buffer"
     );
     assert!(
-        app.app.ui.buf_destroy(scratch[0]).is_none(),
+        app.tui.ui.buf_destroy(scratch[0]).is_none(),
         "destroyed a live native projection"
     );
     let config = app.ui_probe().win(left).unwrap().config.clone();
     assert!(
-        app.app.ui.win_open_split(scratch[0], config).is_none(),
+        app.tui.ui.win_open_split(scratch[0], config).is_none(),
         "shared native projection storage"
     );
     app.run_lua_result("assert(left:buf() == shared); left:document(nil); right:document(nil)")
@@ -3129,8 +3129,8 @@ fn native_view_demand_tracks_mounts_and_copy_uses_each_window_width() {
     let left = app.ui_probe().named_win("doc.left").unwrap();
     let right = app.ui_probe().named_win("doc.right").unwrap();
     let source = Arc::new(Source::default());
-    app.app.ui.set_window_document(left, Some(source.clone()));
-    app.app.ui.set_window_document(right, Some(source.clone()));
+    app.tui.ui.set_window_document(left, Some(source.clone()));
+    app.tui.ui.set_window_document(right, Some(source.clone()));
     app.render_silent();
     let demands = source.0.lock().unwrap().clone();
     assert_eq!(demands.len(), 2);
@@ -3150,7 +3150,7 @@ fn native_view_demand_tracks_mounts_and_copy_uses_each_window_width() {
             "first frame used the width before reserving the gutter"
         );
         assert!(demands.values().any(|viewport| viewport.width == width));
-        let copy = BufferDisplayDocument::new(&mut app.app.ui, win)
+        let copy = BufferDisplayDocument::new(&mut app.tui.ui, win)
             .copy_range(TextRange::Rows(DocRange {
                 start: DocPosition {
                     row: 0,
@@ -3904,7 +3904,7 @@ fn diff_interaction_benchmark() {
     let rect = app.ui_probe().win(win).unwrap().viewport.unwrap().rect;
     let wheel = |app: &mut TestApp, down: bool| {
         for _ in 0..8 {
-            app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
+            app.tui.dispatch_terminal_event(Event::Mouse(MouseEvent {
                 kind: if down {
                     MouseEventKind::ScrollDown
                 } else {
@@ -3955,7 +3955,7 @@ fn diff_interaction_benchmark() {
                     MouseEventKind::Down(MouseButton::Left),
                     MouseEventKind::Up(MouseButton::Left),
                 ] {
-                    app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
+                    app.tui.dispatch_terminal_event(Event::Mouse(MouseEvent {
                         kind,
                         row,
                         column: rect.x + rect.width - 1,

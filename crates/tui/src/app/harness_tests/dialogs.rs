@@ -1289,29 +1289,29 @@ fn vim_session_dialog_visual_yank_beats_copy_all_keymap() {
     assert!(app.run_lua(r#"smelt.cmd.run("session")"#));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("session dialog focused");
+    let win_id = app.tui.ui.focus().expect("session dialog focused");
     app.type_char('v');
     app.type_char('e');
     assert_eq!(
-        app.app.ui.win(win_id).expect("session window").vim_mode(),
+        app.tui.ui.win(win_id).expect("session window").vim_mode(),
         VimMode::Visual
     );
 
     app.type_char('y');
 
-    assert_eq!(app.app.core.clipboard.kill_ring.current(), "session");
+    assert_eq!(app.tui.core.clipboard.kill_ring.current(), "session");
     assert_eq!(
-        app.app.ui.win(win_id).expect("session window").vim_mode(),
+        app.tui.ui.win(win_id).expect("session window").vim_mode(),
         VimMode::Normal
     );
     assert!(
-        app.app.ui.active_modal().is_some(),
+        app.tui.ui.active_modal().is_some(),
         "visual yank must not close the session dialog"
     );
 
     app.type_char('y');
     assert!(
-        app.app
+        app.tui
             .ui
             .win(win_id)
             .expect("session window")
@@ -1342,23 +1342,23 @@ fn vim_visual_viewer_owned_keys_preempt_dialog_keymaps() {
     ));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    let win_id = app.tui.ui.focus().expect("dialog leaf focused");
     app.type_char('v');
     app.type_char('l');
 
     assert!(
-        app.app.ui.active_modal().is_some(),
+        app.tui.ui.active_modal().is_some(),
         "a Vim-owned Visual key must not reach the dialog keymap"
     );
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
+    assert_eq!(app.tui.ui.win(win_id).expect("window").cursor_col(), 1);
     assert_eq!(
-        app.app.ui.win(win_id).expect("window").vim_mode(),
+        app.tui.ui.win(win_id).expect("window").vim_mode(),
         VimMode::Visual
     );
 
     app.type_char('q');
     assert!(
-        app.app.ui.active_modal().is_none(),
+        app.tui.ui.active_modal().is_none(),
         "a Visual key Vim passes through must reach the dialog keymap"
     );
 }
@@ -1387,7 +1387,7 @@ fn vim_visual_global_keymap_overrides_viewer_default() {
     app.type_char('l');
 
     assert!(
-        app.app.ui.active_modal().is_none(),
+        app.tui.ui.active_modal().is_none(),
         "an explicit global Visual mapping must override the viewer default"
     );
 }
@@ -1415,10 +1415,10 @@ fn vim_pending_viewer_sequence_preempts_dialog_keymap() {
     ));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    let win_id = app.tui.ui.focus().expect("dialog leaf focused");
     app.type_char('z');
     assert!(
-        !app.app
+        !app.tui
             .ui
             .win(win_id)
             .expect("window")
@@ -1430,11 +1430,11 @@ fn vim_pending_viewer_sequence_preempts_dialog_keymap() {
     app.type_char('q');
 
     assert!(
-        app.app.ui.active_modal().is_some(),
+        app.tui.ui.active_modal().is_some(),
         "pending Vim input must not reach the dialog keymap"
     );
     assert!(
-        app.app
+        app.tui
             .ui
             .win(win_id)
             .expect("window")
@@ -2315,7 +2315,7 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
     }));
 
     assert_eq!(
-        app.app
+        app.tui
             .conversation
             .pending_transcript_history_rebuild_from(),
         Some(0)
@@ -2330,7 +2330,7 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
     }));
 
     assert_eq!(
-        app.app
+        app.tui
             .conversation
             .pending_transcript_history_rebuild_from(),
         None
@@ -2357,7 +2357,7 @@ fn bash_session_grants_for_cd_prefixed_outside_path_survive_cancel_and_rewind() 
     );
     app.restrict_permissions_to_cwd();
     app.start_submitted_turn("process outside data");
-    let history_idx = app.app.session_history_len().saturating_sub(1);
+    let history_idx = app.session_message_count().saturating_sub(1);
 
     request_bash_permission(&mut app, 21, &command, vec![approval_pattern]);
     assert_eq!(app.pending_confirm_count(), 1);
@@ -2407,7 +2407,7 @@ fn command_session_grant_survives_cancel_and_rewind() {
     let mut app = TestApp::builder().build();
     let command = format!("cd {} && python3 --version", app.cwd_str());
     app.start_submitted_turn("check python");
-    let history_idx = app.app.session_history_len().saturating_sub(1);
+    let history_idx = app.session_message_count().saturating_sub(1);
 
     request_bash_permission(&mut app, 31, &command, vec![approval_pattern]);
     assert_eq!(app.pending_confirm_count(), 1);
@@ -4305,7 +4305,7 @@ fn transparent_overlay_is_not_modal_and_rejects_mouse_capture() {
     "#;
     app.run_lua_result(&OPEN.replace("%s", "")).unwrap();
     app.render();
-    assert!(app.app.ui.active_modal().is_none());
+    assert!(app.tui.ui.active_modal().is_none());
 
     for extra in [", modal = true", ", draggable = true", ", resizable = true"] {
         let err = app.run_lua_result(&OPEN.replace("%s", extra)).unwrap_err();

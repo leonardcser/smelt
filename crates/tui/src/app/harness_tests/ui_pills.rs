@@ -56,7 +56,7 @@ fn click(app: &mut TestApp, expression: &str) {
 fn custom_bar_press_handlers_exist_only_while_enabled() {
     let mut app = TestApp::builder().build();
     app.render_silent();
-    let callbacks = app.app.lua.shared().callbacks.lock().unwrap().len();
+    let callbacks = app.tui.lua.shared().callbacks.lock().unwrap().len();
     app.exec_lua_entry(
         r#"
       smelt.statusline:set_view(function()
@@ -75,13 +75,13 @@ fn custom_bar_press_handlers_exist_only_while_enabled() {
     .expect("mount custom bar without bar-level press handlers");
     app.render_silent();
     assert_eq!(
-        app.app.lua.shared().callbacks.lock().unwrap().len(),
+        app.tui.lua.shared().callbacks.lock().unwrap().len(),
         callbacks + 2
     );
     assert!(app.run_lua("smelt.statusline:configure({ on_press = function() __bar_presses = __bar_presses + 1 end })"));
     app.render_silent();
     assert_eq!(
-        app.app.lua.shared().callbacks.lock().unwrap().len(),
+        app.tui.lua.shared().callbacks.lock().unwrap().len(),
         callbacks + 4
     );
     click(&mut app, "__press_win");
@@ -90,7 +90,7 @@ fn custom_bar_press_handlers_exist_only_while_enabled() {
     assert!(app.run_lua("smelt.statusline:configure({ on_press = false })"));
     app.render_silent();
     assert_eq!(
-        app.app.lua.shared().callbacks.lock().unwrap().len(),
+        app.tui.lua.shared().callbacks.lock().unwrap().len(),
         callbacks + 2
     );
     click(&mut app, "__press_win");
@@ -99,7 +99,7 @@ fn custom_bar_press_handlers_exist_only_while_enabled() {
     assert!(app.run_lua("smelt.statusline:set_view(nil)"));
     app.render_silent();
     assert_eq!(
-        app.app.lua.shared().callbacks.lock().unwrap().len(),
+        app.tui.lua.shared().callbacks.lock().unwrap().len(),
         callbacks
     );
 }
@@ -109,8 +109,8 @@ fn failed_pill_remount_preserves_active_presentation() {
     let mut app = conversation();
     assert!(app.run_lua("local w = smelt.transcript.win; w:scroll(w:scroll().top - 1)"));
     app.render_silent();
-    let buffers = app.app.ui.iter_bufs().count();
-    let renderers = app.app.lua.shared().win_renderers.lock().unwrap().len();
+    let buffers = app.tui.ui.iter_bufs().count();
+    let renderers = app.tui.lua.shared().win_renderers.lock().unwrap().len();
     app.exec_lua_entry(
         r#"
       local bar, l = smelt.transcript.pills.bottom, smelt.ui.layout
@@ -132,9 +132,9 @@ fn failed_pill_remount_preserves_active_presentation() {
     "#,
     )
     .expect("keep old presentation until replacement mount succeeds");
-    assert_eq!(app.app.ui.iter_bufs().count(), buffers);
+    assert_eq!(app.tui.ui.iter_bufs().count(), buffers);
     assert_eq!(
-        app.app.lua.shared().win_renderers.lock().unwrap().len(),
+        app.tui.lua.shared().win_renderers.lock().unwrap().len(),
         renderers - 1
     );
     assert!(app.render_to_frame().text().contains("active candidate"));
@@ -244,7 +244,7 @@ fn growing_custom_pill_keeps_navigation_below_current_geometry() {
 #[test]
 fn rejected_pill_mount_releases_owned_leaves() {
     let mut app = conversation();
-    let buffers = app.app.ui.iter_bufs().count();
+    let buffers = app.tui.ui.iter_bufs().count();
     app.exec_lua_entry(r#"
       local l = smelt.ui.layout
       for _, stop in ipairs({ true, false }) do
@@ -266,7 +266,7 @@ fn rejected_pill_mount_releases_owned_leaves() {
       end
     "#).expect("roll back rejected pill mount");
     assert!(app.paint_registry_probe().all_ids().next().is_none());
-    assert_eq!(app.app.ui.iter_bufs().count(), buffers);
+    assert_eq!(app.tui.ui.iter_bufs().count(), buffers);
 }
 
 #[test]
@@ -280,11 +280,11 @@ fn unchanged_pill_labels_do_not_rewrite_buffers_on_scroll() {
             .named_buf(&format!("smelt.scroll_pills.{kind}.buf"))
             .unwrap()
     });
-    let ticks = ids.map(|id| app.app.ui.buf(id).unwrap().changedtick());
+    let ticks = ids.map(|id| app.tui.ui.buf(id).unwrap().changedtick());
     assert!(app.run_lua(scroll));
     app.render_silent();
     assert_eq!(
-        ids.map(|id| app.app.ui.buf(id).unwrap().changedtick()),
+        ids.map(|id| app.tui.ui.buf(id).unwrap().changedtick()),
         ticks
     );
 }

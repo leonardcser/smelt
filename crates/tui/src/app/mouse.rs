@@ -1110,7 +1110,7 @@ mod tests {
     }
 
     fn app_with_seeded_prompt_top_bar() -> crate::app::TuiApp {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.push_block(smelt_core::Block::Text {
             content: "content focus target".into(),
         });
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn paint_leaf_press_keeps_capture_until_release() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.ui.set_terminal_size(20, 10);
         let (paint, _) = app.paint_registry.register(
             1,
@@ -1291,7 +1291,7 @@ mod tests {
 
     #[test]
     fn prompt_top_chrome_drag_grows_manual_prompt_rows() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         let (row, col) = prompt_resize_handle_cell(&mut app);
         let start_rows = app.prompt.prompt_rows_for_harness();
 
@@ -1318,7 +1318,7 @@ mod tests {
 
     #[test]
     fn prompt_top_chrome_drag_shrinks_manual_prompt_rows() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         let (row, col) = prompt_resize_handle_cell(&mut app);
 
@@ -1334,7 +1334,7 @@ mod tests {
 
     #[test]
     fn prompt_manual_resize_can_exceed_auto_height_cap() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.ui.set_terminal_size(30, 20);
         app.prompt.set_manual_prompt_rows_for_harness(Some(13));
 
@@ -1348,7 +1348,7 @@ mod tests {
 
     #[test]
     fn prompt_auto_height_uses_half_screen_cap() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.ui.set_terminal_size(20, 12);
         app.set_placeholder(
             crate::app::PROMPT_WIN,
@@ -1363,7 +1363,7 @@ mod tests {
 
     #[test]
     fn prompt_resize_handle_double_click_resets_to_auto_rows() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         let (row, col) = prompt_resize_handle_cell(&mut app);
 
@@ -1377,7 +1377,7 @@ mod tests {
 
     #[test]
     fn prompt_resize_drag_to_minimum_resets_to_auto_rows() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.ui.set_terminal_size(20, 16);
         app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         app.set_placeholder(
@@ -1397,7 +1397,7 @@ mod tests {
 
     #[test]
     fn manual_prompt_rows_are_exact_even_when_prompt_content_overflows() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.prompt.set_manual_prompt_rows_for_harness(Some(1));
         app.ui
             .buf_mut(crate::app::PROMPT_EDIT_BUF)
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn prompt_placeholder_wraps_into_auto_prompt_rows() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.ui.set_terminal_size(20, 16);
         app.set_placeholder(
             crate::app::PROMPT_WIN,
@@ -1434,7 +1434,7 @@ mod tests {
 
     #[test]
     fn prompt_placeholder_respects_manual_prompt_rows() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.ui.set_terminal_size(20, 16);
         app.prompt.set_manual_prompt_rows_for_harness(Some(1));
         app.set_placeholder(
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[test]
     fn prompt_bottom_bar_click_focuses_prompt() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.push_block(smelt_core::Block::Text {
             content: "content focus target".into(),
         });
@@ -1481,7 +1481,7 @@ mod tests {
 
     #[test]
     fn transcript_click_after_tail_render_lands_on_clicked_screen_row() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1533,7 +1533,7 @@ mod tests {
 
     #[test]
     fn transcript_tail_follow_tracks_growth_through_render_projection() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1569,7 +1569,7 @@ mod tests {
 
     #[test]
     fn transcript_wheel_down_to_bottom_reengages_tail_follow() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1611,7 +1611,7 @@ mod tests {
 
     #[test]
     fn transcript_wheel_down_at_tail_keeps_tail_follow_before_projection() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1648,7 +1648,7 @@ mod tests {
 
     #[test]
     fn transcript_page_down_to_bottom_reengages_tail_follow() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1681,7 +1681,7 @@ mod tests {
 
     #[test]
     fn transcript_scrollbar_click_bottom_reengages_tail_follow() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn transcript_scrollbar_gesture_preserves_prompt_focus_until_content_click() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1755,7 +1755,7 @@ mod tests {
 
     #[test]
     fn transcript_pinned_scroll_does_not_tail_follow_after_growth() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1799,7 +1799,7 @@ mod tests {
 
     #[test]
     fn transcript_drag_after_tail_render_starts_from_clicked_row() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn row_document_transcript_drag_renders_cursor_and_selection_while_captured() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1913,7 +1913,7 @@ mod tests {
 
     #[test]
     fn transcript_drag_while_streaming_keeps_clicked_anchor() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
                 content: format!("line {i}").into(),
@@ -1981,7 +1981,7 @@ mod tests {
     }
     #[test]
     fn transcript_mouse_drag_copies_raw_math_after_virtual_projection() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         let source = r"\[\frac{a}{b}\]";
         app.push_block(smelt_core::Block::Text {
             content: format!("before\n\n{source}\n\nafter").into(),
@@ -2033,7 +2033,7 @@ mod tests {
 
     #[test]
     fn transcript_click_uses_local_row_in_tail_projection() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         let buf_id = app.transcript_win().buf;
         {
             let buf = app.ui.buf_mut(buf_id).expect("transcript buffer");
@@ -2086,7 +2086,7 @@ mod tests {
 
     #[test]
     fn prompt_triple_click_yanks_only_clicked_source_line() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         let source = "first line\nsecond line\nthird line";
         {
             let buf = app

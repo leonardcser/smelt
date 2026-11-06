@@ -217,9 +217,9 @@ pub struct TestApp {
     // Focused unit tests beside the owning `TuiApp` modules may inspect internals.
     // External harness consumers and normal harness builds stay on semantic APIs.
     #[cfg(test)]
-    pub(crate) app: TuiApp,
+    pub(crate) tui: TuiApp,
     #[cfg(not(test))]
-    app: TuiApp,
+    tui: TuiApp,
     pub clock: Arc<VirtualClock>,
     cmd_rx: Option<mpsc::UnboundedReceiver<UiCommand>>,
     output_injector: Option<engine::EngineOutputInjector>,
@@ -574,7 +574,7 @@ impl TestAppBuilder {
         smelt_perf::alloc::enable();
 
         TestApp {
-            app,
+            tui: app,
             clock,
             cmd_rx,
             output_injector,
@@ -751,27 +751,23 @@ mod runtime_path_tests {
         assert_ne!(first.session_storage_root(), second.session_storage_root());
         assert_ne!(first.cwd_str(), second.cwd_str());
 
-        let first_id = first.app.conversation.session().id.clone();
-        let second_id = second.app.conversation.session().id.clone();
-        first
-            .app
-            .session_append_history(protocol::HistoryItem::user(protocol::Content::text(
-                "first runtime",
-            )));
-        second
-            .app
-            .session_append_history(protocol::HistoryItem::user(protocol::Content::text(
-                "second runtime",
-            )));
-        first.app.save_session_and_flush();
-        second.app.save_session_and_flush();
+        let first_id = first.session_id();
+        let second_id = second.session_id();
+        first.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+            "first runtime",
+        )));
+        second.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+            "second runtime",
+        )));
+        first.tui.save_session_and_flush();
+        second.tui.save_session_and_flush();
 
-        assert!(first.app.core.sessions.reader(&first_id).is_ok());
-        assert!(second.app.core.sessions.reader(&second_id).is_ok());
-        assert!(first.app.core.sessions.reader(&second_id).is_err());
-        assert!(second.app.core.sessions.reader(&first_id).is_err());
+        assert!(first.tui.core.sessions.reader(&first_id).is_ok());
+        assert!(second.tui.core.sessions.reader(&second_id).is_ok());
+        assert!(first.tui.core.sessions.reader(&second_id).is_err());
+        assert!(second.tui.core.sessions.reader(&first_id).is_err());
         let only_session = |app: &TestApp| {
-            let sessions = app.app.core.sessions.list_all_sessions().unwrap();
+            let sessions = app.tui.core.sessions.list_all_sessions().unwrap();
             assert_eq!(sessions.len(), 1);
             sessions[0].id.clone()
         };
@@ -884,7 +880,7 @@ mod runtime_path_tests {
     fn ordinary_apps_resolve_lua_filesystem_and_display_paths_independently() {
         let mut first = TestApp::builder().build();
         let mut second = TestApp::builder().build();
-        let file_name = format!("runtime-path-{}.txt", first.app.conversation.session().id);
+        let file_name = format!("runtime-path-{}.txt", first.tui.conversation.session().id);
         let quoted_name = serde_json::to_string(&file_name).expect("quote runtime file name");
 
         first
@@ -979,7 +975,7 @@ mod runtime_path_tests {
     fn ordinary_apps_persist_lua_state_in_independent_runtime_roots() {
         let mut first = TestApp::builder().build();
         let mut second = TestApp::builder().build();
-        let key = format!("runtime_isolation_{}", first.app.conversation.session().id);
+        let key = format!("runtime_isolation_{}", first.tui.conversation.session().id);
         let quoted_key = serde_json::to_string(&key).expect("quote Lua state key");
 
         first
@@ -1045,17 +1041,17 @@ mod runtime_path_tests {
             .expect("write runtime skill");
         }
 
-        first.app.refresh_agent_inputs();
-        second.app.refresh_agent_inputs();
+        first.tui.refresh_agent_inputs();
+        second.tui.refresh_agent_inputs();
 
         let first_instructions = first
-            .app
+            .tui
             .prompt_inputs
             .instructions
             .as_deref()
             .expect("first runtime instructions");
         let second_instructions = second
-            .app
+            .tui
             .prompt_inputs
             .instructions
             .as_deref()
@@ -1068,7 +1064,7 @@ mod runtime_path_tests {
         assert!(!second_instructions.contains("first"));
 
         let first_skill = first
-            .app
+            .tui
             .core
             .skills
             .as_ref()
@@ -1076,7 +1072,7 @@ mod runtime_path_tests {
             .content("runtime-probe")
             .expect("first runtime skill");
         let second_skill = second
-            .app
+            .tui
             .core
             .skills
             .as_ref()

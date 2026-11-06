@@ -118,7 +118,7 @@ fn frames_include_search_jump(frames: &[TranscriptScrollTraceFrame]) -> bool {
 
 impl TestApp {
     pub fn transcript_window(&self) -> TranscriptWindowSnapshot {
-        let win = self.app.transcript_win();
+        let win = self.tui.transcript_win();
         let scroll_top = win.scroll_top();
         TranscriptWindowSnapshot {
             buf: win.buf,
@@ -139,8 +139,8 @@ impl TestApp {
     }
 
     pub fn transcript_buffer_text(&self) -> String {
-        let win = self.app.transcript_win();
-        self.app
+        let win = self.tui.transcript_win();
+        self.tui
             .ui
             .buf(win.buf)
             .map(|buf| buf.source().to_string())
@@ -148,22 +148,22 @@ impl TestApp {
     }
 
     pub fn transcript_cursor_screen_row(&self, viewport_rows: u16) -> Option<u16> {
-        self.app.transcript_win().cursor_screen_row(viewport_rows)
+        self.tui.transcript_win().cursor_screen_row(viewport_rows)
     }
 
     pub fn configure_transcript_vim(&mut self, enabled: bool, mode: VimMode) {
-        self.app.transcript_win_mut().set_vim_enabled(enabled);
-        self.app.transcript_win_mut().set_vim_mode(mode);
+        self.tui.transcript_win_mut().set_vim_enabled(enabled);
+        self.tui.transcript_win_mut().set_vim_mode(mode);
     }
 
     pub fn follow_transcript_tail(&mut self) {
-        self.app.transcript_win_mut().follow_tail();
+        self.tui.transcript_win_mut().follow_tail();
     }
 
     pub(crate) fn pan_transcript_by_lines(&mut self, lines: isize, viewport_rows: u16) {
-        let buf_id = self.app.transcript_win().buf;
+        let buf_id = self.tui.transcript_win().buf;
         let (window, buffer) = self
-            .app
+            .tui
             .ui
             .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
         window.expect("transcript window").pan_by_lines(
@@ -174,9 +174,9 @@ impl TestApp {
     }
 
     pub(crate) fn jump_transcript_to_bottom(&mut self) {
-        let buf_id = self.app.transcript_win().buf;
+        let buf_id = self.tui.transcript_win().buf;
         let (window, buffer) = self
-            .app
+            .tui
             .ui
             .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
         window
@@ -185,11 +185,11 @@ impl TestApp {
     }
 
     pub fn pin_transcript_scroll(&mut self, row: crate::smelt_edit::RowIndex) {
-        self.app.transcript_win_mut().pin_scroll(row);
+        self.tui.transcript_win_mut().pin_scroll(row);
     }
 
     pub fn set_transcript_document_view(&mut self, state: crate::smelt_edit::DocumentViewState) {
-        self.app.transcript_win_mut().set_document_view_state(state);
+        self.tui.transcript_win_mut().set_document_view_state(state);
     }
 
     #[cfg(any(test, feature = "transcript-bench"))]
@@ -201,14 +201,14 @@ impl TestApp {
             return true;
         }
         if !self
-            .app
+            .tui
             .conversation
             .ensure_transcript_blocks_hydrated_for_harness(ids)
         {
             self.render_silent();
         }
         !self
-            .app
+            .tui
             .conversation
             .transcript()
             .deferred_operation_blocks_failed(ids)
@@ -222,12 +222,12 @@ impl TestApp {
     ) -> bool {
         for _ in 0..16 {
             if self
-                .app
+                .tui
                 .reveal_transcript_record_block(record_index, top_padding, move_cursor)
             {
                 return true;
             }
-            if !self.app.conversation.transcript_hydration_is_pending() {
+            if !self.tui.conversation.transcript_hydration_is_pending() {
                 return false;
             }
             self.render_silent();
@@ -236,7 +236,7 @@ impl TestApp {
     }
 
     pub(crate) fn tick_drag_autoscroll_with_transcript_intent(&mut self) -> bool {
-        self.app.tick_drag_autoscroll_with_transcript_intent()
+        self.tui.tick_drag_autoscroll_with_transcript_intent()
     }
 
     pub(crate) fn submit_search(
@@ -245,7 +245,7 @@ impl TestApp {
         direction: crate::app::search::SearchDirection,
         query: String,
     ) {
-        self.app.submit_search(target, direction, query);
+        self.tui.submit_search(target, direction, query);
     }
 
     pub(crate) fn document_action_at(
@@ -253,7 +253,7 @@ impl TestApp {
         win: WinId,
         pos: crate::smelt_edit::DocPosition,
     ) -> Option<crate::smelt_edit::SpanAction> {
-        self.app.document_action_at(win, pos)
+        self.tui.document_action_at(win, pos)
     }
 
     pub(crate) fn document_view_position_at_mouse_for_win(
@@ -261,7 +261,7 @@ impl TestApp {
         win: WinId,
         event: crossterm::event::MouseEvent,
     ) -> Option<crate::smelt_edit::DocPosition> {
-        self.app.document_view_position_at_mouse_for_win(win, event)
+        self.tui.document_view_position_at_mouse_for_win(win, event)
     }
 
     pub(crate) fn transcript_selection_highlights(
@@ -270,13 +270,13 @@ impl TestApp {
         row_base: crate::smelt_edit::RowIndex,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
-        self.app
+        self.tui
             .transcript_selection_highlights(scroll_top, row_base, viewport_rows)
     }
 
     pub(crate) fn transcript_has_row_selection(&self, now: std::time::Instant) -> bool {
-        let win = self.app.transcript_win();
-        self.app
+        let win = self.tui.transcript_win();
+        self.tui
             .ui
             .buf(win.buf)
             .is_some_and(|buf| win.row_selection_range(buf, now).is_some())
@@ -285,12 +285,12 @@ impl TestApp {
     pub(crate) fn materialize_loaded_transcript_display_rows_expensive(
         &mut self,
     ) -> std::sync::Arc<Vec<String>> {
-        self.app
+        self.tui
             .materialize_loaded_transcript_display_rows_expensive()
     }
 
     pub(crate) fn set_transcript_scroll_trace_for_harness(&mut self, enabled: bool) {
-        self.app
+        self.tui
             .conversation
             .set_transcript_scroll_trace_for_harness(enabled);
     }
@@ -299,14 +299,14 @@ impl TestApp {
         &mut self,
         input: crate::app::transcript_scroll_trace::TranscriptScrollTraceRenderInput,
     ) {
-        self.app
+        self.tui
             .conversation
             .set_next_transcript_scroll_trace_input(input);
     }
 
     #[cfg(test)]
     pub(crate) fn set_transcript_scroll_trace_timings_for_harness(&mut self, enabled: bool) {
-        self.app
+        self.tui
             .conversation
             .set_transcript_scroll_trace_timings_for_harness(enabled);
     }
@@ -314,7 +314,7 @@ impl TestApp {
     pub(crate) fn take_transcript_scroll_trace_frames_for_harness(
         &mut self,
     ) -> Vec<crate::app::transcript_scroll_trace::TranscriptScrollTraceFrame> {
-        self.app
+        self.tui
             .conversation
             .take_transcript_scroll_trace_frames_for_harness()
     }
@@ -323,7 +323,7 @@ impl TestApp {
     pub(crate) fn take_transcript_interaction_trace_events_for_harness(
         &mut self,
     ) -> Vec<crate::app::transcript_scroll_trace::TranscriptInteractionTraceEvent> {
-        self.app
+        self.tui
             .conversation
             .take_transcript_interaction_trace_events_for_harness()
     }
@@ -333,14 +333,14 @@ impl TestApp {
         &mut self,
         budget: crate::app::transcript::TranscriptMemoryBudget,
     ) {
-        self.app
+        self.tui
             .conversation
             .set_transcript_memory_budget_for_harness(budget);
     }
 
     #[cfg(test)]
     pub(crate) fn drain_transcript_compaction_for_harness(&mut self) {
-        self.app
+        self.tui
             .conversation
             .drain_transcript_compaction_for_harness();
     }
@@ -349,12 +349,12 @@ impl TestApp {
     pub(crate) fn transcript_tail_state_for_harness(
         &self,
     ) -> Option<(usize, smelt_core::transcript_model::BlockId, bool)> {
-        self.app.conversation.transcript_tail_state_for_harness()
+        self.tui.conversation.transcript_tail_state_for_harness()
     }
 
     #[cfg(test)]
     pub(crate) fn require_transcript_record_resave_from_for_harness(&mut self, index: usize) {
-        self.app
+        self.tui
             .conversation
             .require_transcript_record_resave_from_for_harness(index);
     }
@@ -366,7 +366,7 @@ impl TestApp {
         history_index: usize,
         block: smelt_core::transcript_model::Block,
     ) {
-        self.app
+        self.tui
             .conversation
             .insert_checkpoint_marker(block_index, history_index, block);
     }
@@ -376,7 +376,7 @@ impl TestApp {
         &mut self,
         transcript: crate::app::transcript::LoadedTranscript,
     ) {
-        self.app
+        self.tui
             .conversation
             .replace_loaded_transcript_for_harness(transcript);
     }
@@ -385,7 +385,7 @@ impl TestApp {
         &mut self,
         transcript: crate::app::transcript::TranscriptDocument,
     ) {
-        self.app
+        self.tui
             .conversation
             .replace_transcript_document_for_harness(transcript);
     }
@@ -395,12 +395,12 @@ impl TestApp {
         ids: &[smelt_core::transcript_model::BlockId],
         f: impl FnOnce(&smelt_core::transcript_model::BlockHistory) -> R,
     ) -> Option<R> {
-        self.app.conversation.with_pinned_transcript_blocks(ids, f)
+        self.tui.conversation.with_pinned_transcript_blocks(ids, f)
     }
 
     #[cfg(test)]
     pub(crate) fn transcript_total_rows(&mut self) -> crate::smelt_edit::RowIndex {
-        self.app.transcript_total_rows()
+        self.tui.transcript_total_rows()
     }
 
     #[cfg(test)]
@@ -409,7 +409,7 @@ impl TestApp {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
-        self.app.transcript_rows_and_breaks_range(start, count)
+        self.tui.transcript_rows_and_breaks_range(start, count)
     }
 
     pub(crate) fn record_transcript_scroll_intent(
@@ -418,7 +418,7 @@ impl TestApp {
         intent: crate::app::transcript_scroll_trace::TranscriptScrollIntent,
         window_scroll_before: crate::smelt_edit::RowIndex,
     ) {
-        self.app
+        self.tui
             .record_transcript_scroll_intent(label, intent, window_scroll_before);
     }
 
@@ -429,7 +429,7 @@ impl TestApp {
         rows: isize,
         label: &str,
     ) -> bool {
-        self.app.scroll_at_with_transcript_intent(x, y, rows, label)
+        self.tui.scroll_at_with_transcript_intent(x, y, rows, label)
     }
 
     pub(crate) fn execute_document_view_command_for_win(
@@ -439,7 +439,7 @@ impl TestApp {
         viewport_rows: u16,
         now: std::time::Instant,
     ) -> Option<crate::smelt_edit::DocRange> {
-        self.app
+        self.tui
             .execute_document_view_command_for_win(win, command, viewport_rows, now)
     }
 
@@ -466,19 +466,19 @@ impl TestApp {
         .expect("tail transcript");
 
         self.set_terminal_size(width, height);
-        self.app
+        self.tui
             .conversation
             .replace_transcript_document_for_harness(TranscriptDocument::from_loaded_transcript(
                 loaded,
             ));
-        self.app.app_focus = AppFocus::Content;
-        self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-        self.app.transcript_win_mut().set_vim_enabled(true);
-        self.app
+        self.tui.app_focus = AppFocus::Content;
+        self.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        self.tui.transcript_win_mut().set_vim_enabled(true);
+        self.tui
             .transcript_win_mut()
             .set_vim_mode(crate::smelt_edit::VimMode::Normal);
-        self.app.transcript_win_mut().follow_tail();
-        self.app
+        self.tui.transcript_win_mut().follow_tail();
+        self.tui
             .conversation
             .set_transcript_scroll_trace_for_harness(true);
         self.transcript_scroll_probe = TranscriptScrollProbeState {
@@ -486,7 +486,7 @@ impl TestApp {
             ..TranscriptScrollProbeState::default()
         };
         self.render_silent();
-        self.app
+        self.tui
             .conversation
             .take_transcript_scroll_trace_frames_for_harness();
     }
@@ -502,7 +502,7 @@ impl TestApp {
             std::mem::take(&mut self.transcript_scroll_probe.pending_search_match_check);
         self.render_silent();
         let frames = self
-            .app
+            .tui
             .conversation
             .take_transcript_scroll_trace_frames_for_harness();
         assert_transcript_scroll_probe_frames(&mut self.transcript_scroll_probe, &frames);
@@ -518,9 +518,9 @@ impl TestApp {
     }
 
     pub fn transcript_scroll_probe_no_input_render(&mut self) {
-        let before_scroll = self.app.transcript_win().scroll_top();
+        let before_scroll = self.tui.transcript_win().scroll_top();
         let frames = self.transcript_scroll_probe_render_frames();
-        let after_scroll = self.app.transcript_win().scroll_top();
+        let after_scroll = self.tui.transcript_win().scroll_top();
         if after_scroll != before_scroll {
             assert!(
                 no_input_scroll_top_change_preserved_content(&frames),
@@ -602,7 +602,7 @@ impl TestApp {
 
     pub fn transcript_scroll_probe_start_edge_drag(&mut self, edge: TranscriptScrollProbeEdge) {
         let vp = self
-            .app
+            .tui
             .transcript_win()
             .viewport
             .expect("transcript viewport");
@@ -632,7 +632,7 @@ impl TestApp {
     }
 
     pub fn transcript_scroll_probe_drag_autoscroll_tick(&mut self) -> bool {
-        self.app.tick_drag_autoscroll_with_transcript_intent()
+        self.tui.tick_drag_autoscroll_with_transcript_intent()
     }
 
     pub fn transcript_scroll_probe_finish_drag(&mut self) {
@@ -675,7 +675,7 @@ impl TestApp {
     }
 
     fn transcript_scroll_probe_scrollbar_event(&mut self, rel_row: u16, kind: MouseEventKind) {
-        let Some(vp) = self.app.transcript_win().viewport else {
+        let Some(vp) = self.tui.transcript_win().viewport else {
             return;
         };
         let Some(scrollbar) = vp.scrollbar else {
@@ -696,12 +696,12 @@ impl TestApp {
     }
 
     pub fn transcript_scroll_probe_command(&mut self, command: TranscriptScrollProbeCommand) {
-        self.app.app_focus = AppFocus::Content;
-        self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-        self.app.transcript_win_mut().set_vim_enabled(true);
-        self.app.transcript_win_mut().set_vim_mode(VimMode::Normal);
+        self.tui.app_focus = AppFocus::Content;
+        self.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        self.tui.transcript_win_mut().set_vim_enabled(true);
+        self.tui.transcript_win_mut().set_vim_mode(VimMode::Normal);
         self.transcript_scroll_probe.selection_clearing_command =
-            self.app.transcript_win().selection_active();
+            self.tui.transcript_win().selection_active();
         match command {
             TranscriptScrollProbeCommand::MoveDown => self.press(KeyCode::Down),
             TranscriptScrollProbeCommand::MoveUp => self.press(KeyCode::Up),
@@ -723,7 +723,7 @@ impl TestApp {
 
     pub fn transcript_scroll_probe_reveal_record(&mut self, record_index: usize) {
         let total = self
-            .app
+            .tui
             .conversation
             .transcript()
             .record_total_count()
@@ -731,51 +731,51 @@ impl TestApp {
             .max(1);
         let record_index = record_index % total;
         let _ = self
-            .app
+            .tui
             .reveal_transcript_record_block(record_index, 1, true);
     }
 
     pub fn transcript_scroll_probe_search_record(&mut self, record_index: usize) {
         let total = self
-            .app
+            .tui
             .conversation
             .transcript()
             .record_total_count()
             .unwrap_or(1)
             .max(1);
         let record_index = record_index % total;
-        self.app.submit_search(
+        self.tui.submit_search(
             crate::app::TRANSCRIPT_WIN,
             SearchDirection::Forward,
             format!("record-{record_index:04}"),
         );
         self.transcript_scroll_probe.pending_search_match_check = self
-            .app
+            .tui
             .overlays
             .search_session()
             .and_then(|session| session.current_range())
             .is_some()
-            && self.app.pending_transcript_search.is_none();
+            && self.tui.pending_transcript_search.is_none();
     }
 
     pub fn transcript_scroll_probe_search_common_text(&mut self) {
-        self.app.submit_search(
+        self.tui.submit_search(
             crate::app::TRANSCRIPT_WIN,
             SearchDirection::Forward,
             "markdown".into(),
         );
         self.transcript_scroll_probe.pending_search_match_check = self
-            .app
+            .tui
             .overlays
             .search_session()
             .and_then(|session| session.current_range())
             .is_some()
-            && self.app.pending_transcript_search.is_none();
+            && self.tui.pending_transcript_search.is_none();
     }
 
     pub fn transcript_scroll_probe_repeat_search(&mut self, reverse: bool) {
         let has_match = self
-            .app
+            .tui
             .overlays
             .search_session()
             .and_then(|session| session.current_range())
@@ -783,7 +783,7 @@ impl TestApp {
         if has_match {
             self.type_char(if reverse { 'N' } else { 'n' });
             self.transcript_scroll_probe.pending_search_match_check =
-                self.app.pending_transcript_search.is_none();
+                self.tui.pending_transcript_search.is_none();
         }
     }
 
@@ -795,7 +795,7 @@ impl TestApp {
 
     fn current_transcript_search_match_is_cursor(&self) -> bool {
         let Some(range) = self
-            .app
+            .tui
             .overlays
             .search_session()
             .and_then(|session| session.current_range())
@@ -803,7 +803,7 @@ impl TestApp {
         else {
             return false;
         };
-        self.app
+        self.tui
             .transcript_win()
             .row_cursor()
             .is_some_and(|position| position.row == range.start.row)
@@ -811,7 +811,7 @@ impl TestApp {
 
     fn assert_current_transcript_search_match(&self) {
         let (query, range) = self
-            .app
+            .tui
             .overlays
             .search_session()
             .and_then(|session| {
@@ -821,7 +821,7 @@ impl TestApp {
                     .map(|range| (session.query.clone(), range))
             })
             .expect("pending transcript search check has a current match");
-        let window = self.app.transcript_win();
+        let window = self.tui.transcript_win();
         let materialized = window
             .materialized_rows()
             .expect("search result has materialized transcript rows");
@@ -830,7 +830,7 @@ impl TestApp {
         }
         let local_row = crate::smelt_edit::row_to_usize(materialized.local_row(range.start.row));
         let buffer = self
-            .app
+            .tui
             .ui
             .buf(window.buf)
             .expect("transcript search buffer");
@@ -854,13 +854,13 @@ impl TestApp {
             2 => format!("{marker} markdown paragraph {}", "wrap ".repeat(32)),
             _ => format!("{marker} compact-ish summary {}", "summary ".repeat(12)),
         };
-        self.app.push_block(Block::Text {
+        self.tui.push_block(Block::Text {
             content: content.into(),
         });
     }
 
     pub fn transcript_scroll_probe_follow_tail(&mut self) {
-        self.app.scroll_window(
+        self.tui.scroll_window(
             crate::app::TRANSCRIPT_WIN,
             crate::app::transcript_scroll::WindowScrollCommand::Tail,
         );
@@ -868,7 +868,7 @@ impl TestApp {
 
     pub(crate) fn transcript_viewport_lines(&self) -> Vec<String> {
         let window = self.transcript_window();
-        let buffer = self.app.ui.buf(window.buf).expect("transcript buffer");
+        let buffer = self.tui.ui.buf(window.buf).expect("transcript buffer");
         let viewport_rows = window
             .viewport
             .map(|viewport| usize::from(viewport.rect.height))
@@ -881,7 +881,7 @@ impl TestApp {
 
     fn transcript_scroll_probe_content_point(&self, rel_row: u16, rel_col: u16) -> (u16, u16) {
         let vp = self
-            .app
+            .tui
             .transcript_win()
             .viewport
             .expect("transcript viewport");
@@ -2314,16 +2314,16 @@ mod tests {
             app.transcript_scroll_probe_render();
         }
         let viewport_rows = app
-            .app
+            .tui
             .transcript_win()
             .viewport
             .map(|viewport| viewport.rect.height)
             .unwrap_or(1);
         assert!(!app
-            .app
+            .tui
             .conversation
             .activate_transcript_search_record_window(
-                app.app.transcript_width() as u16,
+                app.tui.transcript_width() as u16,
                 32,
                 viewport_rows,
             ));

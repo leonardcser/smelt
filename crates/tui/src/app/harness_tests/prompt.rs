@@ -102,7 +102,7 @@ fn prompt_picker_and_notification_stay_under_a_floating_window() {
     app.render();
 
     app.type_text("/zzunder");
-    app.app.notify("NOTICE under the game".into());
+    app.tui.notify("NOTICE under the game".into());
     let frame = app.render_to_frame().text();
     assert!(
         app.state().picker_count > 0,
@@ -143,13 +143,13 @@ fn notification_stays_within_a_prompt_narrowed_by_a_sidebar() {
         app.set_terminal_size(80, 24);
         app.render();
         if notice_first {
-            app.app.notify(NOTICE.into());
+            app.tui.notify(NOTICE.into());
             app.render();
         }
         assert!(app.run_lua(SIDEBAR));
         app.render();
         if !notice_first {
-            app.app.notify(NOTICE.into());
+            app.tui.notify(NOTICE.into());
         }
 
         let frame = app.render_to_frame().text();
@@ -194,7 +194,7 @@ fn prompt_chrome_stays_right_of_a_left_sidebar() {
     app.push_queued_message("QUEUED row".into());
     app.type_text("stashed");
     app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
-    app.app.notify("NOTICE row".into());
+    app.tui.notify("NOTICE row".into());
     let with_notice = app.render_to_frame().text();
     // The prompt's picker covers its notice.
     app.type_text("/zzleft");
@@ -233,10 +233,10 @@ fn slash_completion_accepts_current_command_from_a_terminal_burst() {
         app.type_text("/r");
         assert!(app.state().picker_count > 0);
 
-        let work = app.app.lua.core_shared().begin_work();
-        while app.app.lua.core_shared().claim_work() {}
+        let work = app.tui.lua.core_shared().begin_work();
+        while app.tui.lua.core_shared().claim_work() {}
         for code in "ewind-first".chars().map(KeyCode::Char).chain([accept]) {
-            app.app
+            app.tui
                 .dispatch_terminal_event(crossterm::event::Event::Key(
                     crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
                 ));
@@ -907,10 +907,10 @@ fn steering_waits_for_transcript_work_before_acknowledging_input() {
         let before = app.session_message_count();
         app.type_text("keep this visible");
         app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
-        app.app.queue_engine_continuation(EngineEvent::TextDelta {
+        app.tui.queue_engine_continuation(EngineEvent::TextDelta {
             delta: "earlier output".into(),
         });
-        app.app.dispatch_engine_event(EngineEvent::Steered {
+        app.dispatch_engine_event(EngineEvent::Steered {
             turn_id: app.current_turn_id().expect("active turn"),
             delta: protocol::CanonicalHistoryDelta::new(
                 before,
@@ -929,7 +929,7 @@ fn steering_waits_for_transcript_work_before_acknowledging_input() {
             assert_eq!(app.session_message_count(), before);
             assert!(app.render_to_frame().text().contains("keep this visible"));
         } else {
-            app.app.apply_pending_transcript_work();
+            app.tui.apply_pending_transcript_work();
             assert!(app.state().queued_inputs.is_empty());
             assert_eq!(app.session_message_count(), before + 1);
             let frame = app.render_to_frame().text();
@@ -2399,14 +2399,14 @@ fn vim_gg_reveals_top_of_prompt_scrolled_to_bottom() {
     let last_line = app.screen_position("line 59").expect("last line painted");
     app.mouse(crossterm::event::MouseEventKind::ScrollDown, last_line);
     app.render_silent();
-    assert!(!app.app.prompt_win().is_following_tail());
+    assert!(!app.tui.prompt_win().is_following_tail());
 
     app.press(KeyCode::Esc);
     app.press(KeyCode::Char('g'));
     app.press(KeyCode::Char('g'));
     app.render_silent();
 
-    assert_eq!(app.app.prompt_win().scroll_top(), 0);
+    assert_eq!(app.tui.prompt_win().scroll_top(), 0);
     assert!(app.screen_position("line 00").is_some());
     assert!(app.screen_position("line 59").is_none());
 }

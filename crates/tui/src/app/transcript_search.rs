@@ -1339,20 +1339,20 @@ mod tests {
         const QUERY: &str = "phase-five-unique-search-target";
 
         let mut app = TestApp::builder().with_vim(true).build();
-        app.app.handle_resize(100, 32);
+        app.tui.handle_resize(100, 32);
         for index in 0..700 {
             let marker = if index == MATCH_INDEX {
                 QUERY
             } else {
                 "ordinary"
             };
-            app.app
+            app.tui
                 .push_block(smelt_core::transcript_model::Block::Text {
                     content: format!("search block {index}: {marker}").into(),
                 });
         }
         let match_id = app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
@@ -1360,7 +1360,7 @@ mod tests {
             .iter()
             .copied()
             .find(|id| {
-                app.app
+                app.tui
                     .conversation
                     .transcript()
                     .history()
@@ -1369,37 +1369,36 @@ mod tests {
                     .is_some_and(|text| text.contains(QUERY))
             })
             .expect("search target block");
-        app.app.save_session_and_flush();
+        app.tui.save_session_and_flush();
         let loaded = crate::app::history::load_transcript_tail_from_sqlite_id(
-            &app.app.core.sessions,
-            &app.app.conversation.session().id,
+            &app.tui.core.sessions,
+            &app.tui.conversation.session().id,
             100,
             32,
         )
         .expect("load sparse transcript");
-        app.app.clear_transcript();
-        app.app
+        app.clear_transcript();
+        app.tui
             .conversation
             .replace_transcript_document_for_harness(
                 crate::app::transcript::TranscriptDocument::from_loaded_transcript(loaded),
             );
-        app.app
+        app.tui
             .conversation
             .set_transcript_memory_budget_for_harness(TranscriptMemoryBudget {
                 hydrated_blocks: 1,
                 ..Default::default()
             });
-        app.app.app_focus = AppFocus::Content;
-        app.app.ui.set_focus(TRANSCRIPT_WIN);
-        app.app.transcript_win_mut().set_vim_enabled(true);
-        app.app.transcript_win_mut().set_vim_mode(VimMode::Normal);
+        app.tui.app_focus = AppFocus::Content;
+        app.tui.ui.set_focus(TRANSCRIPT_WIN);
+        app.tui.transcript_win_mut().set_vim_enabled(true);
+        app.tui.transcript_win_mut().set_vim_mode(VimMode::Normal);
         app.render_silent();
 
-        app.app
-            .submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
+        app.submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
         app.render_silent();
         let first = app
-            .app
+            .tui
             .conversation
             .transcript_memory_snapshot_for_harness();
         assert!(first.hydration_reads > 0);
@@ -1408,19 +1407,19 @@ mod tests {
             "candidate verification exceeded one viewport-sized neighborhood: {first:?}"
         );
         assert!(app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .order
             .iter()
-            .filter_map(|id| app.app.conversation.transcript().history().block(*id))
+            .filter_map(|id| app.tui.conversation.transcript().history().block(*id))
             .filter_map(smelt_core::transcript_model::Block::raw_text)
             .any(|text| text.contains(QUERY)));
 
         app.render_silent();
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .transcript_memory_snapshot_for_harness()
                 .hydration_reads,
@@ -1428,10 +1427,10 @@ mod tests {
             "render reread a block that remained in the viewport working set"
         );
 
-        app.app.clear_search();
-        assert!(!app.app.reveal_transcript_record_block(699, 0, true));
+        app.tui.clear_search();
+        assert!(!app.tui.reveal_transcript_record_block(699, 0, true));
         app.render_silent();
-        assert!(app.app.reveal_transcript_target_at_top(
+        assert!(app.tui.reveal_transcript_target_at_top(
             699,
             smelt_core::transcript_model::BlockId::new(699),
             0,
@@ -1439,21 +1438,20 @@ mod tests {
         ));
         app.render_silent();
         assert!(!app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .is_materialized(match_id));
         let before_reveal = app
-            .app
+            .tui
             .conversation
             .transcript_memory_snapshot_for_harness();
 
-        app.app
-            .submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
+        app.submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
         app.render_silent();
         let revealed = app
-            .app
+            .tui
             .conversation
             .transcript_memory_snapshot_for_harness();
         assert!(revealed.hydration_reads > before_reveal.hydration_reads);
@@ -1462,13 +1460,13 @@ mod tests {
             "search reveal exceeded one viewport-sized neighborhood: before={before_reveal:?}, after={revealed:?}"
         );
         assert!(app
-            .app
+            .tui
             .conversation
             .transcript()
             .history()
             .order
             .iter()
-            .filter_map(|id| app.app.conversation.transcript().history().block(*id))
+            .filter_map(|id| app.tui.conversation.transcript().history().block(*id))
             .filter_map(smelt_core::transcript_model::Block::raw_text)
             .any(|text| text.contains(QUERY)));
     }

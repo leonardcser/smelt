@@ -111,13 +111,13 @@ fn ctrl_c_quits_from_interrupted_and_interrupted_paused() {
                 retry_at_ms: None,
             }));
             assert_eq!(
-                app.app.prompt_work_state(),
+                app.tui.prompt_work_state(),
                 crate::app::PromptWorkState::Paused
             );
         } else {
             app.discard_turn(crate::app::TurnEnd::Cancelled);
             assert_eq!(
-                app.app.prompt_work_state(),
+                app.tui.prompt_work_state(),
                 crate::app::PromptWorkState::Idle
             );
         }
@@ -154,7 +154,7 @@ fn paused_commands_run_like_interrupted_commands() {
                     retry_at_ms: None,
                 }));
                 assert_eq!(
-                    app.app.prompt_work_state(),
+                    app.tui.prompt_work_state(),
                     crate::app::PromptWorkState::Paused
                 );
             } else {
@@ -193,15 +193,15 @@ fn paused_prompt_still_queues_messages_and_resumes_on_empty_enter() {
     app.press(KeyCode::Enter);
     assert_eq!(app.state().queued_inputs, vec!["queued turn"]);
     assert_eq!(
-        app.app.prompt_work_state(),
+        app.tui.prompt_work_state(),
         crate::app::PromptWorkState::Paused
     );
 
     app.type_text("queued request");
     app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
-    assert!(app.app.prompt.has_queued_request());
+    assert!(app.tui.prompt.has_queued_request());
     assert_eq!(
-        app.app.prompt_work_state(),
+        app.tui.prompt_work_state(),
         crate::app::PromptWorkState::Paused
     );
 
@@ -291,11 +291,11 @@ fn non_quota_retry_metadata_does_not_publish_continuation_token() {
 }
 
 fn run_due_timers(app: &mut TestApp, ms: u64) -> Vec<protocol::UiCommand> {
-    app.app.drain_persist_reports();
+    app.tui.drain_persist_reports();
     app.pump_lua();
     app.feed_one(SourceEvent::Tick(ms));
     app.tick_timers();
-    if app.agent_running() || app.app.turn_submission_is_pending() {
+    if app.agent_running() || app.tui.turn_submission_is_pending() {
         app.wait_for_turn_dispatch();
     }
     app.drain_engine_sends()
@@ -451,7 +451,7 @@ fn auto_continuation_keeps_work_signals_and_status_busy() {
         }
         let turn_id = start_canonical_turn(&mut app);
         app.set_terminal_focus_for_harness(false);
-        app.app.platform.status_updates = Some(Vec::new());
+        app.tui.platform.status_updates = Some(Vec::new());
         assert!(app.run_lua(
             r#"
             _G.work_states = {}
@@ -460,15 +460,15 @@ fn auto_continuation_keeps_work_signals_and_status_busy() {
             end)
         "#
         ));
-        let release = app.app.conversation.pause_persistence();
-        app.app.dispatch_engine_event(EngineEvent::TurnComplete {
+        let release = app.pause_persistence();
+        app.dispatch_engine_event(EngineEvent::TurnComplete {
             turn_id,
             history: None,
             meta: None,
         });
-        app.app.tick_runtime();
+        app.tui.tick_runtime();
         app.clock.advance(std::time::Duration::from_millis(1199));
-        app.app.tick_runtime();
+        app.tui.tick_runtime();
         assert!(!has_started_turn(&app.drain_engine_sends()));
         assert!(app.run_lua(
             r#"
@@ -478,11 +478,11 @@ fn auto_continuation_keeps_work_signals_and_status_busy() {
         "#
         ));
         app.clock.advance(std::time::Duration::from_millis(1));
-        app.app.tick_runtime();
+        app.tui.tick_runtime();
         assert!(has_started_turn(&app.drain_engine_sends()));
         release.send(()).unwrap();
-        app.app.tick_runtime();
-        let updates = app.app.platform.status_updates.as_ref().unwrap();
+        app.tui.tick_runtime();
+        let updates = app.tui.platform.status_updates.as_ref().unwrap();
         assert!(!updates.is_empty());
         assert!(
             updates
@@ -615,7 +615,7 @@ fn quota_error(app: &mut TestApp, retry_at_ms: Option<u64>) {
 }
 
 fn complete_background_job(app: &mut TestApp) {
-    app.app
+    app.tui
         .handle_job_completed(smelt_core::process::JobCompletion {
             id: "quota-test-job".into(),
             exit_code: Some(0),
@@ -666,7 +666,7 @@ fn rewind_command_resubmits_edited_prompt_before_preserved_queue() {
         }
         app.type_text("queued follow-up");
         app.press(KeyCode::Enter);
-        let release = app.app.conversation.pause_persistence();
+        let release = app.pause_persistence();
         app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
             message: "quota exceeded".into(),
             kind: Some(protocol::EngineAskErrorKind::Quota),
@@ -704,12 +704,12 @@ fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
             let mut app = isolated_app();
             assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
             app.start_submitted_turn("initial request");
-            app.app.flush_persist();
-            let history_idx = app.app.conversation.active().unwrap().rewind_history_idx;
+            app.flush_persist();
+            let history_idx = app.tui.conversation.active().unwrap().rewind_history_idx;
             app.steer("queued steering");
             app.push_queued_message("queued follow-up".into());
             let queued = app.state().queued_inputs;
-            let release = pending_persistence.then(|| app.app.conversation.pause_persistence());
+            let release = pending_persistence.then(|| app.pause_persistence());
             app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
                 message: "quota exceeded".into(),
                 kind: Some(protocol::EngineAskErrorKind::Quota),
@@ -718,7 +718,7 @@ fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
             if !pending_persistence {
                 app.wait_for_turn_dispatch();
             }
-            let retry_token = app.app.conversation.continuation_token().unwrap();
+            let retry_token = app.tui.conversation.continuation_token().unwrap();
 
             app.rewind_to_history_index(if to_start { None } else { history_idx }, false);
 
@@ -727,8 +727,8 @@ fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
                 app.state().prompt_text,
                 if to_start { "" } else { "initial request" }
             );
-            assert!(app.app.conversation.continuation_token().is_none());
-            assert!(!app.app.resume_paused_turn(Some(retry_token)));
+            assert!(app.tui.conversation.continuation_token().is_none());
+            assert!(!app.tui.resume_paused_turn(Some(retry_token)));
             assert!(!app.start_next_queued_input_if_idle());
             app.clear_actions();
             assert!(!has_started_turn(&run_due_timers(&mut app, 124_000)));
@@ -744,7 +744,7 @@ fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
                 app.agent_running(),
                 "explicit Enter must not leave the queue locked"
             );
-            assert!(app.app.conversation.turn_pause().is_none());
+            assert!(app.tui.conversation.turn_pause().is_none());
         }
     }
 }
@@ -1017,7 +1017,7 @@ fn quota_retry_starts_at_its_deadline_while_the_writer_is_paused() {
     quota_error(&mut app, Some(reset));
     assert!(has_started_turn(&run_due_timers(&mut app, 151_000)));
 
-    let release = app.app.conversation.pause_persistence();
+    let release = app.pause_persistence();
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "provider limit".into(),
         kind: Some(protocol::EngineAskErrorKind::Quota),
@@ -1772,7 +1772,7 @@ fn native_compaction_shows_its_phase_and_resets_the_context_reading() {
     });
     assert_eq!(app.working_probe().phase_label(), Some("working"));
     assert_eq!(
-        app.app.conversation.session().display_context_tokens(),
+        app.tui.conversation.session().display_context_tokens(),
         Some(1_192)
     );
     assert!(app.state().notification.is_some(), "the outcome is shown");

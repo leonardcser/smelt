@@ -4,11 +4,11 @@ use super::*;
 pub(super) async fn request_session_completion(app: &TestApp, turn: u64) {
     use protocol::event::CONTROL_SOCKET_ENV;
     use smelt_core::session_control::request_completion;
-    let control = &app.app.core.session_control;
+    let control = &app.tui.core.session_control;
     control.initialize().unwrap();
     request_completion(
         &control.shell_env()[CONTROL_SOCKET_ENV],
-        &app.app.conversation.session().id,
+        &app.tui.conversation.session().id,
         Some(turn),
     )
     .await
@@ -20,9 +20,9 @@ async fn public_status_waits_for_notifying_background_jobs() {
     use smelt_core::public_status::PublicState;
     let mut app = TestApp::builder().build();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.app.core.jobs.set_completion_sender(tx);
-    let jobs = app.app.core.jobs.clone();
-    let cwd = app.app.core.env.cwd();
+    app.tui.core.jobs.set_completion_sender(tx);
+    let jobs = app.tui.core.jobs.clone();
+    let cwd = app.tui.core.env.cwd();
     let id = jobs
         .spawn_background(
             "sleep 0.02",
@@ -48,7 +48,7 @@ async fn public_status_waits_for_notifying_background_jobs() {
         PublicState::Waiting,
         "delivery is still pending"
     );
-    app.app.handle_job_completed(completion);
+    app.tui.handle_job_completed(completion);
     assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
     app.discard_turn(crate::app::TurnEnd::Complete);
     assert_ne!(app.public_status_state_reason().0, PublicState::Waiting);
@@ -73,7 +73,7 @@ async fn public_status_completed_survives_focus_until_next_turn() {
     use smelt_core::public_status::PublicState;
     let mut app = TestApp::builder().build();
     app.start_turn(1);
-    let session = app.app.conversation.session().id.clone();
+    let session = app.session_id();
     request_session_completion(&app, 1).await;
     assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
     app.discard_turn(crate::app::TurnEnd::Complete);
@@ -95,9 +95,9 @@ async fn public_status_completed_survives_focus_until_next_turn() {
     assert!(app.run_lua(r#"smelt.settings.auto_continue = 'always'"#));
     app.discard_turn(crate::app::TurnEnd::Complete);
     assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
-    assert!(!app.app.core.session_control.is_completed(&session));
+    assert!(!app.tui.core.session_control.is_completed(&session));
     assert!(app
-        .app
+        .tui
         .overlays
         .notification()
         .is_some_and(|notice| notice.summary.contains("session completion not applied")));
@@ -110,7 +110,7 @@ async fn public_status_completion_is_invalidated_by_history_changes() {
     for reset in [false, true] {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
-        let session = app.app.conversation.session().id.clone();
+        let session = app.session_id();
         request_session_completion(&app, 1).await;
         app.discard_turn(crate::app::TurnEnd::Complete);
         assert_eq!(app.public_status_state_reason().0, PublicState::Completed);
@@ -119,7 +119,7 @@ async fn public_status_completion_is_invalidated_by_history_changes() {
         } else {
             app.rewind_to_start();
         }
-        assert!(!app.app.core.session_control.is_completed(&session));
+        assert!(!app.tui.core.session_control.is_completed(&session));
         assert_ne!(app.public_status_state_reason().0, PublicState::Completed);
     }
 }
@@ -613,14 +613,14 @@ async fn completed_background_process_output_expands_in_transcript() {
         .build_with_test_home_guard(&guard);
     app.set_terminal_size(90, 24);
     let (completion_tx, mut completion_rx) = tokio::sync::mpsc::unbounded_channel();
-    app.app.core.jobs.set_completion_sender(completion_tx);
-    app.app
+    app.tui.core.jobs.set_completion_sender(completion_tx);
+    app.tui
         .core
         .jobs
         .spawn_background(
             "printf '\\033[32mbackground stdout\\033[0m\\n'; printf 'background stderr\\n' >&2; exit 7",
             &smelt_core::process::ShellSpec::default(),
-            &app.app.core.env.cwd(),
+            &app.tui.core.env.cwd(),
             std::time::Instant::now(),
         )
         .await
@@ -629,8 +629,8 @@ async fn completed_background_process_output_expands_in_transcript() {
         .await
         .expect("background process should complete")
         .expect("completion notification");
-    app.app.core.jobs.clear();
-    app.app
+    app.tui.core.jobs.clear();
+    app.tui
         .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
             completion,
         ));
@@ -758,7 +758,7 @@ fn job_completion_after_final_request_starts_follow_up_turn() {
     let mut app = TestApp::builder().build();
     app.start_turn(7);
 
-    app.app
+    app.tui
         .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
             smelt_core::process::JobCompletion {
                 id: "4242".into(),
@@ -798,7 +798,7 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
     })
     .expect("queue ready turn completion");
 
-    app.app
+    app.tui
         .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
             smelt_core::process::JobCompletion {
                 id: "4242".into(),
@@ -838,7 +838,7 @@ fn job_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
         ),
     );
 
-    app.app
+    app.tui
         .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
             smelt_core::process::JobCompletion {
                 id: "4242".into(),

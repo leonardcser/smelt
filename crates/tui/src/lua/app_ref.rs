@@ -2129,19 +2129,19 @@ mod tests {
         let mut outer = crate::app::test_harness::TestApp::builder().build();
         let mut nested = crate::app::test_harness::TestApp::builder().build();
         outer
-            .app
+            .tui
             .conversation
             .set_session_id_for_harness("outer".into());
-        outer.app.core.config.settings.fast_mode = false;
+        outer.tui.core.config.settings.fast_mode = false;
         nested
-            .app
+            .tui
             .conversation
             .set_session_id_for_harness("nested".into());
-        nested.app.core.config.settings.fast_mode = true;
+        nested.tui.core.config.settings.fast_mode = true;
 
-        scope_app(&mut outer.app, || {
+        scope_app(&mut outer.tui, || {
             assert_eq!(with_session_host(|host| host.session_id()), "outer");
-            scope_app(&mut nested.app, || {
+            scope_app(&mut nested.tui, || {
                 assert_eq!(with_session_host(|host| host.session_id()), "nested");
                 assert!(smelt_core::host::with_core(|core| core
                     .config
@@ -2161,7 +2161,7 @@ mod tests {
     fn capability_borrow_cannot_alias_itself() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        scope_app(&mut app.app, || {
+        scope_app(&mut app.tui, || {
             with_session_host(|host| {
                 assert!(!host.session_id().is_empty());
                 assert!(try_with_session_host(|_| ()).is_none());

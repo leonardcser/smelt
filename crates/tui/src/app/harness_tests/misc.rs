@@ -603,7 +603,7 @@ fn headerline_add_reg_removes_only_its_own_source() {
 #[test]
 fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
     let mut app = TestApp::builder().build();
-    let session_dir = app.app.conversation.current_artifact_dir();
+    let session_dir = app.tui.conversation.current_artifact_dir();
     assert!(
         !session_dir.exists(),
         "fresh session should not be persisted before its first message"
@@ -613,7 +613,7 @@ fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
         app.render_silent();
     }
 
-    let transcript = app.app.conversation.transcript();
+    let transcript = app.tui.conversation.transcript();
     assert_eq!(
         transcript.projection_count_for_harness(),
         1,
@@ -1154,7 +1154,7 @@ fn a_running_turn_repaints_only_when_the_working_indicator_asks() {
     app.animate_with_virtual_clock();
     app.start_turn(42);
     assert_eq!(
-        app.app.animation_frame_interval(),
+        app.tui.animation_frame_interval(),
         None,
         "waiting on the model must not run the frame loop"
     );
@@ -1177,7 +1177,7 @@ fn a_running_turn_repaints_only_when_the_working_indicator_asks() {
     app.run_lua("smelt.prompt.top:invalidate()");
     app.advance_animation(150);
     assert_eq!(
-        app.app.core.timers.next_deadline(),
+        app.tui.core.timers.next_deadline(),
         None,
         "a cooled coal stops asking for frames"
     );
@@ -1187,7 +1187,7 @@ fn a_running_turn_repaints_only_when_the_working_indicator_asks() {
     app.type_char('y');
     app.type_char('y');
     assert_eq!(
-        app.app.animation_frame_interval(),
+        app.tui.animation_frame_interval(),
         Some(std::time::Duration::from_millis(16)),
         "a yank flash follows the user's input at full rate"
     );
@@ -1205,16 +1205,16 @@ fn a_focused_overlay_runs_the_frame_loop_only_for_tick_handlers() {
     )
     .unwrap();
     app.drive_lua_tasks();
-    assert!(app.app.ui.focused_overlay().is_some());
+    assert!(app.tui.ui.focused_overlay().is_some());
     assert_eq!(
-        app.app.animation_frame_interval(),
+        app.tui.animation_frame_interval(),
         None,
         "an idle overlay repaints on demand"
     );
     app.run_lua_result(r#"win:on("tick", function() end)"#)
         .unwrap();
     assert_eq!(
-        app.app.animation_frame_interval(),
+        app.tui.animation_frame_interval(),
         Some(std::time::Duration::from_millis(16)),
         "tick handlers keep their per-frame cadence"
     );
@@ -1225,7 +1225,7 @@ fn tick_every_runs_while_idle_and_only_now_listeners_wake_each_second() {
     let mut app = TestApp::builder().build();
     app.clear_timers();
     assert_eq!(
-        app.app.next_second_delay(),
+        app.tui.next_second_delay(),
         None,
         "nothing listens to `now` by default, so idle never wakes for it"
     );
@@ -1244,12 +1244,12 @@ fn tick_every_runs_while_idle_and_only_now_listeners_wake_each_second() {
 
     app.run_lua("_G.listener = smelt.signal.subscribe('now', function() end)");
     let delay = app
-        .app
+        .tui
         .next_second_delay()
         .expect("a `now` listener wakes the loop");
     assert!(delay <= std::time::Duration::from_secs(1));
     app.run_lua("_G.listener:remove()");
-    assert_eq!(app.app.next_second_delay(), None);
+    assert_eq!(app.tui.next_second_delay(), None);
 }
 
 #[test]
@@ -1416,7 +1416,7 @@ fn oversized_provider_output_is_sliced_before_completion_and_turn_finalization()
         meta: None,
     }));
     assert!(
-        app.app.conversation.is_active(),
+        app.tui.conversation.is_active(),
         "turn completion must wait for queued output slices"
     );
     assert_eq!(
@@ -1459,13 +1459,13 @@ fn oversized_provider_output_is_sliced_before_completion_and_turn_finalization()
     assert_eq!(output.content.snapshot(), "x".repeat(3 * SLICE_BYTES));
     assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 0 })));
     assert!(
-        app.app.conversation.is_active(),
+        app.tui.conversation.is_active(),
         "turn finalization must remain queued behind tool completion"
     );
 
     app.render_silent();
     assert!(
-        !app.app.conversation.is_active(),
+        !app.tui.conversation.is_active(),
         "turn completes after retained output and tool lifecycle settle"
     );
 }
@@ -1998,7 +1998,7 @@ fn open_sparse_resume_preview(guard: &TestEnvironmentGuard) -> TestApp {
     app.settle_lua();
     app.render_silent();
     app.feed_one(SourceEvent::Tick(50));
-    app.app.tick_timers();
+    app.tick_timers();
     app.settle_lua();
     app.render_silent();
     assert!(app.state().active_modal.is_some());
@@ -2177,7 +2177,7 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
         .load_meta(&session_id)
         .expect("corrupt preview fixture metadata")
         .updated_at_ms;
-    app.app.conversation.store_resume_preview(
+    app.tui.conversation.store_resume_preview(
         format!("{session_id}:{updated_at_ms}"),
         crate::app::transcript::TranscriptDocument::from_loaded_transcript(preview),
     );
@@ -2185,7 +2185,7 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
     app.settle_lua();
     app.render_silent();
     app.feed_one(SourceEvent::Tick(50));
-    app.app.tick_timers();
+    app.tick_timers();
     app.settle_lua();
     app.render_silent();
 
@@ -4022,7 +4022,7 @@ fn visible_transcript_record_word(app: &TestApp) -> VisibleTranscriptWord {
 
 fn assert_visible_word_direct_copy_round_trip(app: &mut TestApp, target: &VisibleTranscriptWord) {
     let direct = app
-        .app
+        .tui
         .copy_document_rows(
             crate::app::TRANSCRIPT_WIN,
             crate::smelt_edit::DocRange {
@@ -4206,7 +4206,7 @@ fn first_resumed_wheel_after_tiny_initial_layout_moves_exact_rows() {
     app.take_transcript_scroll_trace_frames_for_harness();
 
     let extent_reads = app
-        .app
+        .tui
         .conversation
         .transcript_extent_store_read_count_for_harness();
     let before = transcript_viewport_lines(&app);
@@ -4218,7 +4218,7 @@ fn first_resumed_wheel_after_tiny_initial_layout_moves_exact_rows() {
     let frames = app.take_transcript_scroll_trace_frames_for_harness();
     let frame = frames.last().expect("first resumed wheel trace frame");
     assert_eq!(
-        app.app
+        app.tui
             .conversation
             .transcript_extent_store_read_count_for_harness(),
         extent_reads,
@@ -4246,7 +4246,7 @@ fn first_resumed_wheel_after_tiny_initial_layout_moves_exact_rows() {
     app.render_silent();
     app.take_transcript_scroll_trace_frames_for_harness();
     let extent_reads = app
-        .app
+        .tui
         .conversation
         .transcript_extent_store_read_count_for_harness();
     let before = transcript_viewport_lines(&app);
@@ -4255,7 +4255,7 @@ fn first_resumed_wheel_after_tiny_initial_layout_moves_exact_rows() {
     let after = transcript_viewport_lines(&app);
     assert_viewport_shifted_up_rows(1, &before, &after, 3);
     assert_eq!(
-        app.app
+        app.tui
             .conversation
             .transcript_extent_store_read_count_for_harness(),
         extent_reads,
@@ -4351,7 +4351,7 @@ fn resumed_sparse_page_delta_moves_one_viewport_without_extent_reads() {
         .height
         .max(1);
     let extent_reads = app
-        .app
+        .tui
         .conversation
         .transcript_extent_store_read_count_for_harness();
 
@@ -4372,7 +4372,7 @@ fn resumed_sparse_page_delta_moves_one_viewport_without_extent_reads() {
         "page delta did not move a whole viewport: {frame:?}"
     );
     assert_eq!(
-        app.app
+        app.tui
             .conversation
             .transcript_extent_store_read_count_for_harness(),
         extent_reads,
@@ -4457,7 +4457,7 @@ fn resumed_sparse_wheel_moves_exact_visible_rows_across_pages() {
     app.set_transcript_scroll_trace_for_harness(true);
     app.take_transcript_scroll_trace_frames_for_harness();
     let extent_reads = app
-        .app
+        .tui
         .conversation
         .transcript_extent_store_read_count_for_harness();
     let mut window_switches = 0;
@@ -4481,7 +4481,7 @@ fn resumed_sparse_wheel_moves_exact_visible_rows_across_pages() {
         }
     }
     assert!(
-        app.app
+        app.tui
             .conversation
             .transcript_extent_store_read_count_for_harness()
             <= extent_reads + 2 * window_switches,
@@ -5023,7 +5023,7 @@ fn tail_clamped_user_reveal_keeps_top_pill_on_the_viewport_top_message() {
     let record_index = 22;
     let block_id = app.conversation_probe().transcript().history().order[record_index];
     assert!(app
-        .app
+        .tui
         .reveal_transcript_target_at_top(record_index, block_id, 1, false));
     app.render_silent();
     let lines = transcript_viewport_lines(&app);
@@ -6840,7 +6840,7 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
     app.type_char('g');
     app.type_char('g');
     let extent_reads = app
-        .app
+        .tui
         .conversation
         .transcript_extent_store_read_count_for_harness();
     for _ in 0..80 {
@@ -6859,7 +6859,7 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
         .filter(|frame| frame.active_record_range_before != frame.active_record_range_after)
         .count();
     assert!(
-        app.app
+        app.tui
             .conversation
             .transcript_extent_store_read_count_for_harness()
             <= extent_reads + 2 * window_switches,
@@ -7360,7 +7360,7 @@ fn assert_painted_scrollbar_drag_follows_pointer(
         ));
         observed.push(painted(app));
         app.feed_one(SourceEvent::Tick(16));
-        app.app.tick_timers();
+        app.tick_timers();
         observed.push(painted(app));
     }
     app.feed_one(mouse(
@@ -7587,7 +7587,7 @@ fn scrollbar_drag_retains_exact_viewport_while_far_seek_hydrates() {
         );
 
         assert!(
-            app.app.conversation.transcript_hydration_is_pending(),
+            app.tui.conversation.transcript_hydration_is_pending(),
             "regression fixture must keep the far seek asynchronous"
         );
         let pending_window = app.transcript_window();
@@ -7798,7 +7798,7 @@ fn resumed_grouped_tail_keeps_warm_projection_viewport_bounded() {
     let (mut app, _dir) =
         resumed_transcript_app_from_records(consecutive_tool_records(900), 80, viewport_rows);
 
-    app.app
+    app.tui
         .conversation
         .reset_transcript_projection_counters_for_harness();
     let frame = app.render_to_frame().text();
@@ -9044,7 +9044,7 @@ fn resume_preview_mouse_drag_paints_selection_and_copies() {
     app.settle_lua();
     app.render_silent();
     app.feed_one(SourceEvent::Tick(50));
-    app.app.tick_timers();
+    app.tick_timers();
     app.settle_lua();
 
     let (col, row) = app

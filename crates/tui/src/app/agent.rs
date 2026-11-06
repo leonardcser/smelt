@@ -2484,10 +2484,10 @@ mod tests {
     use super::*;
 
     fn session_reader(app: &crate::app::test_harness::TestApp) -> smelt_store::SessionReader {
-        app.app
+        app.tui
             .core
             .sessions
-            .reader(&app.app.conversation.session().id)
+            .reader(&app.session_id())
             .expect("open stored session")
     }
 
@@ -2511,8 +2511,8 @@ mod tests {
         session: &smelt_core::session::Session,
         transcript_text: &str,
     ) {
-        app.app.core.sessions.save(session).expect("save session");
-        let address = app.app.core.sessions.address(session.id.clone());
+        app.tui.core.sessions.save(session).expect("save session");
+        let address = app.tui.core.sessions.address(session.id.clone());
         let mut transcript = smelt_core::content::transcript::Transcript::new();
         transcript.push(smelt_core::Block::Text {
             content: transcript_text.into(),
@@ -2600,22 +2600,22 @@ mod tests {
     #[test]
     fn conversation_cancels_context_updates_that_restore_committed_state() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.append_history_item(HistoryItem::note(
+        app.tui.conversation.append_history_item(HistoryItem::note(
             protocol::HistoryNote::named_context("project", "committed"),
         ));
 
-        app.app
+        app.tui
             .set_context_note("project".into(), Some("pending".into()));
-        assert_eq!(app.app.conversation.pending_history_append_count(), 1);
-        app.app
+        assert_eq!(app.tui.conversation.pending_history_append_count(), 1);
+        app.tui
             .set_context_note("project".into(), Some("committed".into()));
-        assert_eq!(app.app.conversation.pending_history_append_count(), 0);
+        assert_eq!(app.tui.conversation.pending_history_append_count(), 0);
 
-        app.app.set_context_note("project".into(), None);
-        assert_eq!(app.app.conversation.pending_history_append_count(), 1);
-        app.app
+        app.tui.set_context_note("project".into(), None);
+        assert_eq!(app.tui.conversation.pending_history_append_count(), 1);
+        app.tui
             .set_context_note("project".into(), Some("committed".into()));
-        assert_eq!(app.app.conversation.pending_history_append_count(), 0);
+        assert_eq!(app.tui.conversation.pending_history_append_count(), 0);
     }
 
     #[test]
@@ -2660,16 +2660,16 @@ mod tests {
         app.start_turn(41);
 
         let dispatch = app
-            .app
+            .tui
             .conversation
             .begin_dispatch()
             .expect("active turn enters dispatch");
-        assert!(!app.app.conversation.is_active());
-        assert_eq!(app.app.conversation.active_id(), Some(41));
+        assert!(!app.tui.conversation.is_active());
+        assert_eq!(app.tui.conversation.active_id(), Some(41));
 
-        app.app.conversation.finish_dispatch(dispatch);
+        app.tui.conversation.finish_dispatch(dispatch);
         assert_eq!(
-            app.app.conversation.active().map(|turn| turn.turn_id),
+            app.tui.conversation.active().map(|turn| turn.turn_id),
             Some(41)
         );
     }
@@ -2680,19 +2680,19 @@ mod tests {
         app.start_turn(42);
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            app.app.with_dispatched_turn::<()>(|_, _| panic!("boom"));
+            app.tui.with_dispatched_turn::<()>(|_, _| panic!("boom"));
         }));
 
         assert!(panic.is_err());
-        assert_eq!(app.app.conversation.active_id(), Some(42));
+        assert_eq!(app.tui.conversation.active_id(), Some(42));
         assert_eq!(
-            app.app.conversation.active().map(|turn| turn.turn_id),
+            app.tui.conversation.active().map(|turn| turn.turn_id),
             Some(42)
         );
     }
 
     fn process_status_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         history
             .order
             .iter()
@@ -2705,7 +2705,7 @@ mod tests {
     }
 
     fn user_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        let history = app.app.conversation.transcript().history();
+        let history = app.tui.conversation.transcript().history();
         history
             .order
             .iter()
@@ -2758,8 +2758,7 @@ mod tests {
 
     fn large_saved_session_app(history_len: usize) -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         session.first_user_message = Some("old user 0".into());
         session.history = (0..history_len)
             .map(|idx| {
@@ -2775,49 +2774,49 @@ mod tests {
             })
             .collect();
         app.load_session(session);
-        app.app.restore_screen();
-        app.app.ensure_current_context_note();
-        app.app.apply_pending_history_appends_for_request();
-        app.app.save_session();
-        app.app.flush_persist();
+        app.restore_screen();
+        app.tui.ensure_current_context_note();
+        app.tui.apply_pending_history_appends_for_request();
+        app.save_session();
+        app.flush_persist();
         app
     }
 
     #[test]
     fn starting_user_turn_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .notify_turn_error_sticky("rate limit exceeded".to_string());
-        assert!(app.app.notification_win().is_some());
+        assert!(app.tui.notification_win().is_some());
 
         app.start_submitted_turn("try again");
 
-        assert!(app.app.notification_win().is_none());
+        assert!(app.tui.notification_win().is_none());
     }
 
     #[test]
     fn starting_user_turn_dismisses_turn_start_failure() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.notify_operation_error_sticky(
+        app.tui.notify_operation_error_sticky(
             crate::app::NotificationOperation::TurnStart,
             "missing credentials".to_string(),
         );
 
         app.start_submitted_turn("try again");
 
-        assert!(app.app.notification_win().is_none());
+        assert!(app.tui.notification_win().is_none());
     }
 
     #[test]
     fn starting_user_turn_preserves_session_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let session_id = app.app.conversation.session().id.clone();
-        app.app
+        let session_id = app.session_id();
+        app.tui
             .notify_session_error_sticky("session failure".to_string());
 
         app.start_submitted_turn("try again");
 
-        assert!(app.app.overlays.notification().is_some_and(|notification| {
+        assert!(app.tui.overlays.notification().is_some_and(|notification| {
             matches!(
                 &notification.scope,
                 crate::app::NotificationScope::Session(owner_session_id)
@@ -2829,12 +2828,12 @@ mod tests {
     #[test]
     fn starting_user_turn_preserves_application_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
+        app.tui
             .notify_application_error_sticky("application failure".to_string());
 
         app.start_submitted_turn("try again");
 
-        assert!(app.app.overlays.notification().is_some_and(|notification| {
+        assert!(app.tui.overlays.notification().is_some_and(|notification| {
             matches!(
                 &notification.scope,
                 crate::app::NotificationScope::Application
@@ -2846,13 +2845,13 @@ mod tests {
     fn starting_command_continuation_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_submitted_turn("previous");
-        app.app.discard_turn(crate::app::TurnEnd::Complete);
+        app.discard_turn(crate::app::TurnEnd::Complete);
         app.wait_for_turn_dispatch();
-        app.app
+        app.tui
             .notify_turn_error_sticky("quota exceeded".to_string());
-        assert!(app.app.notification_win().is_some());
+        assert!(app.tui.notification_win().is_some());
 
-        let turn = app.app.begin_command_request_turn(
+        let turn = app.tui.begin_command_request_turn(
             "continue".into(),
             String::new(),
             crate::app::CommandScope::default(),
@@ -2861,7 +2860,7 @@ mod tests {
         );
         assert!(turn.is_some());
 
-        assert!(app.app.notification_win().is_none());
+        assert!(app.tui.notification_win().is_none());
     }
 
     #[test]
@@ -2871,7 +2870,7 @@ mod tests {
         app.start_submitted_turn("first request");
 
         assert!(matches!(
-            app.app.conversation.session().history.last(),
+            app.tui.conversation.session().history.last(),
             Some(HistoryItem::User { content, .. }) if content.text_content() == "first request"
         ));
         let payload = app
@@ -2884,17 +2883,17 @@ mod tests {
             .expect("turn dispatched");
         assert_eq!(
             payload.history.items.len(),
-            app.app.conversation.session().history.len() - 1
+            app.tui.conversation.session().history.len() - 1
         );
         assert_eq!(
             payload.input.provider_content().text_content(),
             "first request"
         );
 
-        app.app.flush_persist();
+        app.flush_persist();
         let loaded = crate::app::history::load_saved_session(
-            &app.app.core.sessions,
-            &app.app.conversation.session().id,
+            &app.tui.core.sessions,
+            &app.tui.conversation.session().id,
         )
         .expect("session saved");
         assert!(matches!(
@@ -2908,15 +2907,14 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_submitted_turn("finish me");
         let turn_id = app.current_turn_id().unwrap();
-        app.app
-            .session_append_history(HistoryItem::assistant(protocol::AssistantStep::terminal(
-                Some(Content::text("finished")),
-                None,
-                Vec::new(),
-            )));
+        app.session_append_history(HistoryItem::assistant(protocol::AssistantStep::terminal(
+            Some(Content::text("finished")),
+            None,
+            Vec::new(),
+        )));
 
-        app.app.discard_turn(crate::app::TurnEnd::Complete);
-        app.app.save_session_and_flush();
+        app.discard_turn(crate::app::TurnEnd::Complete);
+        app.tui.save_session_and_flush();
 
         assert_eq!(stored_last_turn_id(&app), turn_id);
         assert!(matches!(
@@ -2933,8 +2931,8 @@ mod tests {
         app.start_submitted_turn("interrupt while persistence is busy");
         app.press(crossterm::event::KeyCode::Esc);
         assert!(app.agent_running(), "first Escape is the local Vim action");
-        app.app.flush_persist();
-        let release = app.app.conversation.pause_persistence();
+        app.flush_persist();
+        let release = app.pause_persistence();
 
         let started = std::time::Instant::now();
         app.press(crossterm::event::KeyCode::Esc);
@@ -2946,7 +2944,7 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "interrupt waited {elapsed:?} for busy session persistence"
         );
-        let flush = app.app.flush_persist();
+        let flush = app.flush_persist();
         assert!(
             matches!(flush, crate::persist::PersistenceFlushOutcome::Durable),
             "cancel did not become durable: {flush:?}"
@@ -2961,12 +2959,12 @@ mod tests {
                     .with_vim(vim)
                     .build();
                 app.start_submitted_turn("first request");
-                app.app.flush_persist();
-                let turn_id = app.app.conversation.active_id().unwrap();
-                let release = app.app.conversation.pause_persistence();
+                app.flush_persist();
+                let turn_id = app.tui.conversation.active_id().unwrap();
+                let release = app.pause_persistence();
 
                 if to_start {
-                    app.app.rewind_to_history_index(None, vim);
+                    app.rewind_to_history_index(None, vim);
                     app.type_text("first request");
                 } else {
                     app.press(crossterm::event::KeyCode::Esc);
@@ -2974,9 +2972,8 @@ mod tests {
                 }
                 assert!(!app.agent_running());
                 assert_eq!(app.state().prompt_text, "first request");
-                assert!(app.app.conversation.turn_pause().is_none());
+                assert!(app.tui.conversation.turn_pause().is_none());
                 assert!(app
-                    .app
                     .model_history()
                     .iter()
                     .all(|item| !matches!(item, HistoryItem::User { .. })));
@@ -2986,17 +2983,17 @@ mod tests {
                 assert!(app.agent_running());
                 assert!(app.state().queued_inputs.is_empty());
                 release.send(()).unwrap();
-                let flush = app.app.flush_persist();
+                let flush = app.flush_persist();
                 assert!(
                     matches!(flush, crate::persist::PersistenceFlushOutcome::Durable),
                     "{flush:?}"
                 );
-                assert!(app.app.prompt.queue_is_empty());
+                assert!(app.tui.prompt.queue_is_empty());
                 assert_eq!(
-                    app.app.model_history().iter().filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "first request")).count(),
+                    app.model_history().iter().filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "first request")).count(),
                     1
                 );
-                assert_ne!(app.app.conversation.active_id(), Some(turn_id));
+                assert_ne!(app.tui.conversation.active_id(), Some(turn_id));
             }
         }
     }
@@ -3004,14 +3001,13 @@ mod tests {
     #[test]
     fn rewind_during_active_turn_is_not_blocked_by_persistence() {
         let mut app = large_saved_session_app(4);
-        let rewind_history_idx = app.app.rewind_turns().unwrap()[0].history_idx;
+        let rewind_history_idx = app.tui.rewind_turns().unwrap()[0].history_idx;
         app.start_submitted_turn("rewind this active turn");
-        app.app.flush_persist();
-        let release = app.app.conversation.pause_persistence();
+        app.flush_persist();
+        let release = app.pause_persistence();
 
         let started = std::time::Instant::now();
-        app.app
-            .rewind_to_history_index(Some(rewind_history_idx), false);
+        app.rewind_to_history_index(Some(rewind_history_idx), false);
         let elapsed = started.elapsed();
         release.send(()).expect("resume persistence actor");
 
@@ -3020,29 +3016,29 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "rewind waited {elapsed:?} for canonical turn cancellation"
         );
-        app.app.flush_persist();
+        app.flush_persist();
         assert_eq!(stored_history(&session_reader(&app)).len(), 0);
     }
 
     #[test]
     fn reset_fails_promptly_when_current_session_persistence_is_busy() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("durable baseline"),
-        ));
-        app.app.save_session_and_flush();
-        let original_id = app.app.conversation.session().id.clone();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("preserve this change"),
-        ));
-        let release = app.app.conversation.pause_persistence();
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "durable baseline",
+        )));
+        app.tui.save_session_and_flush();
+        let original_id = app.session_id();
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "preserve this change",
+        )));
+        let release = app.pause_persistence();
 
         let started = std::time::Instant::now();
-        app.app.reset_session();
+        app.reset_session();
         let elapsed = started.elapsed();
 
         assert_eq!(
-            app.app.conversation.session().id,
+            app.tui.conversation.session().id,
             original_id,
             "failed reset keeps the current session"
         );
@@ -3051,39 +3047,39 @@ mod tests {
             "reset waited {elapsed:?} for busy session persistence"
         );
         release.send(()).expect("resume persistence actor");
-        app.app.flush_persist();
+        app.flush_persist();
         assert_eq!(stored_history(&session_reader(&app)).len(), 2);
     }
 
     #[test]
     fn session_switch_fails_promptly_when_current_persistence_is_busy() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("switch target"),
-        ));
-        app.app.push_block(smelt_core::Block::Text {
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "switch target",
+        )));
+        app.tui.push_block(smelt_core::Block::Text {
             content: "switch target transcript".into(),
         });
-        app.app.save_session_and_flush();
-        let target_id = app.app.conversation.session().id.clone();
-        app.app.reset_session();
-        let current_id = app.app.conversation.session().id.clone();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("current baseline"),
-        ));
-        app.app.save_session_and_flush();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("preserve current change"),
-        ));
-        let release = app.app.conversation.pause_persistence();
+        app.tui.save_session_and_flush();
+        let target_id = app.session_id();
+        app.reset_session();
+        let current_id = app.session_id();
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "current baseline",
+        )));
+        app.tui.save_session_and_flush();
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "preserve current change",
+        )));
+        let release = app.pause_persistence();
 
         let started = std::time::Instant::now();
-        let loaded = app.app.load_session_by_id(&target_id);
+        let loaded = app.tui.load_session_by_id(&target_id);
         let elapsed = started.elapsed();
 
         assert!(!loaded, "busy persistence prevents the session switch");
         assert_eq!(
-            app.app.conversation.session().id,
+            app.tui.conversation.session().id,
             current_id,
             "failed switch keeps the current session"
         );
@@ -3092,41 +3088,41 @@ mod tests {
             "session switch waited {elapsed:?} for busy session persistence"
         );
         release.send(()).expect("resume persistence actor");
-        app.app.flush_persist();
+        app.flush_persist();
         assert_eq!(stored_history(&session_reader(&app)).len(), 2);
     }
 
     #[test]
     fn fork_fails_promptly_when_current_persistence_is_busy() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("durable fork baseline"),
-        ));
-        app.app.save_session_and_flush();
-        let original_id = app.app.conversation.session().id.clone();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("preserve before fork"),
-        ));
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "durable fork baseline",
+        )));
+        app.tui.save_session_and_flush();
+        let original_id = app.session_id();
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "preserve before fork",
+        )));
         let session_ids_before = app
-            .app
+            .tui
             .core
             .sessions
             .store()
             .ids_with_prefix("", u32::MAX)
             .expect("list sessions before fork");
-        let release = app.app.conversation.pause_persistence();
+        let release = app.pause_persistence();
 
         let started = std::time::Instant::now();
-        app.app.fork_session();
+        app.tui.fork_session();
         let elapsed = started.elapsed();
 
         assert_eq!(
-            app.app.conversation.session().id,
+            app.tui.conversation.session().id,
             original_id,
             "failed fork keeps the current session"
         );
         assert_eq!(
-            app.app
+            app.tui
                 .core
                 .sessions
                 .store()
@@ -3140,54 +3136,53 @@ mod tests {
             "fork waited {elapsed:?} for busy session persistence"
         );
         release.send(()).expect("resume persistence actor");
-        app.app.flush_persist();
+        app.flush_persist();
         assert_eq!(stored_history(&session_reader(&app)).len(), 2);
     }
 
     #[test]
     fn deleting_a_fork_source_keeps_the_fork_while_its_writer_is_busy() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("fork before delete"),
-        ));
-        app.app.push_block(smelt_core::Block::Text {
+        app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+            "fork before delete",
+        )));
+        app.tui.push_block(smelt_core::Block::Text {
             content: "fork before delete transcript".into(),
         });
-        app.app.save_session_and_flush();
-        let source_id = app.app.conversation.session().id.clone();
+        app.tui.save_session_and_flush();
+        let source_id = app.session_id();
         app.fork_session();
-        assert_ne!(app.app.conversation.session().id, source_id);
+        assert_ne!(app.tui.conversation.session().id, source_id);
         app.set_lua_string_global("SOURCE_SESSION_ID", source_id.clone())
             .expect("install source session id");
-        let release = app.app.conversation.pause_persistence();
+        let release = app.pause_persistence();
 
         let result = app.run_lua_result("smelt.session.delete(SOURCE_SESSION_ID)");
 
         release.send(()).expect("resume persistence actor");
         assert!(result.is_ok(), "{result:?}");
-        assert!(app.app.core.sessions.reader(&source_id).is_err());
-        app.app.flush_persist();
+        assert!(app.tui.core.sessions.reader(&source_id).is_err());
+        app.flush_persist();
         assert_eq!(stored_history(&session_reader(&app)).len(), 1);
     }
 
     #[test]
     fn session_load_rejects_missing_transcript_records_off_thread() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut target =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut target = app.new_session();
         target
             .history
             .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
                 "recordless resume target",
             )));
         let target_id = target.id.clone();
-        app.app
+        app.tui
             .core
             .sessions
             .save(&target)
             .expect("save recordless resume target");
-        let current_id = app.app.conversation.session().id.clone();
-        app.app
+        let current_id = app.session_id();
+        app.tui
             .session_load
             .set_delay(std::time::Duration::from_millis(500));
         app.set_lua_string_global("TARGET_SESSION_ID", target_id)
@@ -3202,7 +3197,7 @@ mod tests {
             elapsed < std::time::Duration::from_millis(100),
             "session load blocked the UI for {elapsed:?}"
         );
-        assert_eq!(app.app.conversation.session().id, current_id);
+        assert_eq!(app.tui.conversation.session().id, current_id);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -3220,19 +3215,18 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
-        assert_eq!(app.app.conversation.session().id, current_id);
+        assert_eq!(app.tui.conversation.session().id, current_id);
     }
 
     #[test]
     fn session_load_adoption_does_not_wait_for_writer_release() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
-        app.app.show_user_message("retained source", Vec::new());
+        app.tui.show_user_message("retained source", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let release = app.app.conversation.pause_persistence();
-        let target =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let release = app.pause_persistence();
+        let target = app.new_session();
         let target_id = target.id.clone();
         save_record_backed_session(&app, &target, "resume destination");
         app.set_lua_string_global("TARGET_SESSION_ID", target_id.clone())
@@ -3255,7 +3249,7 @@ mod tests {
         };
         wait_for_source_close(&mut app);
         let retained_id = app.session_snapshot().id.clone();
-        let retained_actor = app.app.conversation.has_persistence();
+        let retained_actor = app.tui.conversation.has_persistence();
         let display = app.render_unsettled_silent().text();
         app.animate_with_virtual_clock();
         let mut dots = std::collections::HashSet::new();
@@ -3306,12 +3300,11 @@ mod tests {
         for change in ["unchanged", "head", "width", "height"] {
             let mut app = crate::app::test_harness::TestApp::builder().build();
             app.ensure_writer_ready();
-            app.app.show_user_message("source display", Vec::new());
+            app.tui.show_user_message("source display", Vec::new());
             app.save_session_and_flush();
-            let mut target =
-                smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+            let mut target = app.new_session();
             save_record_backed_session(&app, &target, "destination display");
-            let release = app.app.conversation.pause_persistence();
+            let release = app.pause_persistence();
             app.set_lua_string_global("TARGET_SESSION_ID", target.id.clone())
                 .unwrap();
             smelt_perf::perf::clear();
@@ -3330,12 +3323,12 @@ mod tests {
                     save_record_backed_session(&app, &target, "updated destination display");
                 }
                 "width" => app.feed_one(crate::event_source::SourceEvent::Resize {
-                    width: app.app.last_width + 10,
-                    height: app.app.last_height,
+                    width: app.tui.last_width + 10,
+                    height: app.tui.last_height,
                 }),
                 "height" => app.feed_one(crate::event_source::SourceEvent::Resize {
-                    width: app.app.last_width,
-                    height: app.app.last_height + 10,
+                    width: app.tui.last_width,
+                    height: app.tui.last_height + 10,
                 }),
                 _ => {}
             }
@@ -3362,7 +3355,7 @@ mod tests {
             assert_eq!(reused, usize::from(change == "unchanged"), "{change}");
             assert_eq!(app.session_snapshot().id, target.id);
             assert_eq!(
-                app.app.conversation.history_navigation().user_turn_count(),
+                app.tui.conversation.history_navigation().user_turn_count(),
                 usize::from(change == "head")
             );
             app.render_silent();
@@ -3399,13 +3392,13 @@ mod tests {
 
     fn wait_for_source_close(app: &mut crate::app::test_harness::TestApp) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !app.app.session_load.is_releasing_source() {
+        while !app.tui.session_load.is_releasing_source() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "source session did not start closing"
             );
-            app.app.drain_persist_reports();
-            app.app.poll_session_adoption();
+            app.tui.drain_persist_reports();
+            app.tui.poll_session_adoption();
             std::thread::yield_now();
         }
     }
@@ -3416,35 +3409,34 @@ mod tests {
             .with_vim(false)
             .build();
         app.ensure_writer_ready();
-        app.app.show_user_message("retained source", Vec::new());
+        app.tui.show_user_message("retained source", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let target =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let target = app.new_session();
         save_record_backed_session(&app, &target, "cancelled destination");
-        let release = app.app.conversation.pause_persistence();
-        app.app.request_session_load(&target.id);
+        let release = app.pause_persistence();
+        app.tui.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
         wait_for_source_close(&mut app);
-        app.app.publish_diff_signals();
+        app.tui.publish_diff_signals();
         app.render_unsettled_silent();
         let busy: bool = app.eval_lua("return smelt.work.is_busy()").unwrap();
         assert!(busy);
         app.press(crossterm::event::KeyCode::Esc);
         app.press(crossterm::event::KeyCode::Esc);
-        app.app.drain_persist_reports();
+        app.tui.drain_persist_reports();
         assert_eq!(app.session_snapshot().id, source_id);
-        assert!(app.app.conversation.has_persistence());
+        assert!(app.tui.conversation.has_persistence());
         release.send(()).unwrap();
         app.wait_for_session_lifecycle();
         assert_eq!(app.session_snapshot().id, source_id);
-        assert!(app.app.conversation.has_persistence());
-        assert!(!app.app.busy_stack.is_busy());
+        assert!(app.tui.conversation.has_persistence());
+        assert!(!app.tui.busy_stack.is_busy());
         app.session_append_history(protocol::HistoryItem::user(Content::text(
             "after cancelled resume",
         )));
         app.save_session_and_flush();
-        assert_eq!(app.app.session_history_len(), 1);
+        assert_eq!(app.session_message_count(), 1);
         app.assert_invariants();
     }
 
@@ -3452,26 +3444,24 @@ mod tests {
     fn latest_session_load_during_release_adopts_only_latest_destination() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
-        app.app.show_user_message("retained source", Vec::new());
+        app.tui.show_user_message("retained source", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let first =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let first = app.new_session();
         save_record_backed_session(&app, &first, "obsolete destination");
-        let latest =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let latest = app.new_session();
         save_record_backed_session(&app, &latest, "latest destination");
-        let release = app.app.conversation.pause_persistence();
-        app.app.request_session_load(&first.id);
+        let release = app.pause_persistence();
+        app.tui.request_session_load(&first.id);
         wait_for_session_load_result(&mut app);
         wait_for_source_close(&mut app);
-        app.app.request_session_load(&latest.id);
+        app.tui.request_session_load(&latest.id);
         wait_for_session_load_result(&mut app);
         assert_eq!(app.session_snapshot().id, source_id);
         release.send(()).unwrap();
         app.wait_for_session_lifecycle();
         assert_eq!(app.session_snapshot().id, latest.id);
-        assert!(!app.app.busy_stack.is_busy());
+        assert!(!app.tui.busy_stack.is_busy());
         app.assert_invariants();
     }
 
@@ -3479,30 +3469,29 @@ mod tests {
     fn session_load_close_timeout_preserves_source_and_can_retry() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
-        app.app.show_user_message("retained source", Vec::new());
+        app.tui.show_user_message("retained source", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let target =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let target = app.new_session();
         save_record_backed_session(&app, &target, "retry destination");
-        let resume = app.app.conversation.pause_persistence();
-        app.app.request_session_load(&target.id);
+        let resume = app.pause_persistence();
+        app.tui.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
         let deadline = std::time::Instant::now()
             + crate::persist::DEFAULT_PERSISTENCE_DEADLINE
             + std::time::Duration::from_secs(5);
-        while app.app.session_load.is_pending() {
+        while app.tui.session_load.is_pending() {
             let started = std::time::Instant::now();
-            app.app.drain_persist_reports();
+            app.tui.drain_persist_reports();
             assert!(started.elapsed() < std::time::Duration::from_millis(100));
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }
         assert_eq!(app.session_snapshot().id, source_id);
-        assert!(app.app.conversation.has_persistence());
-        assert!(!app.app.busy_stack.is_busy());
+        assert!(app.tui.conversation.has_persistence());
+        assert!(!app.tui.busy_stack.is_busy());
         resume.send(()).unwrap();
-        app.app.request_session_load(&target.id);
+        app.tui.request_session_load(&target.id);
         app.wait_for_session_lifecycle();
         assert_eq!(app.session_snapshot().id, target.id);
         app.assert_invariants();
@@ -3512,14 +3501,13 @@ mod tests {
     fn source_mutation_during_release_cancels_adoption_without_losing_work() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
-        app.app.show_user_message("retained source", Vec::new());
+        app.tui.show_user_message("retained source", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let target =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let target = app.new_session();
         save_record_backed_session(&app, &target, "obsolete destination");
-        let release = app.app.conversation.pause_persistence();
-        app.app.request_session_load(&target.id);
+        let release = app.pause_persistence();
+        app.tui.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
         wait_for_source_close(&mut app);
         app.session_append_history(protocol::HistoryItem::user(Content::text(
@@ -3528,7 +3516,7 @@ mod tests {
         release.send(()).unwrap();
         app.wait_for_session_lifecycle();
         assert_eq!(app.session_snapshot().id, source_id);
-        assert_eq!(app.app.session_history_len(), 1);
+        assert_eq!(app.session_message_count(), 1);
         app.save_session_and_flush();
         assert_eq!(session_reader(&app).head().unwrap().history_len.get(), 1);
         app.assert_invariants();
@@ -3539,22 +3527,18 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
         app.session_append_history(protocol::HistoryItem::user(Content::text("stored user")));
-        app.app.show_user_message("stored user", Vec::new());
+        app.tui.show_user_message("stored user", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let resume = app.app.conversation.pause_persistence();
+        let resume = app.pause_persistence();
         app.session_append_history(protocol::HistoryItem::user(Content::text("unsaved user")));
-        app.app.show_user_message("unsaved user", Vec::new());
-        app.app.request_session_load(&source_id);
+        app.tui.show_user_message("unsaved user", Vec::new());
+        app.tui.request_session_load(&source_id);
         wait_for_session_load_result(&mut app);
         resume.send(()).unwrap();
         app.wait_for_session_lifecycle();
         assert_eq!(app.session_snapshot().id, source_id);
-        assert_eq!(
-            app.app.session_history_len(),
-            2,
-            "adopted pre-flush snapshot"
-        );
+        assert_eq!(app.session_message_count(), 2, "adopted pre-flush snapshot");
         app.render_silent();
         assert!(app
             .render_unsettled_silent()
@@ -3566,8 +3550,7 @@ mod tests {
     #[test]
     fn latest_session_load_request_wins_without_head_of_line_blocking() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut first =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut first = app.new_session();
         first
             .history
             .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
@@ -3575,8 +3558,7 @@ mod tests {
             )));
         let first_id = first.id.clone();
         save_record_backed_session(&app, &first, "stale resume transcript");
-        let mut latest =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut latest = app.new_session();
         latest
             .history
             .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
@@ -3584,8 +3566,8 @@ mod tests {
             )));
         let latest_id = latest.id.clone();
         save_record_backed_session(&app, &latest, "latest resume transcript");
-        let current_id = app.app.conversation.session().id.clone();
-        app.app
+        let current_id = app.session_id();
+        app.tui
             .session_load
             .set_delay(std::time::Duration::from_millis(500));
         app.set_lua_string_global("FIRST_SESSION_ID", first_id.clone())
@@ -3596,15 +3578,15 @@ mod tests {
         app.run_lua_result("smelt.session.load(FIRST_SESSION_ID)")
             .expect("request first session load");
         std::thread::sleep(std::time::Duration::from_millis(25));
-        app.app.session_load.set_delay(std::time::Duration::ZERO);
+        app.tui.session_load.set_delay(std::time::Duration::ZERO);
         let latest_requested_at = std::time::Instant::now();
         app.run_lua_result("smelt.session.load(LATEST_SESSION_ID)")
             .expect("request latest session load");
-        assert_eq!(app.app.conversation.session().id, current_id);
+        assert_eq!(app.tui.conversation.session().id, current_id);
 
         let deadline = latest_requested_at + std::time::Duration::from_millis(250);
-        while app.app.conversation.session().id != latest_id {
-            app.app.drain_persist_reports();
+        while app.tui.conversation.session().id != latest_id {
+            app.tui.drain_persist_reports();
             if let Some(event) = app.try_recv_app_event() {
                 app.handle_app_event(event);
             } else {
@@ -3615,25 +3597,24 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
-        assert_ne!(app.app.conversation.session().id, first_id);
-        assert_eq!(app.app.session_history_len(), 1);
+        assert_ne!(app.tui.conversation.session().id, first_id);
+        assert_eq!(app.session_message_count(), 1);
     }
 
     #[test]
     fn title_target_beyond_current_history_is_rejected() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
-            .session_append_history(HistoryItem::user(Content::text("current request")));
-        let history_len = app.app.session_history_len();
+        app.session_append_history(HistoryItem::user(Content::text("current request")));
+        let history_len = app.session_message_count();
 
-        app.app.set_session_title(
+        app.set_session_title(
             "Future title".into(),
             "future-title".into(),
             Some(history_len + 1),
         );
 
-        assert_eq!(app.app.conversation.session().title, None);
-        assert!(app.app.conversation.session().metadata_snapshots.is_empty());
+        assert_eq!(app.tui.conversation.session().title, None);
+        assert!(app.tui.conversation.session().metadata_snapshots.is_empty());
     }
 
     #[test]
@@ -3647,8 +3628,8 @@ mod tests {
                 .build();
             app.start_submitted_turn("before restart");
             turn_id = app.current_turn_id().expect("turn starts");
-            let _ = app.app.flush_persist();
-            session_id = app.app.conversation.session().id.clone();
+            let _ = app.flush_persist();
+            session_id = app.session_id();
             assert_eq!(stored_last_turn_id(&app), turn_id);
         }
 
@@ -3657,20 +3638,20 @@ mod tests {
             .build();
         resumed.clear_actions();
         let prepared = crate::app::session_load::prepare_session_load(
-            &resumed.app.core.sessions,
+            &resumed.tui.core.sessions,
             &session_id,
             80,
             24,
             &|| false,
         )
         .unwrap();
-        assert!(resumed.app.install_prepared_session_load(prepared));
-        assert!(resumed.app.conversation.writer_is_opening());
-        let title = resumed.app.conversation.session().title.clone();
+        assert!(resumed.tui.install_prepared_session_load(prepared));
+        assert!(resumed.tui.conversation.writer_is_opening());
+        let title = resumed.tui.conversation.session().title.clone();
         resumed
             .eval_lua::<()>("smelt.session.title.set('blocked while opening')")
             .unwrap();
-        assert_eq!(resumed.app.conversation.session().title, title);
+        assert_eq!(resumed.tui.conversation.session().title, title);
         assert!(resumed
             .overlays_probe()
             .notification()
@@ -3680,11 +3661,11 @@ mod tests {
         resumed.wait_for_session_lifecycle();
 
         assert_eq!(
-            resumed.app.conversation.session().id,
+            resumed.tui.conversation.session().id,
             session_id,
             "resume failed: {:?}",
             resumed
-                .app
+                .tui
                 .overlays
                 .notification()
                 .map(|notification| notification.summary.as_str())
@@ -3696,10 +3677,10 @@ mod tests {
                 if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
         )));
         assert_eq!(
-            resumed.app.conversation.last_terminal_turn_id(),
+            resumed.tui.conversation.last_terminal_turn_id(),
             Some(turn_id)
         );
-        assert!(!resumed.app.conversation.is_read_only());
+        assert!(!resumed.tui.conversation.is_read_only());
         resumed.start_submitted_turn("after restart");
         assert_eq!(resumed.current_turn_id(), Some(turn_id + 1));
     }
@@ -3708,7 +3689,7 @@ mod tests {
     fn request_start_dispatches_store_history_without_full_reads() {
         const BASE_HISTORY_LEN: usize = 128;
         let mut app = large_saved_session_app(BASE_HISTORY_LEN);
-        let old_history_len = app.app.conversation.session().history.len();
+        let old_history_len = app.tui.conversation.session().history.len();
         assert!(old_history_len >= BASE_HISTORY_LEN);
 
         smelt_perf::perf::set_enabled(true);
@@ -3741,7 +3722,7 @@ mod tests {
             "new request"
         );
         assert_eq!(
-            app.app.conversation.session().history.len(),
+            app.tui.conversation.session().history.len(),
             old_history_len + 1
         );
     }
@@ -3750,8 +3731,7 @@ mod tests {
     fn request_start_appends_clear_for_deep_named_context() {
         const TRAILING_HISTORY_LEN: usize = 1024;
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let mut session = app.new_session();
         session.first_user_message = Some("old user".into());
         session
             .history
@@ -3770,13 +3750,13 @@ mod tests {
             }
         }));
         app.load_session(session);
-        app.app.restore_screen();
-        app.app.ensure_current_context_note();
-        app.app.apply_pending_history_appends_for_request();
-        app.app.save_session();
-        app.app.flush_persist();
+        app.restore_screen();
+        app.tui.ensure_current_context_note();
+        app.tui.apply_pending_history_appends_for_request();
+        app.save_session();
+        app.flush_persist();
 
-        app.app.set_context_note("goal".into(), None);
+        app.tui.set_context_note("goal".into(), None);
         smelt_perf::perf::set_enabled(true);
         smelt_perf::perf::clear();
         app.start_submitted_turn("new request");
@@ -3788,9 +3768,9 @@ mod tests {
         assert_perf_value_at_most(&snapshot, "store:session:history_rows_inserted", 2);
         assert_perf_value_at_most(&snapshot, "store:session:history_rows_deleted", 0);
         let tail = app
-            .app
+            .tui
             .session_history_range(
-                app.app.session_history_len().saturating_sub(2)..app.app.session_history_len(),
+                app.session_message_count().saturating_sub(2)..app.session_message_count(),
             )
             .unwrap();
         assert!(tail[0]
@@ -3804,40 +3784,40 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
         app.ensure_writer_ready();
-        let turn = app.app.begin_command_request_turn(
+        let turn = app.tui.begin_command_request_turn(
             "/fix".into(),
             "fix it".into(),
             crate::app::CommandScope::default(),
             crate::app::CommandTurnStart::Fresh,
             0,
         );
-        app.app.conversation.set_active(turn);
+        app.tui.conversation.set_active(turn);
         app.wait_for_turn_dispatch();
         assert!(app.agent_running(), "test app has a usable model");
 
         assert_eq!(
-            app.app.conversation.session().first_user_message.as_deref(),
+            app.tui.conversation.session().first_user_message.as_deref(),
             Some("/fix")
         );
         assert_eq!(
-            app.app
+            app.tui
                 .conversation
                 .session()
                 .metadata_snapshots
                 .as_slice()
                 .last()
                 .map(|(idx, _)| *idx),
-            Some(app.app.conversation.session().history.len())
+            Some(app.session_message_count())
         );
         assert!(matches!(
-            app.app.conversation.session().history.last(),
+            app.session_history().last(),
             Some(HistoryItem::User {
                 display: Some(display),
                 command: true,
                 ..
             }) if display == "/fix"
         ));
-        let transcript = app.app.conversation.transcript().history();
+        let transcript = app.tui.conversation.transcript().history();
         assert!(transcript
             .order
             .last()
@@ -3887,7 +3867,7 @@ mod tests {
         )));
         assert!(expanded.contains("Called the read_file tool with the following input:"));
         assert!(expanded.contains("   1\thello"));
-        assert!(app.app.core.files.has(&path));
+        assert!(app.tui.core.files.has(&path));
     }
 
     #[test]
@@ -3924,14 +3904,14 @@ mod tests {
         )));
         assert!(expanded.contains("Called the read_file tool with the following input:"));
         assert!(expanded.contains("--- Cell 0 [markdown] id=intro ---"));
-        assert!(app.app.core.files.has(&path));
+        assert!(app.tui.core.files.has(&path));
     }
 
     #[test]
     fn idle_job_completion_starts_turn_with_process_status_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app
+        app.tui
             .handle_job_completed(smelt_core::process::JobCompletion {
                 id: "1234".into(),
                 exit_code: Some(0),
@@ -3940,7 +3920,7 @@ mod tests {
             });
 
         app.wait_for_turn_dispatch();
-        assert!(app.app.agent_is_running());
+        assert!(app.tui.agent_is_running());
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
             process_status_blocks(&app),
@@ -3952,7 +3932,7 @@ mod tests {
     fn idle_oom_completion_starts_turn_with_distinct_process_status() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app
+        app.tui
             .handle_job_completed(smelt_core::process::JobCompletion {
                 id: "proc_123".into(),
                 exit_code: None,
@@ -3961,7 +3941,7 @@ mod tests {
             });
 
         app.wait_for_turn_dispatch();
-        assert!(app.app.agent_is_running());
+        assert!(app.tui.agent_is_running());
         assert_eq!(
             process_status_blocks(&app),
             vec!["background process proc_123 was terminated after an out-of-memory event"]
@@ -3972,7 +3952,7 @@ mod tests {
     fn process_status_resize_keeps_transcript_cursor_in_bounds() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app
+        app.tui
             .handle_job_completed(smelt_core::process::JobCompletion {
                 id: String::new(),
                 exit_code: None,
@@ -4000,14 +3980,14 @@ mod tests {
         app.start_turn(7);
 
         let before = app
-            .app
+            .tui
             .conversation
             .pending_history_appends()
             .iter()
             .map(|append| append.history_item())
             .collect::<Vec<_>>();
 
-        app.app
+        app.tui
             .handle_job_completed(smelt_core::process::JobCompletion {
                 id: "4242".into(),
                 exit_code: Some(9),
@@ -4024,7 +4004,7 @@ mod tests {
             ),
         ));
         let after = app
-            .app
+            .tui
             .conversation
             .pending_history_appends()
             .iter()
@@ -4034,7 +4014,7 @@ mod tests {
         assert_eq!(&after[before.len()..], std::slice::from_ref(&expected));
 
         let process_status_appends: Vec<_> = app
-            .app
+            .tui
             .conversation
             .pending_history_appends()
             .iter()
@@ -4053,14 +4033,14 @@ mod tests {
         let text = note.text().to_string();
 
         assert!(
-            app.app
+            app.tui
                 .start_queued_input(crate::app::QueuedInput::ProcessStatus(note))
                 .is_ok(),
             "test app has a usable model"
         );
 
         app.wait_for_turn_dispatch();
-        assert!(app.app.agent_is_running());
+        assert!(app.tui.agent_is_running());
         assert_eq!(process_status_blocks(&app), vec![text]);
         assert!(user_blocks(&app).is_empty());
     }
@@ -4069,7 +4049,7 @@ mod tests {
     fn process_status_history_update_stays_out_of_lua_conversation() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app
+        app.tui
             .handle_job_completed(smelt_core::process::JobCompletion {
                 id: "751225".into(),
                 exit_code: Some(1),
@@ -4078,7 +4058,7 @@ mod tests {
             });
         app.wait_for_turn_dispatch();
         let turn_id = app
-            .app
+            .tui
             .active_agent_turn_id()
             .expect("process turn started");
         let (start_content, current_note) = app
@@ -4155,7 +4135,7 @@ mod tests {
     #[test]
     fn lua_conversation_limit_returns_recent_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.conversation.replace_history_for_harness(vec![
+        app.tui.conversation.replace_history_for_harness(vec![
             HistoryItem::user(Content::text("first user")),
             HistoryItem::note(protocol::HistoryNote::named_context("hidden", "note")),
             protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
@@ -4193,12 +4173,12 @@ mod tests {
     #[tokio::test]
     async fn cancelling_turn_does_not_kill_registered_background_process() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let supervisor = app.app.core.jobs.clone();
+        let supervisor = app.tui.core.jobs.clone();
         let id = supervisor
             .spawn_background(
                 "echo alive; sleep 30",
                 &smelt_core::process::ShellSpec::default(),
-                &app.app.core.env.cwd(),
+                &app.tui.core.env.cwd(),
                 std::time::Instant::now(),
             )
             .await

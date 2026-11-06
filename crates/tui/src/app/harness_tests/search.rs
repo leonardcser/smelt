@@ -72,7 +72,7 @@ fn wait_for_live_search(app: &mut TestApp) {
             return;
         }
         if let Some(event) = app.try_recv_app_event() {
-            app.app.handle_app_event(event);
+            app.handle_app_event(event);
             app.render_silent();
             continue;
         }
@@ -95,7 +95,7 @@ fn wait_for_search_query(app: &mut TestApp, query: &str) {
             return;
         }
         if let Some(event) = app.try_recv_app_event() {
-            app.app.handle_app_event(event);
+            app.handle_app_event(event);
             app.render_silent();
             continue;
         }
@@ -112,13 +112,13 @@ fn settle_search(app: &mut TestApp) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         app.render_silent();
-        if app.app.pending_transcript_search.is_none()
-            && !app.app.conversation.transcript_hydration_is_pending()
+        if app.tui.pending_transcript_search.is_none()
+            && !app.tui.conversation.transcript_hydration_is_pending()
         {
             return;
         }
         if let Some(event) = app.try_recv_app_event() {
-            app.app.handle_app_event(event);
+            app.handle_app_event(event);
             continue;
         }
         assert!(
@@ -133,7 +133,7 @@ fn drain_app_events_for(app: &mut TestApp, duration: std::time::Duration) {
     let deadline = std::time::Instant::now() + duration;
     while std::time::Instant::now() < deadline {
         if let Some(event) = app.try_recv_app_event() {
-            app.app.handle_app_event(event);
+            app.handle_app_event(event);
             app.render_silent();
         } else {
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -142,7 +142,7 @@ fn drain_app_events_for(app: &mut TestApp, duration: std::time::Duration) {
 }
 
 fn begin_slow_persisted_search(app: &mut TestApp) {
-    app.app
+    app.tui
         .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
     app.type_char('/');
     app.type_text("needle");
@@ -156,7 +156,7 @@ fn interrupted_tool_turn_in_a_sparse_transcript_saves_after_hydration() {
     app.press(KeyCode::Enter);
     app.wait_for_turn_dispatch();
     assert!(app.agent_running());
-    let _ = app.app.flush_persist();
+    let _ = app.flush_persist();
     app.feed_one(crate::app::test_harness::SourceEvent::engine(
         protocol::EngineEvent::ToolStarted {
             invocation_id: protocol::InvocationId::new(1),
@@ -167,7 +167,7 @@ fn interrupted_tool_turn_in_a_sparse_transcript_saves_after_hydration() {
         },
     ));
 
-    app.app
+    app.tui
         .conversation
         .require_transcript_record_resave_from_for_harness(0);
     app.type_text("next turn");
@@ -187,17 +187,17 @@ fn interrupted_tool_turn_in_a_sparse_transcript_saves_after_hydration() {
     );
     // The save waits for the sparse records it rewrites to hydrate.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while app.app.session_document_has_unflushed_work() {
+    while app.session_document_has_unflushed_work() {
         assert!(
             std::time::Instant::now() < deadline,
             "deferred save never finished"
         );
-        app.app.save_session_and_flush();
+        app.tui.save_session_and_flush();
         app.render_silent();
         drain_app_events_for(&mut app, std::time::Duration::from_millis(10));
     }
     let id = app.session_snapshot().id.clone();
-    let reader = app.app.core.sessions.reader(&id).unwrap();
+    let reader = app.tui.core.sessions.reader(&id).unwrap();
     let state = reader.state().unwrap();
     assert_eq!(
         state.metadata.title.as_deref(),
@@ -331,7 +331,7 @@ fn transcript_search_paste_and_history_changes_preview_live() {
     app.type_char('g');
     app.type_char('g');
     app.type_char('/');
-    app.app
+    app.tui
         .cmdline_handle_event(crossterm::event::Event::Paste("row 090".into()));
     app.render_silent();
     let pasted_row = transcript_row_cursor_row(&app);
@@ -430,7 +430,7 @@ fn transcript_search_no_match_during_hydration_restores_original_anchor() {
     {
         match app.try_recv_app_event() {
             Some(event @ crate::app::AppEvent::TranscriptHydrationCompleted(_)) => held.push(event),
-            Some(event) => app.app.handle_app_event(event),
+            Some(event) => app.handle_app_event(event),
             None => {
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -440,14 +440,14 @@ fn transcript_search_no_match_during_hydration_restores_original_anchor() {
             }
         }
     }
-    assert!(app.app.conversation.transcript_hydration_is_pending());
+    assert!(app.tui.conversation.transcript_hydration_is_pending());
 
     for event in held {
-        app.app.handle_app_event(event);
+        app.handle_app_event(event);
     }
     settle_search(&mut app);
 
-    assert!(app.app.pending_transcript_search.is_none());
+    assert!(app.tui.pending_transcript_search.is_none());
     assert_eq!(transcript_row_cursor_row(&app), original_row);
     assert_eq!(app.transcript_window().scroll_top, original_scroll_top);
     assert!(app.state().cmdline_open);
@@ -457,7 +457,7 @@ fn transcript_search_no_match_during_hydration_restores_original_anchor() {
 fn transcript_search_rapid_typing_cancels_stale_worker_generations() {
     let mut app = sparse_display_only_search_app();
     app.type_char('G');
-    app.app
+    app.tui
         .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
     app.type_char('/');
 

@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn ctrl_w_starts_pane_chord_without_toggling_focus() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
 
         let outcome = app.handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
 
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn pane_chord_toggles_to_content_only_when_transcript_has_content() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
         let outcome = app.handle_pane_chord(&key(KeyCode::Char('j'), KeyModifiers::NONE));
         assert!(matches!(outcome, Some(EventOutcome::Redraw)));
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn pane_chord_leaves_a_floating_window_for_the_pane_under_it() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.push_block(smelt_core::Block::Text {
+        app.tui.push_block(smelt_core::Block::Text {
             content: "content".into(),
         });
         app.run_lua_result(
@@ -197,18 +197,18 @@ mod tests {
         )
         .unwrap();
         app.render_silent();
-        assert!(app.app.ui.focused_overlay().is_some());
+        assert!(app.tui.ui.focused_overlay().is_some());
 
-        app.app
+        app.tui
             .handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
         let outcome = app
-            .app
+            .tui
             .handle_pane_chord(&key(KeyCode::Char('j'), KeyModifiers::NONE));
 
         assert!(matches!(outcome, Some(EventOutcome::Redraw)));
-        assert_eq!(app.app.app_focus, AppFocus::Prompt);
-        assert_eq!(app.app.ui.focus(), Some(crate::app::PROMPT_WIN));
-        assert!(app.app.ui.focused_overlay().is_none());
+        assert_eq!(app.tui.app_focus, AppFocus::Prompt);
+        assert_eq!(app.tui.ui.focus(), Some(crate::app::PROMPT_WIN));
+        assert!(app.tui.ui.focused_overlay().is_none());
     }
 
     #[test]
@@ -235,7 +235,7 @@ mod tests {
         app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
         app.press(KeyCode::Char('k'));
         app.render();
-        assert_eq!(app.app.app_focus, AppFocus::Content);
+        assert_eq!(app.tui.app_focus, AppFocus::Content);
         let landed = app
             .transcript_window()
             .row_cursor()
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn non_navigation_key_clears_pending_pane_chord() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let mut app = crate::app::test_harness::TestApp::builder().build().tui;
         app.handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
 
         let outcome = app.handle_pane_chord(&key(KeyCode::Char('x'), KeyModifiers::NONE));

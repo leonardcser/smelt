@@ -245,7 +245,7 @@ fn vim_insert_double_esc_rewinds_active_command_by_history_index() {
     let context = protocol::HistoryItem::note(protocol::HistoryNote::context(
         "Current working directory: /workspace.",
     ));
-    app.app.conversation.append_history_item(context.clone());
+    app.tui.conversation.append_history_item(context.clone());
     assert!(app.start_command_request_turn(
         "/review".into(),
         "expanded review prompt".into(),
@@ -260,7 +260,7 @@ fn vim_insert_double_esc_rewinds_active_command_by_history_index() {
     let after_second = app.state();
     assert!(!after_second.agent_running);
     assert_eq!(after_second.prompt_text, "/review");
-    let history = &app.app.conversation.session().history;
+    let history = &app.tui.conversation.session().history;
     assert_eq!(history.first(), Some(&context));
     assert!(history
         .iter()
