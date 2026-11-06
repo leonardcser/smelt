@@ -143,27 +143,6 @@ local function work_state()
   return state
 end
 
-define("pause", { "auto_continue_status" }, function()
-  local pause = smelt.signal.get("auto_continue_status")
-  if not pause then return nil end
-  local reason = pause.kind == "quota" and "quota exceeded"
-    or pause.kind == "rate_limited" and "rate limited" or "interrupted"
-  local action = "paused"
-  if pause.phase == "waiting_for_idle" then
-    action = "resuming when idle"
-  elseif pause.phase == "scheduled" then
-    local at = math.floor(pause.next_attempt_at_ms / 1000)
-    local today = smelt.time.format(math.floor(smelt.time.now_ms() / 1000), "%Y-%m-%d")
-    local format = smelt.time.format(at, "%Y-%m-%d") == today and "%H:%M" or "%b %d %H:%M"
-    local time = smelt.time.format(at, format)
-    if time then action = "resuming at " .. time end
-  end
-  return {
-    { text = reason, style = COMMENT_DIM_STYLE, priority = INDICATOR_PRIORITY, separated = true },
-    { text = action, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY, separated = true },
-  }
-end)
-
 -- One coal says what the turn is doing. It catches when the turn starts or
 -- resumes and then breathes. It heats with tool calls: each call bumps it, it
 -- keeps warming for as long as a call is pending, and it cools back to a dull
@@ -349,6 +328,32 @@ local function typed_label(label, ctx)
     end,
   }
 end
+
+-- A turn paused by a limit keeps its dim coal. The text says why it waits and
+-- when it resumes.
+define("pause", { "auto_continue_status" }, function()
+  local pause = smelt.signal.get("auto_continue_status")
+  if not pause then return nil end
+  local reason = pause.kind == "quota" and "quota exceeded"
+    or pause.kind == "rate_limited" and "rate limited" or "interrupted"
+  local action = "paused"
+  if pause.phase == "resuming" then
+    action = "resuming now"
+  elseif pause.phase == "waiting_for_idle" then
+    action = "resuming when idle"
+  elseif pause.phase == "scheduled" then
+    local at = math.floor(pause.next_attempt_at_ms / 1000)
+    local today = smelt.time.format(math.floor(smelt.time.now_ms() / 1000), "%Y-%m-%d")
+    local format = smelt.time.format(at, "%Y-%m-%d") == today and "%H:%M" or "%b %d %H:%M"
+    local time = smelt.time.format(at, format)
+    if time then action = "resuming at " .. time end
+  end
+  return {
+    coal_item(function() return mix(ground(), heat(), PAUSED_LEVEL) end),
+    { text = reason, style = COMMENT_DIM_STYLE, priority = INDICATOR_PRIORITY, separated = true },
+    { text = action, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY, separated = true },
+  }
+end)
 
 define("indicator", { "auto_continue_status", "work_state", "work_label" }, function(ctx)
   local state = work_state()

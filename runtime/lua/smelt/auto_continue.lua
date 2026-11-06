@@ -5,14 +5,18 @@ local M = {}
 local AUTO_DELAY_MS = 1200
 local QUOTA_RETRY_INITIAL_MS = 60000
 local QUOTA_RETRY_MAX_MS = 300000
+local RESET_MARGIN_MS = 1000
+local USAGE_POLL_MS = 300000
 
 local pending
 local retry_state = smelt.state.get("auto_continue")
 local timer
+local poll_timer
 local subscriptions = {}
 local setup_done = false
 local provider
 local resume_policy
+local usage_provider = require("smelt.usage_provider")
 
 local function trim(s)
   return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -87,6 +91,9 @@ local function current(schedule, state)
   return schedule and schedule.session == smelt.session.id() and schedule.token == state.token
 end
 
+-- A paused turn resumes when the provider's reset time passes. Without a
+-- usable reset time it retries with a doubling delay, and only after a first
+-- failed attempt.
 local function quota_schedule(state)
   local retry = retry_state.recovery
   if current(retry, state) then return retry end
@@ -97,23 +104,26 @@ local function quota_schedule(state)
   end
 
   local now = now_ms()
-  if state.retry_at_ms then
-    local reset_at_ms = state.retry_at_ms + 1000
-    -- Keep the earliest untried reset, even if later responses omit it or move it back.
-    if not retry.last_attempt_at_ms or reset_at_ms > retry.last_attempt_at_ms then
-      retry.reset_at_ms = math.min(retry.reset_at_ms or reset_at_ms, reset_at_ms)
-    end
+  -- The latest reported reset wins, unless a retry already ran past it.
+  local reset_at_ms = state.retry_at_ms and state.retry_at_ms + RESET_MARGIN_MS or retry.reset_at_ms
+  if reset_at_ms and retry.last_attempt_at_ms and reset_at_ms <= retry.last_attempt_at_ms then
+    reset_at_ms = nil
   end
+  retry.reset_at_ms = reset_at_ms
   retry.token = state.token
+  retry.kind = state.error_kind or "other"
   retry.awaiting_result = false
-  retry.at_ms = math.max(now + AUTO_DELAY_MS,
-    math.min(now + retry.delay_ms, retry.reset_at_ms or math.huge))
+  retry.at_ms = math.max(now + AUTO_DELAY_MS, reset_at_ms or now + retry.delay_ms)
   retry_state.recovery = retry
   return retry
 end
 
 local function stop_timer()
   if timer then timer:remove(); timer = nil end
+end
+
+local function stop_poll()
+  if poll_timer then poll_timer:remove(); poll_timer = nil end
 end
 
 local function publish_status()
@@ -130,6 +140,13 @@ local function publish_status()
       status.next_attempt_at_ms = pending.at_ms
       status.phase = now_ms() >= pending.at_ms and "waiting_for_idle" or "scheduled"
     end
+  else
+    -- A resumed turn keeps the pause line until it produces output.
+    local retry = retry_state.recovery
+    if retry and retry.session == smelt.session.id() and retry.awaiting_result
+      and not retry.output_seen and not state.paused then
+      status = { kind = retry.kind, phase = "resuming" }
+    end
   end
   local previous = smelt.signal.get("auto_continue_status")
   if (status and not previous) or (previous and not status)
@@ -139,8 +156,17 @@ local function publish_status()
   end
 end
 
+local function note_output()
+  local retry = retry_state.recovery
+  if retry and retry.awaiting_result and not retry.output_seen then
+    retry.output_seen = true
+    publish_status()
+  end
+end
+
 local function clear_pending()
   stop_timer()
+  stop_poll()
   pending = nil
 end
 
@@ -148,15 +174,23 @@ function M.continue(continuation_token)
   local state = smelt.engine.continuation_state()
   if state.paused then
     if not can_continue(state) then return false end
-    local started = continuation_token ~= nil and smelt.engine.resume_paused(continuation_token)
     local retry = retry_state.recovery
-    if started and current(retry, state) then
-      retry.last_attempt_at_ms = now_ms()
-      if retry.reset_at_ms and retry.reset_at_ms <= retry.last_attempt_at_ms then
-        retry.reset_at_ms = nil
+    local tracked = continuation_token ~= nil and current(retry, state)
+    -- Marked before the resume so the status never falls back to idle.
+    if tracked then retry.awaiting_result, retry.output_seen = true, nil end
+    local started = continuation_token ~= nil and smelt.engine.resume_paused(continuation_token)
+    if tracked then
+      if started then
+        retry.last_attempt_at_ms = now_ms()
+        -- The delay grows only over attempts that were not made at a reset time.
+        if retry.reset_at_ms then
+          if retry.reset_at_ms <= retry.last_attempt_at_ms then retry.reset_at_ms = nil end
+        else
+          retry.delay_ms = math.min(retry.delay_ms * 2, QUOTA_RETRY_MAX_MS)
+        end
+      else
+        retry.awaiting_result = false
       end
-      retry.delay_ms = math.min(retry.delay_ms * 2, QUOTA_RETRY_MAX_MS)
-      retry.awaiting_result = true
     end
     return started
   end
@@ -197,6 +231,55 @@ local function arm(delay)
   end)
 end
 
+-- Whether a usage report shows room under every limit it reports.
+local function has_room(report)
+  local rows = { report.summary }
+  for _, row in ipairs(report.limits or {}) do rows[#rows + 1] = row end
+  local known = false
+  for _, row in ipairs(rows) do
+    local limit = tonumber(row.limit) or 0
+    if limit > 0 then
+      if (tonumber(row.used) or 0) >= limit then return false end
+      known = true
+    end
+  end
+  return known
+end
+
+-- A reset can come before the time the provider reported. Where the provider
+-- reports account usage, a paused turn checks it now and then and resumes as
+-- soon as the limits have room.
+local function check_usage(scheduled)
+  local kind = usage_provider.detect()
+  if not kind then return end
+  smelt.spawn(function()
+    local report, err = smelt.auth.managed_usage(kind)
+    if type(report) ~= "table" then
+      smelt.log.warn("auto_continue.usage_check_failed", { error = tostring(err) })
+      return
+    end
+    if pending ~= scheduled or scheduled.usage_resumed or not has_room(report) then return end
+    -- A report that shows room but is followed by another limit error is not trusted again.
+    scheduled.usage_resumed = true
+    scheduled.at_ms = now_ms()
+    arm(0)
+    publish_status()
+  end)
+end
+
+local function arm_poll(scheduled)
+  stop_poll()
+  poll_timer = smelt.timer.set(USAGE_POLL_MS, function()
+    poll_timer = nil
+    if pending ~= scheduled or scheduled.usage_resumed
+      or scheduled.at_ms - now_ms() <= USAGE_POLL_MS then
+      return
+    end
+    check_usage(scheduled)
+    arm_poll(scheduled)
+  end)
+end
+
 function M.refresh()
   local state = smelt.engine.continuation_state()
   local retry = retry_state.recovery
@@ -219,6 +302,10 @@ function M.refresh()
       }
     end
     if not timer then arm(pending.at_ms - now_ms()) end
+    if state.paused and not poll_timer and not pending.usage_resumed
+      and pending.at_ms - now_ms() > USAGE_POLL_MS then
+      arm_poll(pending)
+    end
   end
   publish_status()
 end
@@ -254,6 +341,9 @@ end
 function M.setup()
   if setup_done then return end
   setup_done = true
+  for _, name in ipairs({ "stream_delta", "tool_start" }) do
+    subscriptions[#subscriptions + 1] = smelt.events.on(name, note_output)
+  end
   subscriptions[#subscriptions + 1] = smelt.events.on("turn_end", function(ev)
     if ev.error_kind ~= "quota" and ev.error_kind ~= "rate_limited" then
       retry_state.recovery = nil

@@ -20,6 +20,7 @@ const ARGV_LUA: &str = include_str!("../../../runtime/lua/smelt/argv.lua");
 const WORKTREE_LUA: &str = include_str!("../../../runtime/lua/smelt/worktree.lua");
 const USAGE_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/usage.lua");
 const USAGE_CACHE_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/usage/cache.lua");
+const USAGE_PROVIDER_LUA: &str = include_str!("../../../runtime/lua/smelt/usage_provider.lua");
 
 fn install_explicit_api_fixtures(lua: &mlua::Lua) {
     lua.load(
@@ -152,12 +153,18 @@ fn render_usage(provider: &str, stubs: &str) -> (mlua::Lua, String) {
         .set("__USAGE_CACHE_LUA", USAGE_CACHE_LUA)
         .expect("install usage cache source");
     lua.globals()
+        .set("__USAGE_PROVIDER_LUA", USAGE_PROVIDER_LUA)
+        .expect("install usage provider source");
+    lua.globals()
         .set("__USAGE_PROVIDER", provider)
         .expect("install usage provider");
     lua.load(format!(
         r#"
         package.preload["smelt.commands.usage.cache"] = function()
           return assert(load(__USAGE_CACHE_LUA, "smelt/commands/usage/cache.lua"))()
+        end
+        package.preload["smelt.usage_provider"] = function()
+          return assert(load(__USAGE_PROVIDER_LUA, "smelt/usage_provider.lua"))()
         end
         package.loaded["smelt.progress"] = {{
           bar = function()

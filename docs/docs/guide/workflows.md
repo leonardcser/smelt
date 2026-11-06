@@ -161,7 +161,9 @@ goals, `"off"` never continues, and `"always"` continues any idle session.
 If a provider reports a quota or rate-limit error, smelt pauses and queues
 anything you type, then resumes the interrupted turn on its own. When the
 provider gives a reset time, smelt shows `quota exceeded · resuming at 14:30` and
-resumes then. Otherwise it retries with a growing delay. This finishes work you
+resumes then. For Claude Code, Codex and Kimi Code, smelt also checks your usage
+every 5 minutes and resumes early when a limit has room. If a retry fails with
+no new reset time, it retries with a growing delay. This finishes work you
 already asked for, so it happens in `"goal"` mode without a goal too. It does
 not happen with `"off"`, while a goal is paused or blocked, or for a goal's own
 turn once that goal is done or cleared.

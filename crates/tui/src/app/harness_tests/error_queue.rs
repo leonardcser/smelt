@@ -981,17 +981,18 @@ fn cancelling_from_quota_turn_end_does_not_finalize_the_turn_twice() {
 }
 
 #[test]
-fn quota_recovery_keeps_original_deadline_when_a_retry_omits_metadata() {
+fn quota_recovery_resumes_at_the_reported_reset_and_then_backs_off() {
     for kind in [
         protocol::EngineAskErrorKind::Quota,
         protocol::EngineAskErrorKind::RateLimited,
     ] {
         let mut app = isolated_app();
-        create_auto_goal(&mut app, "retain known reset");
+        create_auto_goal(&mut app, "wait for the reset");
         start_canonical_turn(&mut app);
         let reset = engine::clock::unix_time_ms(app.clock.as_ref()) + 150_000;
         quota_error(&mut app, Some(reset));
-        assert!(has_started_turn(&run_due_timers(&mut app, 60_000)));
+        assert!(!has_started_turn(&run_due_timers(&mut app, 150_999)));
+        assert!(has_started_turn(&run_due_timers(&mut app, 1)));
         app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
             message: "provider limit".into(),
             kind: Some(kind),
@@ -1001,10 +1002,10 @@ fn quota_recovery_keeps_original_deadline_when_a_retry_omits_metadata() {
         assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
         app.reload_lua();
         assert!(app.run_lua(r#"smelt.settings.auto_continue = "goal""#));
-        assert!(!has_started_turn(&run_due_timers(&mut app, 90_999)));
+        assert!(!has_started_turn(&run_due_timers(&mut app, 59_999)));
         assert!(has_started_turn(&run_due_timers(&mut app, 1)));
         quota_error(&mut app, None);
-        assert!(!has_started_turn(&run_due_timers(&mut app, 239_999)));
+        assert!(!has_started_turn(&run_due_timers(&mut app, 119_999)));
         assert!(has_started_turn(&run_due_timers(&mut app, 1)));
     }
 }
@@ -1016,7 +1017,7 @@ fn quota_retry_accepts_at_deadline_while_terminal_receipt_is_pending() {
     start_canonical_turn(&mut app);
     let reset = engine::clock::unix_time_ms(app.clock.as_ref()) + 150_000;
     quota_error(&mut app, Some(reset));
-    assert!(has_started_turn(&run_due_timers(&mut app, 60_000)));
+    assert!(has_started_turn(&run_due_timers(&mut app, 151_000)));
 
     let release = app.app.conversation.pause_persistence();
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
@@ -1024,7 +1025,7 @@ fn quota_retry_accepts_at_deadline_while_terminal_receipt_is_pending() {
         kind: Some(protocol::EngineAskErrorKind::Quota),
         retry_at_ms: None,
     }));
-    app.feed_one(SourceEvent::Tick(90_999));
+    app.feed_one(SourceEvent::Tick(59_999));
     app.tick_timers();
     assert!(!app.app.turn_submission_is_pending());
     app.feed_one(SourceEvent::Tick(1));
@@ -1063,7 +1064,7 @@ fn quota_without_reset_requires_manual_resume_even_in_always_mode() {
 
 #[test]
 fn quota_retry_waits_for_busy_work_and_drafts_without_losing_the_continuation() {
-    for (reset_delay, first_attempt_delay) in [(0, 1300), (3_600_000, 60_000)] {
+    for (reset_delay, first_attempt_delay) in [(0, 1300), (3_600_000, 3_601_000)] {
         for draft in [false, true] {
             let mut app = isolated_app();
             create_auto_goal(&mut app, "wait for idle");
@@ -1086,7 +1087,7 @@ fn quota_retry_waits_for_busy_work_and_drafts_without_losing_the_continuation() 
             }
             assert!(has_started_turn(&run_due_timers(&mut app, 300)));
             quota_error(&mut app, Some(reset));
-            assert!(!has_started_turn(&run_due_timers(&mut app, 119_999)));
+            assert!(!has_started_turn(&run_due_timers(&mut app, 59_999)));
             assert!(has_started_turn(&run_due_timers(&mut app, 1)));
         }
     }
@@ -1195,36 +1196,35 @@ fn repeated_expired_quota_deadline_keeps_backoff_across_reload() {
     quota_error(&mut app, Some(0));
     assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
     quota_error(&mut app, Some(0));
-    assert!(!has_started_turn(&run_due_timers(&mut app, 60_000)));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 30_000)));
 
     let generation = app.lua_probe().id;
     app.type_text("/reload");
     app.press(crossterm::event::KeyCode::Enter);
     app.wait_for_workspace();
     assert_eq!(app.lua_probe().id, generation + 1);
-    assert!(!has_started_turn(&run_due_timers(&mut app, 59_999)));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 29_999)));
     assert!(has_started_turn(&run_due_timers(&mut app, 1)));
     quota_error(&mut app, Some(0));
-    assert!(!has_started_turn(&run_due_timers(&mut app, 239_999)));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 119_999)));
     assert!(has_started_turn(&run_due_timers(&mut app, 1)));
 }
 
 #[test]
-fn hybrid_quota_retry_backs_off_to_five_minutes_before_reset() {
+fn quota_retry_backs_off_to_five_minutes_once_the_reset_has_passed() {
     for kind in [
         protocol::EngineAskErrorKind::Quota,
         protocol::EngineAskErrorKind::RateLimited,
     ] {
         let mut app = isolated_app();
-        create_auto_goal(&mut app, "detect an early reset");
+        create_auto_goal(&mut app, "keep trying after the reset");
         start_canonical_turn(&mut app);
         app.push_queued_message("keep queued".into());
-        let reset = engine::clock::unix_time_ms(app.clock.as_ref()) + 3_600_000;
-        for delay in [60_000, 120_000, 240_000, 300_000, 300_000] {
+        for delay in [1_200, 60_000, 120_000, 240_000, 300_000] {
             app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
                 message: "provider limit".into(),
                 kind: Some(kind),
-                retry_at_ms: Some(reset),
+                retry_at_ms: Some(0),
             }));
             app.wait_for_turn_persistence();
             assert!(!has_started_turn(&run_due_timers(&mut app, delay - 1)));
@@ -1242,25 +1242,25 @@ fn hybrid_quota_retry_backs_off_to_five_minutes_before_reset() {
 }
 
 #[test]
-fn hybrid_quota_retry_preserves_original_reset_when_estimates_move_later() {
+fn quota_recovery_follows_the_latest_reported_reset() {
     let mut app = isolated_app();
-    create_auto_goal(&mut app, "honor the original reset");
+    create_auto_goal(&mut app, "follow the reset");
     start_canonical_turn(&mut app);
     let now = engine::clock::unix_time_ms(app.clock.as_ref());
     let reset = now + 150_000;
     quota_error(&mut app, Some(reset));
-    assert!(has_started_turn(&run_due_timers(&mut app, 60_000)));
+    assert!(has_started_turn(&run_due_timers(&mut app, 151_000)));
     quota_error(&mut app, Some(now + 3_600_000));
-    assert!(!has_started_turn(&run_due_timers(&mut app, 90_999)));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 3_449_999)));
     assert!(has_started_turn(&run_due_timers(&mut app, 1)));
 
     quota_error(&mut app, Some(reset));
-    assert!(!has_started_turn(&run_due_timers(&mut app, 239_999)));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 59_999)));
     assert!(has_started_turn(&run_due_timers(&mut app, 1)));
 }
 
 #[test]
-fn hybrid_quota_retry_keeps_next_attempt_across_policy_changes_and_reload() {
+fn quota_retry_keeps_its_reset_across_policy_changes_and_reload() {
     let mut app = isolated_app();
     create_auto_goal(&mut app, "preserve the next attempt");
     start_canonical_turn(&mut app);
@@ -1272,19 +1272,19 @@ fn hybrid_quota_retry_keeps_next_attempt_across_policy_changes_and_reload() {
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "goal""#));
     assert!(!has_started_turn(&run_due_timers(&mut app, 10_000)));
     app.reload_lua();
-    assert!(!has_started_turn(&run_due_timers(&mut app, 9_999)));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 3_550_999)));
     assert!(has_started_turn(&run_due_timers(&mut app, 1)));
 }
 
 #[test]
-fn cancelling_hybrid_quota_retry_clears_backoff_without_losing_queued_work() {
+fn cancelling_quota_retry_clears_the_schedule_without_losing_queued_work() {
     let mut app = isolated_app();
     create_auto_goal(&mut app, "cancel periodic retries");
     start_canonical_turn(&mut app);
     app.push_queued_message("keep queued".into());
     let reset = engine::clock::unix_time_ms(app.clock.as_ref()) + 3_600_000;
     quota_error(&mut app, Some(reset));
-    assert!(has_started_turn(&run_due_timers(&mut app, 60_000)));
+    assert!(has_started_turn(&run_due_timers(&mut app, 3_601_000)));
     quota_error(&mut app, Some(reset));
     assert!(app.run_lua("smelt.engine.cancel()"));
     complete_background_job(&mut app);
@@ -1298,14 +1298,14 @@ fn cancelling_hybrid_quota_retry_clears_backoff_without_losing_queued_work() {
 }
 
 #[test]
-fn hybrid_quota_retry_resets_backoff_after_success_or_manual_resume() {
+fn quota_recovery_starts_fresh_after_success_or_manual_resume() {
     for manual in [false, true] {
         let mut app = isolated_app();
         create_auto_goal(&mut app, "reset recovered backoff");
         start_canonical_turn(&mut app);
         let reset = engine::clock::unix_time_ms(app.clock.as_ref()) + 3_600_000;
         quota_error(&mut app, Some(reset));
-        assert!(has_started_turn(&run_due_timers(&mut app, 60_000)));
+        assert!(has_started_turn(&run_due_timers(&mut app, 3_601_000)));
         if manual {
             quota_error(&mut app, Some(reset));
             app.press(crossterm::event::KeyCode::Enter);
@@ -1320,8 +1320,75 @@ fn hybrid_quota_retry_resets_backoff_after_success_or_manual_resume() {
             start_canonical_turn(&mut app);
         }
         quota_error(&mut app, Some(reset));
-        assert!(!has_started_turn(&run_due_timers(&mut app, 59_999)));
+        assert!(!has_started_turn(&run_due_timers(&mut app, 1_199)));
         assert!(has_started_turn(&run_due_timers(&mut app, 1)));
+    }
+}
+
+#[test]
+fn resuming_turn_keeps_the_pause_status_until_output_arrives() {
+    let mut app = isolated_app();
+    create_auto_goal(&mut app, "stay paused while probing");
+    start_canonical_turn(&mut app);
+    assert!(app.run_lua(
+        r#"
+        _G.phases = {}
+        smelt.signal.subscribe("auto_continue_status", function(status)
+            _G.phases[#_G.phases + 1] = status and status.phase or "none"
+        end)
+    "#
+    ));
+    quota_error(&mut app, Some(0));
+    assert!(has_started_turn(&run_due_timers(&mut app, 1_200)));
+    let resuming = app.render_to_frame().text();
+    assert!(
+        resuming.contains("quota exceeded · resuming now"),
+        "{resuming}"
+    );
+
+    quota_error(&mut app, Some(0));
+    assert!(has_started_turn(&run_due_timers(&mut app, 120_000)));
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "back".into(),
+    }));
+    assert!(app.run_lua(
+        r#"
+        assert(smelt.signal.get("auto_continue_status") == nil)
+        assert(table.concat(_G.phases, ",")
+            == "scheduled,resuming,scheduled,resuming,none", table.concat(_G.phases, ","))
+    "#
+    ));
+}
+
+#[test]
+fn paused_turn_resumes_when_the_provider_usage_has_room() {
+    for (used, resumes) in [(100, false), (40, true)] {
+        let mut app = isolated_app();
+        create_auto_goal(&mut app, "notice an early reset");
+        start_canonical_turn(&mut app);
+        assert!(app.run_lua(&format!(
+            r#"
+            require("smelt.usage_provider").detect = function()
+                return "codex", "Codex", ""
+            end
+            smelt.auth.managed_usage = function()
+                return {{ limits = {{ {{ label = "5h limit", used = {used}, limit = 100 }} }} }}
+            end
+        "#
+        )));
+        let reset = engine::clock::unix_time_ms(app.clock.as_ref()) + 3_600_000;
+        quota_error(&mut app, Some(reset));
+        assert!(!has_started_turn(&run_due_timers(&mut app, 299_999)));
+        assert!(!has_started_turn(&run_due_timers(&mut app, 1)));
+        drive_lua_tasks(&mut app);
+        assert_eq!(has_started_turn(&run_due_timers(&mut app, 1_000)), resumes);
+        if resumes {
+            // A usage report that was wrong once is not trusted again for this pause.
+            quota_error(&mut app, Some(reset));
+            assert!(!has_started_turn(&run_due_timers(&mut app, 300_000)));
+            drive_lua_tasks(&mut app);
+            assert!(!has_started_turn(&run_due_timers(&mut app, 1_000)));
+        }
     }
 }
 

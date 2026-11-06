@@ -7,6 +7,7 @@
 --   * Closing the dialog unsubscribes from further updates.
 
 local cache = require("smelt.commands.usage.cache")
+local usage_provider = require("smelt.usage_provider").detect
 local progress = require("smelt.progress")
 local modal = require("smelt.modal")
 
@@ -44,22 +45,6 @@ local function dim_lines(lines)
   local out = {}
   for _, line in ipairs(lines) do out[#out + 1] = dim_line(line) end
   return out
-end
-
--- ── Provider detection ─────────────────────────────────────────────────
-
-local function active_provider()
-  local active = smelt.model.current()
-  local capabilities = smelt.model.capabilities and smelt.model.capabilities()
-  if capabilities then
-    return capabilities.provider_type or "", capabilities.api_base or ""
-  end
-  for _, model in ipairs(smelt.model.list() or {}) do
-    if model.key == active or model.name == active then
-      return model.provider or "", model.api_base or ""
-    end
-  end
-  return "", ""
 end
 
 -- ── Formatting helpers ─────────────────────────────────────────────────
@@ -197,17 +182,6 @@ local function usage_lines(title, report)
   end
   append(lines, usage_table_lines(rendered))
   return lines
-end
-
--- ── Provider dispatch ──────────────────────────────────────────────────
-
-local function usage_provider()
-  local provider, api_base = active_provider()
-  local kind = provider:lower()
-  if kind:find("codex", 1, true) or kind:find("chatgpt", 1, true) then return "codex", "Codex", api_base end
-  if kind == "claude-code" then return "claude-code", "Claude Code", api_base end
-  if kind == "kimi-code" or api_base:lower():find("api.kimi.com/coding", 1, true) then return "kimi-code", "Kimi Code", api_base end
-  return nil, provider ~= "" and provider or "unknown", api_base
 end
 
 -- ── Cost/pricing (always local, always bright) ─────────────────────────
