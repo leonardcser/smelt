@@ -161,6 +161,7 @@ fn note_kind_to_lua(kind: protocol::HistoryNoteKind) -> &'static str {
         protocol::HistoryNoteKind::ModeChange => "mode_change",
         protocol::HistoryNoteKind::Context => "context",
         protocol::HistoryNoteKind::ProcessStatus => "process_status",
+        protocol::HistoryNoteKind::Compaction => "compaction",
     }
 }
 

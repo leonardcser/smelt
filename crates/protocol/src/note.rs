@@ -68,6 +68,16 @@ pub fn process_status_note(note: &str) -> String {
     )
 }
 
+/// Marker prefix on synthetic user messages that record a compaction a native
+/// agent performed on its own context.
+pub const COMPACTION_NOTE_PREFIX: &str = "[smelt:compaction] ";
+
+/// Build the model-visible record of a compaction the agent performed. The
+/// summary stays inside the agent, so only the fact is recorded.
+pub fn compaction_note(note: &str) -> String {
+    format!("{COMPACTION_NOTE_PREFIX}{}", text::trim_whitespace(note))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

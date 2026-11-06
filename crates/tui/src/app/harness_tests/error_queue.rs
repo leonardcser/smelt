@@ -1751,8 +1751,26 @@ fn turn_complete_still_chains_queued_turn() {
     assert!(app.queued_message_count() == 0 || app.state().queued_inputs.is_empty());
 }
 
+/// Summaries of the transcript's compaction markers and whether a preview
+/// block is showing.
+fn compaction_blocks(app: &TestApp) -> (Vec<String>, bool) {
+    let transcript = app.tui.conversation.transcript();
+    let history = transcript.history();
+    let markers = history
+        .order
+        .iter()
+        .filter_map(|id| match history.block(*id) {
+            Some(smelt_core::transcript_model::Block::Compacted { summary, .. }) => {
+                Some(summary.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    (markers, transcript.compaction_preview_id().is_some())
+}
+
 #[test]
-fn native_compaction_shows_its_phase_and_resets_the_context_reading() {
+fn native_compaction_shows_its_phase_and_leaves_a_marker() {
     use protocol::NativeCompaction;
     let mut app = TestApp::builder().build();
     app.start_turn(1);
@@ -1762,8 +1780,18 @@ fn native_compaction_shows_its_phase_and_resets_the_context_reading() {
         state: NativeCompaction::Started,
     });
     assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+    assert_eq!(compaction_blocks(&app), (Vec::new(), true));
 
     app.engine_event(EngineEvent::ContextTokens { tokens: 1_192 });
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id: 1,
+        delta: protocol::CanonicalHistoryDelta::new(
+            app.session_snapshot().history.len(),
+            vec![protocol::HistoryItem::note(
+                protocol::HistoryNote::compaction(Some(27_445), Some(1_192)),
+            )],
+        ),
+    }));
     app.engine_event(EngineEvent::NativeCompaction {
         state: NativeCompaction::Finished {
             before_tokens: Some(27_445),
@@ -1775,7 +1803,13 @@ fn native_compaction_shows_its_phase_and_resets_the_context_reading() {
         app.tui.conversation.session().display_context_tokens(),
         Some(1_192)
     );
-    assert!(app.state().notification.is_some(), "the outcome is shown");
+    assert_eq!(
+        compaction_blocks(&app),
+        (
+            vec!["compacted context: 27.4k -> 1.2k tokens".into()],
+            false
+        )
+    );
 }
 
 #[test]
@@ -1792,5 +1826,6 @@ fn failed_native_compaction_returns_to_working() {
         },
     });
     assert_eq!(app.working_probe().phase_label(), Some("working"));
+    assert_eq!(compaction_blocks(&app), (Vec::new(), false));
     assert!(app.state().notification.is_some(), "the failure is shown");
 }

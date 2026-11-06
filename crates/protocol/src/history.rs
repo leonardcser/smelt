@@ -160,6 +160,17 @@ impl ProcessStatusEvent {
     }
 }
 
+/// A raw token count as `1.2k`, `3.4m`, or the bare integer under 1000.
+pub fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 pub const DEFAULT_CONTEXT_NOTE_NAME: &str = "cwd";
 
 fn default_context_note_name() -> String {
@@ -196,6 +207,9 @@ pub enum HistoryNote {
         #[serde(skip_serializing_if = "String::is_empty", default)]
         output: String,
     },
+    /// A native agent compacted its own context. The agent keeps the summary,
+    /// so only the outcome is recorded.
+    Compaction { text: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +218,7 @@ pub enum HistoryNoteKind {
     ModeChange,
     Context,
     ProcessStatus,
+    Compaction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -420,6 +435,20 @@ impl HistoryNote {
         }
     }
 
+    /// A compaction with the context sizes the agent reported, when it did.
+    pub fn compaction(before_tokens: Option<u32>, after_tokens: Option<u32>) -> Self {
+        Self::Compaction {
+            text: match (before_tokens, after_tokens) {
+                (Some(before), Some(after)) => format!(
+                    "compacted context: {} -> {} tokens",
+                    format_tokens(before.into()),
+                    format_tokens(after.into())
+                ),
+                _ => "compacted context".into(),
+            },
+        }
+    }
+
     pub fn process_status(text: impl Into<String>) -> Self {
         Self::ProcessStatus {
             text: text.into(),
@@ -448,6 +477,7 @@ impl HistoryNote {
             HistoryNote::ModeChange { .. } => HistoryNoteKind::ModeChange,
             HistoryNote::Context { .. } => HistoryNoteKind::Context,
             HistoryNote::ProcessStatus { .. } => HistoryNoteKind::ProcessStatus,
+            HistoryNote::Compaction { .. } => HistoryNoteKind::Compaction,
         }
     }
 
@@ -455,35 +485,44 @@ impl HistoryNote {
         match self {
             HistoryNote::ModeChange { text, .. }
             | HistoryNote::Context { text, .. }
-            | HistoryNote::ProcessStatus { text, .. } => text,
+            | HistoryNote::ProcessStatus { text, .. }
+            | HistoryNote::Compaction { text } => text,
         }
     }
 
     pub fn mode(&self) -> Option<&str> {
         match self {
             HistoryNote::ModeChange { mode, .. } => mode.as_deref(),
-            HistoryNote::Context { .. } | HistoryNote::ProcessStatus { .. } => None,
+            HistoryNote::Context { .. }
+            | HistoryNote::ProcessStatus { .. }
+            | HistoryNote::Compaction { .. } => None,
         }
     }
 
     pub fn base_mode(&self) -> Option<&str> {
         match self {
             HistoryNote::ModeChange { base_mode, .. } => base_mode.as_deref(),
-            HistoryNote::Context { .. } | HistoryNote::ProcessStatus { .. } => None,
+            HistoryNote::Context { .. }
+            | HistoryNote::ProcessStatus { .. }
+            | HistoryNote::Compaction { .. } => None,
         }
     }
 
     pub fn context_name(&self) -> Option<&str> {
         match self {
             HistoryNote::Context { name, .. } => Some(name),
-            HistoryNote::ModeChange { .. } | HistoryNote::ProcessStatus { .. } => None,
+            HistoryNote::ModeChange { .. }
+            | HistoryNote::ProcessStatus { .. }
+            | HistoryNote::Compaction { .. } => None,
         }
     }
 
     pub fn process_status_event_ref(&self) -> Option<&ProcessStatusEvent> {
         match self {
             HistoryNote::ProcessStatus { event, .. } => event.as_ref(),
-            HistoryNote::ModeChange { .. } | HistoryNote::Context { .. } => None,
+            HistoryNote::ModeChange { .. }
+            | HistoryNote::Context { .. }
+            | HistoryNote::Compaction { .. } => None,
         }
     }
 
@@ -510,6 +549,7 @@ impl HistoryNote {
             }
             HistoryNote::Context { text, .. } => crate::note::context_note(text),
             HistoryNote::ProcessStatus { text, .. } => crate::note::process_status_note(text),
+            HistoryNote::Compaction { text } => crate::note::compaction_note(text),
         }
     }
 }
@@ -973,6 +1013,7 @@ fn history_item_transcript_projection(item: &HistoryItem) -> Option<HistoryTrans
         HistoryItem::Note(note) => match note.kind() {
             HistoryNoteKind::ModeChange => Some(HistoryTranscriptProjection::Mode),
             HistoryNoteKind::ProcessStatus => Some(HistoryTranscriptProjection::ProcessStatus),
+            HistoryNoteKind::Compaction => Some(HistoryTranscriptProjection::Compacted),
             HistoryNoteKind::Context => None,
         },
         HistoryItem::System { .. } => None,

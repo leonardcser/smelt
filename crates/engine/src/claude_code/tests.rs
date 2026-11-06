@@ -2289,6 +2289,23 @@ async fn claude_codes_compaction_is_reported_and_resets_the_context_reading() {
             },
         ]
     );
+    let notes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::HistoryAppended { delta, .. } => Some(delta.items.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|item| item.note_kind() == Some(protocol::HistoryNoteKind::Compaction))
+        .collect();
+    assert_eq!(
+        notes,
+        [HistoryItem::note(protocol::HistoryNote::compaction(
+            Some(27445),
+            Some(1192)
+        ))],
+        "the compaction is recorded in the history where it happened"
+    );
     let readings: Vec<_> = events
         .iter()
         .filter_map(|event| match event {

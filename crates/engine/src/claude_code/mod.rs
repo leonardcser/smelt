@@ -957,8 +957,9 @@ impl Runtime<'_> {
         let _ = self.live_tx().send(EngineEvent::ContextTokens { tokens });
     }
 
-    /// Reports Claude Code's own compaction. Its boundary carries the context
-    /// size the compacted history leaves, which the next reading replaces.
+    /// Reports Claude Code's own compaction and records where it happened. Its
+    /// boundary carries the context size the compacted history leaves, which
+    /// the next reading replaces.
     async fn compaction(&mut self, frame: &Value) -> Result<bool, String> {
         if frame["type"] != "system" {
             return Ok(false);
@@ -988,8 +989,14 @@ impl Runtime<'_> {
                     json!({"subtype":"get_context_usage"}),
                 ))
                 .await?;
+                let before_tokens = tokens("pre_tokens");
+                self.transcript
+                    .note(HistoryItem::note(protocol::HistoryNote::compaction(
+                        before_tokens,
+                        after_tokens,
+                    )));
                 protocol::NativeCompaction::Finished {
-                    before_tokens: tokens("pre_tokens"),
+                    before_tokens,
                     after_tokens,
                 }
             }

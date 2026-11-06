@@ -239,6 +239,10 @@ impl TuiApp {
     }
 
     pub(crate) fn begin_context_recalculation(&mut self, label: String) -> ContextRecalculation {
+        ContextRecalculation(self.start_context_recalculation(label))
+    }
+
+    fn start_context_recalculation(&mut self, label: String) -> super::BusyToken {
         if let Some(previous) = self.host_work.context_recalculation.take() {
             previous.release();
             self.clear_compaction_preview();
@@ -255,7 +259,26 @@ impl TuiApp {
         }
         self.host_work.context_recalculation = Some(token.clone());
         self.sync_compaction_phase();
-        ContextRecalculation(token)
+        token
+    }
+
+    /// A native agent starts compacting its own context. The turn shows the
+    /// same phase and transcript preview as a smelt compaction, until
+    /// `end_native_compaction`.
+    pub(crate) fn begin_native_compaction(&mut self) {
+        if !self.agent_is_running() {
+            return;
+        }
+        self.start_context_recalculation("compacting".into());
+        self.conversation
+            .update_compaction_preview(String::new(), std::time::Instant::now());
+    }
+
+    pub(crate) fn end_native_compaction(&mut self) {
+        if let Some(token) = &self.host_work.context_recalculation {
+            token.release();
+        }
+        self.sync_compaction_phase();
     }
 
     pub(super) fn cancel_request_hook(&mut self) {

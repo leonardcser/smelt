@@ -766,6 +766,10 @@ pub(crate) fn history_note_to_block(
             event: note.process_status_event_ref().cloned(),
             output: note.process_output().map(Into::into),
         }),
+        protocol::HistoryNoteKind::Compaction => Some(Block::Compacted {
+            summary: note.text().to_string(),
+            kept: Vec::new(),
+        }),
     }
 }
 
@@ -1038,6 +1042,27 @@ mod tests {
             }
             other => panic!("expected tool call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebuilt_transcript_shows_native_compaction_where_it_happened() {
+        let lua = crate::lua::LuaRuntime::new();
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            HistoryItem::user(Content::text("before")),
+            HistoryItem::note(protocol::HistoryNote::compaction(Some(27_445), Some(1_192))),
+            HistoryItem::user(Content::text("after")),
+        ];
+
+        let transcript = build_transcript_from_session(&lua, &session);
+
+        let kinds: Vec<_> = transcript
+            .history
+            .order
+            .iter()
+            .filter_map(|id| transcript.history.block_kind(*id))
+            .collect();
+        assert_eq!(kinds, ["user", "compacted", "user"]);
     }
 
     #[test]
@@ -1605,6 +1630,8 @@ impl TuiApp {
                     );
                     // Keep the canonical item and its rewind boundary in the same mutation.
                     self.commit_request_history_item_to_document(item, Some(block), None);
+                } else if let Some(block) = self.engine_note_block(&item) {
+                    self.commit_request_history_item_to_document(item, Some(block), None);
                 } else {
                     self.session_append_history(item);
                 }
@@ -1617,6 +1644,15 @@ impl TuiApp {
         self.sync_session_snapshot();
         self.publish_history_delta(HistoryDeltaKind::Append);
         items.len() - common_len
+    }
+
+    /// The block for a note the engine recorded itself. Notes the app staged
+    /// already have theirs.
+    fn engine_note_block(&self, item: &HistoryItem) -> Option<Block> {
+        let HistoryItem::Note(note) = item else {
+            return None;
+        };
+        history_note_to_block(&self.lua, note)
     }
 
     pub(crate) fn publish_history_delta(&mut self, kind: HistoryDeltaKind) {

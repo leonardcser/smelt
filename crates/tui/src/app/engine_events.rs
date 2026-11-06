@@ -89,39 +89,15 @@ impl TuiApp {
         });
     }
 
-    /// A native agent compacts its own context: show the phase while it runs
-    /// and its outcome once it ends.
+    /// A native agent compacts its own context: show the phase while it runs.
+    /// Its outcome reaches the transcript as a history note.
     fn show_native_compaction(&mut self, state: protocol::NativeCompaction) {
         use protocol::NativeCompaction;
-        let tokens = |tokens: u32| crate::lua::api::text::format_tokens(tokens.into());
         match state {
-            NativeCompaction::Started => {
-                if self.working.is_animating() {
-                    self.working.begin(TurnPhase::Compacting);
-                }
-            }
-            NativeCompaction::Finished {
-                before_tokens,
-                after_tokens,
-            } => {
-                if self.working.is_compacting() {
-                    self.working.begin(TurnPhase::Working);
-                }
-                self.notify(match (before_tokens, after_tokens) {
-                    (Some(before), Some(after)) => {
-                        format!(
-                            "compacted context: {} -> {} tokens",
-                            tokens(before),
-                            tokens(after)
-                        )
-                    }
-                    _ => "compacted context".into(),
-                });
-            }
+            NativeCompaction::Started => self.begin_native_compaction(),
+            NativeCompaction::Finished { .. } => self.end_native_compaction(),
             NativeCompaction::Failed { message } => {
-                if self.working.is_compacting() {
-                    self.working.begin(TurnPhase::Working);
-                }
+                self.end_native_compaction();
                 self.notify_warn(match message {
                     Some(message) => format!("compaction failed: {message}"),
                     None => "compaction failed".into(),
