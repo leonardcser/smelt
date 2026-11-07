@@ -8,8 +8,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use protocol::{AssistantStep, Content, HistoryItem};
 use smelt_store::{
-    HistorySuffix, SessionCommit, SessionIdentity, SessionMetadata, SessionWriter, SideRows,
-    Store, StoreError, StoredTranscriptBlock, TranscriptRecordSuffix,
+    HistorySuffix, SessionCommit, SessionIdentity, SessionMetadata, SessionWriter, SideRows, Store,
+    StoreError, StoredTranscriptBlock, TranscriptRecordSuffix,
 };
 use std::path::Path;
 
@@ -97,7 +97,10 @@ fn run(input: Input) {
     }
 
     drop(writer);
-    assert!(store.integrity_issues().expect("integrity check").is_empty());
+    assert!(store
+        .integrity_issues()
+        .expect("integrity check")
+        .is_empty());
     if model.created {
         store.delete(SESSION_ID).expect("delete session");
         assert!(!store.exists(SESSION_ID).expect("check deleted session"));
@@ -114,7 +117,11 @@ fn commit(writer: &mut SessionWriter, model: &mut Model, input: CommitInput) {
     }
     if let Some((keep, entries)) = input.history {
         let start = usize::from(keep) % (model.history.len() + 1);
-        let items: Vec<HistoryItem> = entries.into_iter().take(MAX_ITEMS).map(history_item).collect();
+        let items: Vec<HistoryItem> = entries
+            .into_iter()
+            .take(MAX_ITEMS)
+            .map(history_item)
+            .collect();
         model.history.truncate(start);
         model.history.extend(items.iter().cloned());
         commit.history = Some(HistorySuffix {
@@ -141,7 +148,12 @@ fn commit(writer: &mut SessionWriter, model: &mut Model, input: CommitInput) {
         let table = usize::from(table) % SIDE_TABLES;
         let start = u64::from(start % 32);
         let rows: Vec<(u64, serde_json::Value)> = (0..u64::from(count % 6))
-            .map(|offset| (start + offset * 2, serde_json::json!({ "row": start + offset })))
+            .map(|offset| {
+                (
+                    start + offset * 2,
+                    serde_json::json!({ "row": start + offset }),
+                )
+            })
             .collect();
         model.side[table].retain(|(key, _)| *key < start);
         model.side[table].extend(rows.iter().cloned());
@@ -165,10 +177,15 @@ fn commit(writer: &mut SessionWriter, model: &mut Model, input: CommitInput) {
     }
     model.metadata = commit.metadata.clone();
 
-    let head = writer.commit(&identity(SESSION_ID, None), &commit).expect("commit");
+    let head = writer
+        .commit(&identity(SESSION_ID, None), &commit)
+        .expect("commit");
     model.created = true;
     assert_eq!(head.history_len.as_usize(), model.history.len());
-    assert_eq!(head.transcript_record_count.as_usize(), model.transcript.len());
+    assert_eq!(
+        head.transcript_record_count.as_usize(),
+        model.transcript.len()
+    );
     assert_eq!(writer.head(), head);
 }
 
@@ -221,7 +238,9 @@ fn backup(store: &Store, root: &Path, index: u32, model: &Model) {
     let backup_root = root.join(format!("backup-{index}"));
     std::fs::create_dir(&backup_root).expect("create backup root");
     let copy = Store::new(&backup_root);
-    store.backup_to(&copy.database_path()).expect("back up store");
+    store
+        .backup_to(&copy.database_path())
+        .expect("back up store");
     assert!(store.backup_to(&copy.database_path()).is_err());
     assert_session(&copy, SESSION_ID, model, None);
 }
@@ -239,7 +258,10 @@ fn assert_session(store: &Store, id: &str, model: &Model, parent: Option<&str>) 
     assert_eq!(state.first_user_message, model.first_user_message);
     assert_eq!(state.checkpoint, model.checkpoint);
     assert_eq!(state.head.history_len.as_usize(), model.history.len());
-    assert_eq!(state.head.transcript_record_count.as_usize(), model.transcript.len());
+    assert_eq!(
+        state.head.transcript_record_count.as_usize(),
+        model.transcript.len()
+    );
     let side = [
         &state.turn_metas,
         &state.metadata_snapshots,
@@ -253,10 +275,15 @@ fn assert_session(store: &Store, id: &str, model: &Model, parent: Option<&str>) 
     }
 
     let history_len = model.history.len() as u64;
-    assert_eq!(reader.history_range(0, history_len).expect("read history"), model.history);
+    assert_eq!(
+        reader.history_range(0, history_len).expect("read history"),
+        model.history
+    );
     let record_count = model.transcript.len() as u64;
     assert_eq!(
-        reader.transcript_range(0, record_count).expect("read transcript"),
+        reader
+            .transcript_range(0, record_count)
+            .expect("read transcript"),
         model.transcript
     );
 

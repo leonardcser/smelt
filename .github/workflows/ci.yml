@@ -59,6 +59,12 @@ jobs:
       - name: Run lints
         run: cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings
 
+      - name: Check fuzz crate formatting
+        run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+
+      - name: Lint fuzz crate
+        run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+
       - name: Check transcript benchmark target
         run: cargo clippy -p smelt-tui --tests --features "harness transcript-bench" -- -D warnings
 
