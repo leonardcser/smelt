@@ -5,7 +5,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::error::{Result, StoreError};
-use crate::transcript;
+use crate::{lock, transcript, Store};
 
 pub const SCHEMA_VERSION: i32 = 2;
 const SCHEMA: &str = include_str!("schema.sql");
@@ -16,7 +16,8 @@ const WAL_SIZE_LIMIT: i64 = 1024 * 1024;
 const WAL_CHECKPOINT_PAGES: i64 = WAL_SIZE_LIMIT / 4096;
 
 /// Opens the shared database, creating it and its schema on first use.
-pub(crate) fn open(path: &Path) -> Result<Connection> {
+pub(crate) fn open(store: &Store) -> Result<Connection> {
+    let path = &store.database_path();
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }
@@ -45,11 +46,11 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
     match version {
         SCHEMA_VERSION => Ok(conn),
         0 => {
-            upgrade(&conn, 0, |conn| Ok(conn.execute_batch(SCHEMA)?))?;
+            upgrade(store, &conn, 0, |conn| Ok(conn.execute_batch(SCHEMA)?))?;
             Ok(conn)
         }
         1 => {
-            upgrade(&conn, 1, upgrade_v1)?;
+            upgrade(store, &conn, 1, upgrade_v1)?;
             // Give the pages of the dropped columns back to the file system.
             incremental_vacuum(&conn, None)?;
             Ok(conn)
@@ -72,8 +73,10 @@ pub(crate) fn upgrade_pending(path: &Path) -> Result<bool> {
 
 /// Runs `step` and marks the schema current, in one write transaction, if the
 /// database is still at version `from`. Another process may have done it while
-/// this one waited for the lock.
+/// this one waited for the lock. An existing schema stays as it is while other
+/// processes own sessions, since older builds keep writing it until they exit.
 fn upgrade(
+    store: &Store,
     conn: &Connection,
     from: i32,
     step: impl FnOnce(&Connection) -> Result<()>,
@@ -82,6 +85,12 @@ fn upgrade(
     let result = (|| {
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version == from {
+            if from > 0 {
+                let sessions = lock::owned_sessions(&store.locks_dir())?;
+                if sessions > 0 {
+                    return Err(StoreError::UpgradeBlocked { sessions });
+                }
+            }
             step(conn)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -246,7 +255,7 @@ pub(crate) fn signed(value: u64) -> i64 {
 #[cfg(test)]
 pub(crate) fn assert_query_seeks(sql: &str) {
     let dir = tempfile::tempdir().unwrap();
-    let conn = open(&dir.path().join("smelt.db")).unwrap();
+    let conn = open(&Store::new(dir.path())).unwrap();
     let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
     // Unbound parameters plan as NULL, which keeps the same index choice.
     let mut rows = stmt.raw_query();
@@ -269,7 +278,7 @@ mod tests {
     #[test]
     fn new_database_uses_incremental_auto_vacuum() {
         let dir = tempfile::tempdir().unwrap();
-        let conn = open(&dir.path().join("smelt.db")).unwrap();
+        let conn = open(&Store::new(dir.path())).unwrap();
         let mode: i32 = conn
             .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
             .unwrap();
@@ -279,7 +288,7 @@ mod tests {
     #[test]
     fn incremental_vacuum_returns_every_requested_page() {
         let dir = tempfile::tempdir().unwrap();
-        let conn = open(&dir.path().join("smelt.db")).unwrap();
+        let conn = open(&Store::new(dir.path())).unwrap();
         conn.execute_batch(
             "CREATE TABLE filler (body BLOB);
              INSERT INTO filler VALUES (zeroblob(4 * 1024 * 1024));
@@ -300,7 +309,7 @@ mod tests {
     #[test]
     fn wal_stays_near_its_size_limit_while_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let conn = open(&dir.path().join("smelt.db")).unwrap();
+        let conn = open(&Store::new(dir.path())).unwrap();
         conn.execute_batch("CREATE TABLE filler (body BLOB)")
             .unwrap();
         let wal = dir.path().join("smelt.db-wal");
@@ -321,8 +330,9 @@ mod tests {
     #[test]
     fn version_1_transcript_rows_move_into_the_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("smelt.db");
-        let conn = open(&path).unwrap();
+        let store = Store::new(dir.path());
+        let path = store.database_path();
+        let conn = open(&store).unwrap();
         conn.execute_batch(
             "DROP TABLE transcript;
              CREATE TABLE transcript (
@@ -385,7 +395,14 @@ mod tests {
         drop(conn);
 
         assert!(upgrade_pending(&path).unwrap());
-        let conn = open(&path).unwrap();
+        let owner = lock::SessionLock::acquire(&store, "s").unwrap();
+        assert!(matches!(
+            open(&store),
+            Err(StoreError::UpgradeBlocked { sessions: 1 })
+        ));
+        assert!(upgrade_pending(&path).unwrap());
+        drop(owner);
+        let conn = open(&store).unwrap();
         assert!(!upgrade_pending(&path).unwrap());
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -424,12 +441,12 @@ mod tests {
     #[test]
     fn opening_an_existing_database_does_not_wait_for_a_writer() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("smelt.db");
-        let writer = open(&path).unwrap();
+        let store = Store::new(dir.path());
+        let writer = open(&store).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
 
         let started = std::time::Instant::now();
-        let reader = open(&path).unwrap();
+        let reader = open(&store).unwrap();
         reader
             .query_row("SELECT count(*) FROM sessions", [], |row| {
                 row.get::<_, i64>(0)

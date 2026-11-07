@@ -28,7 +28,9 @@ query rows by position or by indexed columns and decode only the rows they retur
 
 Each session has an exclusive writer lock at `<state>/locks/<id>.lock`. A
 second process that opens the same session gets `StoreError::Owned` and opens it
-read-only. Readers never take the lock.
+read-only. Readers never take the lock. A newer build does not upgrade an existing
+schema while any session lock is held, because older builds keep writing the old
+schema until they exit.
 
 Deleting a session runs `PRAGMA incremental_vacuum` so the file shrinks in bounded
 steps. Pages freed by suffix rewrites, such as a rewind, are reused by later saves.

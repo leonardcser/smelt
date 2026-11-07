@@ -88,7 +88,7 @@ impl Store {
     }
 
     pub(crate) fn connect(&self) -> Result<rusqlite::Connection> {
-        db::open(&self.database_path())
+        db::open(self)
     }
 
     /// A connection for ledgers such as prompts and usage, which run on the UI

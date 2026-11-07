@@ -27,6 +27,10 @@ pub enum StoreError {
         found: i32,
         expected: i32,
     },
+    /// Sessions of an older build still use the schema an upgrade would change.
+    UpgradeBlocked {
+        sessions: usize,
+    },
 }
 
 impl StoreError {
@@ -57,6 +61,7 @@ impl StoreError {
             Self::Cancelled => "cancelled",
             Self::Integrity(_) => "integrity",
             Self::UnsupportedSchema { .. } => "unsupported_schema",
+            Self::UpgradeBlocked { .. } => "upgrade_blocked",
         }
     }
 }
@@ -87,6 +92,13 @@ impl fmt::Display for StoreError {
             Self::UnsupportedSchema { found, expected } => write!(
                 f,
                 "unsupported session database schema {found}; this build supports {expected}"
+            ),
+            Self::UpgradeBlocked { sessions: 1 } => f.write_str(
+                "1 session is still open in an older smelt; quit it, then start smelt again"
+            ),
+            Self::UpgradeBlocked { sessions } => write!(
+                f,
+                "{sessions} sessions are still open in an older smelt; quit them, then start smelt again"
             ),
         }
     }
