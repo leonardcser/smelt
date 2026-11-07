@@ -1883,52 +1883,19 @@ smelt.provider.register("local", {{
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_quota_error_does_not_dispatch_queued_input() {
-    interactive_quota_pause(false, QuotaRecovery::Wait).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_background_completion_does_not_bypass_quota_pause() {
-    interactive_quota_pause(true, QuotaRecovery::Wait).await;
-}
-
+// Real HTTP 429 with retry-after through a wall-clock retry. The pause, cancel and
+// queue contracts around it are covered on a fake clock in `harness_tests::error_queue`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_quota_reset_resumes_original_work_before_queued_input() {
-    interactive_quota_pause(true, QuotaRecovery::Resume).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_double_escape_unqueues_before_cancelling_quota_retry() {
-    interactive_quota_pause(true, QuotaRecovery::Cancel).await;
+    interactive_quota_resume(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_quota_recovery_preserves_command_overrides() {
-    interactive_quota_pause(true, QuotaRecovery::CommandResume).await;
+    interactive_quota_resume(true).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_quota_recovery_cancels_foreground_work() {
-    interactive_quota_pause(true, QuotaRecovery::CancelBusy).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_quota_recovery_can_be_cancelled_from_turn_end_hook() {
-    interactive_quota_pause(true, QuotaRecovery::CancelHook).await;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QuotaRecovery {
-    Wait,
-    Resume,
-    CommandResume,
-    Cancel,
-    CancelBusy,
-    CancelHook,
-}
-
-async fn interactive_quota_pause(background: bool, recovery: QuotaRecovery) {
+async fn interactive_quota_resume(command_resume: bool) {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
     use wiremock::matchers::method;
@@ -1948,21 +1915,7 @@ async fn interactive_quota_pause(background: bool, recovery: QuotaRecovery) {
     let home = tempfile::tempdir().expect("temporary home");
     let provider = MockServer::start().await;
     let attempts = AtomicUsize::new(0);
-    let resume = matches!(
-        recovery,
-        QuotaRecovery::Resume | QuotaRecovery::CommandResume
-    );
-    let short_wait = matches!(
-        recovery,
-        QuotaRecovery::Resume
-            | QuotaRecovery::CommandResume
-            | QuotaRecovery::Cancel
-            | QuotaRecovery::CancelBusy
-    );
-    let command_resume = recovery == QuotaRecovery::CommandResume;
-    let cancel_hook = recovery == QuotaRecovery::CancelHook;
     let quota_attempts = 1;
-    let retry_after = if short_wait { "2" } else { "3600" };
     let resumed_at = Arc::new(AtomicU64::new(0));
     let resumed_at_response = Arc::clone(&resumed_at);
     Mock::given(method("POST"))
@@ -1973,11 +1926,11 @@ async fn interactive_quota_pause(background: bool, recovery: QuotaRecovery) {
             } else {
                 0
             };
-            if !resume || (main && attempt < quota_attempts) {
+            if main && attempt < quota_attempts {
                 return ResponseTemplate::new(429)
                     .set_body_json(serde_json::json!({"error": {"code": "insufficient_quota"}}))
                     .set_delay(Duration::from_secs(1))
-                    .insert_header("retry-after", retry_after);
+                    .insert_header("retry-after", "2");
             }
             if main && attempt == quota_attempts {
                 resumed_at_response.store(
@@ -2019,30 +1972,17 @@ smelt.settings.autoupgrade = "off"
 -- Runtime edits must not reset the quota fixture's in-flight callback state.
 smelt.settings.auto_reload = false
 smelt.settings.auto_continue = "always"
-local function record_busy_state()
-  local file = assert(io.open("foreground-busy", "w"))
-  file:write(tostring(smelt.work.is_busy()))
-  file:close()
-end
 local started_background = false
 smelt.events.on("turn_end", function(ev)
-  if {resume} and not ev.cancelled then smelt.settings.auto_continue = "off" end
+  if not ev.cancelled then smelt.settings.auto_continue = "off" end
   if ev.error_kind == "quota" and ev.retry_at_ms then
     local file = assert(io.open("quota-deadline", "w"))
     file:write(tostring(ev.retry_at_ms))
     file:close()
   end
-  if {background} and ev.error_kind == "quota" and not started_background then
+  if ev.error_kind == "quota" and not started_background then
     started_background = true
     smelt.spawn(function() smelt.process.spawn_bg("sleep 0.1") end)
-  end
-  if {cancel_hook} and ev.error_kind == "quota" then
-    _G.quota_busy = smelt.work.busy("foreground quota check")
-    smelt.engine.cancel()
-    record_busy_state()
-    local file = assert(io.open("hook-pause-kind", "w"))
-    file:write(tostring(smelt.engine.continuation_state().error_kind))
-    file:close()
   end
 end)
 smelt.provider.register("local", {{
@@ -2055,16 +1995,6 @@ smelt.cmd.register("quota-command", function()
   smelt.engine.submit_command("quota-command", "original request", {{
     model = "local/command-model", temperature = 0.3, tools = {{ deny = {{ "bash" }} }},
   }})
-end)
-smelt.cmd.register("quota-busy", function()
-  _G.quota_busy = smelt.work.busy("foreground quota check")
-end)
-smelt.signal.subscribe("work_busy", record_busy_state)
-smelt.keymap.set("", "<F4>", function()
-  local file = assert(io.open("unqueued-input.tmp", "w"))
-  assert(file:write(tostring(#smelt.prompt.queued()), "\n", smelt.prompt.text()))
-  assert(file:close())
-  assert(os.rename("unqueued-input.tmp", "unqueued-input"))
 end)
 "#,
             provider.uri()
@@ -2089,10 +2019,7 @@ end)
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut captured = Vec::new();
     let mut command_submitted = false;
-    let mut busy_submitted = false;
-    let mut queued_at = None;
-    let mut unqueued = false;
-    let mut cancelled_at = None;
+    let mut queued = false;
     let mut follow_up_at = None;
     loop {
         drain_pty(&mut master, &mut captured);
@@ -2107,53 +2034,14 @@ end)
             command_submitted = true;
         }
         assert!(
-            posts <= if resume { quota_attempts + 2 } else { 1 },
+            posts <= quota_attempts + 2,
             "unexpected automatic turn after quota error"
         );
-        if posts == 1 && queued_at.is_none() {
+        if posts == 1 && !queued {
             master
                 .write_all(b"queued follow-up\r")
                 .expect("queue a user message");
-            queued_at = Some(Instant::now());
-        }
-        if recovery == QuotaRecovery::CancelBusy
-            && !busy_submitted
-            && contains(&captured, b"resuming at")
-        {
-            master
-                .write_all(b"/quota-busy\r")
-                .expect("start foreground work while paused");
-            busy_submitted = true;
-        }
-        if matches!(recovery, QuotaRecovery::Cancel | QuotaRecovery::CancelBusy)
-            && !unqueued
-            && contains(&captured, b"resuming at")
-            && (recovery != QuotaRecovery::CancelBusy
-                || std::fs::read_to_string(home.path().join("foreground-busy"))
-                    .is_ok_and(|value| value == "true"))
-        {
-            master
-                .write_all(b"\x1b\x1b\x1bOS")
-                .expect("restore queued input then inspect prompt");
-            unqueued = true;
-        }
-        if unqueued && cancelled_at.is_none() {
-            if let Ok(input) = std::fs::read_to_string(home.path().join("unqueued-input")) {
-                assert_eq!(input, "0\nqueued follow-up");
-                master
-                    .write_all(b"\x1b\x1b")
-                    .expect("cancel scheduled retry after unqueuing");
-                cancelled_at = Some(Instant::now());
-            }
-        }
-        if cancel_hook && cancelled_at.is_none() {
-            if let Ok(kind) = std::fs::read_to_string(home.path().join("hook-pause-kind")) {
-                assert_eq!(
-                    kind, "quota",
-                    "cancelling from turn_end finished the turn twice"
-                );
-                cancelled_at = Some(Instant::now());
-            }
+            queued = true;
         }
         if command_resume {
             for body in bodies.iter().take(quota_attempts + 1) {
@@ -2167,7 +2055,7 @@ end)
                 );
             }
         }
-        if resume && posts > quota_attempts {
+        if posts > quota_attempts {
             let reset: u64 = std::fs::read_to_string(home.path().join("quota-deadline"))
                 .expect("quota error published a reset deadline")
                 .parse()
@@ -2186,7 +2074,7 @@ end)
                 "retry consumed the next turn"
             );
         }
-        if resume && posts == quota_attempts + 2 {
+        if posts == quota_attempts + 2 {
             let messages = bodies[quota_attempts + 1]["messages"].to_string();
             assert_eq!(messages.matches("queued follow-up").count(), 1);
             assert!(
@@ -2195,56 +2083,23 @@ end)
             );
             follow_up_at.get_or_insert_with(Instant::now);
         }
-        let settled = match recovery {
-            QuotaRecovery::Resume | QuotaRecovery::CommandResume => {
-                follow_up_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(3))
-            }
-            QuotaRecovery::Cancel | QuotaRecovery::CancelBusy | QuotaRecovery::CancelHook => {
-                cancelled_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(4))
-            }
-            QuotaRecovery::Wait => {
-                queued_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(3))
-            }
-        };
-        if settled && (!background || contains(&captured, b"finished successfully")) {
+        let settled = follow_up_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(3));
+        if settled && contains(&captured, b"finished successfully") {
             assert!(
                 contains(&captured, b"queued follow-up"),
                 "queued input was not rendered"
             );
             assert!(
-                contains(&captured, b"quota exceeded")
-                    && contains(
-                        &captured,
-                        if cancel_hook {
-                            b"paused"
-                        } else {
-                            b"resuming at"
-                        }
-                    ),
+                contains(&captured, b"quota exceeded") && contains(&captured, b"resuming at"),
                 "quiet quota status was not rendered"
             );
-            if matches!(
-                recovery,
-                QuotaRecovery::CancelBusy | QuotaRecovery::CancelHook
-            ) {
-                assert_eq!(
-                    std::fs::read_to_string(home.path().join("foreground-busy")).unwrap(),
-                    "false",
-                    "cancel left foreground work busy"
-                );
-            }
-            if matches!(recovery, QuotaRecovery::Cancel | QuotaRecovery::CancelBusy) {
-                assert!(
-                    contains(&captured, b"paused"),
-                    "cancelled wait did not render as paused: {}",
-                    String::from_utf8_lossy(&captured[captured.len().saturating_sub(3500)..])
-                );
-            }
             return;
         }
-        assert!(Instant::now() < deadline,
-            "quota pause did not settle (main requests: {posts}, background: {background}, resume: {resume}): {}",
-            String::from_utf8_lossy(&captured[captured.len().saturating_sub(2000)..]));
+        assert!(
+            Instant::now() < deadline,
+            "quota resume did not settle (main requests: {posts}): {}",
+            String::from_utf8_lossy(&captured[captured.len().saturating_sub(2000)..])
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
