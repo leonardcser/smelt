@@ -22,7 +22,6 @@ use crate::arb::short_string;
 use crate::SwarmWeights;
 use arbitrary::{Arbitrary, Unstructured};
 use serde::{Deserialize, Serialize};
-use tui::app::test_harness::TestApp;
 
 /// Bounded JSON-ish value for `state.<key> = value`. Mirrors `ArgsBag`
 /// but flatter - Lua-side state assignment doesn't need deep tables to
@@ -1014,7 +1013,7 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
         let config_dir = tempfile::tempdir().expect("fuzz Lua config dir");
         let init_path = config_dir.path().join("init.lua");
         std::fs::write(&init_path, "").expect("write fuzz init.lua");
-        let mut app = TestApp::builder().with_init_lua(&init_path).build();
+        let mut app = crate::app_builder().with_init_lua(&init_path).build();
         // Capture the live Lua doc-registry enumeration *after* the TUI
         // LuaRuntime has finished registering every `LuaMod::fn_`. The
         // snapshot drives `LuaOp::ApiProbe` emit so the fuzz surface

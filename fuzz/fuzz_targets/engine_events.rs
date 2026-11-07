@@ -160,7 +160,7 @@ fuzz_target!(|input: Input| {
 });
 
 fn run(input: Input) {
-    let mut app = TestApp::builder().build();
+    let mut app = smelt_fuzz::app_builder().build();
     app.run_lua_result(
         r#"
         smelt.tools.register({

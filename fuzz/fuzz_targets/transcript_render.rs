@@ -63,7 +63,7 @@ fn run(input: Input) {
 }
 
 fn run_with_app(input: Input) {
-    let mut app = TestApp::builder().build();
+    let mut app = smelt_fuzz::app_builder().build();
 
     for op in input.ops.into_iter().take(96) {
         match op {

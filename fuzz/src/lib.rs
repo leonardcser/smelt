@@ -37,6 +37,15 @@ use tui::app::test_harness::{Action, AllocBudget, SourceEvent};
 use tui::smelt_edit::VimMode;
 
 pub use tui::app::test_harness::TestApp;
+use tui::app::test_harness::TestAppBuilder;
+
+/// Builder for every UI-level fuzz target. Sessions are ephemeral so the
+/// writer is claimed synchronously: a persistent writer reports status from a
+/// background thread, which makes the same input pass or fail by timing.
+/// Persistence has its own deterministic target, `store_state`.
+pub fn app_builder() -> TestAppBuilder {
+    TestApp::builder().with_ephemeral(true)
+}
 
 pub const SPECIALS: &[KeyCode] = &[
     KeyCode::Enter,
@@ -184,7 +193,7 @@ fn render_trigger(op: &FuzzOp) -> bool {
 /// Bypasses the invariant-only path so visual replay code can advance
 /// step-by-step.
 pub fn build_app(scenario: &Scenario) -> TestApp {
-    TestApp::builder()
+    app_builder()
         .with_vim(scenario.vim)
         .with_mode(scenario.mode.into())
         .build()

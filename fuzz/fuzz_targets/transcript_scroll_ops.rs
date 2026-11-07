@@ -10,7 +10,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use smelt_fuzz::{runtime::with_current_thread_runtime, TestApp};
+use smelt_fuzz::runtime::with_current_thread_runtime;
 use tui::app::test_harness::{TranscriptScrollProbeCommand, TranscriptScrollProbeEdge};
 
 #[derive(Arbitrary, Debug)]
@@ -63,7 +63,7 @@ fn run_with_app(input: Input) {
     let op_limit = if heavy_fixture { 128 } else { 48 };
     let width = u16::from(input.width % 96).saturating_add(40);
     let height = u16::from(input.height % 28).saturating_add(10);
-    let mut app = TestApp::builder().with_vim(true).build();
+    let mut app = smelt_fuzz::app_builder().with_vim(true).build();
     app.install_sparse_transcript_scroll_fixture(record_count, width, height);
 
     for op in input.ops.into_iter().take(op_limit) {
