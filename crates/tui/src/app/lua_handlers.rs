@@ -583,6 +583,16 @@ impl TuiApp {
         prepared: super::cwd::PreparedLuaInputs,
     ) -> Option<LuaBringUpError> {
         let refresh_agent_inputs = kind.refresh_agent_inputs() || cwd_transition.is_some();
+        // The candidate drops every Lua callback, so a modal left open here
+        // could never close. Callers wait for modals; close any that remain.
+        if self.ui.active_modal().is_some() {
+            engine::log::entry(
+                engine::log::Level::Error,
+                "lua_bring_up_with_open_modal",
+                &serde_json::json!({ "kind": kind.lifecycle_kind() }),
+            );
+            while self.close_active_modal() {}
+        }
         let lua = self.lua.execution();
         let flush_error = crate::lua::scope_app(self, move || lua.flush_persistent_state());
         if let Some(error) = flush_error {

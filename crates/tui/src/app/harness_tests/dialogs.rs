@@ -2613,7 +2613,9 @@ fn switch_cwd_outside_workspace_requires_destination_permission() {
     }));
     assert_eq!(app.cwd_str(), original_cwd);
 
-    assert!(app.resolve_first_confirm(true, None));
+    app.press(KeyCode::Enter);
+    assert!(app.first_pending_confirm().is_none());
+    assert!(app.state().active_modal.is_none());
     assert_eq!(app.cwd_str(), original_cwd);
 
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {

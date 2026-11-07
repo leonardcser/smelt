@@ -474,11 +474,16 @@ impl TuiApp {
         let Some(pending) = self.workspace.pending() else {
             return false;
         };
+        // A cwd change commits a fresh Lua generation, which retires every Lua
+        // callback. An open modal would stay mounted with no handlers left.
+        if self.ui.active_modal().is_some() {
+            return false;
+        }
         if pending.tool_invocation.is_some() {
             if pending.tool_completion.is_none() {
                 return false;
             }
-        } else if self.prompt_input_is_busy() || self.ui.active_modal().is_some() {
+        } else if self.prompt_input_is_busy() {
             return false;
         }
         if pending.preparation.is_none() {
@@ -1054,6 +1059,44 @@ mod tests {
             }
             assert_eq!(app.state().prompt_text, "input while preparing");
         }
+    }
+
+    #[test]
+    fn tool_cwd_change_waits_for_open_dialog() {
+        use crate::app::test_harness::{test_environment_guard, TestApp};
+
+        let environment = test_environment_guard();
+        let target = tempfile::TempDir::new().unwrap();
+        let target = std::fs::canonicalize(target.path()).unwrap();
+        let mut app = TestApp::builder().build_with_test_environment_guard(&environment);
+        let original_cwd = app.core_probe().env.cwd();
+        let original_generation = app.lua_probe().id;
+        let invocation = smelt_core::lua::ToolInvocationContext {
+            invocation_id: protocol::InvocationId::new(92),
+            request_id: 92,
+            execution_mode: protocol::ToolExecutionMode::Sequential,
+        };
+        app.start_turn(1);
+        assert!(app.run_lua(r#"smelt.dialog.viewer({ title = "viewer", text = "read only" })"#));
+        assert!(app.state().active_modal.is_some());
+
+        app.tui
+            .workspace
+            .schedule(target.clone(), true, Some(invocation));
+        app.complete_lua_tool(invocation, "dialog-cwd".into(), "ok".into(), false, None);
+        app.drain_idle_work();
+        assert!(app.tui.workspace.has_pending_change());
+        assert_eq!(app.core_probe().env.cwd(), original_cwd);
+        assert_eq!(app.lua_probe().id, original_generation);
+
+        app.press(crossterm::event::KeyCode::Esc);
+        assert!(
+            app.state().active_modal.is_none(),
+            "Esc should close the dialog while the cwd change waits"
+        );
+        app.wait_for_tool_result("dialog-cwd");
+        assert_eq!(app.core_probe().env.cwd(), target);
+        assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));
     }
 
     #[test]
