@@ -58,6 +58,9 @@ impl WatcherEntry {
         let mut watcher = RecommendedWatcher::new(
             move |result: notify::Result<notify::Event>| {
                 let Ok(event) = result else { return };
+                if is_read_only_access(&event.kind) {
+                    return;
+                }
                 let payload = event_to_json(&event);
                 let resume = {
                     let Ok(mut state) = state.lock() else {
@@ -85,6 +88,17 @@ impl WatcherEntry {
         self.watcher = Some(watcher);
         Ok(())
     }
+}
+
+/// Opens and reads change nothing, and a handler that reads the watched files
+/// would otherwise be woken by its own reads. A close after writing is kept.
+fn is_read_only_access(kind: &notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode};
+    matches!(
+        kind,
+        notify::EventKind::Access(access)
+            if !matches!(access, AccessKind::Close(AccessMode::Write))
+    )
 }
 
 fn event_to_json(event: &notify::Event) -> serde_json::Value {
@@ -144,4 +158,29 @@ fn event_to_json(event: &notify::Event) -> serde_json::Value {
     }
     object.insert("paths".into(), serde_json::Value::Array(paths));
     serde_json::Value::Object(object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_read_only_access;
+    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind};
+    use notify::EventKind;
+
+    #[test]
+    fn only_reads_and_opens_are_dropped() {
+        for kind in [
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Read,
+            AccessKind::Close(AccessMode::Read),
+        ] {
+            assert!(is_read_only_access(&EventKind::Access(kind)));
+        }
+        for kind in [
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+        ] {
+            assert!(!is_read_only_access(&kind));
+        }
+    }
 }
