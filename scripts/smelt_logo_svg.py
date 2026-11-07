@@ -41,7 +41,7 @@ FIRE_COLORS = {
 THEMES = {
     "light": {
         "W": "#241611",
-        "G": "#7c6257",
+        "G": "#a8958d",
     },
     "dark": {
         "W": "#fff6ef",
