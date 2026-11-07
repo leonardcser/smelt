@@ -2918,7 +2918,7 @@ dependencies = [
  "sha2",
  "smelt-perf 0.3.0",
  "smelt-style 0.6.0",
- "unicode-segmentation",
+ "smelt-text",
 ]
 
 [[package]]
@@ -2954,35 +2954,30 @@ dependencies = [
  "neo_frizbee",
  "notify",
  "process-wrap",
- "pulldown-cmark",
- "ratex-font",
- "ratex-parser",
  "reqwest",
  "rmcp",
- "rust-latex-parser",
  "scoped-tls-hkt",
  "scraper",
- "seahash",
  "serde",
  "serde_json",
  "sha2",
- "shellexpand",
- "similar 3.2.1",
  "smelt-ansi",
  "smelt-buffer 0.0.0-dev",
  "smelt-engine",
  "smelt-lua-doc-derive",
+ "smelt-paths",
  "smelt-perf 0.3.0",
+ "smelt-permissions",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-store 0.0.0-dev (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
- "syntect",
+ "smelt-text",
+ "smelt-transcript",
+ "smelt-worktree",
  "tempfile",
- "term-maths",
  "tokio",
  "tokio-util",
- "two-face",
  "url",
 ]
 
@@ -3000,9 +2995,7 @@ name = "smelt-engine"
 version = "0.0.0-dev"
 dependencies = [
  "apple-native-keyring-store",
- "atomic-write-file",
  "base64 0.22.1",
- "dirs",
  "futures-util",
  "keyring-core",
  "libc",
@@ -3011,11 +3004,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "smelt-buffer 0.0.0-dev",
+ "smelt-paths",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
+ "smelt-text",
  "thiserror 2.0.21",
  "tokio",
  "url",
@@ -3040,11 +3034,14 @@ dependencies = [
  "smelt-core",
  "smelt-edit",
  "smelt-engine",
+ "smelt-permissions",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-style 0.6.0",
  "smelt-term",
+ "smelt-text",
+ "smelt-transcript",
  "smelt-tui",
  "tempfile",
  "tokio",
@@ -3061,6 +3058,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-mermaid"
+version = "0.0.0-dev"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
+name = "smelt-paths"
+version = "0.0.0-dev"
+dependencies = [
+ "atomic-write-file",
+ "dirs",
+ "shellexpand",
+ "smelt-text",
+]
+
+[[package]]
 name = "smelt-perf"
 version = "0.3.0"
 
@@ -3070,12 +3084,26 @@ version = "0.3.0"
 source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
 
 [[package]]
+name = "smelt-permissions"
+version = "0.0.0-dev"
+dependencies = [
+ "brush-parser",
+ "glob",
+ "serde",
+ "serde_json",
+ "smelt-paths",
+ "smelt-protocol 0.0.0-dev",
+ "smelt-text",
+ "smelt-worktree",
+]
+
+[[package]]
 name = "smelt-protocol"
 version = "0.0.0-dev"
 dependencies = [
  "serde",
  "serde_json",
- "smelt-buffer 0.0.0-dev",
+ "smelt-text",
 ]
 
 [[package]]
@@ -3104,9 +3132,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "smelt-buffer 0.0.0-dev",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
+ "smelt-text",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3124,9 +3152,9 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "smelt-buffer 0.0.0-dev",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
+ "smelt-text",
  "zstd",
 ]
 
@@ -3182,6 +3210,40 @@ name = "smelt-test-support"
 version = "0.0.0-dev"
 
 [[package]]
+name = "smelt-text"
+version = "0.0.0-dev"
+dependencies = [
+ "smelt-style 0.6.0",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "smelt-transcript"
+version = "0.0.0-dev"
+dependencies = [
+ "pulldown-cmark",
+ "ratex-font",
+ "ratex-parser",
+ "rust-latex-parser",
+ "seahash",
+ "serde",
+ "serde_json",
+ "similar 3.2.1",
+ "smelt-ansi",
+ "smelt-buffer 0.0.0-dev",
+ "smelt-perf 0.3.0",
+ "smelt-permissions",
+ "smelt-protocol 0.0.0-dev",
+ "smelt-store 0.0.0-dev",
+ "smelt-text",
+ "syntect",
+ "term-maths",
+ "tokio",
+ "two-face",
+ "url",
+]
+
+[[package]]
 name = "smelt-tui"
 version = "0.0.0-dev"
 dependencies = [
@@ -3205,17 +3267,58 @@ dependencies = [
  "smelt-edit",
  "smelt-engine",
  "smelt-lua-doc-derive",
+ "smelt-paths",
  "smelt-perf 0.3.0",
+ "smelt-permissions",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-term",
  "smelt-test-support",
+ "smelt-transcript",
+ "smelt-view",
+ "smelt-worktree",
  "tempfile",
  "tiny-skia",
  "tokio",
  "tokio-util",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "smelt-view"
+version = "0.0.0-dev"
+dependencies = [
+ "base64 0.22.1",
+ "crossterm",
+ "mlua",
+ "ratex-layout",
+ "ratex-parser",
+ "ratex-render",
+ "ratex-types",
+ "serde",
+ "serde_json",
+ "smelt-buffer 0.0.0-dev",
+ "smelt-core",
+ "smelt-edit",
+ "smelt-engine",
+ "smelt-mermaid",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
+ "smelt-store 0.0.0-dev",
+ "smelt-term",
+ "smelt-text",
+ "smelt-transcript",
+ "tiny-skia",
+]
+
+[[package]]
+name = "smelt-worktree"
+version = "0.0.0-dev"
+dependencies = [
+ "sha2",
+ "smelt-paths",
+ "smelt-text",
 ]
 
 [[package]]

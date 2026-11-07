@@ -19,7 +19,6 @@ smelt-protocol = { workspace = true }
 smelt-engine = { workspace = true }
 smelt-provider = { workspace = true }
 smelt-core = { workspace = true }
-smelt-mermaid = { workspace = true }
 smelt-store = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-buffer = { workspace = true }

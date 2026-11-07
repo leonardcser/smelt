@@ -363,8 +363,8 @@ fn markdown_code_block(
     lang: &str,
     code_lines: &[&str],
     width: usize,
-    bctx: Option<&smelt_core::content::BoxContext>,
-) -> (smelt_core::content::code_block::CodeBlock, bool) {
+    bctx: Option<&smelt_transcript::content::BoxContext>,
+) -> (smelt_transcript::content::code_block::CodeBlock, bool) {
     if lang.eq_ignore_ascii_case("mermaid") && fence_closed(&source.slice(fence.clone())) {
         let inner = bctx.map_or(width, |b| b.inner_w);
         if let Some(diagram) = mermaid_diagram(&code_lines.join("\n"), inner) {

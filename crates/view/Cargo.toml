@@ -19,6 +19,7 @@ smelt-term = { workspace = true }
 smelt-store = { workspace = true }
 smelt-transcript = { workspace = true }
 smelt-text = { workspace = true }
+smelt-mermaid = { workspace = true }
 crossterm = { workspace = true }
 mlua = { workspace = true }
 serde = { workspace = true }
