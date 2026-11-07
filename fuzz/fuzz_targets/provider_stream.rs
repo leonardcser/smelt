@@ -2,6 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
+use smelt_fuzz::arb::{short_bytes, short_string};
 use smelt_provider::{
     fuzz_parse_provider_response, fuzz_parse_provider_stream, fuzz_parse_sse_event,
     CancellationToken, FuzzProviderSummary, FuzzSseDecoder, FuzzSseSummary, ProviderError,
@@ -135,15 +136,6 @@ impl<'a> Arbitrary<'a> for Input {
             events,
         })
     }
-}
-
-fn short_bytes(u: &mut Unstructured<'_>, max: usize) -> arbitrary::Result<Vec<u8>> {
-    let len = u.int_in_range(0..=max)?;
-    (0..len).map(|_| u.arbitrary::<u8>()).collect()
-}
-
-fn short_string(u: &mut Unstructured<'_>, max: usize) -> arbitrary::Result<String> {
-    Ok(String::from_utf8_lossy(&short_bytes(u, max)?).into_owned())
 }
 
 fn event_json(event: &Event) -> serde_json::Value {

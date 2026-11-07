@@ -22,23 +22,12 @@ impl<'a> Arbitrary<'a> for ArgsBag {
         let n = u.int_in_range(0u8..=6)? as usize;
         let mut map = HashMap::with_capacity(n);
         for _ in 0..n {
-            let key: String = arb_short_string(u, 16)?;
+            let key: String = short_string(u, 16)?;
             let val = arb_json(u, 3)?;
             map.insert(key, val);
         }
         Ok(ArgsBag(map))
     }
-}
-
-pub(crate) fn arb_short_string(
-    u: &mut Unstructured<'_>,
-    max_bytes: usize,
-) -> arbitrary::Result<String> {
-    let len = u.int_in_range(0..=max_bytes)?;
-    let bytes: Vec<u8> = (0..len)
-        .map(|_| u.arbitrary::<u8>())
-        .collect::<Result<_, _>>()?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub(crate) fn arb_json(
@@ -50,7 +39,7 @@ pub(crate) fn arb_json(
     }
     match u.int_in_range(0u8..=5)? {
         0 => arb_json_leaf(u),
-        1 => Ok(serde_json::Value::String(arb_short_string(u, 16)?)),
+        1 => Ok(serde_json::Value::String(short_string(u, 16)?)),
         2 => {
             let n = u.int_in_range(0u8..=4)? as usize;
             let mut v = Vec::with_capacity(n);
@@ -63,7 +52,7 @@ pub(crate) fn arb_json(
             let n = u.int_in_range(0u8..=4)? as usize;
             let mut m = serde_json::Map::with_capacity(n);
             for _ in 0..n {
-                m.insert(arb_short_string(u, 16)?, arb_json(u, depth - 1)?);
+                m.insert(short_string(u, 16)?, arb_json(u, depth - 1)?);
             }
             Ok(serde_json::Value::Object(m))
         }
@@ -82,7 +71,7 @@ pub(crate) fn arb_json_leaf(u: &mut Unstructured<'_>) -> arbitrary::Result<serde
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null))
         }
-        _ => Ok(serde_json::Value::String(arb_short_string(u, 16)?)),
+        _ => Ok(serde_json::Value::String(short_string(u, 16)?)),
     }
 }
 

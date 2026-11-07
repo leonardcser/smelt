@@ -4,6 +4,7 @@
 //! produces, so a crash artifact round-trips into a readable file with no
 //! lossy translation.
 
+pub mod arb;
 pub mod cache_common;
 pub mod engine_sim;
 pub mod lua_loop;
@@ -19,6 +20,7 @@ use oracle::*;
 pub use plan::apply;
 pub use scenario::*;
 
+use arb::short_string;
 use arbitrary::{Arbitrary, Unstructured};
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton,

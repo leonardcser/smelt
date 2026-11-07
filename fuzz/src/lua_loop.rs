@@ -18,6 +18,7 @@
 //! (`__fuzz.bufs[i]`, `__fuzz.wins[i]`, `__fuzz.overlays[i]`,
 //! `__fuzz.paints[i]`) so later ops can reference earlier outputs.
 
+use crate::arb::short_string;
 use crate::SwarmWeights;
 use arbitrary::{Arbitrary, Unstructured};
 use serde::{Deserialize, Serialize};
@@ -40,13 +41,7 @@ impl<'a> Arbitrary<'a> for ArbValue {
             0 => Ok(ArbValue::Nil),
             1 => Ok(ArbValue::Bool(u.arbitrary()?)),
             2 => Ok(ArbValue::Int(u.arbitrary()?)),
-            _ => {
-                let len = u.int_in_range(0..=16)?;
-                let bytes: Vec<u8> = (0..len)
-                    .map(|_| u.arbitrary::<u8>())
-                    .collect::<Result<_, _>>()?;
-                Ok(ArbValue::Str(String::from_utf8_lossy(&bytes).into_owned()))
-            }
+            _ => Ok(ArbValue::Str(short_string(u, 16)?)),
         }
     }
 }
@@ -334,14 +329,14 @@ const LUAOP_BUILDERS: &[LuaOpBuilder] = &[
     |u| {
         Ok(LuaOp::StateSet {
             slot: u.arbitrary()?,
-            key: arb_short_string(u, 16)?,
+            key: short_string(u, 16)?,
             value: u.arbitrary()?,
         })
     },
     |u| {
         Ok(LuaOp::StateGet {
             slot: u.arbitrary()?,
-            key: arb_short_string(u, 16)?,
+            key: short_string(u, 16)?,
         })
     },
     |u| {
@@ -419,14 +414,6 @@ fn opt_slot(u: &mut Unstructured<'_>) -> arbitrary::Result<Option<u8>> {
     } else {
         Ok(None)
     }
-}
-
-fn arb_short_string(u: &mut Unstructured<'_>, max_bytes: usize) -> arbitrary::Result<String> {
-    let len = u.int_in_range(0..=max_bytes)?;
-    let bytes: Vec<u8> = (0..len)
-        .map(|_| u.arbitrary::<u8>())
-        .collect::<Result<_, _>>()?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

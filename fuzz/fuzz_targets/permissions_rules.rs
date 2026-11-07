@@ -10,6 +10,7 @@ use smelt_core::permissions::{
     builtin_subpattern_parser, split_shell_commands, split_shell_commands_with_ops, Decision,
     PermissionRequirement, Permissions, ToolOrigin, ToolPath,
 };
+use smelt_fuzz::arb::short_string;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -107,14 +108,6 @@ fn patterns(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<String>> {
         )?);
     }
     Ok(out)
-}
-
-fn short_string(u: &mut Unstructured<'_>, max: usize) -> arbitrary::Result<String> {
-    let len = u.int_in_range(0..=max)?;
-    let bytes: Vec<u8> = (0..len)
-        .map(|_| u.arbitrary::<u8>())
-        .collect::<Result<_, _>>()?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn choose_or_string(u: &mut Unstructured<'_>, choices: &[&str]) -> arbitrary::Result<String> {
