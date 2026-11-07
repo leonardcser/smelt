@@ -97,7 +97,7 @@ pub(super) fn register(
                     return Ok(false);
                 }
             };
-            let preview = match crate::content::display_layout::compile_layout_ir(&layout) {
+            let preview = match smelt_view::display_layout::compile_layout_ir(&layout) {
                 Ok(preview) => preview,
                 Err(error) => {
                     smelt_core::lua::LuaRuntime::record_error_with(
@@ -108,18 +108,23 @@ pub(super) fn register(
                     return Ok(false);
                 }
             };
-            let width = crate::content::term_width() as u16;
+            let width = smelt_view::term_width() as u16;
             Ok(crate::lua::try_with_ui_host(|host| {
                 host.with_ui(|ui| {
                     let theme = ui.theme().clone();
                     let Some(buffer) = ui.buf_mut(buf.id) else {
                         return false;
                     };
-                    crate::content::to_buffer::render_into_buffer(buffer, width, &theme, |sink| {
-                        crate::content::display_renderers::render_layout_ir_into(
-                            sink, &preview, width,
-                        );
-                    });
+                    smelt_transcript::content::builder::render_into(
+                        buffer,
+                        width,
+                        &theme,
+                        |sink| {
+                            smelt_view::display_renderers::render_layout_ir_into(
+                                sink, &preview, width,
+                            );
+                        },
+                    );
                     true
                 })
             })

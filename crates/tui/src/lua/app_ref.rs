@@ -442,7 +442,7 @@ impl ConversationLuaHost<'_> {
         &mut self,
         buffer_id: crate::smelt_edit::BufId,
         width: Option<u16>,
-        projection: &mut crate::content::transcript_buf::TranscriptProjection,
+        projection: &mut smelt_view::transcript_buf::TranscriptProjection,
         history: &mut smelt_transcript::transcript_model::BlockHistory,
     ) {
         let target_width = self
@@ -454,7 +454,7 @@ impl ConversationLuaHost<'_> {
             .max();
         let width = width
             .or(target_width)
-            .unwrap_or_else(|| crate::content::term_width().saturating_sub(2).max(1) as u16)
+            .unwrap_or_else(|| smelt_view::term_width().saturating_sub(2).max(1) as u16)
             .max(1);
         let theme = self.app.ui.theme().clone();
         let Some(buffer) = self.app.ui.buf_mut(buffer_id) else {
@@ -550,15 +550,15 @@ impl ConversationLuaHost<'_> {
     pub(crate) fn transcript_node_at_row(
         &mut self,
         row: crate::smelt_edit::RowIndex,
-    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+    ) -> Option<smelt_view::transcript_buf::TranscriptNodeRow> {
         self.app.transcript_node_at_row(row)
     }
 
     pub(crate) fn fold_transcript_node_at_row(
         &mut self,
         row: crate::smelt_edit::RowIndex,
-        action: crate::content::transcript_buf::FoldAction,
-        activation: crate::content::transcript_buf::FoldActivation,
+        action: smelt_view::transcript_buf::FoldAction,
+        activation: smelt_view::transcript_buf::FoldActivation,
     ) -> bool {
         self.app
             .fold_transcript_node_at_row(row, action, activation)
@@ -566,15 +566,15 @@ impl ConversationLuaHost<'_> {
 
     pub(crate) fn fold_transcript_node(
         &mut self,
-        id: crate::content::transcript_scene::RenderNodeId,
-        action: crate::content::transcript_buf::FoldAction,
+        id: smelt_view::transcript_scene::RenderNodeId,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.app.fold_transcript_node(id, action)
     }
 
     pub(crate) fn fold_all_transcript_nodes(
         &mut self,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.app.fold_all_transcript_nodes(action)
     }
@@ -582,7 +582,7 @@ impl ConversationLuaHost<'_> {
     pub(crate) fn fold_transcript_block_kind(
         &mut self,
         kind: &str,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.app.fold_transcript_block_kind(kind, action)
     }

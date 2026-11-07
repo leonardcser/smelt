@@ -16,6 +16,8 @@ pub(crate) mod format;
 pub mod inspect_server;
 #[cfg(all(test, feature = "transcript-bench"))]
 mod transcript_benchmarks;
+#[cfg(all(test, feature = "transcript-bench"))]
+mod transcript_layout_bench;
 pub use smelt_core::fuzzy;
 pub mod instructions;
 pub(crate) mod keymap;
@@ -30,8 +32,8 @@ pub(crate) mod persist;
 pub(crate) mod picker;
 pub mod prompt_inputs;
 pub(crate) mod sleep_inhibit;
-pub use content::highlight::warm_up_syntect;
 pub use smelt_core::state;
+pub use smelt_transcript::content::highlight::warm_up_syntect;
 pub(crate) mod input;
 pub(crate) mod term_input;
 pub(crate) mod term_setup;

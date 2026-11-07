@@ -7,13 +7,13 @@ use crate::app::transcript_scroll_trace::{
     TranscriptTraceAnchor, TranscriptVisibleContentAnchor,
 };
 use crate::app::TuiApp;
-use crate::content::transcript_buf::TranscriptRowAnchor;
 use crate::smelt_edit::{
     add_signed_row, Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition,
     DocRange, DocumentCommand, RowIndex, TextRange, Theme, VerticalScroll,
 };
 use smelt_transcript::content::file_icons::FileIconOptions;
 use smelt_transcript::content::highlight::InlineOptions;
+use smelt_view::transcript_buf::TranscriptRowAnchor;
 
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_transcript::content::transcript::Transcript;
@@ -225,7 +225,7 @@ pub(crate) struct TranscriptDocument {
 
 struct TranscriptContentState {
     transcript: Transcript,
-    projection: crate::content::transcript_buf::TranscriptProjection,
+    projection: smelt_view::transcript_buf::TranscriptProjection,
     compaction_preview_id: Option<BlockId>,
 }
 
@@ -573,7 +573,7 @@ struct PendingTranscriptProjection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TranscriptExactViewport {
-    tape: crate::content::transcript_buf::ExactRowTapeHandle,
+    tape: smelt_view::transcript_buf::ExactRowTapeHandle,
     width: u16,
     row_offset: RowIndex,
     global_total_rows: RowIndex,
@@ -841,8 +841,8 @@ enum TranscriptCursorTarget {
 }
 
 enum TranscriptMaterializationPlan {
-    ExactRowTape(crate::content::transcript_buf::ExactRowTapeProjection),
-    Loaded(crate::content::transcript_buf::ProjectionPlan),
+    ExactRowTape(smelt_view::transcript_buf::ExactRowTapeProjection),
+    Loaded(smelt_view::transcript_buf::ProjectionPlan),
 }
 
 fn inert_sparse_gap_rows(count: RowIndex) -> Vec<DisplayRow> {
@@ -963,7 +963,7 @@ impl TranscriptDocument {
             hydration_context_id: next_transcript_hydration_context_id(),
             content: TranscriptContentState {
                 transcript: loaded.transcript,
-                projection: crate::content::transcript_buf::TranscriptProjection::new(),
+                projection: smelt_view::transcript_buf::TranscriptProjection::new(),
                 compaction_preview_id: None,
             },
             records,
@@ -1337,8 +1337,8 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         theme: &Theme,
         mut ids: Vec<BlockId>,
-        mut plan: crate::content::transcript_buf::ProjectionPlan,
-    ) -> Result<crate::content::transcript_buf::ProjectionPlan, TranscriptProjectionHydrationError>
+        mut plan: smelt_view::transcript_buf::ProjectionPlan,
+    ) -> Result<smelt_view::transcript_buf::ProjectionPlan, TranscriptProjectionHydrationError>
     {
         let _perf = smelt_perf::perf::begin("transcript:hydration:projection_plan");
         let mut iterations = 0_u64;
@@ -2389,7 +2389,7 @@ impl TranscriptDocument {
         viewport_rows: u16,
     ) -> Option<(
         TranscriptExactViewport,
-        crate::content::transcript_buf::ExactRowTapeState,
+        smelt_view::transcript_buf::ExactRowTapeState,
     )> {
         let exact = self.viewport.state.exact_viewport?;
         let state = self.content.projection.exact_row_tape_state(
@@ -2475,7 +2475,7 @@ impl TranscriptDocument {
         };
         let Some((mut trace_frame, trace_started_at)) = self.start_scroll_trace_frame(
             width,
-            crate::content::transcript_buf::ScrollTarget::visible_row(rows.clamped_scroll),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(rows.clamped_scroll),
             Some((exact.row_offset, exact.global_total_rows)),
         ) else {
             return;
@@ -2684,17 +2684,17 @@ impl TranscriptDocument {
     }
 
     fn trace_projection_target(
-        target: crate::content::transcript_buf::ScrollTarget,
+        target: smelt_view::transcript_buf::ScrollTarget,
     ) -> TranscriptProjectionTargetTrace {
         match target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Tail,
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::Tail,
             ) => TranscriptProjectionTargetTrace::Tail,
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => TranscriptProjectionTargetTrace::ExactRow(row),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
             ) => TranscriptProjectionTargetTrace::StableRowDelta { row, delta },
         }
     }
@@ -2702,7 +2702,7 @@ impl TranscriptDocument {
     fn start_scroll_trace_frame(
         &mut self,
         width: u16,
-        projection_target: crate::content::transcript_buf::ScrollTarget,
+        projection_target: smelt_view::transcript_buf::ScrollTarget,
         exact_extent: Option<(RowIndex, RowIndex)>,
     ) -> Option<(TranscriptScrollTraceFrameStart, Option<Instant>)> {
         let projection_target = Self::trace_projection_target(projection_target);
@@ -3150,8 +3150,8 @@ impl TranscriptDocument {
     fn offset_node_row(
         &mut self,
         width: u16,
-        mut node: crate::content::transcript_buf::TranscriptNodeRow,
-    ) -> crate::content::transcript_buf::TranscriptNodeRow {
+        mut node: smelt_view::transcript_buf::TranscriptNodeRow,
+    ) -> smelt_view::transcript_buf::TranscriptNodeRow {
         let offset = self.row_offset(width);
         node.first_row = node.first_row.saturating_add(offset);
         node
@@ -3193,7 +3193,7 @@ impl TranscriptDocument {
     #[cfg(test)]
     pub(crate) fn projection_counters_for_harness(
         &self,
-    ) -> crate::content::transcript_buf::TranscriptProjectionCounters {
+    ) -> smelt_view::transcript_buf::TranscriptProjectionCounters {
         self.content.projection.counters()
     }
 
@@ -3870,7 +3870,7 @@ impl TranscriptDocument {
     ) -> Option<(
         BlockId,
         RowIndex,
-        crate::content::transcript_buf::TranscriptRowAnchor,
+        smelt_view::transcript_buf::TranscriptRowAnchor,
     )> {
         let block_id = if self.records.total_count().is_some() {
             let range = self.record_window_range_for_reveal(width, record_index, viewport_rows)?;
@@ -4085,7 +4085,7 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-    ) -> crate::content::transcript_buf::TranscriptSearchLayout {
+    ) -> smelt_view::transcript_buf::TranscriptSearchLayout {
         let offset = self.row_offset(width);
         let mut layout = self.content.projection.materialize_search_layout(
             lua,
@@ -4103,7 +4103,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         block_indices: &[u64],
-    ) -> crate::content::transcript_buf::TranscriptSearchLayout {
+    ) -> smelt_view::transcript_buf::TranscriptSearchLayout {
         let hydration_ids = block_indices
             .iter()
             .copied()
@@ -4114,7 +4114,7 @@ impl TranscriptDocument {
             .search_candidate_pins
             .extend(hydration_ids.iter().copied());
         if !self.pin_operation_blocks(&hydration_ids) {
-            return crate::content::transcript_buf::TranscriptSearchLayout {
+            return smelt_view::transcript_buf::TranscriptSearchLayout {
                 generation: 0,
                 entries: Vec::new(),
             };
@@ -4608,17 +4608,17 @@ impl TranscriptDocument {
 
     fn scroll_anchor_for_projection_target(
         &self,
-        scroll_target: crate::content::transcript_buf::ScrollTarget,
+        scroll_target: smelt_view::transcript_buf::ScrollTarget,
     ) -> TranscriptScrollAnchor {
         match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Tail,
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::Tail,
             ) => TranscriptScrollAnchor::Tail,
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => TranscriptScrollAnchor::EstimatedRow(row),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
             ) => TranscriptScrollAnchor::EstimatedRow(add_signed_row(row, delta)),
         }
     }
@@ -4642,7 +4642,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         anchor: TranscriptContentAnchor,
-    ) -> Option<crate::content::transcript_buf::StableRowAnchor> {
+    ) -> Option<smelt_view::transcript_buf::StableRowAnchor> {
         if anchor.row_anchor.id.as_block_id().is_none() {
             let stable_anchor = anchor.row_anchor.into();
             if self.content.projection.stable_anchor_is_present(
@@ -5108,7 +5108,7 @@ impl TranscriptDocument {
 
     fn local_delta_needs_record_expansion(
         &self,
-        tape: Option<crate::content::transcript_buf::ExactRowTapeState>,
+        tape: Option<smelt_view::transcript_buf::ExactRowTapeState>,
         viewport_rows: u16,
         rows: isize,
         anchor_record: Option<usize>,
@@ -5154,7 +5154,7 @@ impl TranscriptDocument {
         viewport_rows: u16,
         fallback_scroll_top: RowIndex,
         rows: isize,
-    ) -> crate::content::transcript_buf::ScrollTarget {
+    ) -> smelt_view::transcript_buf::ScrollTarget {
         let exact_viewport =
             self.exact_viewport_state(lua, width, viewport_rows)
                 .filter(|(exact, tape)| {
@@ -5248,7 +5248,7 @@ impl TranscriptDocument {
         } else {
             (base, rows)
         };
-        crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+        smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
             stable_row,
             stable_anchor,
             stable_delta,
@@ -5264,12 +5264,12 @@ impl TranscriptDocument {
         intent: &TranscriptScrollIntent,
         hint: Option<TranscriptProjectionHint>,
     ) -> (
-        crate::content::transcript_buf::ScrollTarget,
+        smelt_view::transcript_buf::ScrollTarget,
         Option<TranscriptCursorTarget>,
     ) {
         match intent {
             TranscriptScrollIntent::Tail => (
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 None,
             ),
             TranscriptScrollIntent::PreserveViewport => {
@@ -5284,7 +5284,7 @@ impl TranscriptDocument {
                     .and_then(|(_, tape)| tape.top_anchor);
                 if let Some(anchor) = exact_anchor {
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                        smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
                             fallback_scroll_top,
                             Some(anchor),
                             0,
@@ -5305,7 +5305,7 @@ impl TranscriptDocument {
                             .stable_row_anchor_for_content_anchor(lua, width, anchor)
                             .unwrap_or_else(|| anchor.row_anchor.into());
                         return (
-                            crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                            smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
                                 row,
                                 Some(stable_anchor),
                                 Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
@@ -5314,7 +5314,7 @@ impl TranscriptDocument {
                         );
                     }
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                        smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
                             anchor.fallback_row,
                             Some(anchor.row_anchor.into()),
                             Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
@@ -5340,7 +5340,7 @@ impl TranscriptDocument {
                                 .stable_row_anchor_for_content_anchor(lua, width, anchor)
                                 .unwrap_or_else(|| anchor.row_anchor.into());
                             return (
-                                crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                                smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
                                     row,
                                     Some(stable_anchor),
                                     Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
@@ -5356,8 +5356,8 @@ impl TranscriptDocument {
                     viewport_rows,
                     fallback_scroll_top,
                 ) {
-                    Some(row) => crate::content::transcript_buf::ScrollTarget::visible_row(row),
-                    None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                    Some(row) => smelt_view::transcript_buf::ScrollTarget::visible_row(row),
+                    None => smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 };
                 (target, None)
             }
@@ -5379,38 +5379,34 @@ impl TranscriptDocument {
                         });
                         match row.zip(stable_anchor) {
                             Some((row, stable_anchor)) => {
-                                crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                                smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
                                     row,
                                     Some(stable_anchor),
                                     Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
                                 )
                             }
-                            None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                            None => smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         }
                     }
                     Some(TranscriptResolvedViewportAnchor {
                         top: TranscriptScrollAnchor::EstimatedRow(row),
                         offset_rows,
                         ..
-                    }) => {
-                        crate::content::transcript_buf::ScrollTarget::visible_row(add_signed_row(
-                            row,
-                            Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
-                        ))
-                    }
+                    }) => smelt_view::transcript_buf::ScrollTarget::visible_row(add_signed_row(
+                        row,
+                        Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
+                    )),
                     Some(TranscriptResolvedViewportAnchor {
                         top: TranscriptScrollAnchor::Tail,
                         offset_rows,
                         ..
-                    }) => {
-                        crate::content::transcript_buf::ScrollTarget::visible_row(add_signed_row(
-                            fallback_scroll_top,
-                            Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
-                        ))
-                    }
-                    None => crate::content::transcript_buf::ScrollTarget::visible_row(
+                    }) => smelt_view::transcript_buf::ScrollTarget::visible_row(add_signed_row(
                         fallback_scroll_top,
-                    ),
+                        Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
+                    )),
+                    None => {
+                        smelt_view::transcript_buf::ScrollTarget::visible_row(fallback_scroll_top)
+                    }
                 };
                 (target, None)
             }
@@ -5441,7 +5437,7 @@ impl TranscriptDocument {
                 let Some(row) = self.row_for_trace_anchor(lua, width, viewport_rows, *anchor)
                 else {
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 };
@@ -5454,7 +5450,7 @@ impl TranscriptDocument {
                     );
                 }
                 (
-                    crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                    smelt_view::transcript_buf::ScrollTarget::visible_stable_row_delta(
                         row, None, 0,
                     ),
                     None,
@@ -5468,7 +5464,7 @@ impl TranscriptDocument {
                 let Some(row) = self.row_for_trace_anchor(lua, width, viewport_rows, *anchor)
                 else {
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 };
@@ -5492,7 +5488,7 @@ impl TranscriptDocument {
                         node_id,
                         row_offset,
                         ..
-                    } => crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                    } => smelt_view::transcript_buf::ScrollTarget::visible_stable_row_delta(
                         requested_row,
                         Some(TranscriptRowAnchor {
                             id: *node_id,
@@ -5501,7 +5497,7 @@ impl TranscriptDocument {
                         -(target_screen_row.min(isize::MAX as RowIndex) as isize),
                     ),
                     TranscriptTraceAnchor::EstimatedRow(_) | TranscriptTraceAnchor::Tail => {
-                        crate::content::transcript_buf::ScrollTarget::visible_row(
+                        smelt_view::transcript_buf::ScrollTarget::visible_row(
                             requested_row.saturating_sub(target_screen_row),
                         )
                     }
@@ -5529,7 +5525,7 @@ impl TranscriptDocument {
                     hint,
                 ) else {
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 };
@@ -5545,14 +5541,14 @@ impl TranscriptDocument {
                     (*target_screen_row).min(viewport_rows.saturating_sub(1) as RowIndex);
                 let scroll_target = match anchor {
                     TranscriptSearchAnchor::Content(anchor) => {
-                        crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                        smelt_view::transcript_buf::ScrollTarget::visible_stable_row_delta(
                             row,
                             Some(anchor.row_anchor),
                             -(target_screen_row.min(isize::MAX as RowIndex) as isize),
                         )
                     }
                     TranscriptSearchAnchor::EstimatedRow(_) => {
-                        crate::content::transcript_buf::ScrollTarget::visible_row(
+                        smelt_view::transcript_buf::ScrollTarget::visible_row(
                             row.saturating_sub(target_screen_row),
                         )
                     }
@@ -5576,7 +5572,7 @@ impl TranscriptDocument {
                     self.record_block_reveal_position(lua, width, *record_index, 0, viewport_rows)
                 else {
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 };
@@ -5584,7 +5580,7 @@ impl TranscriptDocument {
                 // it lands, so the scroll is not clamped to the old window.
                 if reveal.block_id != *block_id || self.pending_hydration.record_is_pending() {
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 }
@@ -5608,7 +5604,7 @@ impl TranscriptDocument {
                 });
                 let screen_padding_top = (*screen_padding_top).min(isize::MAX as RowIndex) as isize;
                 (
-                    crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                    smelt_view::transcript_buf::ScrollTarget::visible_stable_row_delta(
                         reveal.target_row,
                         Some(reveal.row_anchor),
                         -screen_padding_top,
@@ -5617,7 +5613,7 @@ impl TranscriptDocument {
                 )
             }
             TranscriptScrollIntent::RevealFirstRecord { .. } => (
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 None,
             ),
             TranscriptScrollIntent::ScrollbarFraction {
@@ -5627,7 +5623,7 @@ impl TranscriptDocument {
                 let denominator = (*denominator).max(1);
                 if *numerator >= denominator {
                     return (
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 }
@@ -5639,12 +5635,12 @@ impl TranscriptDocument {
                     viewport_rows,
                 );
                 (
-                    crate::content::transcript_buf::ScrollTarget::visible_row(row),
+                    smelt_view::transcript_buf::ScrollTarget::visible_row(row),
                     None,
                 )
             }
             TranscriptScrollIntent::ApproximateRowSeek(row) => (
-                crate::content::transcript_buf::ScrollTarget::visible_row(*row),
+                smelt_view::transcript_buf::ScrollTarget::visible_row(*row),
                 None,
             ),
         }
@@ -5736,7 +5732,7 @@ impl TranscriptDocument {
                 .and_then(|block_id| self.record_index_for_block_id(block_id));
             if target_anchor_record.is_none()
                 || self.local_delta_needs_record_expansion(
-                    Some(crate::content::transcript_buf::ExactRowTapeState {
+                    Some(smelt_view::transcript_buf::ExactRowTapeState {
                         rows: local_rows,
                         top_anchor: target_top_anchor,
                     }),
@@ -5762,13 +5758,13 @@ impl TranscriptDocument {
         let row_offset = self.row_offset(width);
         let target = local_rows.clamped_scroll.saturating_add(row_offset);
         let scroll_target = if rows == 0 {
-            crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+            smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
                 target,
                 tape.top_anchor,
                 0,
             )
         } else {
-            crate::content::transcript_buf::ScrollTarget::visible_row(target)
+            smelt_view::transcript_buf::ScrollTarget::visible_row(target)
         };
         let (trace_frame, trace_started_at) = self
             .start_scroll_trace_frame(width, scroll_target, Some((row_offset, total_rows)))
@@ -5913,7 +5909,7 @@ impl TranscriptDocument {
             matches!(semantic_far_seek, TranscriptFarSeekResolution::Hydrating);
         let (scroll_target, cursor_target) = match semantic_far_seek {
             TranscriptFarSeekResolution::Resolved(far_seek) => (
-                crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                smelt_view::transcript_buf::ScrollTarget::visible_stable_row_delta(
                     far_seek.scroll_top,
                     Some(far_seek.row_anchor),
                     0,
@@ -5940,8 +5936,8 @@ impl TranscriptDocument {
                 | TranscriptScrollIntent::RevealFirstRecord { .. }
         ) && matches!(
             scroll_target,
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Tail
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::Tail
             )
         ) && self.hydration_is_pending();
         let unresolved_local_delta_hydration = matches!(
@@ -6036,7 +6032,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         theme: &Theme,
-        scroll_target: crate::content::transcript_buf::ScrollTarget,
+        scroll_target: smelt_view::transcript_buf::ScrollTarget,
         viewport_rows: u16,
     ) -> Result<TranscriptProjectionPlan, TranscriptProjectionHydrationError> {
         self.plan_sparse_projection_measured(
@@ -6056,7 +6052,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         theme: &Theme,
-        scroll_target: crate::content::transcript_buf::ScrollTarget,
+        scroll_target: smelt_view::transcript_buf::ScrollTarget,
         viewport_rows: u16,
         options: TranscriptProjectionOptions,
     ) -> Result<TranscriptProjectionPlan, TranscriptProjectionHydrationError> {
@@ -6064,8 +6060,8 @@ impl TranscriptDocument {
         let _perf = smelt_perf::perf::begin("transcript:plan_sparse_projection");
         let scroll_anchor = self.scroll_anchor_for_projection_target(scroll_target);
         match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => {
                 self.activate_record_window_covering_approximate_display_row(
                     lua,
@@ -6074,11 +6070,11 @@ impl TranscriptDocument {
                     viewport_rows,
                 );
             }
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::StableRowDelta { .. },
             ) => {}
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Tail,
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::Tail,
             ) => {
                 let _perf = smelt_perf::perf::begin("transcript:sparse:activate_tail_window");
                 match self.ensure_tail_record_window(width, viewport_rows) {
@@ -6096,30 +6092,30 @@ impl TranscriptDocument {
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let projection_covers_persisted_tail = self.records.projection_covers_persisted_tail();
         let requested_scroll = match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => Some(row),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
-                | crate::content::transcript_buf::ScrollAnchor::Tail,
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::StableRowDelta { .. }
+                | smelt_view::transcript_buf::ScrollAnchor::Tail,
             ) => None,
         };
         let local_target = match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
-            ) => crate::content::transcript_buf::ScrollTarget::visible_row(
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::ExactRow(row),
+            ) => smelt_view::transcript_buf::ScrollTarget::visible_row(
                 row.saturating_sub(row_offset),
             ),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, anchor, delta },
-            ) => crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::StableRowDelta { row, anchor, delta },
+            ) => smelt_view::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
                 row.saturating_sub(row_offset),
                 anchor,
                 delta,
             ),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Tail,
-            ) => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::Tail,
+            ) => smelt_view::transcript_buf::ScrollTarget::visible_tail(),
         };
         let (hydration_ids, hydration_plan) = {
             let _perf = smelt_perf::perf::begin("transcript:hydration:plan_ids");
@@ -6142,21 +6138,21 @@ impl TranscriptDocument {
             self.scrollbar_total_rows(width, loaded_rows)
         };
         let target_reaches_tail = match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Tail,
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::Tail,
             ) => true,
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => row >= total_rows.saturating_sub(viewport_row_count),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
+            smelt_view::transcript_buf::ScrollTarget::Visible(
+                smelt_view::transcript_buf::ScrollAnchor::StableRowDelta { .. },
             ) => false,
         };
         if target_reaches_tail && projection_covers_persisted_tail {
             let planned_as_tail = matches!(
                 local_target,
-                crate::content::transcript_buf::ScrollTarget::Visible(
-                    crate::content::transcript_buf::ScrollAnchor::Tail
+                smelt_view::transcript_buf::ScrollTarget::Visible(
+                    smelt_view::transcript_buf::ScrollAnchor::Tail
                 )
             );
             if !planned_as_tail && options.repin_at_semantic_tail {
@@ -6167,7 +6163,7 @@ impl TranscriptDocument {
                         &mut self.content.transcript.history,
                         width,
                         theme,
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                         viewport_rows,
                     )
                 };
@@ -6486,7 +6482,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         row: crate::smelt_edit::RowIndex,
-    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+    ) -> Option<smelt_view::transcript_buf::TranscriptNodeRow> {
         let local_row = self.exact_loaded_row_for_virtual_content_row(lua, width, row)?;
         self.content
             .projection
@@ -6662,8 +6658,8 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         row: crate::smelt_edit::RowIndex,
-        action: crate::content::transcript_buf::FoldAction,
-        activation: crate::content::transcript_buf::FoldActivation,
+        action: smelt_view::transcript_buf::FoldAction,
+        activation: smelt_view::transcript_buf::FoldActivation,
     ) -> bool {
         let Some(local_row) = self.exact_loaded_row_for_virtual_content_row(lua, width, row) else {
             return false;
@@ -6672,7 +6668,7 @@ impl TranscriptDocument {
             lua,
             &mut self.content.transcript.history,
             width,
-            crate::content::transcript_buf::FoldAtRow {
+            smelt_view::transcript_buf::FoldAtRow {
                 row: local_row,
                 action,
                 activation,
@@ -6690,8 +6686,8 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        id: crate::content::transcript_scene::RenderNodeId,
-        action: crate::content::transcript_buf::FoldAction,
+        id: smelt_view::transcript_scene::RenderNodeId,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.prepare_layout(lua, width);
         self.content
@@ -6703,7 +6699,7 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         let _perf = smelt_perf::perf::begin("transcript:fold_all");
         self.prepare_layout(lua, width);
@@ -6722,7 +6718,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         kind: &str,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.prepare_layout(lua, width);
         let changed =
@@ -7090,7 +7086,7 @@ mod document_tests {
         lua: &LuaRuntime,
         width: u16,
         theme: &Theme,
-        scroll_target: crate::content::transcript_buf::ScrollTarget,
+        scroll_target: smelt_view::transcript_buf::ScrollTarget,
         viewport_rows: u16,
     ) -> TranscriptProjectionPlan {
         for _ in 0..4 {
@@ -7234,7 +7230,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            smelt_view::transcript_buf::ScrollTarget::visible_tail(),
             5,
         );
         document.project_applied_viewport(&lua, &mut buf, &theme, plan);
@@ -8051,7 +8047,7 @@ mod document_tests {
                     &lua,
                     80,
                     &theme,
-                    crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                    smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                     0,
                 )
                 .expect("projection hydration");
@@ -8109,7 +8105,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(0),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(0),
             36,
         );
         assert!(plan.total_rows >= 36);
@@ -8150,7 +8146,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            smelt_view::transcript_buf::ScrollTarget::visible_tail(),
             10,
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(401), Default::default());
@@ -8190,7 +8186,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            smelt_view::transcript_buf::ScrollTarget::visible_tail(),
             10,
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(409), Default::default());
@@ -8249,7 +8245,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(0),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(0),
             viewport_rows,
         );
         let applied = document.project_applied_viewport(
@@ -8293,7 +8289,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(10),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(10),
             viewport_rows,
         );
         let first = document.project_applied_viewport(
@@ -8355,7 +8351,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(8),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(8),
             viewport_rows,
         );
         let first =
@@ -8416,7 +8412,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(20),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(20),
             viewport_rows,
         );
         let first =
@@ -8478,7 +8474,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(initial_scroll),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(initial_scroll),
             viewport_rows,
         );
         let first = document.project_applied_viewport(
@@ -8629,7 +8625,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(loaded_start),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(loaded_start),
             viewport_rows,
         );
         let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
@@ -8722,7 +8718,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(top),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(top),
             viewport_rows,
         );
         let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
@@ -8800,7 +8796,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(0),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(0),
             10,
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(410), Default::default());
@@ -8833,7 +8829,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(target),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(target),
             10,
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(402), Default::default());
@@ -8904,8 +8900,8 @@ mod document_tests {
             &lua,
             width,
             gap_row,
-            crate::content::transcript_buf::FoldAction::Open,
-            crate::content::transcript_buf::FoldActivation::AnyNodeRow,
+            smelt_view::transcript_buf::FoldAction::Open,
+            smelt_view::transcript_buf::FoldActivation::AnyNodeRow,
         ));
 
         let action = {
@@ -8957,8 +8953,8 @@ mod document_tests {
             &lua,
             width,
             suffix_gap_row,
-            crate::content::transcript_buf::FoldAction::Open,
-            crate::content::transcript_buf::FoldActivation::AnyNodeRow,
+            smelt_view::transcript_buf::FoldAction::Open,
+            smelt_view::transcript_buf::FoldActivation::AnyNodeRow,
         ));
         let action = {
             let mut display_document =
@@ -9009,7 +9005,7 @@ mod document_tests {
                     record
                         .block
                         .raw_text()
-                        .map(|text| crate::content::estimate_text_rows(&text, 20))
+                        .map(|text| smelt_view::estimate_text_rows(&text, 20))
                         .unwrap_or(1)
                         .saturating_add(1)
                 })
@@ -9035,7 +9031,7 @@ mod document_tests {
             &lua,
             width,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(original_top),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(original_top),
             viewport_rows,
         );
         let rows =
@@ -9535,7 +9531,7 @@ mod document_tests {
                 &lua,
                 width,
                 &theme,
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
             document.project_planned(&lua, &mut buf, &theme, plan)
@@ -9610,7 +9606,7 @@ mod document_tests {
                 &lua,
                 width,
                 &theme,
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
             document
@@ -9681,9 +9677,9 @@ mod document_tests {
     ) -> crate::smelt_edit::MaterializedRows {
         let cursor_screen_row = win.cursor_screen_row(ctx.viewport_rows);
         let scroll_target = if follow_tail {
-            crate::content::transcript_buf::ScrollTarget::visible_tail()
+            smelt_view::transcript_buf::ScrollTarget::visible_tail()
         } else {
-            crate::content::transcript_buf::ScrollTarget::visible_row(win.scroll_top())
+            smelt_view::transcript_buf::ScrollTarget::visible_row(win.scroll_top())
         };
         let plan = plan_projection_after_hydration(
             document,
@@ -10006,7 +10002,7 @@ mod document_tests {
                 &lua,
                 width,
                 &theme,
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
             full_document.project_planned(
@@ -10031,7 +10027,7 @@ mod document_tests {
                 &lua,
                 width,
                 &theme,
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
             sparse_document.project_planned(&lua, &mut sparse_buf, &theme, plan)
@@ -10151,7 +10147,7 @@ mod document_tests {
                 &lua,
                 width,
                 &theme,
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
             full_document.project_planned(
@@ -10571,7 +10567,7 @@ mod document_tests {
             .expect("built-in explore group");
         assert!(matches!(
             original.id,
-            crate::content::transcript_scene::RenderNodeId::Group(_)
+            smelt_view::transcript_scene::RenderNodeId::Group(_)
         ));
         let position = DocPosition {
             row: original.first_row + original.rows - 1,
@@ -10623,7 +10619,7 @@ mod document_tests {
             .expect("replacement group at resolved cursor");
         assert!(matches!(
             replacement.id,
-            crate::content::transcript_scene::RenderNodeId::Group(_)
+            smelt_view::transcript_scene::RenderNodeId::Group(_)
         ));
         assert_ne!(replacement.id, original.id);
         assert!(resolved.row >= replacement.first_row);
@@ -10693,7 +10689,7 @@ mod document_tests {
                 &lua,
                 80,
                 &theme,
-                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                smelt_view::transcript_buf::ScrollTarget::visible_tail(),
                 10,
             );
         }
@@ -10740,7 +10736,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(80),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(80),
             10,
         );
         let active = document.records.active_range.clone().unwrap();
@@ -10770,7 +10766,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_row(82),
+            smelt_view::transcript_buf::ScrollTarget::visible_row(82),
             10,
         );
 
@@ -10861,7 +10857,7 @@ mod document_tests {
             &lua,
             20,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            smelt_view::transcript_buf::ScrollTarget::visible_tail(),
             10,
         );
 
@@ -10888,7 +10884,7 @@ mod document_tests {
             &lua,
             80,
             &theme,
-            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            smelt_view::transcript_buf::ScrollTarget::visible_tail(),
             10,
         );
 
@@ -10996,7 +10992,7 @@ pub(crate) struct TranscriptNavigationBlock {
 pub(crate) struct TranscriptBlockRevealPosition {
     pub(crate) block_id: BlockId,
     pub(crate) target_row: RowIndex,
-    pub(crate) row_anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+    pub(crate) row_anchor: smelt_view::transcript_buf::TranscriptRowAnchor,
 }
 
 fn transcript_raw_first_line(history: &BlockHistory, id: BlockId) -> String {
@@ -11076,7 +11072,7 @@ impl TuiApp {
     pub(crate) fn transcript_node_at_row(
         &mut self,
         row: crate::smelt_edit::RowIndex,
-    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+    ) -> Option<smelt_view::transcript_buf::TranscriptNodeRow> {
         self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
@@ -11087,8 +11083,8 @@ impl TuiApp {
     pub(crate) fn fold_transcript_node_at_row(
         &mut self,
         row: crate::smelt_edit::RowIndex,
-        action: crate::content::transcript_buf::FoldAction,
-        activation: crate::content::transcript_buf::FoldActivation,
+        action: smelt_view::transcript_buf::FoldAction,
+        activation: smelt_view::transcript_buf::FoldActivation,
     ) -> bool {
         self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
@@ -11105,8 +11101,8 @@ impl TuiApp {
 
     pub(crate) fn fold_transcript_node(
         &mut self,
-        id: crate::content::transcript_scene::RenderNodeId,
-        action: crate::content::transcript_buf::FoldAction,
+        id: smelt_view::transcript_scene::RenderNodeId,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
@@ -11123,7 +11119,7 @@ impl TuiApp {
 
     pub(crate) fn fold_all_transcript_nodes(
         &mut self,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
@@ -11141,7 +11137,7 @@ impl TuiApp {
     pub(crate) fn fold_transcript_block_kind(
         &mut self,
         kind: &str,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
@@ -11493,10 +11489,8 @@ impl TuiApp {
     pub(crate) fn sync_transcript_renderer_generation(&mut self) {
         let generation = self.lua.transcript_renderer_generation();
         let inline_options = self.inline_options();
-        let cache_key = crate::content::display_layout::transcript_renderer_cache_key(
-            &self.lua,
-            &inline_options,
-        );
+        let cache_key =
+            smelt_view::display_layout::transcript_renderer_cache_key(&self.lua, &inline_options);
         self.conversation
             .invalidate_transcript_renderer(generation, cache_key);
     }
@@ -11623,8 +11617,8 @@ mod tests {
     use super::{seed_test_transcript_rows, TEST_SESSION_ID};
     use crate::app::search::SearchDirection;
     use crate::app::test_harness::TestApp;
-    use crate::content::transcript_buf::{FoldAction, FoldActivation};
     use crate::smelt_edit::{DocPosition, TextRange};
+    use smelt_view::transcript_buf::{FoldAction, FoldActivation};
 
     #[test]
     fn selection_highlights_subtract_materialized_row_base() {
@@ -11683,7 +11677,7 @@ mod tests {
             .expect("grouped transcript node");
         assert!(matches!(
             group.id,
-            crate::content::transcript_scene::RenderNodeId::Group(_)
+            smelt_view::transcript_scene::RenderNodeId::Group(_)
         ));
         let row = group.first_row + group.rows - 1;
         let row_anchor = document

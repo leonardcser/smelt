@@ -37,9 +37,9 @@ use std::ops::Range;
 use serde_json::json;
 
 use crate::app::transcript::TranscriptSearchAnchor;
-use crate::content::transcript_scene::RenderNodeId;
 use crate::smelt_edit::{add_signed_row, DocPosition, RowIndex};
 use smelt_transcript::transcript_model::BlockId;
+use smelt_view::transcript_scene::RenderNodeId;
 
 /// Where a block reveal puts the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

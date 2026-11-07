@@ -254,7 +254,7 @@ pub(crate) struct TranscriptStreamState {
     buf: LuaBuf,
     transcript: Transcript,
     parser: StreamParser,
-    projection: crate::content::transcript_buf::TranscriptProjection,
+    projection: smelt_view::transcript_buf::TranscriptProjection,
     width: Option<u16>,
     raw_text: String,
     saw_delta: bool,
@@ -268,7 +268,7 @@ impl LuaTranscriptStream {
             buf,
             transcript: Transcript::new(),
             parser: StreamParser::new(),
-            projection: crate::content::transcript_buf::TranscriptProjection::new(),
+            projection: smelt_view::transcript_buf::TranscriptProjection::new(),
             width: opts.and_then(|opts| opts.width),
             raw_text: String::new(),
             saw_delta: false,
@@ -339,7 +339,7 @@ impl mlua::UserData for LuaTranscriptStream {
             if let Some(text) = final_text.as_deref().filter(|text| !text.is_empty()) {
                 if !state.saw_delta || text != state.raw_text {
                     state.transcript = Transcript::new();
-                    state.projection = crate::content::transcript_buf::TranscriptProjection::new();
+                    state.projection = smelt_view::transcript_buf::TranscriptProjection::new();
                     state.parser.clear();
                     let state = &mut *state;
                     state
@@ -361,7 +361,7 @@ impl mlua::UserData for LuaTranscriptStream {
             let mut state = this.state.borrow_mut();
             state.reveal.finish_all();
             state.transcript = Transcript::new();
-            state.projection = crate::content::transcript_buf::TranscriptProjection::new();
+            state.projection = smelt_view::transcript_buf::TranscriptProjection::new();
             state.parser.clear();
             state.raw_text.clear();
             state.saw_delta = false;
@@ -389,29 +389,29 @@ fn view_state_label(view_state: smelt_transcript::transcript_model::ViewState) -
     }
 }
 
-fn fold_action(action: &str) -> Option<crate::content::transcript_buf::FoldAction> {
+fn fold_action(action: &str) -> Option<smelt_view::transcript_buf::FoldAction> {
     match action {
-        "toggle" => Some(crate::content::transcript_buf::FoldAction::Toggle),
-        "peek" => Some(crate::content::transcript_buf::FoldAction::Peek),
-        "open" => Some(crate::content::transcript_buf::FoldAction::Open),
-        "close" => Some(crate::content::transcript_buf::FoldAction::Close),
+        "toggle" => Some(smelt_view::transcript_buf::FoldAction::Toggle),
+        "peek" => Some(smelt_view::transcript_buf::FoldAction::Peek),
+        "open" => Some(smelt_view::transcript_buf::FoldAction::Open),
+        "close" => Some(smelt_view::transcript_buf::FoldAction::Close),
         _ => None,
     }
 }
 
 fn node_id_table(
     lua: &Lua,
-    id: crate::content::transcript_scene::RenderNodeId,
+    id: smelt_view::transcript_scene::RenderNodeId,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     match id {
-        crate::content::transcript_scene::RenderNodeId::Block(id) => {
+        smelt_view::transcript_scene::RenderNodeId::Block(id) => {
             t.set("kind", "block")?;
             t.set("type", "block")?;
             t.set("id", id.get())?;
             t.set("block_id", id.get())?;
         }
-        crate::content::transcript_scene::RenderNodeId::Group(id) => {
+        smelt_view::transcript_scene::RenderNodeId::Group(id) => {
             t.set("kind", "group")?;
             t.set("type", "group")?;
             t.set("id", id)?;
@@ -423,7 +423,7 @@ fn node_id_table(
 
 fn render_node_id_from_table(
     t: mlua::Table,
-) -> LuaResult<Option<crate::content::transcript_scene::RenderNodeId>> {
+) -> LuaResult<Option<smelt_view::transcript_scene::RenderNodeId>> {
     let kind = t
         .get::<String>("kind")
         .or_else(|_| t.get::<String>("type"))
@@ -431,15 +431,13 @@ fn render_node_id_from_table(
     match kind.as_deref() {
         Some("block") => {
             let id = t.get::<u64>("block_id").or_else(|_| t.get::<u64>("id"))?;
-            Ok(Some(crate::content::transcript_scene::RenderNodeId::Block(
+            Ok(Some(smelt_view::transcript_scene::RenderNodeId::Block(
                 smelt_transcript::transcript_model::BlockId::new(id),
             )))
         }
         Some("group") => {
             let id = t.get::<u64>("group_id").or_else(|_| t.get::<u64>("id"))?;
-            Ok(Some(crate::content::transcript_scene::RenderNodeId::Group(
-                id,
-            )))
+            Ok(Some(smelt_view::transcript_scene::RenderNodeId::Group(id)))
         }
         _ => Ok(None),
     }
@@ -447,16 +445,16 @@ fn render_node_id_from_table(
 
 fn node_snapshot_table(
     lua: &Lua,
-    node: crate::content::transcript_buf::TranscriptNodeRow,
+    node: smelt_view::transcript_buf::TranscriptNodeRow,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     let id = node_id_table(lua, node.id)?;
     match node.id {
-        crate::content::transcript_scene::RenderNodeId::Block(block_id) => {
+        smelt_view::transcript_scene::RenderNodeId::Block(block_id) => {
             t.set("kind", "block")?;
             t.set("block_id", block_id.get())?;
         }
-        crate::content::transcript_scene::RenderNodeId::Group(group_id) => {
+        smelt_view::transcript_scene::RenderNodeId::Group(group_id) => {
             t.set("kind", "group")?;
             t.set("group_id", group_id)?;
         }
@@ -826,9 +824,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .and_then(|t| t.get::<bool>("explicit").ok())
                 .unwrap_or(false);
             let activation = if explicit {
-                crate::content::transcript_buf::FoldActivation::ExplicitTargetOnly
+                smelt_view::transcript_buf::FoldActivation::ExplicitTargetOnly
             } else {
-                crate::content::transcript_buf::FoldActivation::AnyNodeRow
+                smelt_view::transcript_buf::FoldActivation::AnyNodeRow
             };
             Ok(crate::lua::try_with_conversation_host(|host| {
                 host.fold_transcript_node_at_row(row, action, activation)
@@ -857,8 +855,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["action"],
         |_, action: String| -> LuaResult<bool> {
             let action = match action.as_str() {
-                "open" => crate::content::transcript_buf::FoldAction::Open,
-                "close" => crate::content::transcript_buf::FoldAction::Close,
+                "open" => smelt_view::transcript_buf::FoldAction::Open,
+                "close" => smelt_view::transcript_buf::FoldAction::Close,
                 _ => return Ok(false),
             };
             Ok(crate::lua::try_with_conversation_host(|host| {

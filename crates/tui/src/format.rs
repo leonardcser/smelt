@@ -8,9 +8,11 @@
 use crate::smelt_edit::{Buffer, BufferParser};
 use std::sync::Arc;
 
-use crate::content::builder::{wrapped_segments, LineBuilder};
-use crate::content::highlight::{print_inline_diff_ext, print_syntax_file_ext, GutterStyle};
-use crate::content::to_buffer::render_into_buffer;
+use smelt_transcript::content::builder::render_into as render_into_buffer;
+use smelt_transcript::content::builder::{wrapped_segments, LineBuilder};
+use smelt_transcript::content::highlight::{
+    print_inline_diff_ext, print_syntax_file_ext, GutterStyle,
+};
 
 /// Content kind a parser-backed buffer renders.
 #[derive(Clone, Debug)]
@@ -67,7 +69,7 @@ impl BufferParser for ModeParser {
             }
             BufFormat::Markdown => {
                 render_into_buffer(buf, width, &theme, |sink| {
-                    crate::content::display_renderers::render_markdown_inner(
+                    smelt_view::display_renderers::render_markdown_inner(
                         sink,
                         source,
                         width as usize,

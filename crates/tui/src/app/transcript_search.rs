@@ -3,8 +3,8 @@ use crate::app::transcript::{
     TranscriptSearchBound, TranscriptSearchMatch, TranscriptSearchPositionKey,
 };
 use crate::app::TuiApp;
-use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::smelt_edit::{DocPosition, RowIndex, SearchPattern};
+use smelt_view::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;

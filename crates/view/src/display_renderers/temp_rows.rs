@@ -1,9 +1,9 @@
-use smelt_core::buffer::SpanMeta;
+use smelt_buffer::buffer::SpanMeta;
 use smelt_transcript::content::builder::{display_width, LineBuilder};
 
 pub(super) fn apply_temp_decoration(
     out: &mut LineBuilder,
-    buf: &smelt_core::buffer::Buffer,
+    buf: &smelt_buffer::buffer::Buffer,
     row: usize,
     copy_fill_bg: bool,
 ) {
@@ -45,7 +45,7 @@ pub(super) fn apply_temp_decoration(
 }
 
 pub(super) fn emit_buffer_row_clipped(
-    buf: &smelt_core::buffer::Buffer,
+    buf: &smelt_buffer::buffer::Buffer,
     row: u16,
     max_cols: u16,
     out: &mut LineBuilder,
@@ -66,13 +66,13 @@ pub(super) fn emit_buffer_row_clipped(
 /// Copies `row` of `buf` into `out`, at most `max_cols` wide. `fill_bg` goes under every cell that
 /// sets no background of its own, for a row its renderer filled to its width.
 pub(super) fn emit_buffer_row_clipped_with_scratch(
-    buf: &smelt_core::buffer::Buffer,
+    buf: &smelt_buffer::buffer::Buffer,
     row: u16,
     max_cols: u16,
     out: &mut LineBuilder,
     style_overlay: Option<(bool, bool)>,
-    fill_bg: Option<smelt_core::style::Color>,
-    highlights: &mut Vec<smelt_core::buffer::Span>,
+    fill_bg: Option<smelt_buffer::style::Color>,
+    highlights: &mut Vec<smelt_buffer::buffer::Span>,
 ) -> u16 {
     let text = buf.get_line(row as usize).unwrap_or("");
     highlights.clear();
@@ -142,9 +142,9 @@ fn display_width_u16(text: &str) -> u16 {
 /// `style`, or the line's current one, with `fill_bg` under it where it has no background.
 fn under_fill(
     out: &LineBuilder,
-    style: Option<smelt_core::style::Style>,
-    fill_bg: Option<smelt_core::style::Color>,
-) -> Option<smelt_core::style::Style> {
+    style: Option<smelt_buffer::style::Style>,
+    fill_bg: Option<smelt_buffer::style::Color>,
+) -> Option<smelt_buffer::style::Style> {
     let Some(bg) = fill_bg else { return style };
     let mut style = style.unwrap_or_else(|| out.current_style());
     style.bg.get_or_insert(bg);
@@ -152,9 +152,9 @@ fn under_fill(
 }
 
 fn overlay_style(
-    base: Option<smelt_core::style::Style>,
+    base: Option<smelt_buffer::style::Style>,
     overlay: (bool, bool),
-) -> smelt_core::style::Style {
+) -> smelt_buffer::style::Style {
     let mut style = base.unwrap_or_default();
     if overlay.0 {
         style.dim = true;
@@ -168,7 +168,7 @@ fn overlay_style(
 fn emit_to_line_width(
     out: &mut LineBuilder,
     segment: &str,
-    style: Option<smelt_core::style::Style>,
+    style: Option<smelt_buffer::style::Style>,
     meta: SpanMeta,
     max_line_cols: u16,
 ) -> bool {
@@ -188,8 +188,8 @@ fn emit_to_line_width(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
-    use smelt_core::buffer::LineDecoration;
+    use smelt_buffer::buffer::LineDecoration;
+    use smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
 
     #[test]
     fn temp_image_row_replay_retains_atomic_metadata() {
@@ -200,7 +200,7 @@ mod tests {
             cols: 2,
             rows: 1,
         });
-        let object = smelt_core::buffer::AtomicObject::new(image);
+        let object = smelt_buffer::buffer::AtomicObject::new(image);
         let placeholder = smelt_term::kitty::placeholder_row(0, 2);
         let mut source = Buffer::new(BufId(1), BufCreateOpts::default());
         {
@@ -208,7 +208,7 @@ mod tests {
             out.print_with_meta(
                 &placeholder,
                 SpanMeta {
-                    atomic: Some(smelt_core::buffer::AtomicSpan {
+                    atomic: Some(smelt_buffer::buffer::AtomicSpan {
                         object: std::sync::Arc::clone(&object),
                         row: 0,
                     }),

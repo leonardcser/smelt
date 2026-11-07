@@ -11,6 +11,7 @@ name = "tui"
 
 [dependencies]
 smelt-transcript = { workspace = true }
+smelt-view = { workspace = true }
 smelt-paths = { workspace = true }
 smelt-permissions = { workspace = true }
 smelt-worktree = { workspace = true }
@@ -58,7 +59,7 @@ smelt-test-support = { workspace = true }
 # workspace builds keep this off; tests, storybook, and examples that need it
 # opt in explicitly.
 default = []
-harness = ["dep:smelt-test-support"]
+harness = ["dep:smelt-test-support", "smelt-view/harness"]
 transcript-fixture = []
 transcript-bench = ["harness"]
 

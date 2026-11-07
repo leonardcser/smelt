@@ -1,9 +1,9 @@
-use crate::content::transcript_scene::{
+use crate::transcript_scene::{
     NodeLayoutKey, RenderGroupNode, RenderNode, RenderNodeId, TranscriptDefaultViewPolicy,
 };
-use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
+use smelt_buffer::theme::intern;
 use smelt_core::lua::runtime::{LuaRuntime, TranscriptRenderNode};
-use smelt_core::theme::intern;
+use smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
 use smelt_transcript::content::block_layout::{
     BlockLayout, ContentRenderSpec, GutterSpec, HboxItem, IrLeaf, LayoutIr, LineSpec, LuaLeaf,
     RetainedContentSpec, RetainedInlineSyntax, SourceViewIr, StyleSpec, TextSpec,
@@ -11,7 +11,7 @@ use smelt_transcript::content::block_layout::{
 use smelt_transcript::content::builder::{LineBuilder, Outcome};
 use smelt_transcript::content::highlight::InlineOptions;
 use smelt_transcript::transcript_content::TranscriptContent;
-#[cfg(test)]
+#[cfg(any(test, feature = "harness"))]
 use smelt_transcript::transcript_model::BlockId;
 use smelt_transcript::transcript_model::{Block, BlockHistory, Status, ViewState};
 use std::cell::RefCell;
@@ -26,18 +26,18 @@ use std::sync::{
 static KITTY_CELL_PIXELS: AtomicU64 = AtomicU64::new(0);
 static KITTY_PROBED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn set_kitty_probe_result(supported: bool) {
+pub fn set_kitty_probe_result(supported: bool) {
     KITTY_PROBED.store(supported, Ordering::Relaxed);
     set_kitty_cell_pixels(None);
     update_kitty_geometry();
 }
 
-pub(crate) fn set_kitty_cell_pixels(geometry: Option<(u32, u32)>) {
+pub fn set_kitty_cell_pixels(geometry: Option<(u32, u32)>) {
     let packed = geometry.map_or(0, |(w, h)| (u64::from(w) << 32) | u64::from(h));
     KITTY_CELL_PIXELS.store(packed, Ordering::Relaxed);
 }
 
-pub(crate) fn update_kitty_geometry() {
+pub fn update_kitty_geometry() {
     // tmux may report zero or synthesized pixel dimensions via ioctl. Only a
     // cell-size reply from the outer terminal is authoritative there.
     if !KITTY_PROBED.load(Ordering::Relaxed) || std::env::var_os("TMUX").is_some() {
@@ -60,14 +60,14 @@ fn cell_pixels(columns: u16, rows: u16, width: u16, height: u16) -> Option<(u32,
     (w > 0 && h > 0).then_some((w, h))
 }
 
-pub(crate) fn kitty_cell_pixels() -> Option<(u32, u32)> {
+pub fn kitty_cell_pixels() -> Option<(u32, u32)> {
     let packed = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
     (packed != 0).then_some(((packed >> 32) as u32, packed as u32))
 }
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 17;
+pub const DISPLAY_RENDERER_VERSION: u64 = 17;
 
-pub(crate) fn transcript_renderer_cache_key(
+pub fn transcript_renderer_cache_key(
     lua: &LuaRuntime,
     inline_options: &InlineOptions,
 ) -> Option<u64> {
@@ -96,17 +96,17 @@ pub(crate) fn transcript_renderer_cache_key(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DisplayCacheKey {
-    pub(crate) content_hash: u64,
-    pub(crate) sidecar_hash: u64,
-    pub(crate) renderer_version: u64,
-    pub(crate) renderer_generation: u64,
-    pub(crate) renderer_cache_key: Option<u64>,
-    pub(crate) render_context_hash: u64,
+pub struct DisplayCacheKey {
+    pub content_hash: u64,
+    pub sidecar_hash: u64,
+    pub renderer_version: u64,
+    pub renderer_generation: u64,
+    pub renderer_cache_key: Option<u64>,
+    pub render_context_hash: u64,
 }
 
 impl DisplayCacheKey {
-    pub(crate) fn new(
+    pub fn new(
         content_hash: u64,
         sidecar_hash: u64,
         renderer_generation: u64,
@@ -147,21 +147,21 @@ impl DisplayCacheKey {
 }
 
 #[derive(Clone)]
-pub(crate) struct TranscriptRenderEnv<'a> {
-    pub(crate) lua: &'a LuaRuntime,
-    pub(crate) renderer_generation: u64,
-    pub(crate) renderer_cache_key: Option<u64>,
-    pub(crate) now_ms: u64,
-    pub(crate) refresh_now: std::time::Instant,
+pub struct TranscriptRenderEnv<'a> {
+    pub lua: &'a LuaRuntime,
+    pub renderer_generation: u64,
+    pub renderer_cache_key: Option<u64>,
+    pub now_ms: u64,
+    pub refresh_now: std::time::Instant,
 }
 
 impl<'a> TranscriptRenderEnv<'a> {
     #[cfg(test)]
-    pub(crate) fn new(lua: &'a LuaRuntime) -> Self {
+    pub fn new(lua: &'a LuaRuntime) -> Self {
         Self::with_inline_options(lua, InlineOptions::default())
     }
 
-    pub(crate) fn with_inline_options(lua: &'a LuaRuntime, inline_options: InlineOptions) -> Self {
+    pub fn with_inline_options(lua: &'a LuaRuntime, inline_options: InlineOptions) -> Self {
         Self {
             lua,
             renderer_generation: lua.transcript_renderer_generation(),
@@ -171,7 +171,7 @@ impl<'a> TranscriptRenderEnv<'a> {
         }
     }
 
-    pub(crate) fn with_renderer(
+    pub fn with_renderer(
         lua: &'a LuaRuntime,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
@@ -186,7 +186,7 @@ impl<'a> TranscriptRenderEnv<'a> {
     }
 }
 
-pub(crate) struct CompileJob {
+pub struct CompileJob {
     id: RenderNodeId,
     key: DisplayCacheKey,
     view_state: ViewState,
@@ -305,14 +305,14 @@ impl CompileJob {
 }
 
 #[derive(Clone)]
-pub(crate) struct MeasureCtx {
+pub struct MeasureCtx {
     pub width: u16,
     pub view_state: ViewState,
     pub inline_options: InlineOptions,
 }
 
 #[derive(Clone)]
-pub(crate) struct RenderCtx<'a> {
+pub struct RenderCtx<'a> {
     pub width: u16,
     pub view_state: ViewState,
     pub theme: &'a Theme,
@@ -339,7 +339,7 @@ struct MeasurementKey {
 
 struct CachedMeasurement {
     key: MeasurementKey,
-    layout: crate::content::display_renderers::MeasuredLayout,
+    layout: crate::display_renderers::MeasuredLayout,
     retained_bytes: usize,
     dirty: bool,
 }
@@ -419,7 +419,7 @@ fn ensure_cached_measurement(entry: &mut CachedLayout, key: MeasurementKey) -> i
         .back_mut()
         .filter(|measurement| measurement.key == key)
     {
-        if crate::content::display_renderers::refresh_layout_ir_content_measurements(
+        if crate::display_renderers::refresh_layout_ir_content_measurements(
             &entry.layout,
             &mut measurement.layout,
             key.width,
@@ -451,7 +451,7 @@ fn ensure_cached_measurement(entry: &mut CachedLayout, key: MeasurementKey) -> i
         retained_delta -= old.retained_bytes as isize;
     }
 
-    let layout = crate::content::display_renderers::measure_layout_ir_plan(
+    let layout = crate::display_renderers::measure_layout_ir_plan(
         &entry.layout,
         key.width,
         &key.inline_options,
@@ -630,13 +630,13 @@ struct CompileLayoutCache<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DisplayMemorySnapshot {
-    pub(crate) layout_bytes: usize,
-    pub(crate) pinned_layout_bytes: usize,
-    pub(crate) oversize_debt_bytes: usize,
+pub struct DisplayMemorySnapshot {
+    pub layout_bytes: usize,
+    pub pinned_layout_bytes: usize,
+    pub oversize_debt_bytes: usize,
 }
 
-pub(crate) struct LayoutCache {
+pub struct LayoutCache {
     blocks: HashMap<RenderNodeId, CachedLayout>,
     inline_syntax: InlineSyntaxCache,
     lru: RefCell<Lru<RenderNodeId>>,
@@ -661,20 +661,20 @@ impl Default for LayoutCache {
 }
 
 impl LayoutCache {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn set_budget(&mut self, budget: usize) {
+    pub fn set_budget(&mut self, budget: usize) {
         self.budget = budget;
         self.enforce_budget();
     }
 
-    pub(crate) fn pinned_nodes(&self) -> HashSet<RenderNodeId> {
+    pub fn pinned_nodes(&self) -> HashSet<RenderNodeId> {
         self.pinned.clone()
     }
 
-    pub(crate) fn set_pinned_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
+    pub fn set_pinned_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
         let previous = std::mem::take(&mut self.pinned);
         self.pinned.extend(ids);
         {
@@ -697,12 +697,12 @@ impl LayoutCache {
         }
     }
 
-    pub(crate) fn retained_bytes(&self) -> usize {
+    pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
             .saturating_add(self.inline_syntax.retained_bytes)
     }
 
-    pub(crate) fn memory_snapshot(&self) -> DisplayMemorySnapshot {
+    pub fn memory_snapshot(&self) -> DisplayMemorySnapshot {
         let pinned_layout_bytes = self
             .pinned
             .iter()
@@ -717,7 +717,7 @@ impl LayoutCache {
         }
     }
 
-    pub(crate) fn apply_content_append(
+    pub fn apply_content_append(
         &mut self,
         id: RenderNodeId,
         content: &TranscriptContent,
@@ -798,13 +798,18 @@ impl LayoutCache {
         );
     }
 
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
+    #[cfg(any(test, feature = "harness"))]
+    pub fn len(&self) -> usize {
         self.blocks.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn ensure_many(
+    #[cfg(any(test, feature = "harness"))]
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub fn ensure_many(
         &mut self,
         env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
@@ -848,7 +853,7 @@ impl LayoutCache {
     /// Returns compile jobs for cache misses. The caller can run these jobs on
     /// the current thread or schedule them onto a worker pool, then insert the
     /// results with `insert_compiled_blocks`.
-    pub(crate) fn collect_compile_jobs(
+    pub fn collect_compile_jobs(
         &mut self,
         history: &BlockHistory,
         policy: &TranscriptDefaultViewPolicy,
@@ -986,11 +991,7 @@ impl LayoutCache {
         jobs
     }
 
-    pub(crate) fn compile_and_insert(
-        &mut self,
-        env: TranscriptRenderEnv<'_>,
-        jobs: Vec<CompileJob>,
-    ) {
+    pub fn compile_and_insert(&mut self, env: TranscriptRenderEnv<'_>, jobs: Vec<CompileJob>) {
         let _perf = smelt_perf::perf::begin("transcript:layout_cache:compile_and_insert");
         let mut layouts = Vec::with_capacity(jobs.len());
         {
@@ -1002,7 +1003,7 @@ impl LayoutCache {
         self.insert_compiled_blocks(layouts);
     }
 
-    pub(crate) fn insert_compiled_blocks(
+    pub fn insert_compiled_blocks(
         &mut self,
         layouts: Vec<(
             RenderNodeId,
@@ -1047,7 +1048,7 @@ impl LayoutCache {
         self.enforce_budget();
     }
 
-    pub(crate) fn retain_nodes(&mut self, live: impl Fn(RenderNodeId) -> bool) {
+    pub fn retain_nodes(&mut self, live: impl Fn(RenderNodeId) -> bool) {
         self.blocks.retain(|id, entry| {
             if live(*id) {
                 true
@@ -1062,11 +1063,11 @@ impl LayoutCache {
         self.enforce_budget();
     }
 
-    pub(crate) fn next_refresh_at(&self) -> Option<std::time::Instant> {
+    pub fn next_refresh_at(&self) -> Option<std::time::Instant> {
         self.earliest_refresh_at
     }
 
-    pub(crate) fn expire_due_refreshes(&mut self, now: std::time::Instant) -> Vec<RenderNodeId> {
+    pub fn expire_due_refreshes(&mut self, now: std::time::Instant) -> Vec<RenderNodeId> {
         if self
             .earliest_refresh_at
             .is_none_or(|earliest| earliest > now)
@@ -1099,7 +1100,7 @@ impl LayoutCache {
         due
     }
 
-    pub(crate) fn has_layout(
+    pub fn has_layout(
         &self,
         id: RenderNodeId,
         key: NodeLayoutKey,
@@ -1114,7 +1115,7 @@ impl LayoutCache {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_rendered_range<T>(
+    pub fn with_rendered_range<T>(
         &mut self,
         id: RenderNodeId,
         key: NodeLayoutKey,
@@ -1227,7 +1228,7 @@ impl LayoutCache {
         Some(result)
     }
 
-    pub(crate) fn measure_height(
+    pub fn measure_height(
         &mut self,
         id: RenderNodeId,
         key: NodeLayoutKey,
@@ -1269,7 +1270,7 @@ impl LayoutCache {
         Some(rows)
     }
 
-    pub(crate) fn get(
+    pub fn get(
         &self,
         id: RenderNodeId,
         key: NodeLayoutKey,
@@ -1303,7 +1304,7 @@ fn block_content_sources(
     sources
 }
 
-pub(crate) fn live_streaming_markdown_content(block: &Block) -> Option<&TranscriptContent> {
+pub fn live_streaming_markdown_content(block: &Block) -> Option<&TranscriptContent> {
     match block {
         Block::Text { content } => Some(content),
         Block::Thinking {
@@ -1372,7 +1373,7 @@ fn retained_content_spec_mut(
 }
 
 #[cfg(test)]
-pub(crate) fn compile_block(block: &Block) -> LayoutIr {
+pub fn compile_block(block: &Block) -> LayoutIr {
     let lua = LuaRuntime::new();
     let content_sources = block_content_sources(block, None);
     let mut cache = CompileLayoutCache {
@@ -1505,7 +1506,7 @@ fn compile_node_with_lua(
     }
 }
 
-pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
+pub fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
     let mut cache = CompileLayoutCache {
         content_sources: &[],
         group_children: None,
@@ -1753,9 +1754,9 @@ fn has_inline_syntax(span: &protocol::StyledSpan) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn measure_block(layout: &LayoutIr, ctx: MeasureCtx) -> u64 {
+pub fn measure_block(layout: &LayoutIr, ctx: MeasureCtx) -> u64 {
     let _perf = smelt_perf::perf::begin("transcript:measure_block:layout");
-    let expanded_rows = crate::content::display_renderers::measure_layout_ir_with_options(
+    let expanded_rows = crate::display_renderers::measure_layout_ir_with_options(
         layout,
         ctx.width,
         &ctx.inline_options,
@@ -1763,11 +1764,7 @@ pub(crate) fn measure_block(layout: &LayoutIr, ctx: MeasureCtx) -> u64 {
     ctx.view_state.measured_height(expanded_rows)
 }
 
-pub(crate) fn render_block_into(
-    buf: &mut Buffer,
-    layout: &LayoutIr,
-    ctx: RenderCtx<'_>,
-) -> Outcome {
+pub fn render_block_into(buf: &mut Buffer, layout: &LayoutIr, ctx: RenderCtx<'_>) -> Outcome {
     render_block_into_mode(buf, layout, ctx, false)
 }
 
@@ -1797,7 +1794,7 @@ fn render_block_into_mode(
 
 fn render_layout_range_to_buffer(
     layout: &LayoutIr,
-    measured: &crate::content::display_renderers::MeasuredLayout,
+    measured: &crate::display_renderers::MeasuredLayout,
     ctx: RenderCtx<'_>,
     row_start: usize,
     row_count: usize,
@@ -1821,7 +1818,7 @@ fn render_layout_range_to_buffer(
 fn render_block_range_into_mode(
     buf: &mut Buffer,
     layout: &LayoutIr,
-    measured: &crate::content::display_renderers::MeasuredLayout,
+    measured: &crate::display_renderers::MeasuredLayout,
     ctx: RenderCtx<'_>,
     row_start: usize,
     row_count: usize,
@@ -1847,7 +1844,7 @@ fn render_block_range_into_mode(
 fn render_projected_view_range(
     buf: &mut Buffer,
     layout: &LayoutIr,
-    measured: &crate::content::display_renderers::MeasuredLayout,
+    measured: &crate::display_renderers::MeasuredLayout,
     ctx: RenderCtx<'_>,
     row_start: usize,
     row_count: usize,
@@ -1950,7 +1947,7 @@ fn render_expanded_block(
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:layout");
     if let Some(history) = history {
-        crate::content::display_renderers::render_layout_ir_into_with_history(
+        crate::display_renderers::render_layout_ir_into_with_history(
             out,
             layout,
             width as u16,
@@ -1958,20 +1955,20 @@ fn render_expanded_block(
             inline_options,
         )
     } else {
-        crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
+        crate::display_renderers::render_layout_ir_into(out, layout, width as u16)
     }
 }
 
 fn render_expanded_block_range(
     out: &mut LineBuilder,
     layout: &LayoutIr,
-    measured: &crate::content::display_renderers::MeasuredLayout,
+    measured: &crate::display_renderers::MeasuredLayout,
     rows: (usize, usize),
     ctx: &RenderCtx<'_>,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:layout:range");
     let (row_start, row_count) = rows;
-    crate::content::display_renderers::render_layout_ir_range_into_measured(
+    crate::display_renderers::render_layout_ir_range_into_measured(
         out,
         layout,
         measured,
@@ -2081,7 +2078,7 @@ fn apply_view_state(
                     }
                 }
                 for (i, dec) in kept_decorations.into_iter().enumerate() {
-                    if dec != smelt_core::buffer::LineDecoration::default() {
+                    if dec != smelt_buffer::buffer::LineDecoration::default() {
                         buf.set_decoration(cur_len + i, dec);
                     }
                 }
@@ -2124,7 +2121,7 @@ fn append_ellipsis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::smelt_edit::{BufCreateOpts, BufId};
+    use smelt_edit::{BufCreateOpts, BufId};
     use smelt_transcript::content::block_layout::RunsSpec;
     use smelt_transcript::content::transcript::Transcript;
     use smelt_transcript::transcript_model::LayoutKey;
@@ -2187,8 +2184,7 @@ mod tests {
             },
         }));
         let options = InlineOptions::default();
-        let measured =
-            crate::content::display_renderers::measure_layout_ir_plan(&layout, 80, &options);
+        let measured = crate::display_renderers::measure_layout_ir_plan(&layout, 80, &options);
         let retained_before = content.retained_bytes();
         let theme = Theme::default();
         let cases = [

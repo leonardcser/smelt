@@ -3,8 +3,8 @@
 //! cursor snapping past non-selectable cells).
 
 use crate::app::{EventOutcome, TuiApp};
-use crate::content::transcript_buf::{FoldAction, FoldActivation};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use smelt_view::transcript_buf::{FoldAction, FoldActivation};
 use std::time::Duration;
 
 const TRANSCRIPT_FOLD_CHORD_WINDOW: Duration = Duration::from_millis(750);

@@ -1,20 +1,20 @@
 use super::display_layout::{
     render_block_into, CompileJob, LayoutCache, MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
-use crate::content::estimate_text_rows;
-use crate::content::transcript_scene::{
+use crate::estimate_text_rows;
+use crate::transcript_scene::{
     NodeLayoutKey, RenderNode, RenderNodeId, TranscriptDefaultViewPolicy,
     TranscriptPresentationState, TranscriptScene, TRANSCRIPT_APPEND_HEADROOM,
 };
-use crate::smelt_edit::Theme;
-use crate::smelt_edit::{
+#[cfg(test)]
+use smelt_buffer::buffer::{LineDecoration, Span};
+use smelt_buffer::buffer::{RenderedBufferRebuild, RenderedRowMetadata};
+use smelt_buffer::coords::{copy_byte_range, CopyRangeAccumulator, CopyRow};
+use smelt_edit::Theme;
+use smelt_edit::{
     add_signed_row, clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput,
     DisplayRow, DisplayRows, DocRange, MaterializedRows, RowBreak, RowIndex,
 };
-use smelt_buffer::coords::{copy_byte_range, CopyRangeAccumulator, CopyRow};
-#[cfg(test)]
-use smelt_core::buffer::{LineDecoration, Span};
-use smelt_core::buffer::{RenderedBufferRebuild, RenderedRowMetadata};
 use smelt_transcript::content::highlight::InlineOptions;
 use smelt_transcript::transcript_model::{BlockHistory, BlockId, BlockText, LayoutKey, ViewState};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 const COPY_CHUNK_NODES: usize = 64;
 
-pub(crate) struct TranscriptProjection {
+pub struct TranscriptProjection {
     transcript_scene: TranscriptScene,
     row_hints: RowHints,
     default_view_policy: TranscriptDefaultViewPolicy,
@@ -38,7 +38,7 @@ pub(crate) struct TranscriptProjection {
     inline_options: InlineOptions,
     display_layout_budget: usize,
     full_rows_budget: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "harness"))]
     counters: TranscriptProjectionCounters,
 }
 
@@ -67,15 +67,15 @@ impl RowHints {
 /// Rows the projection measured for one node (`None` until measured) together
 /// with the blocks the node renders.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TranscriptNodeHeight {
-    pub(crate) blocks: Vec<BlockId>,
-    pub(crate) rows: Option<RowIndex>,
+pub struct TranscriptNodeHeight {
+    pub blocks: Vec<BlockId>,
+    pub rows: Option<RowIndex>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TranscriptNodeHeights {
-    pub(crate) width: u16,
-    pub(crate) nodes: Vec<TranscriptNodeHeight>,
+pub struct TranscriptNodeHeights {
+    pub width: u16,
+    pub nodes: Vec<TranscriptNodeHeight>,
 }
 
 #[derive(Clone, Copy)]
@@ -119,14 +119,14 @@ struct MeasurementIndexStore {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TranscriptRenderMemorySnapshot {
-    pub(crate) layout_bytes: usize,
-    pub(crate) pinned_layout_bytes: usize,
-    pub(crate) height_index_bytes: usize,
-    pub(crate) height_index_cache_bytes: usize,
-    pub(crate) visible_rows_bytes: usize,
-    pub(crate) full_rows_bytes: usize,
-    pub(crate) oversize_debt_bytes: usize,
+pub struct TranscriptRenderMemorySnapshot {
+    pub layout_bytes: usize,
+    pub pinned_layout_bytes: usize,
+    pub height_index_bytes: usize,
+    pub height_index_cache_bytes: usize,
+    pub visible_rows_bytes: usize,
+    pub full_rows_bytes: usize,
+    pub oversize_debt_bytes: usize,
 }
 
 impl Default for MeasurementIndexStore {
@@ -140,9 +140,9 @@ impl Default for MeasurementIndexStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "harness"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TranscriptProjectionCounters {
+pub struct TranscriptProjectionCounters {
     pub full_row_builds: usize,
     pub full_layout_materializations: usize,
     pub layout_cache: usize,
@@ -154,12 +154,12 @@ pub(crate) struct TranscriptProjectionCounters {
     pub max_range_materialized_rows: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "harness"))]
 thread_local! {
     static FULL_LAYOUT_BUFFER_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "harness"))]
 pub(super) fn record_full_layout_buffer_render() {
     FULL_LAYOUT_BUFFER_RENDERS.with(|count| count.set(count.get().saturating_add(1)));
 }
@@ -911,10 +911,10 @@ impl ProjectionAnchor {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StableRowAnchor(ProjectionAnchor);
+pub struct StableRowAnchor(ProjectionAnchor);
 
 impl StableRowAnchor {
-    pub(crate) fn block_id(self) -> Option<BlockId> {
+    pub fn block_id(self) -> Option<BlockId> {
         match self.0 {
             ProjectionAnchor::Node { id, .. } => id.as_block_id(),
             ProjectionAnchor::RenderedBlockRow { id, .. }
@@ -947,16 +947,16 @@ struct LayoutEntry {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TranscriptSearchLayout {
-    pub(crate) generation: u64,
-    pub(crate) entries: Vec<TranscriptSearchLayoutEntry>,
+pub struct TranscriptSearchLayout {
+    pub generation: u64,
+    pub entries: Vec<TranscriptSearchLayoutEntry>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TranscriptSearchLayoutEntry {
-    pub(crate) block_ids: Vec<BlockId>,
-    pub(crate) first_row: RowIndex,
-    pub(crate) rows: RowIndex,
+pub struct TranscriptSearchLayoutEntry {
+    pub block_ids: Vec<BlockId>,
+    pub first_row: RowIndex,
+    pub rows: RowIndex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -982,7 +982,7 @@ struct MaterializedProjection {
     changedtick: u64,
 }
 
-pub(crate) struct ProjectionPlan {
+pub struct ProjectionPlan {
     key: ProjectKey,
     target: ResolvedProjectionTarget,
     scroll_top: RowIndex,
@@ -993,30 +993,30 @@ pub(crate) struct ProjectionPlan {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ExactRowTapeHandle {
+pub struct ExactRowTapeHandle {
     key: ProjectKey,
     rows: MaterializedRows,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ExactRowTapeState {
-    pub(crate) rows: MaterializedRows,
-    pub(crate) top_anchor: Option<StableRowAnchor>,
+pub struct ExactRowTapeState {
+    pub rows: MaterializedRows,
+    pub top_anchor: Option<StableRowAnchor>,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ExactRowTapeProjection {
+pub struct ExactRowTapeProjection {
     key: ProjectKey,
     rows: MaterializedRows,
     top_anchor: Option<StableRowAnchor>,
 }
 
 impl ExactRowTapeProjection {
-    pub(crate) fn rows(self) -> MaterializedRows {
+    pub fn rows(self) -> MaterializedRows {
         self.rows
     }
 
-    pub(crate) fn top_anchor(self) -> Option<StableRowAnchor> {
+    pub fn top_anchor(self) -> Option<StableRowAnchor> {
         self.top_anchor
     }
 }
@@ -1028,7 +1028,7 @@ struct ProjectionRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FoldAction {
+pub enum FoldAction {
     Toggle,
     Peek,
     Open,
@@ -1036,37 +1036,37 @@ pub(crate) enum FoldAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FoldActivation {
+pub enum FoldActivation {
     AnyNodeRow,
     ExplicitTargetOnly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FoldAtRow {
-    pub(crate) row: RowIndex,
-    pub(crate) action: FoldAction,
-    pub(crate) activation: FoldActivation,
+pub struct FoldAtRow {
+    pub row: RowIndex,
+    pub action: FoldAction,
+    pub activation: FoldActivation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TranscriptNodeRow {
-    pub(crate) id: RenderNodeId,
-    pub(crate) index: usize,
-    pub(crate) first_row: RowIndex,
-    pub(crate) rows: RowIndex,
-    pub(crate) row_offset: RowIndex,
-    pub(crate) view_state: ViewState,
-    pub(crate) explicit_fold_target: bool,
+pub struct TranscriptNodeRow {
+    pub id: RenderNodeId,
+    pub index: usize,
+    pub first_row: RowIndex,
+    pub rows: RowIndex,
+    pub row_offset: RowIndex,
+    pub view_state: ViewState,
+    pub explicit_fold_target: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TranscriptRowAnchor {
-    pub(crate) id: RenderNodeId,
-    pub(crate) row_offset: RowIndex,
+pub struct TranscriptRowAnchor {
+    pub id: RenderNodeId,
+    pub row_offset: RowIndex,
 }
 
 impl TranscriptNodeRow {
-    pub(crate) fn can_activate(self, activation: FoldActivation) -> bool {
+    pub fn can_activate(self, activation: FoldActivation) -> bool {
         match activation {
             FoldActivation::AnyNodeRow => true,
             FoldActivation::ExplicitTargetOnly => self.explicit_fold_target,
@@ -1092,11 +1092,11 @@ fn layout_view_state(
 }
 
 impl ProjectionPlan {
-    pub(crate) fn node_range(&self) -> std::ops::Range<usize> {
+    pub fn node_range(&self) -> std::ops::Range<usize> {
         self.node_range.clone()
     }
 
-    pub(crate) fn total_rows(&self) -> RowIndex {
+    pub fn total_rows(&self) -> RowIndex {
         self.total_rows
     }
 
@@ -1106,7 +1106,7 @@ impl ProjectionPlan {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScrollAnchor {
+pub enum ScrollAnchor {
     ExactRow(RowIndex),
     StableRowDelta {
         row: RowIndex,
@@ -1127,17 +1127,17 @@ impl ScrollAnchor {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScrollTarget {
+pub enum ScrollTarget {
     /// Materialize only the visible window around the anchor.
     Visible(ScrollAnchor),
 }
 
 impl ScrollTarget {
-    pub(crate) fn visible_row(row: RowIndex) -> Self {
+    pub fn visible_row(row: RowIndex) -> Self {
         Self::Visible(ScrollAnchor::ExactRow(row))
     }
 
-    pub(crate) fn visible_stable_row_delta(
+    pub fn visible_stable_row_delta(
         row: RowIndex,
         anchor: Option<TranscriptRowAnchor>,
         delta: isize,
@@ -1145,7 +1145,7 @@ impl ScrollTarget {
         Self::visible_stable_anchor_delta(row, anchor.map(StableRowAnchor::from), delta)
     }
 
-    pub(crate) fn visible_stable_anchor_delta(
+    pub fn visible_stable_anchor_delta(
         row: RowIndex,
         anchor: Option<StableRowAnchor>,
         delta: isize,
@@ -1153,7 +1153,7 @@ impl ScrollTarget {
         Self::Visible(ScrollAnchor::StableRowDelta { row, anchor, delta })
     }
 
-    pub(crate) fn visible_tail() -> Self {
+    pub fn visible_tail() -> Self {
         Self::Visible(ScrollAnchor::Tail)
     }
 
@@ -1453,7 +1453,7 @@ fn render_cached_layout_to_buffer(
     inline_options: &InlineOptions,
 ) -> Option<(Buffer, usize)> {
     let layout = layout_cache.get(id, key, renderer_generation, renderer_cache_key)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "harness"))]
     record_full_layout_buffer_render();
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let outcome = {
@@ -1473,8 +1473,14 @@ fn render_cached_layout_to_buffer(
     Some((buf, outcome.line_count))
 }
 
+impl Default for TranscriptProjection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TranscriptProjection {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             transcript_scene: TranscriptScene::empty(),
             row_hints: RowHints::default(),
@@ -1491,7 +1497,7 @@ impl TranscriptProjection {
             inline_options: InlineOptions::default(),
             display_layout_budget: 12 * 1024 * 1024,
             full_rows_budget: 2 * 1024 * 1024,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "harness"))]
             counters: TranscriptProjectionCounters::default(),
         }
     }
@@ -1566,7 +1572,7 @@ impl TranscriptProjection {
         }
     }
 
-    pub(crate) fn inline_options(&self) -> &InlineOptions {
+    pub fn inline_options(&self) -> &InlineOptions {
         &self.inline_options
     }
 
@@ -1575,7 +1581,7 @@ impl TranscriptProjection {
         self.layout_cache.set_budget(self.display_layout_budget);
     }
 
-    pub(crate) fn set_memory_budget(&mut self, bytes: usize) {
+    pub fn set_memory_budget(&mut self, bytes: usize) {
         let auxiliary = bytes / 4;
         self.display_layout_budget = bytes.saturating_sub(auxiliary);
         self.layout_cache.set_budget(self.display_layout_budget);
@@ -1591,7 +1597,7 @@ impl TranscriptProjection {
         }
     }
 
-    pub(crate) fn memory_snapshot(&self) -> TranscriptRenderMemorySnapshot {
+    pub fn memory_snapshot(&self) -> TranscriptRenderMemorySnapshot {
         let display = self.layout_cache.memory_snapshot();
         let height_index_bytes = self.measurements.active.retained_bytes();
         let height_index_cache_bytes = self.measurements.retained_bytes();
@@ -1635,7 +1641,7 @@ impl TranscriptProjection {
     }
 
     /// Returns whether the options changed and the layout was reset.
-    pub(crate) fn set_inline_options(&mut self, options: InlineOptions) -> bool {
+    pub fn set_inline_options(&mut self, options: InlineOptions) -> bool {
         if self.inline_options == options {
             return false;
         }
@@ -1648,11 +1654,11 @@ impl TranscriptProjection {
         true
     }
 
-    pub(crate) fn projection_generation(&self) -> u64 {
+    pub fn projection_generation(&self) -> u64 {
         self.projection_generation
     }
 
-    pub(crate) fn node_heights(&self) -> TranscriptNodeHeights {
+    pub fn node_heights(&self) -> TranscriptNodeHeights {
         self.measurements
             .active
             .node_heights(&self.transcript_scene)
@@ -1660,7 +1666,7 @@ impl TranscriptProjection {
 
     /// Estimate unmeasured persisted blocks at `width` with `rows`, and
     /// re-estimate the unmeasured nodes that already exist.
-    pub(crate) fn set_row_hints(
+    pub fn set_row_hints(
         &mut self,
         history: &BlockHistory,
         width: u16,
@@ -1694,12 +1700,12 @@ impl TranscriptProjection {
     }
 
     /// Renderer generation and cache key the active heights were measured with.
-    pub(crate) fn measured_renderer(&self) -> (u64, Option<u64>) {
+    pub fn measured_renderer(&self) -> (u64, Option<u64>) {
         let active = &self.measurements.active;
         (active.renderer_generation, active.renderer_cache_key)
     }
 
-    pub(crate) fn height_suffix_is_exact(&self, anchor: TranscriptRowAnchor) -> bool {
+    pub fn height_suffix_is_exact(&self, anchor: TranscriptRowAnchor) -> bool {
         self.measurements
             .active
             .node_index(anchor.id)
@@ -1710,7 +1716,7 @@ impl TranscriptProjection {
             })
     }
 
-    pub(crate) fn invalidate_renderer_if_changed(
+    pub fn invalidate_renderer_if_changed(
         &mut self,
         generation: u64,
         cache_key: Option<u64>,
@@ -1735,16 +1741,14 @@ impl TranscriptProjection {
     /// Snapshot of the visibly laid-out blocks: `(BlockId, first_row, rows)`.
     /// Used by Lua's `smelt.transcript.visible_blocks()` to map block indices
     /// back to display rows without forcing full transcript materialization.
-    pub(crate) fn visible_block_layout(
-        &self,
-    ) -> impl Iterator<Item = (BlockId, RowIndex, RowIndex)> + '_ {
+    pub fn visible_block_layout(&self) -> impl Iterator<Item = (BlockId, RowIndex, RowIndex)> + '_ {
         self.visible
             .block_layout
             .iter()
             .map(|e| (e.id, e.start, e.rows))
     }
 
-    pub(crate) fn next_refresh_at(&self) -> Option<std::time::Instant> {
+    pub fn next_refresh_at(&self) -> Option<std::time::Instant> {
         self.layout_cache.next_refresh_at()
     }
 
@@ -1761,18 +1765,18 @@ impl TranscriptProjection {
         self.projection_generation = self.projection_generation.wrapping_add(1);
     }
 
-    #[cfg(test)]
-    pub(crate) fn layout_cache_len(&self) -> usize {
+    #[cfg(any(test, feature = "harness"))]
+    pub fn layout_cache_len(&self) -> usize {
         self.layout_cache.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn counters(&self) -> TranscriptProjectionCounters {
+    #[cfg(any(test, feature = "harness"))]
+    pub fn counters(&self) -> TranscriptProjectionCounters {
         self.counters
     }
 
-    #[cfg(test)]
-    pub(crate) fn reset_counters(&mut self) {
+    #[cfg(any(test, feature = "harness"))]
+    pub fn reset_counters(&mut self) {
         self.counters = TranscriptProjectionCounters::default();
     }
 
@@ -1782,7 +1786,7 @@ impl TranscriptProjection {
         if compiled > 0 {
             self.projection_generation = self.projection_generation.wrapping_add(1);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "harness"))]
         {
             self.counters.layout_cache += compiled;
         }
@@ -1895,7 +1899,7 @@ impl TranscriptProjection {
         self.visible.total_rows = 0;
     }
 
-    pub(crate) fn invalidate_source_sequence(&mut self) {
+    pub fn invalidate_source_sequence(&mut self) {
         self.transcript_scene = TranscriptScene::empty();
         self.measurements.clear();
         self.clear_visible_state();
@@ -1933,7 +1937,7 @@ impl TranscriptProjection {
 
     /// Clear rendered visible state so the next projection repaints with the current theme.
     /// Display layouts and exact measurements are theme-independent.
-    pub(crate) fn invalidate_theme(&mut self) {
+    pub fn invalidate_theme(&mut self) {
         self.clear_visible_state();
     }
 
@@ -1989,7 +1993,7 @@ impl TranscriptProjection {
 
     /// Brings the scene and estimated row index up to date at `width`,
     /// without measuring nodes.
-    pub(crate) fn prepare_row_index(
+    pub fn prepare_row_index(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -1999,7 +2003,7 @@ impl TranscriptProjection {
         self.prepare_row_index_with_env(env, history, width);
     }
 
-    pub(crate) fn rebuild_row_index(
+    pub fn rebuild_row_index(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2292,7 +2296,7 @@ impl TranscriptProjection {
         (node_range, changed_any)
     }
 
-    pub(crate) fn row_range_hydration_ids(
+    pub fn row_range_hydration_ids(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2393,7 +2397,7 @@ impl TranscriptProjection {
         if measured {
             self.projection_generation = self.projection_generation.wrapping_add(1);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "harness"))]
         if measured {
             self.counters.exact_height_measured_blocks += 1;
         }
@@ -2474,7 +2478,7 @@ impl TranscriptProjection {
         }
     }
 
-    pub(crate) fn prepare_layout(
+    pub fn prepare_layout(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2484,7 +2488,7 @@ impl TranscriptProjection {
         self.prepare_row_index_with_env(env, history, width);
     }
 
-    pub(crate) fn estimated_total_rows(
+    pub fn estimated_total_rows(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2494,8 +2498,8 @@ impl TranscriptProjection {
         self.measurements.active.total_rows()
     }
 
-    #[cfg(test)]
-    pub(crate) fn exact_total_rows(
+    #[cfg(any(test, feature = "harness"))]
+    pub fn exact_total_rows(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2505,7 +2509,7 @@ impl TranscriptProjection {
         self.measurements.active.total_rows()
     }
 
-    pub(crate) fn node_at_row(
+    pub fn node_at_row(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2555,7 +2559,7 @@ impl TranscriptProjection {
         })
     }
 
-    pub(crate) fn fold_node_at_row(
+    pub fn fold_node_at_row(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2571,7 +2575,7 @@ impl TranscriptProjection {
         self.fold_node(history, node.id, request.action)
     }
 
-    pub(crate) fn fold_node(
+    pub fn fold_node(
         &mut self,
         history: &BlockHistory,
         id: RenderNodeId,
@@ -2612,7 +2616,7 @@ impl TranscriptProjection {
         changed
     }
 
-    pub(crate) fn fold_all(&mut self, history: &BlockHistory, action: FoldAction) -> bool {
+    pub fn fold_all(&mut self, history: &BlockHistory, action: FoldAction) -> bool {
         let view_state = match action {
             FoldAction::Open => ViewState::Expanded,
             FoldAction::Peek => ViewState::Peek,
@@ -2631,7 +2635,7 @@ impl TranscriptProjection {
         changed
     }
 
-    pub(crate) fn fold_block_kind(
+    pub fn fold_block_kind(
         &mut self,
         history: &BlockHistory,
         kind: &str,
@@ -2692,7 +2696,7 @@ impl TranscriptProjection {
         changed
     }
 
-    pub(crate) fn node_metadata_at_row(
+    pub fn node_metadata_at_row(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2702,7 +2706,7 @@ impl TranscriptProjection {
         self.node_at_row(lua, history, width, row)
     }
 
-    pub(crate) fn row_anchor_at_row(
+    pub fn row_anchor_at_row(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2716,7 +2720,7 @@ impl TranscriptProjection {
             })
     }
 
-    pub(crate) fn materialized_row_anchor(&self, row: RowIndex) -> Option<TranscriptRowAnchor> {
+    pub fn materialized_row_anchor(&self, row: RowIndex) -> Option<TranscriptRowAnchor> {
         let identity = row
             .checked_sub(self.visible.row_base)
             .and_then(|local| usize::try_from(local).ok())
@@ -2726,7 +2730,7 @@ impl TranscriptProjection {
 
     /// The first materialized row and the node anchor of each materialized
     /// row, `None` for rows inside a partially rendered block.
-    pub(crate) fn materialized_row_anchors(&self) -> (RowIndex, Vec<Option<TranscriptRowAnchor>>) {
+    pub fn materialized_row_anchors(&self) -> (RowIndex, Vec<Option<TranscriptRowAnchor>>) {
         (
             self.visible.row_base,
             self.visible
@@ -2744,12 +2748,12 @@ impl TranscriptProjection {
             .map(|identity| StableRowAnchor(identity.content.unwrap_or(identity.exact)))
     }
 
-    pub(crate) fn representative_block_id_for_node_index(&self, index: usize) -> Option<BlockId> {
+    pub fn representative_block_id_for_node_index(&self, index: usize) -> Option<BlockId> {
         self.transcript_scene
             .representative_block_id_for_node(index)
     }
 
-    pub(crate) fn representative_block_id_for_row_anchor(
+    pub fn representative_block_id_for_row_anchor(
         &self,
         anchor: TranscriptRowAnchor,
     ) -> Option<BlockId> {
@@ -2758,7 +2762,7 @@ impl TranscriptProjection {
             .representative_block_id_for_node(index)
     }
 
-    pub(crate) fn row_for_anchor(
+    pub fn row_for_anchor(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2771,7 +2775,7 @@ impl TranscriptProjection {
             .row_for_node_anchor(anchor.id, anchor.row_offset)
     }
 
-    pub(crate) fn stable_anchor_is_present(
+    pub fn stable_anchor_is_present(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2788,7 +2792,7 @@ impl TranscriptProjection {
         }
     }
 
-    pub(crate) fn row_anchor_for_block(
+    pub fn row_anchor_for_block(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2800,7 +2804,7 @@ impl TranscriptProjection {
             .map(|(anchor, _)| anchor)
     }
 
-    pub(crate) fn row_anchor_for_block_node_row(
+    pub fn row_anchor_for_block_node_row(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2814,7 +2818,7 @@ impl TranscriptProjection {
         Some(TranscriptRowAnchor { id, row_offset })
     }
 
-    pub(crate) fn block_row_offset_for_anchor(
+    pub fn block_row_offset_for_anchor(
         &self,
         history: &BlockHistory,
         anchor: TranscriptRowAnchor,
@@ -2834,7 +2838,7 @@ impl TranscriptProjection {
         anchor.row_offset.checked_sub(gap)
     }
 
-    pub(crate) fn exact_block_row_target(
+    pub fn exact_block_row_target(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2880,7 +2884,7 @@ impl TranscriptProjection {
 
     /// Text position where `row_offset` starts inside `block_id`, while the
     /// active layout is still at `width`.
-    pub(crate) fn block_display_offset(
+    pub fn block_display_offset(
         &self,
         history: &BlockHistory,
         width: u16,
@@ -2902,7 +2906,7 @@ impl TranscriptProjection {
     }
 
     /// Row inside `block_id` at `width` that holds the text at `display_offset`.
-    pub(crate) fn block_row_for_display_offset(
+    pub fn block_row_for_display_offset(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -2918,13 +2922,13 @@ impl TranscriptProjection {
     /// Where the selectable text of `block_id` at `width` starts: a row inside
     /// the block, past any padding or header chrome that opens it, and a byte
     /// column.
-    pub(crate) fn block_text_start(
+    pub fn block_text_start(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
         block_id: BlockId,
-    ) -> Option<crate::smelt_edit::DocPosition> {
+    ) -> Option<smelt_edit::DocPosition> {
         self.with_exact_block_text(lua, history, width, block_id, |buf, rows| {
             (0..rows)
                 .find_map(|row| {
@@ -2932,7 +2936,7 @@ impl TranscriptProjection {
                     ranges.into_iter().find_map(|range| {
                         let text = smelt_buffer::text::slice(line, range.clone());
                         let lead = text.len() - text.trim_start().len();
-                        (lead < text.len()).then_some(crate::smelt_edit::DocPosition {
+                        (lead < text.len()).then_some(smelt_edit::DocPosition {
                             row: row as RowIndex,
                             byte_col: range.start + lead,
                         })
@@ -3007,7 +3011,7 @@ impl TranscriptProjection {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn projection_hydration_ids(
+    pub fn projection_hydration_ids(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -3052,7 +3056,7 @@ impl TranscriptProjection {
         (ids, plan)
     }
 
-    pub(crate) fn projection_hydration_ids_for_plan(&self, plan: &ProjectionPlan) -> Vec<BlockId> {
+    pub fn projection_hydration_ids_for_plan(&self, plan: &ProjectionPlan) -> Vec<BlockId> {
         let mut ids = Vec::new();
         for index in plan.node_range() {
             self.transcript_scene
@@ -3070,7 +3074,7 @@ impl TranscriptProjection {
         ids
     }
 
-    pub(crate) fn refine_projection_plan(
+    pub fn refine_projection_plan(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -3103,9 +3107,9 @@ impl TranscriptProjection {
         self.plan_projection_progressive(env, history, theme, request)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "harness"))]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn plan_projection_measured(
+    pub fn plan_projection_measured(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -3185,7 +3189,7 @@ impl TranscriptProjection {
         let mut plan = self.plan_projection_from_prepared(history, theme, &request);
         let pass_budget = self.measurements.active.nodes.len().saturating_add(1);
         for _ in 0..pass_budget {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "harness"))]
             {
                 self.counters.projection_planning_passes =
                     self.counters.projection_planning_passes.saturating_add(1);
@@ -3336,10 +3340,7 @@ impl TranscriptProjection {
         }
     }
 
-    pub(crate) fn exact_row_tape_handle(
-        &self,
-        rows: MaterializedRows,
-    ) -> Option<ExactRowTapeHandle> {
+    pub fn exact_row_tape_handle(&self, rows: MaterializedRows) -> Option<ExactRowTapeHandle> {
         let key = self.last_project_key()?;
         let materialized_rows = self.visible.row_identities.len() as RowIndex;
         if rows.row_base != self.visible.row_base
@@ -3386,7 +3387,7 @@ impl TranscriptProjection {
         })
     }
 
-    pub(crate) fn exact_row_tape_state(
+    pub fn exact_row_tape_state(
         &self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &BlockHistory,
@@ -3397,7 +3398,7 @@ impl TranscriptProjection {
         self.resolve_exact_row_tape(lua, history, handle, width, viewport_rows)
     }
 
-    pub(crate) fn retarget_exact_row_tape(
+    pub fn retarget_exact_row_tape(
         &self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &BlockHistory,
@@ -3417,15 +3418,11 @@ impl TranscriptProjection {
         })
     }
 
-    pub(crate) fn exact_row_tape_matches_buffer(
-        &self,
-        handle: ExactRowTapeHandle,
-        buf: &Buffer,
-    ) -> bool {
+    pub fn exact_row_tape_matches_buffer(&self, handle: ExactRowTapeHandle, buf: &Buffer) -> bool {
         self.target_has_projection(handle.key, buf)
     }
 
-    pub(crate) fn plan_exact_row_tape_scroll(
+    pub fn plan_exact_row_tape_scroll(
         &self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &BlockHistory,
@@ -3469,7 +3466,7 @@ impl TranscriptProjection {
         })
     }
 
-    pub(crate) fn apply_exact_row_tape_scroll(
+    pub fn apply_exact_row_tape_scroll(
         &self,
         buf: &Buffer,
         plan: ExactRowTapeProjection,
@@ -3479,9 +3476,9 @@ impl TranscriptProjection {
     }
 
     /// Render a bounded row window into `buf`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "harness"))]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn project(
+    pub fn project(
         &mut self,
         buf: &mut Buffer,
         history: &mut BlockHistory,
@@ -3502,7 +3499,7 @@ impl TranscriptProjection {
         self.project_planned(&lua, buf, history, theme, plan)
     }
 
-    pub(crate) fn project_planned(
+    pub fn project_planned(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         buf: &mut Buffer,
@@ -3682,7 +3679,7 @@ impl TranscriptProjection {
             "transcript:collect_nodes_range:blocks",
             end.saturating_sub(start) as u64,
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "harness"))]
         {
             let count = end.saturating_sub(start);
             self.counters.range_materialized_blocks += count;
@@ -3732,7 +3729,7 @@ impl TranscriptProjection {
             "transcript:collect_nodes_range:rows",
             rebuild.lines.len() as u64,
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "harness"))]
         {
             let count = rebuild.lines.len();
             self.counters.range_materialized_rows += count;
@@ -3873,13 +3870,13 @@ impl TranscriptProjection {
     /// Exact full block layout for snapshot/navigation APIs. This may measure every
     /// transcript block, but it does not concatenate display rows and does not
     /// re-render blocks when the exact height index is already current.
-    pub(crate) fn materialize_block_layout(
+    pub fn materialize_block_layout(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "harness"))]
         {
             self.counters.full_layout_materializations =
                 self.counters.full_layout_materializations.saturating_add(1);
@@ -3896,7 +3893,7 @@ impl TranscriptProjection {
         layout
     }
 
-    pub(crate) fn materialize_search_layout(
+    pub fn materialize_search_layout(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -3911,7 +3908,7 @@ impl TranscriptProjection {
         self.search_layout(generation, history)
     }
 
-    pub(crate) fn materialize_search_layout_for_blocks(
+    pub fn materialize_search_layout_for_blocks(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -3940,7 +3937,7 @@ impl TranscriptProjection {
         self.search_layout_for_node_indices(generation, history, indices)
     }
 
-    pub(crate) fn block_id_at_or_before_row(
+    pub fn block_id_at_or_before_row(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -3960,7 +3957,7 @@ impl TranscriptProjection {
     /// small transcript-shaped surfaces outside the main transcript viewport
     /// (for example a streaming `/btw` dialog) that still want the exact same
     /// block parser, markdown layout, and highlights.
-    pub(crate) fn project_all(
+    pub fn project_all(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         buf: &mut Buffer,
@@ -3988,7 +3985,7 @@ impl TranscriptProjection {
 
     /// Full display rows. Cached by transcript, renderer, width, and presentation;
     /// callers get a free `Arc::clone`.
-    pub(crate) fn build_rows(
+    pub fn build_rows(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -4013,7 +4010,7 @@ impl TranscriptProjection {
                 return Arc::clone(&c.rows);
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "harness"))]
         {
             self.counters.full_row_builds += 1;
         }
@@ -4087,7 +4084,7 @@ impl TranscriptProjection {
         rows
     }
 
-    pub(crate) fn display_rows_for_range(
+    pub fn display_rows_for_range(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -4153,11 +4150,10 @@ impl TranscriptProjection {
             .map(|index| {
                 let text = &texts[index];
                 let highlights = metadata.highlights_at(index);
-                let selectable =
-                    crate::smelt_edit::selectable_byte_ranges_for_line(text, &highlights);
+                let selectable = smelt_edit::selectable_byte_ranges_for_line(text, &highlights);
                 let row_index = materialized.row_base + index as RowIndex;
                 let row = DisplayRow::new(text.clone(), selectable)
-                    .with_actions(crate::smelt_edit::display_actions_for_spans(&highlights))
+                    .with_actions(smelt_edit::display_actions_for_spans(&highlights))
                     .with_atomic_spans(&highlights)
                     .with_code_block(
                         metadata
@@ -4180,7 +4176,7 @@ impl TranscriptProjection {
         DisplayRows { rows }
     }
 
-    pub(crate) fn copy_range(
+    pub fn copy_range(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
@@ -4351,21 +4347,21 @@ fn debug_assert_materialized_viewport(rows: MaterializedRows, viewport_rows: u16
 
 /// Yank transform for the transcript. Both destinations use logical copy text
 /// so render-only wraps and non-selectable chrome never leak into a paste.
-pub(crate) struct TranscriptCopier;
+pub struct TranscriptCopier;
 
-impl smelt_core::buffer::BufferCopy for TranscriptCopier {
+impl smelt_buffer::buffer::BufferCopy for TranscriptCopier {
     fn copy(
         &self,
         buf: &Buffer,
         _src: &str,
         range: std::ops::Range<usize>,
-    ) -> smelt_core::buffer::CopyOutput {
-        smelt_core::buffer::CopyOutput::same(copy_byte_range(buf, range.start, range.end))
+    ) -> smelt_buffer::buffer::CopyOutput {
+        smelt_buffer::buffer::CopyOutput::same(copy_byte_range(buf, range.start, range.end))
     }
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use smelt_transcript::content::stream_parser::{StreamParser, ToolStart};
     use smelt_transcript::content::transcript::Transcript;
@@ -4397,11 +4393,11 @@ pub(crate) mod tests {
                 &mut head,
                 materialized(text.clone()),
                 DocRange {
-                    start: crate::smelt_edit::DocPosition {
+                    start: smelt_edit::DocPosition {
                         row: 0,
                         byte_col: 0,
                     },
-                    end: crate::smelt_edit::DocPosition {
+                    end: smelt_edit::DocPosition {
                         row: 0,
                         byte_col: inside,
                     },
@@ -4415,11 +4411,11 @@ pub(crate) mod tests {
                 &mut tail,
                 materialized(text.clone()),
                 DocRange {
-                    start: crate::smelt_edit::DocPosition {
+                    start: smelt_edit::DocPosition {
                         row: 0,
                         byte_col: inside,
                     },
-                    end: crate::smelt_edit::DocPosition {
+                    end: smelt_edit::DocPosition {
                         row: 0,
                         byte_col: text.len(),
                     },
@@ -4685,7 +4681,7 @@ pub(crate) mod tests {
             .last_block_id()
             .expect("tool block should exist");
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(101), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(101), Default::default());
         let first = project_with_lua(
             &mut projection,
             &lua,
@@ -4772,11 +4768,11 @@ pub(crate) mod tests {
             80,
             &theme,
             DocRange {
-                start: crate::smelt_edit::DocPosition {
+                start: smelt_edit::DocPosition {
                     row: 0,
                     byte_col: 0,
                 },
-                end: crate::smelt_edit::DocPosition {
+                end: smelt_edit::DocPosition {
                     row: 0,
                     byte_col: usize::MAX,
                 },
@@ -4811,11 +4807,11 @@ pub(crate) mod tests {
             80,
             &theme,
             DocRange {
-                start: crate::smelt_edit::DocPosition {
+                start: smelt_edit::DocPosition {
                     row: 40,
                     byte_col: 0,
                 },
-                end: crate::smelt_edit::DocPosition {
+                end: smelt_edit::DocPosition {
                     row: 220,
                     byte_col: usize::MAX,
                 },
@@ -4882,7 +4878,7 @@ pub(crate) mod tests {
                 .into(),
         });
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(12), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(12), Default::default());
         let total_rows = projection.estimated_total_rows(&lua, &mut transcript.history, 80);
         reset_full_layout_buffer_renders();
 
@@ -4946,7 +4942,7 @@ pub(crate) mod tests {
     ) -> Vec<RowSnapshot> {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(99), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(99), Default::default());
         projection.project(
             &mut buf,
             history,
@@ -4966,7 +4962,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(1), Default::default());
 
         projection.project(
             &mut buf,
@@ -4991,7 +4987,7 @@ pub(crate) mod tests {
         let id = transcript.history.order[0];
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(77), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(77), Default::default());
 
         projection.project(
             &mut buf,
@@ -5101,7 +5097,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(78), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(78), Default::default());
 
         projection.project(
             &mut buf,
@@ -5331,7 +5327,7 @@ pub(crate) mod tests {
             )
             .exec()
             .expect("set renderer");
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(23), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(23), Default::default());
 
         projection.project_planned(&lua, &mut buf, &mut transcript.history, &theme, plan);
 
@@ -5350,7 +5346,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(24), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(24), Default::default());
         let plan = projection.plan_projection_measured(
             &lua,
             &mut transcript.history,
@@ -5386,7 +5382,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(25), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(25), Default::default());
         let plan = projection.plan_projection_measured(
             &lua,
             &mut transcript.history,
@@ -5432,7 +5428,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(25), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(25), Default::default());
         let plan = projection.plan_projection_measured(
             &lua,
             &mut transcript.history,
@@ -5474,7 +5470,7 @@ pub(crate) mod tests {
 
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(2), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(2), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -5526,7 +5522,7 @@ pub(crate) mod tests {
 
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(3), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(3), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -5593,7 +5589,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group), crate::content::transcript_scene::RenderNode::Block { .. }] if group.children.len() == 2
+            [crate::transcript_scene::RenderNode::Group(group), crate::transcript_scene::RenderNode::Block { .. }] if group.children.len() == 2
         ));
         assert!(grouped
             .iter()
@@ -5695,10 +5691,7 @@ pub(crate) mod tests {
             .transcript_scene
             .nodes
             .iter()
-            .all(|node| matches!(
-                node,
-                crate::content::transcript_scene::RenderNode::Block { .. }
-            )));
+            .all(|node| matches!(node, crate::transcript_scene::RenderNode::Block { .. })));
         assert!(!rows.iter().any(|line| line.starts_with("group:")));
         assert_eq!(rows.iter().filter(|line| line.contains("bash")).count(), 2);
     }
@@ -5736,10 +5729,7 @@ pub(crate) mod tests {
             .transcript_scene
             .nodes
             .iter()
-            .all(|node| matches!(
-                node,
-                crate::content::transcript_scene::RenderNode::Block { .. }
-            )));
+            .all(|node| matches!(node, crate::transcript_scene::RenderNode::Block { .. })));
         assert!(!rows.iter().any(|line| line.starts_with("group:")));
         assert!(rows.iter().any(|line| line == "between"));
     }
@@ -5823,7 +5813,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group)] if group.children.len() == 3
+            [crate::transcript_scene::RenderNode::Group(group)] if group.children.len() == 3
         ));
         let child_rows: Vec<_> = rows
             .iter()
@@ -5869,7 +5859,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group)] if group.name == "explore" && group.children.len() == 2
+            [crate::transcript_scene::RenderNode::Group(group)] if group.name == "explore" && group.children.len() == 2
         ));
         assert!(
             rows.iter().any(|line| line == "* explore ×2"),
@@ -5972,7 +5962,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group)] if group.name == "explore" && group.child_ids().collect::<Vec<_>>() == [first, second]
+            [crate::transcript_scene::RenderNode::Group(group)] if group.name == "explore" && group.child_ids().collect::<Vec<_>>() == [first, second]
         ));
         assert_eq!(layout.len(), 2);
         assert_eq!(layout[0].0, first);
@@ -6037,7 +6027,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group)]
+            [crate::transcript_scene::RenderNode::Group(group)]
                 if group.name == "explore" && group.children.len() == 5
         ));
         assert!(rows.iter().any(|line| line == "* explore ×5"));
@@ -6076,7 +6066,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group)]
+            [crate::transcript_scene::RenderNode::Group(group)]
                 if group.name == "lsp" && group.children.len() == 5
         ));
         assert!(rows.iter().any(|line| line == "* lsp ×5"));
@@ -6112,10 +6102,7 @@ pub(crate) mod tests {
             .transcript_scene
             .nodes
             .iter()
-            .all(|node| matches!(
-                node,
-                crate::content::transcript_scene::RenderNode::Block { .. }
-            )));
+            .all(|node| matches!(node, crate::transcript_scene::RenderNode::Block { .. })));
     }
 
     #[test]
@@ -6161,7 +6148,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group)]
+            [crate::transcript_scene::RenderNode::Group(group)]
                 if group.name == "explore" && group.children.len() == 4
         ));
         assert!(rows.iter().any(|line| line.starts_with("* explore ×4")));
@@ -6202,7 +6189,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
-            [crate::content::transcript_scene::RenderNode::Group(group)] if group.name == "explore" && group.children.len() == 3
+            [crate::transcript_scene::RenderNode::Group(group)] if group.name == "explore" && group.children.len() == 3
         ));
         assert!(
             rows.iter()
@@ -6247,8 +6234,8 @@ pub(crate) mod tests {
         assert!(matches!(
             projection.transcript_scene.nodes.as_slice(),
             [
-                crate::content::transcript_scene::RenderNode::Group(group),
-                crate::content::transcript_scene::RenderNode::Block { .. },
+                crate::transcript_scene::RenderNode::Group(group),
+                crate::transcript_scene::RenderNode::Block { .. },
             ] if group.name == "background_process_completed" && group.children.len() == 2
         ));
         assert!(
@@ -6387,7 +6374,7 @@ pub(crate) mod tests {
         );
         let target = transcript.history.order[1];
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(103), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(103), Default::default());
 
         let rows = project_with_lua(
             &mut projection,
@@ -6464,7 +6451,7 @@ pub(crate) mod tests {
             );
         }
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(104), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(104), Default::default());
 
         let rows = project_with_lua(
             &mut projection,
@@ -6760,7 +6747,7 @@ pub(crate) mod tests {
             });
         }
         let theme = Theme::default();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(31), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(31), Default::default());
 
         projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
         projection.project(
@@ -6915,7 +6902,7 @@ pub(crate) mod tests {
         parser.append_streaming_text(&mut transcript.history, "streaming response\n");
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(102), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(102), Default::default());
 
         project_with_lua(
             &mut projection,
@@ -7060,11 +7047,11 @@ pub(crate) mod tests {
             80,
             &theme,
             DocRange {
-                start: crate::smelt_edit::DocPosition {
+                start: smelt_edit::DocPosition {
                     row: 0,
                     byte_col: "alpha ’ ".len(),
                 },
-                end: crate::smelt_edit::DocPosition {
+                end: smelt_edit::DocPosition {
                     row: 0,
                     byte_col: "alpha ’ beta".len(),
                 },
@@ -7097,11 +7084,11 @@ pub(crate) mod tests {
             80,
             &theme,
             DocRange {
-                start: crate::smelt_edit::DocPosition {
+                start: smelt_edit::DocPosition {
                     row: 150,
                     byte_col: 0,
                 },
-                end: crate::smelt_edit::DocPosition {
+                end: smelt_edit::DocPosition {
                     row: 150,
                     byte_col: "line 75".len(),
                 },
@@ -7139,11 +7126,11 @@ pub(crate) mod tests {
             80,
             &theme,
             DocRange {
-                start: crate::smelt_edit::DocPosition {
+                start: smelt_edit::DocPosition {
                     row: 0,
                     byte_col: 0,
                 },
-                end: crate::smelt_edit::DocPosition {
+                end: smelt_edit::DocPosition {
                     row: total_rows.saturating_sub(1),
                     byte_col: "line 179".len(),
                 },
@@ -7178,7 +7165,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(12), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(12), Default::default());
 
         let output = projection.project(
             &mut buf,
@@ -7211,7 +7198,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(18), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(18), Default::default());
         let viewport_rows = 10;
         let max_materialized = (viewport_rows as RowIndex).saturating_mul(2);
 
@@ -7258,7 +7245,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut full_projection = TranscriptProjection::new();
-        let mut full_buf = Buffer::new(crate::smelt_edit::BufId(21), Default::default());
+        let mut full_buf = Buffer::new(smelt_edit::BufId(21), Default::default());
         full_projection.project(
             &mut full_buf,
             &mut transcript.history,
@@ -7293,7 +7280,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut full_projection = TranscriptProjection::new();
-        let mut full_buf = Buffer::new(crate::smelt_edit::BufId(22), Default::default());
+        let mut full_buf = Buffer::new(smelt_edit::BufId(22), Default::default());
         full_projection.project(
             &mut full_buf,
             &mut transcript.history,
@@ -7332,7 +7319,7 @@ pub(crate) mod tests {
         let full_rows = projection
             .build_rows(&test_lua(), &mut transcript.history, 80, &theme)
             .len() as RowIndex;
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(5), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(5), Default::default());
 
         let output = projection.project(
             &mut buf,
@@ -7366,7 +7353,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(14), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(14), Default::default());
         let exact_total = 120 * 5 + 119;
 
         let tail = projection.project(
@@ -7427,7 +7414,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(15), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(15), Default::default());
 
         let scroll_top = 10 + 50;
         let output = projection.project(
@@ -7466,7 +7453,7 @@ pub(crate) mod tests {
         let after_id = *transcript.history.order.last().expect("after block id");
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(16), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(16), Default::default());
         let after_start = projection
             .materialize_block_layout(&test_lua(), &mut transcript.history, 80)
             .into_iter()
@@ -7511,7 +7498,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(13), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(13), Default::default());
         let anchor_id = transcript.history.order[10];
         let anchor_row = projection
             .materialize_block_layout(&test_lua(), &mut transcript.history, 80)
@@ -7561,7 +7548,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(8), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(8), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -7595,7 +7582,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut first_buf = Buffer::new(crate::smelt_edit::BufId(8), Default::default());
+        let mut first_buf = Buffer::new(smelt_edit::BufId(8), Default::default());
         projection.project(
             &mut first_buf,
             &mut transcript.history,
@@ -7605,7 +7592,7 @@ pub(crate) mod tests {
             5,
         );
 
-        let mut second_buf = Buffer::new(crate::smelt_edit::BufId(9), Default::default());
+        let mut second_buf = Buffer::new(smelt_edit::BufId(9), Default::default());
         second_buf.set_all_lines(vec!["other session".into()]);
         projection.project(
             &mut second_buf,
@@ -7640,7 +7627,7 @@ pub(crate) mod tests {
         let theme = Theme::default();
         let mut first_projection = TranscriptProjection::new();
         let mut second_projection = TranscriptProjection::new();
-        let mut shared = Buffer::new(crate::smelt_edit::BufId(11), Default::default());
+        let mut shared = Buffer::new(smelt_edit::BufId(11), Default::default());
 
         first_projection.project(
             &mut shared,
@@ -7685,7 +7672,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(6), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(6), Default::default());
 
         projection.project(
             &mut buf,
@@ -7721,7 +7708,7 @@ pub(crate) mod tests {
         let mut projection = TranscriptProjection::new();
         let full_rows = projection.build_rows(&test_lua(), &mut transcript.history, 80, &theme);
         assert_eq!(full_rows.len() as RowIndex, 439);
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(7), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(7), Default::default());
 
         let tail = projection.project(
             &mut buf,
@@ -7766,7 +7753,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(24), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(24), Default::default());
         let old_width = 30;
         let new_width = 14;
         let viewport_rows = 5;
@@ -7835,7 +7822,7 @@ pub(crate) mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(10), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(10), Default::default());
 
         let anchor_id = transcript.history.order[10];
         let anchor_row = projection
@@ -7988,1229 +7975,6 @@ pub(crate) mod tests {
         projection.project_planned(lua, buf, history, theme, plan)
     }
 
-    #[cfg(feature = "transcript-bench")]
-    #[rustfmt::skip]
-    pub(crate) mod benchmark_support {
-        use super::*;
-
-    fn push_large_mixed_transcript_fixture(
-        transcript: &mut Transcript,
-        target_bytes: usize,
-    ) -> usize {
-        let mut approx_bytes = 0usize;
-        let mut i = 0usize;
-        while approx_bytes < target_bytes {
-            let user = format!(
-                "Investigate transcript layout batch {i}. {}",
-                "preserve exact copy navigation scrollbar resize preview ".repeat(8)
-            );
-            approx_bytes += user.len();
-            transcript.push(Block::User {
-                text: user,
-                image_labels: vec![],
-                command: false,
-                sent_at_ms: None,
-            });
-
-            let markdown = large_mixed_markdown_payload(i);
-            approx_bytes += markdown.len();
-            transcript.push(Block::Text {
-                content: markdown.into(),
-            });
-
-            if i.is_multiple_of(5) {
-                let reasoning = format!(
-                    "{}\n{}",
-                    "consider cached width-independent measurement ".repeat(20),
-                    "validate row-count and copy-source equivalence ".repeat(20)
-                );
-                approx_bytes += reasoning.len();
-                transcript.push(Block::Thinking {
-                    title: None,
-                    summary_titles: Vec::new(),
-                    content: reasoning.into(),
-                    kind: protocol::ReasoningKind::Raw,
-                });
-            }
-
-            if i.is_multiple_of(7) {
-                let command = format!("python scripts/analyze_layout.py --batch {i}");
-                let output = (0..24)
-                    .map(|j| {
-                        format!(
-                            "result {i}.{j}: {}",
-                            "tool output wraps and truncates ".repeat(10)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                approx_bytes += command.len() + output.len();
-                transcript.push(Block::Exec {
-                    command,
-                    output: output.into(),
-                });
-            }
-
-            if i.is_multiple_of(11) {
-                let call_id = format!("mixed-fixture-call-{i}");
-                let output = (0..80)
-                    .map(|j| {
-                        format!(
-                            "tool line {i}.{j}: {}",
-                            "visible materialization ".repeat(12)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                approx_bytes += output.len();
-                transcript.push_tool_call(
-                    Block::ToolCall {
-                        call_id: call_id.clone(),
-                        name: "edit_file".into(),
-                        summary: protocol::StyledLines::from_plain(format!("edit mixed_{i}.rs")),
-                        args: std::collections::HashMap::new().into(),
-                    },
-                    ToolState {
-                        status: ToolStatus::Ok,
-                        elapsed: Some(std::time::Duration::from_millis(1_250)),
-                        called_at_ms: None,
-                        elapsed_active: false,
-                        output: Some(Box::new(ToolOutput {
-                            content: output.into(),
-                            is_error: false,
-                            metadata: None,
-                            content_fields: Vec::new(),
-                        })),
-                        user_message: None,
-                        preview_output: None,
-                    },
-                );
-            }
-
-            i += 1;
-        }
-        approx_bytes
-    }
-
-    fn large_mixed_markdown_payload(i: usize) -> String {
-        format!(
-            "# Batch {i}\n\n{}\n\n| file | rows | notes |\n| --- | ---: | --- |\n| transcript_{i}.rs | {} | {} |\n| render_{i}.rs | {} | {} |\n\n```rust\nfn batch_{i}() {{\n    let rows = {};\n    println!(\"{{rows}}\");\n}}\n```\n\n- {}\n- {}",
-            "markdown paragraphs with inline `code`, **bold spans**, links, and wrap pressure ".repeat(18),
-            i * 3 + 1,
-            "table cells wrap under preview width ".repeat(8),
-            i * 3 + 2,
-            "copy source must remain markdown exact ".repeat(8),
-            i * 17,
-            "resize should preserve visible block anchors ".repeat(10),
-            "first render should not materialize irrelevant rows ".repeat(10),
-        )
-    }
-
-    fn approx_history_bytes(history: &BlockHistory) -> usize {
-        let mut bytes = 0usize;
-        for id in &history.order {
-            if let Some(block) = history.block(*id) {
-                bytes += block.raw_text().map_or(0, |text| text.len());
-                if let Block::ToolCall { .. } = block {
-                    if let Some(state) = history.tool_state(*id) {
-                        bytes += state
-                            .output
-                            .as_ref()
-                            .map_or(0, |output| output.content.len());
-                    }
-                }
-            }
-        }
-        bytes
-    }
-
-    fn push_markdown_heavy_transcript_fixture(
-        transcript: &mut Transcript,
-        target_bytes: usize,
-    ) -> usize {
-        let mut approx_bytes = 0usize;
-        let mut i = 0usize;
-        while approx_bytes < target_bytes {
-            let content = format!(
-                "# Markdown-heavy document {i}\n\n{}\n\n## Table\n\n| column | value | notes |\n| --- | ---: | --- |\n| alpha | {} | {} |\n| beta | {} | {} |\n\n## Code\n\n```rust\nfn markdown_heavy_{i}() -> usize {{\n    let mut total = 0;\n    for n in 0..{} {{ total += n; }}\n    total\n}}\n```\n\n{}\n\n{}",
-                "Paragraph with links, `inline code`, emphasis, and wrap pressure. ".repeat(42),
-                i * 11 + 1,
-                "table cells intentionally contain enough content to wrap at narrow widths ".repeat(18),
-                i * 11 + 2,
-                "copy/search/source exactness must survive markdown measurement ".repeat(18),
-                i % 127 + 32,
-                "- bullet item with long content ".repeat(44),
-                "> quoted reasoning line ".repeat(36),
-            );
-            approx_bytes += content.len();
-            transcript.push(Block::Text {
-                content: content.into(),
-            });
-            i += 1;
-        }
-        approx_bytes
-    }
-
-    fn push_tool_output_heavy_transcript_fixture(
-        transcript: &mut Transcript,
-        target_bytes: usize,
-    ) -> usize {
-        let mut approx_bytes = 0usize;
-        let mut i = 0usize;
-        while approx_bytes < target_bytes {
-            let call_id = format!("tool-output-heavy-{i}");
-            let command = format!("cargo test package_{i} -- --nocapture");
-            let output = (0..160)
-                .map(|j| {
-                    format!(
-                        "tool output line {i}.{j}: {}",
-                        "ansi-free terminal output wraps exactly and keeps tail caps honest "
-                            .repeat(8)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            approx_bytes += command.len() + output.len();
-            transcript.push_tool_call(
-                Block::ToolCall {
-                    call_id: call_id.clone(),
-                    name: "bash".into(),
-                    summary: protocol::StyledLines::from_plain(command),
-                    args: std::collections::HashMap::new().into(),
-                },
-                ToolState {
-                    status: ToolStatus::Ok,
-                    elapsed: Some(std::time::Duration::from_millis(2_000 + i as u64)),
-                    called_at_ms: None,
-                    elapsed_active: false,
-                    output: Some(Box::new(ToolOutput {
-                        content: output.into(),
-                        is_error: false,
-                        metadata: None,
-                        content_fields: Vec::new(),
-                    })),
-                    user_message: None,
-                    preview_output: None,
-                },
-            );
-            i += 1;
-        }
-        approx_bytes
-    }
-
-    fn push_many_tiny_blocks_transcript_fixture(
-        transcript: &mut Transcript,
-        target_bytes: usize,
-    ) -> usize {
-        let mut approx_bytes = 0usize;
-        let mut i = 0usize;
-        while approx_bytes < target_bytes {
-            let text = format!("tiny block {i} alpha beta gamma");
-            approx_bytes += text.len();
-            match i % 6 {
-                0 => transcript.push(Block::User {
-                    text,
-                    image_labels: vec![],
-                    command: false,
-                    sent_at_ms: None,
-                }),
-                1 => transcript.push(Block::Text {
-                    content: text.into(),
-                }),
-                2 => transcript.push(Block::CodeLine {
-                    content: format!("let tiny_{i} = {i};"),
-                    lang: "rust".into(),
-                }),
-                3 => transcript.push(Block::Thinking {
-                    title: None,
-                    summary_titles: Vec::new(),
-                    content: text.into(),
-                    kind: protocol::ReasoningKind::Raw,
-                }),
-                4 => transcript.push(Block::Compacted {
-                    summary: text,
-                    kept: Vec::new(),
-                }),
-                _ => transcript.push(Block::ProcessStatus { text, event: None, output: None }),
-            }
-            i += 1;
-        }
-        approx_bytes
-    }
-
-    fn push_few_huge_blocks_transcript_fixture(
-        transcript: &mut Transcript,
-        target_bytes: usize,
-    ) -> usize {
-        let mut approx_bytes = 0usize;
-        let mut i = 0usize;
-        while approx_bytes < target_bytes {
-            let content = format!(
-                "# Huge block {i}\n\n{}\n\n```text\n{}\n```\n\n{}",
-                "large paragraph with wrapping pressure and markdown spans `code` **bold** ".repeat(900),
-                "preformatted output still contributes exact rows without visible materialization\n".repeat(420),
-                "closing paragraph ".repeat(700),
-            );
-            approx_bytes += content.len();
-            transcript.push(Block::Text {
-                content: content.into(),
-            });
-            i += 1;
-        }
-        approx_bytes
-    }
-
-    #[derive(Clone, Copy)]
-    struct TranscriptBenchWorkload {
-        name: &'static str,
-        target_bytes: usize,
-        build: fn(&mut Transcript, usize) -> usize,
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    struct TranscriptBenchSample {
-        input_bytes: usize,
-        generated_bytes: usize,
-        blocks: usize,
-        total_rows: RowIndex,
-        first_ms: f64,
-        resize_ms: f64,
-        theme_ms: f64,
-        scroll12_ms: f64,
-        visible_ms: f64,
-        copy_ms: f64,
-        append_ms: f64,
-        no_cache_ms: f64,
-        allocs: u64,
-        bytes_allocated: u64,
-        alloc_current_bytes: usize,
-        alloc_peak_bytes: usize,
-        visible_rows: usize,
-        copied_rows: RowIndex,
-        appended_rows: RowIndex,
-        scroll_materialized_rows: u64,
-        first_counters: TranscriptProjectionCounters,
-        resize_counters: TranscriptProjectionCounters,
-        theme_counters: TranscriptProjectionCounters,
-        scroll_counters: TranscriptProjectionCounters,
-        visible_counters: TranscriptProjectionCounters,
-        copy_counters: TranscriptProjectionCounters,
-        append_counters: TranscriptProjectionCounters,
-        no_cache_counters: TranscriptProjectionCounters,
-    }
-
-    use smelt_test_support::bench::Stats as MetricStats;
-
-    fn elapsed_ms(elapsed: std::time::Duration) -> f64 {
-        elapsed.as_secs_f64() * 1_000.0
-    }
-
-    fn counters_json(counters: TranscriptProjectionCounters) -> String {
-        format!(
-            "{{\"full_row_builds\":{},\"layout_cache\":{},\"exact_height_measured_blocks\":{},\"range_materialized_blocks\":{},\"max_range_materialized_blocks\":{},\"range_materialized_rows\":{},\"max_range_materialized_rows\":{}}}",
-            counters.full_row_builds,
-            counters.layout_cache,
-            counters.exact_height_measured_blocks,
-            counters.range_materialized_blocks,
-            counters.max_range_materialized_blocks,
-            counters.range_materialized_rows,
-            counters.max_range_materialized_rows,
-        )
-    }
-
-    fn selectable_copy_range_from_rows(
-        start_row: RowIndex,
-        rows: &DisplayRows,
-        total_rows: RowIndex,
-    ) -> Option<DocRange> {
-        rows.rows.iter().enumerate().find_map(|(offset, row)| {
-            let selectable = row
-                .selectable_ranges
-                .iter()
-                .find(|range| range.start < range.end)?;
-            let row_idx = start_row.saturating_add(offset as RowIndex);
-            Some(DocRange {
-                start: crate::smelt_edit::DocPosition {
-                    row: row_idx,
-                    byte_col: selectable.start,
-                },
-                end: crate::smelt_edit::DocPosition {
-                    row: row_idx.saturating_add(79).min(total_rows.saturating_sub(1)),
-                    byte_col: usize::MAX,
-                },
-            })
-        })
-    }
-
-    fn find_selectable_copy_range(
-        projection: &mut TranscriptProjection,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        history: &mut BlockHistory,
-        width: u16,
-        theme: &Theme,
-        preferred_row: RowIndex,
-        total_rows: RowIndex,
-    ) -> Option<DocRange> {
-        if total_rows == 0 {
-            return None;
-        }
-        let chunk = 80;
-        let start = preferred_row.min(total_rows.saturating_sub(1));
-        for row in (start..total_rows).step_by(chunk as usize) {
-            let rows = projection.display_rows_for_range(
-                lua,
-                history,
-                width,
-                theme,
-                row..row.saturating_add(chunk).min(total_rows),
-            );
-            if let Some(range) = selectable_copy_range_from_rows(row, &rows, total_rows) {
-                if !projection
-                    .copy_range(lua, history, width, theme, range)
-                    .kill_ring
-                    .is_empty()
-                {
-                    return Some(range);
-                }
-            }
-        }
-        let mut row = start;
-        while row > 0 {
-            row = row.saturating_sub(chunk).min(row);
-            let rows = projection.display_rows_for_range(
-                lua,
-                history,
-                width,
-                theme,
-                row..row.saturating_add(chunk).min(total_rows),
-            );
-            if let Some(range) = selectable_copy_range_from_rows(row, &rows, total_rows) {
-                if !projection
-                    .copy_range(lua, history, width, theme, range)
-                    .kill_ring
-                    .is_empty()
-                {
-                    return Some(range);
-                }
-            }
-        }
-        None
-    }
-
-    fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
-        snapshot
-            .values
-            .iter()
-            .find(|row| row.label == label)
-            .map(|row| row.max)
-            .unwrap_or(0)
-    }
-
-    fn assert_resume_tail_perf_gates(snapshot: &smelt_perf::perf::Snapshot, history_items: usize) {
-        for label in [
-            "store:history:read_all",
-            "store:history:read_all_rows",
-            "store:session:load_full_snapshot",
-            "store:session:full_snapshot_rows_read",
-            "store:transcript:read_records_full",
-            "store:transcript:records_full_loaded",
-            "transcript:build_from_session:history_items",
-        ] {
-            let value = perf_value_max(snapshot, label);
-            assert_eq!(
-                value, 0,
-                "display-only resume recorded {label}={value}, expected no full-session work"
-            );
-        }
-        let loaded = perf_value_max(snapshot, "store:transcript:records_loaded");
-        assert!(
-            loaded <= 256,
-            "display-only resume loaded {loaded} records from {history_items} history items"
-        );
-        let record_total = perf_value_max(snapshot, "transcript:sqlite:record_total");
-        assert!(
-            record_total >= history_items as u64 / 2,
-            "display-only resume did not observe total record count: {record_total} for {history_items} history items"
-        );
-    }
-
-    fn resume_perf_metric(label: &str) -> bool {
-        [
-            "transcript:resume_tail",
-            "transcript:record_window",
-            "store:db",
-            "store:transcript",
-        ]
-        .iter()
-        .any(|prefix| label.starts_with(prefix))
-    }
-
-    fn print_resume_perf_snapshot(snapshot: &smelt_perf::perf::Snapshot) {
-        for row in snapshot
-            .durations
-            .iter()
-            .filter(|row| resume_perf_metric(row.label))
-        {
-            eprintln!(
-                "TRANSCRIPT_RESUME_PERF_DURATION metric={} count={} last_us={} total_us={} p95_us={} max_us={}",
-                row.label, row.count, row.last_us, row.total_us, row.p95_us, row.max_us
-            );
-            eprintln!(
-                "TRANSCRIPT_RESUME_PERF_DURATION_JSON {{\"type\":\"resume_perf_duration\",\"metric\":\"{}\",\"count\":{},\"last_us\":{},\"total_us\":{},\"p95_us\":{},\"max_us\":{}}}",
-                row.label, row.count, row.last_us, row.total_us, row.p95_us, row.max_us
-            );
-        }
-        for row in snapshot
-            .values
-            .iter()
-            .filter(|row| resume_perf_metric(row.label))
-        {
-            eprintln!(
-                "TRANSCRIPT_RESUME_PERF_VALUE metric={} count={} last={} total={} p95={} max={}",
-                row.label, row.count, row.last, row.total, row.p95, row.max
-            );
-            eprintln!(
-                "TRANSCRIPT_RESUME_PERF_VALUE_JSON {{\"type\":\"resume_perf_value\",\"metric\":\"{}\",\"count\":{},\"last\":{},\"total\":{},\"p95\":{},\"max\":{}}}",
-                row.label, row.count, row.last, row.total, row.p95, row.max
-            );
-        }
-    }
-
-    fn print_layout_alloc_snapshot(workload: &str, snapshot: &smelt_perf::perf::Snapshot) {
-        for row in snapshot
-            .allocs
-            .iter()
-            .filter(|row| row.label.starts_with("transcript:"))
-        {
-            eprintln!(
-                "TRANSCRIPT_LAYOUT_ALLOC workload={} metric={} count={} allocs_last={} allocs_total={} bytes_last={} bytes_total={} bytes_p95={} bytes_max={}",
-                workload,
-                row.label,
-                row.count,
-                row.allocs_last,
-                row.allocs_total,
-                row.bytes_last,
-                row.bytes_total,
-                row.bytes_p95,
-                row.bytes_max
-            );
-            eprintln!(
-                "TRANSCRIPT_LAYOUT_ALLOC_JSON {{\"type\":\"layout_alloc\",\"workload\":\"{}\",\"metric\":\"{}\",\"count\":{},\"allocs_last\":{},\"allocs_total\":{},\"bytes_last\":{},\"bytes_total\":{},\"bytes_p95\":{},\"bytes_max\":{}}}",
-                workload,
-                row.label,
-                row.count,
-                row.allocs_last,
-                row.allocs_total,
-                row.bytes_last,
-                row.bytes_total,
-                row.bytes_p95,
-                row.bytes_max
-            );
-        }
-    }
-
-    fn transcript_bench_runs() -> usize {
-        std::env::var("SMELT_TRANSCRIPT_BENCH_RUNS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|runs| *runs > 0)
-            .unwrap_or(3)
-    }
-
-    fn transcript_bench_workloads() -> Vec<TranscriptBenchWorkload> {
-        use crate::benchmark_config::{named_list, LayoutKind, LAYOUT_WORKLOADS};
-        let filter = std::env::var("SMELT_TRANSCRIPT_BENCH_WORKLOADS").ok();
-        let names = filter.as_deref().map(|value| {
-            named_list(value, LAYOUT_WORKLOADS.iter().map(|entry| entry.0))
-                .expect("SMELT_TRANSCRIPT_BENCH_WORKLOADS")
-        });
-        LAYOUT_WORKLOADS.iter()
-            .filter(|entry| names.as_ref().is_none_or(|names| names.contains(&entry.0)))
-            .map(|&(name, target_bytes, kind)| TranscriptBenchWorkload {
-                name,
-                target_bytes,
-                build: match kind {
-                    LayoutKind::Mixed => push_large_mixed_transcript_fixture,
-                    LayoutKind::Markdown => push_markdown_heavy_transcript_fixture,
-                    LayoutKind::ToolOutput => push_tool_output_heavy_transcript_fixture,
-                    LayoutKind::TinyBlocks => push_many_tiny_blocks_transcript_fixture,
-                    LayoutKind::HugeBlocks => push_few_huge_blocks_transcript_fixture,
-                },
-            }).collect()
-    }
-
-    const RESUME_RECORD_BLOCK_TEXT_BYTES: usize = 4 * 1024;
-    const RESUME_RECORD_WRITE_CHUNK: usize = 2048;
-
-    fn resume_record_content(block_idx: usize) -> String {
-        let mut content = format!("# Resume benchmark response {block_idx}\n\n");
-        let paragraph = "This record-backed resume fixture stores full transcript text in session storage without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
-        while content.len() < RESUME_RECORD_BLOCK_TEXT_BYTES {
-            content.push_str(paragraph);
-        }
-        smelt_buffer::text::grapheme_prefix(&content, RESUME_RECORD_BLOCK_TEXT_BYTES).to_string()
-    }
-
-    fn resume_block_record(
-        block_idx: usize,
-        content: String,
-    ) -> smelt_store::StoredTranscriptBlock {
-        let record = smelt_core::Block::Text {
-            content: content.clone().into(),
-        };
-        let content_hash = record.content_hash();
-        let indexed_text = format!("resume benchmark block {block_idx}");
-        let mut row = smelt_store::StoredTranscriptBlock {
-            block_idx: block_idx as u64,
-            history_idx: None,
-            kind: record.kind().to_string(),
-            tool_call_id: None,
-            tool_name: None,
-            content_hash: content_hash.to_string(),
-            estimated_text_bytes: content.len() as u64,
-            summary: Vec::new(),
-            indexed_text,
-            block_json: serde_json::to_string(&record).expect("serialize resume record"),
-            origin_json: None,
-            tool_state_json: None,
-            tool_render_revision: 0,
-        };
-        let parsed = smelt_core::TranscriptBlockRecordWithId::try_from(row.clone())
-            .expect("parse resume record");
-        row.summary = smelt_transcript::transcript_model::encode_record_summary(
-            &parsed.record,
-            &row.indexed_text,
-            row.estimated_text_bytes,
-        )
-        .expect("encode resume summary");
-        row
-    }
-
-    fn write_record_backed_resume_fixture(
-        sessions: &smelt_core::session::SessionStorage,
-        session: &smelt_core::session::Session,
-        target_bytes: usize,
-    ) -> (usize, usize, f64) {
-        let setup_start = std::time::Instant::now();
-        let mut writer = sessions
-            .store()
-            .writer(&session.id)
-            .expect("open record resume fixture writer");
-        let identity = smelt_core::session::store_identity(session);
-        let commit = smelt_core::session::full_commit(session)
-            .expect("prepare record resume fixture state");
-        let mut head = writer
-            .commit(&identity, &commit)
-            .expect("initialize record resume fixture state");
-        let target_bytes = target_bytes.max(RESUME_RECORD_BLOCK_TEXT_BYTES);
-        let mut generated_bytes = 0usize;
-        let mut record_count = 0usize;
-        while generated_bytes < target_bytes {
-            let mut records = Vec::with_capacity(RESUME_RECORD_WRITE_CHUNK);
-            while generated_bytes < target_bytes && records.len() < RESUME_RECORD_WRITE_CHUNK {
-                let content = resume_record_content(record_count);
-                generated_bytes = generated_bytes.saturating_add(content.len());
-                records.push(resume_block_record(record_count, content));
-                record_count += 1;
-            }
-            let chunk = smelt_store::SessionCommit {
-                metadata: commit.metadata.clone(),
-                transcript: Some(smelt_store::TranscriptRecordSuffix {
-                    start: head.transcript_record_count.get(),
-                    records,
-                }),
-                ..Default::default()
-            };
-            head = writer
-                .commit(&identity, &chunk)
-                .expect("write record resume fixture chunk");
-        }
-        drop(writer);
-        let setup_ms = elapsed_ms(setup_start.elapsed());
-        (record_count, generated_bytes, setup_ms)
-    }
-
-    fn run_true_resume_bench_sample(target_bytes: usize) {
-        smelt_perf::perf::clear();
-        smelt_perf::perf::set_enabled(true);
-        let lua = crate::lua::LuaRuntime::new();
-        let theme = Theme::default();
-        let session = smelt_core::session::Session::new(
-            std::process::id(),
-            std::env::current_dir().unwrap_or_default(),
-        );
-        let session_id = session.id.clone();
-        let storage_dir = tempfile::tempdir().expect("resume benchmark storage");
-        let sessions = smelt_core::session::SessionStorage::new(storage_dir.path().join("smelt"));
-        let (record_count, generated_bytes, setup_ms) =
-            write_record_backed_resume_fixture(&sessions, &session, target_bytes);
-
-        smelt_perf::perf::clear();
-        let tail_alloc_before = smelt_perf::alloc::snapshot();
-        let tail_load_start = std::time::Instant::now();
-        let tail_resumed = crate::app::history::load_transcript_tail_from_sqlite_id(
-            &sessions,
-            &session_id,
-            100,
-            40,
-        )
-        .expect("tail-load benchmark transcript records");
-        let mut tail_document =
-            crate::app::transcript::TranscriptDocument::from_loaded_transcript(tail_resumed);
-        let tail_load_ms = elapsed_ms(tail_load_start.elapsed());
-        let mut tail_buf = Buffer::new(crate::smelt_edit::BufId(94), Default::default());
-        let tail_render_start = std::time::Instant::now();
-        // The tail slice carries record profiles; the first frame hydrates the
-        // blocks it shows, as the app's hydration worker does.
-        let tail_plan = loop {
-            match tail_document.plan_viewport_projection_measured(
-                &lua,
-                100,
-                &theme,
-                crate::app::transcript::TranscriptViewportProjectionInput {
-                    fallback_scroll_top: 0,
-                    follow_tail: true,
-                    width_changed: false,
-                    previous_width: None,
-                },
-                40,
-            ) {
-                Ok(plan) => break plan,
-                Err(error) => assert!(
-                    tail_document.service_pending_hydration_for_test(),
-                    "resume benchmark projection hydration: {error:?}"
-                ),
-            }
-        };
-        let tail_rows = tail_document
-            .project_applied_viewport(&lua, &mut tail_buf, &theme, tail_plan)
-            .materialized_rows;
-        let tail_render_ms = elapsed_ms(tail_render_start.elapsed());
-        let tail_alloc_after = smelt_perf::alloc::snapshot();
-        let tail_alloc = smelt_perf::alloc::delta(tail_alloc_before, tail_alloc_after);
-        let tail_retained_bytes =
-            tail_alloc_after.current_bytes as i64 - tail_alloc_before.current_bytes as i64;
-        assert!(tail_rows.total_rows > 0);
-        let tail_snapshot = smelt_perf::perf::snapshot();
-        print_resume_perf_snapshot(&tail_snapshot);
-        assert_resume_tail_perf_gates(&tail_snapshot, record_count);
-        assert_eq!(
-            perf_value_max(&tail_snapshot, "transcript:sqlite:record_total"),
-            record_count as u64,
-            "display-only resume did not observe the record-backed fixture size"
-        );
-
-        drop(tail_document);
-        sessions
-            .delete(&session_id)
-            .expect("delete resume benchmark session");
-        smelt_perf::perf::set_enabled(false);
-        eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=record_backed target_bytes={} generated_bytes={} records={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3} tail_bytes_allocated={} tail_bytes_deallocated={} tail_current_bytes_before={} tail_current_bytes_after={} tail_retained_bytes={}",
-            target_bytes,
-            generated_bytes,
-            record_count,
-            tail_rows.total_rows,
-            setup_ms,
-            tail_load_ms,
-            tail_render_ms,
-            tail_alloc.bytes_allocated,
-            tail_alloc.bytes_deallocated,
-            tail_alloc_before.current_bytes,
-            tail_alloc_after.current_bytes,
-            tail_retained_bytes,
-        );
-        eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"mode\":\"record_backed\",\"target_bytes\":{},\"generated_bytes\":{},\"records\":{},\"rows\":{},\"setup_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3},\"tail_bytes_allocated\":{},\"tail_bytes_deallocated\":{},\"tail_current_bytes_before\":{},\"tail_current_bytes_after\":{},\"tail_retained_bytes\":{}}}",
-            target_bytes,
-            generated_bytes,
-            record_count,
-            tail_rows.total_rows,
-            setup_ms,
-            tail_load_ms,
-            tail_render_ms,
-            tail_alloc.bytes_allocated,
-            tail_alloc.bytes_deallocated,
-            tail_alloc_before.current_bytes,
-            tail_alloc_after.current_bytes,
-            tail_retained_bytes,
-        );
-    }
-    fn assert_projection_bench_gates(counters: TranscriptProjectionCounters, label: &str) {
-        const MAX_MATERIALIZED_ROWS_PER_OPERATION: usize = 80;
-        assert!(
-            counters.max_range_materialized_rows <= MAX_MATERIALIZED_ROWS_PER_OPERATION,
-            "{label} materialized {} rows, expected <= {MAX_MATERIALIZED_ROWS_PER_OPERATION}",
-            counters.max_range_materialized_rows,
-        );
-        assert!(
-            counters.max_range_materialized_blocks <= MAX_MATERIALIZED_ROWS_PER_OPERATION,
-            "{label} materialized {} blocks, expected <= {MAX_MATERIALIZED_ROWS_PER_OPERATION}",
-            counters.max_range_materialized_blocks,
-        );
-    }
-
-    fn run_transcript_bench_sample(workload: TranscriptBenchWorkload) -> TranscriptBenchSample {
-        smelt_perf::perf::clear();
-        smelt_perf::perf::set_enabled(true);
-        smelt_perf::alloc::set_enabled(true);
-
-        let lua = test_lua();
-        let mut transcript = Transcript::new();
-        let generated_bytes = (workload.build)(&mut transcript, workload.target_bytes);
-        let input_bytes = approx_history_bytes(&transcript.history);
-        let blocks = transcript.history.order.len();
-        let theme = Theme::default();
-
-        let mut cold = TranscriptProjection::new();
-        let mut cold_buf = Buffer::new(crate::smelt_edit::BufId(77), Default::default());
-        let alloc_start = smelt_perf::alloc::snapshot();
-        let first_start = std::time::Instant::now();
-        let first = project_with_lua(
-            &mut cold,
-            &lua,
-            &mut cold_buf,
-            &mut transcript.history,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
-        );
-        let first_ms = elapsed_ms(first_start.elapsed());
-        let first_alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
-        let first_snapshot = smelt_perf::perf::snapshot();
-        print_layout_alloc_snapshot(workload.name, &first_snapshot);
-        let first_counters = cold.counters();
-
-        cold.reset_counters();
-        let resize_start = std::time::Instant::now();
-        let resized = project_with_lua(
-            &mut cold,
-            &lua,
-            &mut cold_buf,
-            &mut transcript.history,
-            72,
-            &theme,
-            ScrollTarget::visible_row(first.clamped_scroll),
-            40,
-        );
-        let resize_ms = elapsed_ms(resize_start.elapsed());
-        let resize_counters = cold.counters();
-
-        cold.invalidate_theme();
-        cold.reset_counters();
-        let theme_start = std::time::Instant::now();
-        let themed = project_with_lua(
-            &mut cold,
-            &lua,
-            &mut cold_buf,
-            &mut transcript.history,
-            72,
-            &theme,
-            ScrollTarget::visible_row(resized.clamped_scroll),
-            40,
-        );
-        let theme_ms = elapsed_ms(theme_start.elapsed());
-        let theme_counters = cold.counters();
-
-        cold.reset_counters();
-        let scroll_start = std::time::Instant::now();
-        let mut scroll_materialized_rows = 0u64;
-        let max_scroll = resized.total_rows.saturating_sub(1);
-        let step = (resized.total_rows / 12).max(1);
-        for i in 0..12u64 {
-            let row = i.saturating_mul(step).min(max_scroll);
-            let rows = project_with_lua(
-                &mut cold,
-                &lua,
-                &mut cold_buf,
-                &mut transcript.history,
-                72,
-                &theme,
-                ScrollTarget::visible_row(row),
-                40,
-            );
-            scroll_materialized_rows =
-                scroll_materialized_rows.saturating_add(rows.materialized_rows);
-        }
-        let scroll12_ms = elapsed_ms(scroll_start.elapsed());
-        let scroll_counters = cold.counters();
-
-        cold.reset_counters();
-        let visible_start = std::time::Instant::now();
-        let mid = resized.total_rows / 2;
-        let visible =
-            cold.display_rows_for_range(&lua, &mut transcript.history, 72, &theme, mid..mid + 80);
-        let visible_ms = elapsed_ms(visible_start.elapsed());
-        let visible_counters = cold.counters();
-
-        let mut copy_probe = TranscriptProjection::new();
-        copy_probe.set_inline_options(cold.inline_options().clone());
-        let copy_range = find_selectable_copy_range(
-            &mut copy_probe,
-            &lua,
-            &mut transcript.history,
-            72,
-            &theme,
-            mid,
-            resized.total_rows,
-        )
-        .expect("benchmark transcript should contain selectable display text");
-        copy_probe.reset_counters();
-        let copy_start = std::time::Instant::now();
-        let copied = copy_probe.copy_range(&lua, &mut transcript.history, 72, &theme, copy_range);
-        let copy_ms = elapsed_ms(copy_start.elapsed());
-        let copy_counters = copy_probe.counters();
-
-        let mut no_cache = TranscriptProjection::new();
-        let mut no_cache_buf = Buffer::new(crate::smelt_edit::BufId(80), Default::default());
-        let no_cache_start = std::time::Instant::now();
-        let no_cache_projection = project_with_lua(
-            &mut no_cache,
-            &lua,
-            &mut no_cache_buf,
-            &mut transcript.history,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
-        );
-        let no_cache_ms = elapsed_ms(no_cache_start.elapsed());
-        let no_cache_counters = no_cache.counters();
-
-        transcript.push(Block::Text {
-            content: "live append benchmark tail\n".repeat(16).into(),
-        });
-        cold.reset_counters();
-        let append_start = std::time::Instant::now();
-        let appended = project_with_lua(
-            &mut cold,
-            &lua,
-            &mut cold_buf,
-            &mut transcript.history,
-            72,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
-        );
-        let append_ms = elapsed_ms(append_start.elapsed());
-        let append_counters = cold.counters();
-        let appended_rows = appended.total_rows.saturating_sub(resized.total_rows);
-
-        assert!(generated_bytes >= workload.target_bytes);
-        assert!(input_bytes > 0);
-        assert!(first.total_rows > 0);
-        assert!(resized.total_rows > 0);
-        assert_eq!(themed.total_rows, resized.total_rows);
-        assert!(
-            !visible.rows.is_empty(),
-            "visible range was empty at mid={mid} total_rows={} counters={visible_counters:?}",
-            resized.total_rows
-        );
-        assert!(
-            !copied.kill_ring.is_empty(),
-            "copy range was empty at start={:?} end={:?} total_rows={} counters={copy_counters:?}",
-            copy_range.start,
-            copy_range.end,
-            resized.total_rows
-        );
-        assert_eq!(no_cache_projection.total_rows, first.total_rows);
-        assert!(
-            appended.materialized_rows > 0,
-            "live append repaint produced no materialized rows: {appended:?}"
-        );
-        assert!(first_counters.layout_cache > 0);
-        assert!(first_counters.layout_cache <= blocks);
-        assert!(resize_counters.layout_cache <= blocks);
-        assert!(resize_counters.exact_height_measured_blocks <= blocks);
-        assert!(theme_counters.layout_cache <= blocks);
-        assert!(theme_counters.exact_height_measured_blocks <= blocks);
-        assert!(scroll_counters.layout_cache <= blocks);
-        assert!(scroll_counters.exact_height_measured_blocks <= blocks);
-        assert!(visible_counters.layout_cache <= blocks);
-        assert!(visible_counters.exact_height_measured_blocks <= blocks);
-        assert!(copy_counters.layout_cache <= blocks);
-        assert!(copy_counters.exact_height_measured_blocks <= blocks);
-        assert!(append_counters.layout_cache <= blocks + 1);
-        assert!(append_counters.exact_height_measured_blocks <= blocks + 1);
-        assert_eq!(
-            no_cache_counters.layout_cache,
-            first_counters.layout_cache
-        );
-        assert_projection_bench_gates(first_counters, "first paint");
-        assert_projection_bench_gates(resize_counters, "resize");
-        assert_projection_bench_gates(theme_counters, "theme refresh");
-        assert_projection_bench_gates(visible_counters, "visible range");
-        assert_projection_bench_gates(copy_counters, "copy range");
-        assert_projection_bench_gates(append_counters, "live append");
-        assert_projection_bench_gates(no_cache_counters, "no-cache first paint");
-        assert_projection_bench_gates(scroll_counters, "scroll jump");
-        assert!(
-            scroll_counters.range_materialized_rows <= 12 * 80,
-            "scroll benchmark materialized {} rows over 12 jumps, expected <= 960",
-            scroll_counters.range_materialized_rows,
-        );
-
-        smelt_perf::alloc::set_enabled(false);
-        smelt_perf::perf::set_enabled(false);
-        smelt_perf::perf::clear();
-
-        TranscriptBenchSample {
-            input_bytes,
-            generated_bytes,
-            blocks,
-            total_rows: first.total_rows,
-            first_ms,
-            resize_ms,
-            theme_ms,
-            scroll12_ms,
-            visible_ms,
-            copy_ms,
-            append_ms,
-            no_cache_ms,
-            allocs: first_alloc.allocs,
-            bytes_allocated: first_alloc.bytes_allocated,
-            alloc_current_bytes: first_alloc.current_bytes,
-            alloc_peak_bytes: first_alloc.peak_bytes,
-            visible_rows: visible.rows.len(),
-            copied_rows: copy_range
-                .end
-                .row
-                .saturating_sub(copy_range.start.row)
-                .saturating_add(1),
-            appended_rows,
-            scroll_materialized_rows,
-            first_counters,
-            resize_counters,
-            theme_counters,
-            scroll_counters,
-            visible_counters,
-            copy_counters,
-            append_counters,
-            no_cache_counters,
-        }
-    }
-
-    fn print_transcript_bench_summary(
-        workload: TranscriptBenchWorkload,
-        samples: &[TranscriptBenchSample],
-    ) {
-        let first = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.first_ms)
-                .collect::<Vec<_>>(),
-        );
-        let resize = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.resize_ms)
-                .collect::<Vec<_>>(),
-        );
-        let theme = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.theme_ms)
-                .collect::<Vec<_>>(),
-        );
-        let scroll = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.scroll12_ms)
-                .collect::<Vec<_>>(),
-        );
-        let visible = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.visible_ms)
-                .collect::<Vec<_>>(),
-        );
-        let copy = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.copy_ms)
-                .collect::<Vec<_>>(),
-        );
-        let append = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.append_ms)
-                .collect::<Vec<_>>(),
-        );
-        let no_cache = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.no_cache_ms)
-                .collect::<Vec<_>>(),
-        );
-        let sample = samples[0];
-        eprintln!(
-            "| {:<18} | {:>8.2} | {:>6} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} |",
-            workload.name,
-            sample.input_bytes as f64 / (1024.0 * 1024.0),
-            sample.blocks,
-            sample.total_rows,
-            first.display(),
-            resize.display(),
-            theme.display(),
-            scroll.display(),
-            visible.display(),
-            copy.display(),
-            append.display(),
-            no_cache.display(),
-        );
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} copy_mean_ms={:.3} copy_stddev_ms={:.3} append_mean_ms={:.3} append_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} alloc_current_bytes={} alloc_peak_bytes={} visible_rows={} copied_rows={} appended_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
-            workload.name,
-            samples.len(),
-            sample.input_bytes,
-            sample.generated_bytes,
-            sample.blocks,
-            sample.total_rows,
-            first.mean,
-            first.stddev,
-            resize.mean,
-            resize.stddev,
-            theme.mean,
-            theme.stddev,
-            scroll.mean,
-            scroll.stddev,
-            visible.mean,
-            visible.stddev,
-            copy.mean,
-            copy.stddev,
-            append.mean,
-            append.stddev,
-            no_cache.mean,
-            no_cache.stddev,
-            sample.allocs,
-            sample.bytes_allocated,
-            sample.alloc_current_bytes,
-            sample.alloc_peak_bytes,
-            sample.visible_rows,
-            sample.copied_rows,
-            sample.appended_rows,
-            sample.scroll_materialized_rows,
-            first.min,
-            first.max,
-        );
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_JSON {{\"type\":\"layout_summary\",\"workload\":\"{}\",\"runs\":{},\"input_bytes\":{},\"generated_bytes\":{},\"blocks\":{},\"rows\":{},\"first_mean_ms\":{:.3},\"first_stddev_ms\":{:.3},\"resize_mean_ms\":{:.3},\"resize_stddev_ms\":{:.3},\"theme_mean_ms\":{:.3},\"theme_stddev_ms\":{:.3},\"scroll12_mean_ms\":{:.3},\"scroll12_stddev_ms\":{:.3},\"visible_mean_ms\":{:.3},\"visible_stddev_ms\":{:.3},\"copy_mean_ms\":{:.3},\"copy_stddev_ms\":{:.3},\"append_mean_ms\":{:.3},\"append_stddev_ms\":{:.3},\"no_cache_mean_ms\":{:.3},\"no_cache_stddev_ms\":{:.3},\"allocs\":{},\"bytes_allocated\":{},\"alloc_current_bytes\":{},\"alloc_peak_bytes\":{},\"visible_rows\":{},\"copied_rows\":{},\"appended_rows\":{},\"scroll_materialized_rows\":{},\"first_min_ms\":{:.3},\"first_max_ms\":{:.3}}}",
-            workload.name,
-            samples.len(),
-            sample.input_bytes,
-            sample.generated_bytes,
-            sample.blocks,
-            sample.total_rows,
-            first.mean,
-            first.stddev,
-            resize.mean,
-            resize.stddev,
-            theme.mean,
-            theme.stddev,
-            scroll.mean,
-            scroll.stddev,
-            visible.mean,
-            visible.stddev,
-            copy.mean,
-            copy.stddev,
-            append.mean,
-            append.stddev,
-            no_cache.mean,
-            no_cache.stddev,
-            sample.allocs,
-            sample.bytes_allocated,
-            sample.alloc_current_bytes,
-            sample.alloc_peak_bytes,
-            sample.visible_rows,
-            sample.copied_rows,
-            sample.appended_rows,
-            sample.scroll_materialized_rows,
-            first.min,
-            first.max,
-        );
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_COUNTERS_JSON {{\"type\":\"layout_counters\",\"workload\":\"{}\",\"first\":{},\"resize\":{},\"theme\":{},\"scroll12\":{},\"visible\":{},\"copy\":{},\"append\":{},\"no_cache\":{}}}",
-            workload.name,
-            counters_json(sample.first_counters),
-            counters_json(sample.resize_counters),
-            counters_json(sample.theme_counters),
-            counters_json(sample.scroll_counters),
-            counters_json(sample.visible_counters),
-            counters_json(sample.copy_counters),
-            counters_json(sample.append_counters),
-            counters_json(sample.no_cache_counters),
-        );
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_COUNTERS workload={} first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} copy={:?} append={:?} no_cache={:?}",
-            workload.name,
-            sample.first_counters,
-            sample.resize_counters,
-            sample.theme_counters,
-            sample.scroll_counters,
-            sample.visible_counters,
-            sample.copy_counters,
-            sample.append_counters,
-            sample.no_cache_counters,
-        );
-    }
-
-    pub(crate) fn run_layout_benchmark() {
-        let runs = transcript_bench_runs();
-        let workloads = transcript_bench_workloads();
-        assert!(!workloads.is_empty(), "no benchmark workloads selected");
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH runs={runs} workloads={}",
-            workloads.len()
-        );
-        eprintln!(
-            "| workload           |      MiB | blocks |     rows |     first ms |    resize ms |     theme ms |   scroll12 ms |   visible ms |      copy ms |    append ms |   nocache ms |"
-        );
-        eprintln!(
-            "|--------------------|----------|--------|----------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|"
-        );
-        for workload in workloads {
-            let _warmup = run_transcript_bench_sample(workload);
-            let mut samples = Vec::with_capacity(runs);
-            for run in 0..runs {
-                let sample = run_transcript_bench_sample(workload);
-                eprintln!(
-                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} append_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} alloc_current_bytes={} alloc_peak_bytes={}",
-                    workload.name,
-                    run + 1,
-                    sample.input_bytes,
-                    sample.generated_bytes,
-                    sample.blocks,
-                    sample.total_rows,
-                    sample.first_ms,
-                    sample.resize_ms,
-                    sample.theme_ms,
-                    sample.scroll12_ms,
-                    sample.visible_ms,
-                    sample.copy_ms,
-                    sample.append_ms,
-                    sample.no_cache_ms,
-                    sample.allocs,
-                    sample.bytes_allocated,
-                    sample.alloc_current_bytes,
-                    sample.alloc_peak_bytes,
-                );
-                samples.push(sample);
-            }
-            print_transcript_bench_summary(workload, &samples);
-        }
-    }
-
-    pub(crate) fn run_true_resume_benchmark() {
-        let target_bytes = std::env::var("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(10 * 1024 * 1024);
-        run_true_resume_bench_sample(target_bytes);
-    }
-
-    }
-
     fn project_tool_title(name: &str, summary: protocol::StyledLines) -> Buffer {
         let mut transcript = Transcript::new();
         let mut parser = StreamParser::new();
@@ -9230,7 +7994,7 @@ pub(crate) mod tests {
 
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(7), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(7), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -9313,7 +8077,7 @@ pub(crate) mod tests {
                 && expanded.iter().any(|line| line == "* read_file b.rs"),
             "expanded rows: {expanded:?}"
         );
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(8), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(8), Default::default());
 
         projection.project(
             &mut buf,
@@ -9343,7 +8107,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(3), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(3), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -9452,7 +8216,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             display.hard_breaks(),
-            crate::smelt_edit::hard_breaks_for_lines(&rows)
+            smelt_edit::hard_breaks_for_lines(&rows)
         );
     }
 
@@ -9464,7 +8228,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(4), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(4), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -9488,7 +8252,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(5), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(5), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -9530,7 +8294,7 @@ pub(crate) mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(6), Default::default());
+        let mut buf = Buffer::new(smelt_edit::BufId(6), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,

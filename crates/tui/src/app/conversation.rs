@@ -289,7 +289,7 @@ impl ConversationRuntime {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
         block_indices: Option<&[u64]>,
-    ) -> crate::content::transcript_buf::TranscriptSearchLayout {
+    ) -> smelt_view::transcript_buf::TranscriptSearchLayout {
         match block_indices {
             Some(block_indices) => self
                 .document
@@ -403,7 +403,7 @@ impl ConversationRuntime {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
         row: crate::smelt_edit::RowIndex,
-    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+    ) -> Option<smelt_view::transcript_buf::TranscriptNodeRow> {
         self.document
             .transcript
             .node_metadata_at_row(lua, width, row)
@@ -414,8 +414,8 @@ impl ConversationRuntime {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
         row: crate::smelt_edit::RowIndex,
-        action: crate::content::transcript_buf::FoldAction,
-        activation: crate::content::transcript_buf::FoldActivation,
+        action: smelt_view::transcript_buf::FoldAction,
+        activation: smelt_view::transcript_buf::FoldActivation,
     ) -> bool {
         self.document
             .transcript
@@ -426,8 +426,8 @@ impl ConversationRuntime {
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
-        id: crate::content::transcript_scene::RenderNodeId,
-        action: crate::content::transcript_buf::FoldAction,
+        id: smelt_view::transcript_scene::RenderNodeId,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.document.transcript.fold_node(lua, width, id, action)
     }
@@ -436,7 +436,7 @@ impl ConversationRuntime {
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.document.transcript.fold_all(lua, width, action)
     }
@@ -446,7 +446,7 @@ impl ConversationRuntime {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
         kind: &str,
-        action: crate::content::transcript_buf::FoldAction,
+        action: smelt_view::transcript_buf::FoldAction,
     ) -> bool {
         self.document
             .transcript
@@ -680,7 +680,7 @@ impl ConversationRuntime {
     #[cfg(test)]
     pub(crate) fn transcript_projection_counters_for_harness(
         &self,
-    ) -> crate::content::transcript_buf::TranscriptProjectionCounters {
+    ) -> smelt_view::transcript_buf::TranscriptProjectionCounters {
         self.document.transcript.projection_counters_for_harness()
     }
 

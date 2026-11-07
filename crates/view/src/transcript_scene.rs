@@ -9,13 +9,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(crate) enum RenderNodeId {
+pub enum RenderNodeId {
     Block(BlockId),
     Group(u64),
 }
 
 impl RenderNodeId {
-    pub(crate) fn as_block_id(self) -> Option<BlockId> {
+    pub fn as_block_id(self) -> Option<BlockId> {
         match self {
             Self::Block(id) => Some(id),
             Self::Group(_) => None,
@@ -23,35 +23,35 @@ impl RenderNodeId {
     }
 }
 
-pub(crate) type NodeLayoutKey = LayoutKey;
+pub type NodeLayoutKey = LayoutKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RenderNode {
+pub enum RenderNode {
     Block { id: BlockId, block_index: usize },
     Group(Box<RenderGroupNode>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RenderGroupChild {
-    pub(crate) id: BlockId,
-    pub(crate) content_revision: u64,
-    pub(crate) presentation_revision: u64,
-    pub(crate) metadata: TranscriptGroupChildMetadata,
+pub struct RenderGroupChild {
+    pub id: BlockId,
+    pub content_revision: u64,
+    pub presentation_revision: u64,
+    pub metadata: TranscriptGroupChildMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RenderGroupNode {
-    pub(crate) id: u64,
-    pub(crate) name: String,
-    pub(crate) bucket: String,
-    pub(crate) child_range: Range<usize>,
-    pub(crate) children: Vec<RenderGroupChild>,
-    pub(crate) presentation_revision: u64,
-    pub(crate) default_view_state: ViewState,
+pub struct RenderGroupNode {
+    pub id: u64,
+    pub name: String,
+    pub bucket: String,
+    pub child_range: Range<usize>,
+    pub children: Vec<RenderGroupChild>,
+    pub presentation_revision: u64,
+    pub default_view_state: ViewState,
 }
 
 impl RenderGroupNode {
-    pub(crate) fn child_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+    pub fn child_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
         self.children.iter().map(|child| child.id)
     }
 
@@ -85,7 +85,7 @@ impl RenderGroupNode {
 }
 
 impl RenderNode {
-    pub(crate) fn id(&self) -> RenderNodeId {
+    pub fn id(&self) -> RenderNodeId {
         match self {
             Self::Block { id, .. } => RenderNodeId::Block(*id),
             Self::Group(group) => RenderNodeId::Group(group.id),
@@ -93,7 +93,7 @@ impl RenderNode {
     }
 }
 
-pub(crate) const TRANSCRIPT_APPEND_HEADROOM: usize = 64;
+pub const TRANSCRIPT_APPEND_HEADROOM: usize = 64;
 
 #[derive(Clone, Debug, Default)]
 struct RenderNodeIndex {
@@ -153,7 +153,7 @@ impl RenderNodeIndex {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TranscriptDefaultViewPolicy {
+pub struct TranscriptDefaultViewPolicy {
     block_kinds: HashMap<String, ViewState>,
     tools: HashMap<String, ViewState>,
     groups: HashMap<String, ViewState>,
@@ -195,7 +195,7 @@ impl Default for TranscriptDefaultViewPolicy {
 }
 
 impl TranscriptDefaultViewPolicy {
-    pub(crate) fn from_lua(lua: &smelt_core::lua::runtime::LuaRuntime) -> Self {
+    pub fn from_lua(lua: &smelt_core::lua::runtime::LuaRuntime) -> Self {
         let mut policy = Self::default();
         if let Err(err) = policy.apply_lua_config(&lua.lua) {
             lua.record_error(format!("smelt.settings.transcript.view: {err}"));
@@ -224,15 +224,11 @@ impl TranscriptDefaultViewPolicy {
         Ok(())
     }
 
-    pub(crate) fn group_enabled(&self, name: &str) -> bool {
+    pub fn group_enabled(&self, name: &str) -> bool {
         !self.disabled_groups.contains(name)
     }
 
-    pub(crate) fn node_default_view_state(
-        &self,
-        history: &BlockHistory,
-        node: &RenderNode,
-    ) -> ViewState {
+    pub fn node_default_view_state(&self, history: &BlockHistory, node: &RenderNode) -> ViewState {
         match node {
             RenderNode::Block { id, .. } => history
                 .tool_name(*id)
@@ -332,7 +328,7 @@ fn parse_lua_view_state(value: &str) -> mlua::Result<ViewState> {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct TranscriptPresentationState {
+pub struct TranscriptPresentationState {
     overrides: HashMap<RenderNodeId, ViewState>,
     generation: u64,
     /// Nodes changed by recent generations, complete for generations after
@@ -345,13 +341,13 @@ pub(crate) struct TranscriptPresentationState {
 const PRESENTATION_CHANGE_LOG_CAPACITY: usize = 64;
 
 impl TranscriptPresentationState {
-    pub(crate) fn generation(&self) -> u64 {
+    pub fn generation(&self) -> u64 {
         self.generation
     }
 
     /// Nodes whose view state changed after `generation`, or `None` when the
     /// change log no longer covers it.
-    pub(crate) fn changed_since(
+    pub fn changed_since(
         &self,
         generation: u64,
     ) -> Option<impl Iterator<Item = RenderNodeId> + '_> {
@@ -363,7 +359,7 @@ impl TranscriptPresentationState {
         })
     }
 
-    pub(crate) fn effective_view_state(
+    pub fn effective_view_state(
         &self,
         policy: &TranscriptDefaultViewPolicy,
         plan: &TranscriptScene,
@@ -377,7 +373,7 @@ impl TranscriptPresentationState {
             .or_else(|| plan.node_default_view_state(policy, history, index))
     }
 
-    pub(crate) fn set(
+    pub fn set(
         &mut self,
         policy: &TranscriptDefaultViewPolicy,
         plan: &TranscriptScene,
@@ -411,7 +407,7 @@ impl TranscriptPresentationState {
         changed
     }
 
-    pub(crate) fn toggle(
+    pub fn toggle(
         &mut self,
         policy: &TranscriptDefaultViewPolicy,
         plan: &TranscriptScene,
@@ -439,7 +435,7 @@ impl TranscriptPresentationState {
         self.set(policy, plan, history, id, next)
     }
 
-    pub(crate) fn set_all(
+    pub fn set_all(
         &mut self,
         policy: &TranscriptDefaultViewPolicy,
         plan: &TranscriptScene,
@@ -468,7 +464,7 @@ impl TranscriptPresentationState {
         changed
     }
 
-    pub(crate) fn prune(&mut self, live: impl Fn(RenderNodeId) -> bool) {
+    pub fn prune(&mut self, live: impl Fn(RenderNodeId) -> bool) {
         let before = self.overrides.len();
         self.overrides.retain(|id, _| live(*id));
         if self.overrides.len() != before {
@@ -491,18 +487,18 @@ struct TranscriptScenePrefix {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ContentAppend {
-    pub(crate) content_id: ContentId,
-    pub(crate) channel: ContentChannel,
-    pub(crate) byte_range: Range<usize>,
+pub struct ContentAppend {
+    pub content_id: ContentId,
+    pub channel: ContentChannel,
+    pub byte_range: Range<usize>,
 }
 
 #[derive(Default)]
-pub(crate) struct TranscriptSceneRefresh {
-    pub(crate) changed_blocks: HashSet<BlockId>,
-    pub(crate) appended_ranges: HashMap<BlockId, Vec<ContentAppend>>,
-    pub(crate) structure_changed: bool,
-    pub(crate) prune_required: bool,
+pub struct TranscriptSceneRefresh {
+    pub changed_blocks: HashSet<BlockId>,
+    pub appended_ranges: HashMap<BlockId, Vec<ContentAppend>>,
+    pub structure_changed: bool,
+    pub prune_required: bool,
 }
 
 #[derive(Default)]
@@ -512,23 +508,23 @@ struct ContentPatchRefresh {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TranscriptScene {
-    pub(crate) history_generation: u64,
-    pub(crate) history_order_generation: u64,
+pub struct TranscriptScene {
+    pub history_generation: u64,
+    pub history_order_generation: u64,
     history_record_generation: u64,
     history_patch_revision: u64,
     history_order_len: usize,
-    pub(crate) group_generation: u64,
-    pub(crate) group_cache_key: Option<u64>,
-    pub(crate) nodes: Vec<RenderNode>,
+    pub group_generation: u64,
+    pub group_cache_key: Option<u64>,
+    pub nodes: Vec<RenderNode>,
     node_index: RenderNodeIndex,
     grouped_block_index_by_id: HashMap<BlockId, usize>,
-    pub(crate) revision: u64,
+    pub revision: u64,
     stable_prefix: Option<TranscriptScenePrefix>,
 }
 
 impl TranscriptScene {
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             history_generation: 0,
             history_order_generation: 0,
@@ -546,7 +542,7 @@ impl TranscriptScene {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_history_with_groups(
+    pub fn for_history_with_groups(
         history: &BlockHistory,
         groups: &[TranscriptGroupSpec],
         group_generation: u64,
@@ -556,7 +552,7 @@ impl TranscriptScene {
         Self::build_for_history_with_groups(history, groups, group_generation, group_cache_key)
     }
 
-    pub(crate) fn refresh_for_history_with_groups(
+    pub fn refresh_for_history_with_groups(
         &mut self,
         history: &BlockHistory,
         groups: &[TranscriptGroupSpec],
@@ -836,44 +832,48 @@ impl TranscriptScene {
             .retain(|_, node_index| *node_index < index);
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     /// The node count and revision of the prefix the last refresh kept.
-    pub(crate) fn stable_prefix(&self) -> Option<(usize, u64)> {
+    pub fn stable_prefix(&self) -> Option<(usize, u64)> {
         self.stable_prefix
             .map(|prefix| (prefix.len, prefix.revision))
     }
 
-    pub(crate) fn node(&self, index: usize) -> Option<&RenderNode> {
+    pub fn node(&self, index: usize) -> Option<&RenderNode> {
         self.nodes.get(index)
     }
 
-    pub(crate) fn node_id(&self, index: usize) -> Option<RenderNodeId> {
+    pub fn node_id(&self, index: usize) -> Option<RenderNodeId> {
         self.nodes.get(index).map(RenderNode::id)
     }
 
     #[cfg(test)]
-    pub(crate) fn ids(&self) -> impl Iterator<Item = RenderNodeId> + '_ {
+    pub fn ids(&self) -> impl Iterator<Item = RenderNodeId> + '_ {
         self.nodes.iter().map(RenderNode::id)
     }
 
-    pub(crate) fn contains_id(&self, id: RenderNodeId) -> bool {
+    pub fn contains_id(&self, id: RenderNodeId) -> bool {
         self.node_index.contains(id)
     }
 
-    pub(crate) fn index_of(&self, id: RenderNodeId) -> Option<usize> {
+    pub fn index_of(&self, id: RenderNodeId) -> Option<usize> {
         self.node_index.get(id)
     }
 
-    pub(crate) fn index_for_block(&self, id: BlockId) -> Option<usize> {
+    pub fn index_for_block(&self, id: BlockId) -> Option<usize> {
         self.node_index
             .get(RenderNodeId::Block(id))
             .or_else(|| self.grouped_block_index_by_id.get(&id).copied())
     }
 
-    pub(crate) fn push_block_ids_for_node(&self, index: usize, out: &mut Vec<BlockId>) -> bool {
+    pub fn push_block_ids_for_node(&self, index: usize, out: &mut Vec<BlockId>) -> bool {
         match self.nodes.get(index) {
             Some(RenderNode::Block { id, .. }) => {
                 out.push(*id);
@@ -887,14 +887,14 @@ impl TranscriptScene {
         }
     }
 
-    pub(crate) fn representative_block_id_for_node(&self, index: usize) -> Option<BlockId> {
+    pub fn representative_block_id_for_node(&self, index: usize) -> Option<BlockId> {
         match self.nodes.get(index)? {
             RenderNode::Block { id, .. } => Some(*id),
             RenderNode::Group(group) => group.children.first().map(|child| child.id),
         }
     }
 
-    pub(crate) fn node_default_view_state(
+    pub fn node_default_view_state(
         &self,
         policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
@@ -905,7 +905,7 @@ impl TranscriptScene {
             .map(|node| policy.node_default_view_state(history, node))
     }
 
-    pub(crate) fn node_default_view_state_by_id(
+    pub fn node_default_view_state_by_id(
         &self,
         policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
@@ -915,7 +915,7 @@ impl TranscriptScene {
             .and_then(|index| self.node_default_view_state(policy, history, index))
     }
 
-    pub(crate) fn node_key(
+    pub fn node_key(
         &self,
         policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
@@ -927,7 +927,7 @@ impl TranscriptScene {
         self.node_key_with_view_state(history, index, base_key, view_state)
     }
 
-    pub(crate) fn node_key_with_view_state(
+    pub fn node_key_with_view_state(
         &self,
         history: &BlockHistory,
         index: usize,
@@ -958,7 +958,7 @@ impl TranscriptScene {
         }
     }
 
-    pub(crate) fn rendered_node_gap(
+    pub fn rendered_node_gap(
         &self,
         history: &BlockHistory,
         index: usize,

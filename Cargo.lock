@@ -3931,12 +3931,41 @@ dependencies = [
  "smelt-term",
  "smelt-test-support",
  "smelt-transcript",
+ "smelt-view",
  "smelt-worktree",
  "tempfile",
  "tiny-skia",
  "tokio",
  "tokio-util",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "smelt-view"
+version = "0.0.0-dev"
+dependencies = [
+ "base64 0.22.1",
+ "crossterm",
+ "mlua",
+ "ratex-layout",
+ "ratex-parser",
+ "ratex-render",
+ "ratex-types",
+ "serde",
+ "serde_json",
+ "smelt-buffer 0.0.0-dev",
+ "smelt-core",
+ "smelt-edit",
+ "smelt-engine",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
+ "smelt-store 0.0.0-dev",
+ "smelt-term",
+ "smelt-text",
+ "smelt-transcript",
+ "tempfile",
+ "tiny-skia",
+ "tokio",
 ]
 
 [[package]]

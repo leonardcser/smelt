@@ -5,12 +5,12 @@ mod vim_bridge;
 
 pub(crate) use smelt_core::history::History;
 
-use crate::content;
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::smelt_edit::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
 use smelt_core::attachment::{Attachment, AttachmentId, AttachmentStore};
+use smelt_view as content;
 use std::sync::{Arc, Mutex};
 use vim_bridge::VimBridgeResult;
 
@@ -1395,7 +1395,7 @@ mod tests {
     impl Harness {
         pub(super) fn new() -> Self {
             let state = PromptState::new();
-            let parser = Arc::new(crate::content::prompt_parser::PromptBufferParser::new(
+            let parser = Arc::new(smelt_view::prompt_parser::PromptBufferParser::new(
                 state.store.clone(),
             ));
             let mut buf = crate::smelt_edit::Buffer::new(

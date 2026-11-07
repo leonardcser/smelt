@@ -5,19 +5,19 @@ mod markdown;
 mod temp_rows;
 
 #[cfg(test)]
-pub(crate) use layout_ir::measure_layout_ir_with_options;
-pub(crate) use layout_ir::{
+pub use layout_ir::measure_layout_ir_with_options;
+pub use layout_ir::{
     measure_layout_ir_plan, refresh_layout_ir_content_measurements, render_layout_ir_into,
     render_layout_ir_into_with_history, render_layout_ir_range_into_measured, MeasuredLayout,
 };
-pub(crate) use markdown::render_markdown_inner;
+pub use markdown::render_markdown_inner;
 
 #[cfg(test)]
 mod tests {
-    use crate::content::display_layout::{compile_block, render_block_into, RenderCtx};
+    use crate::display_layout::{compile_block, render_block_into, RenderCtx};
+    use smelt_buffer::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_buffer::cell_width;
-    use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
-    use smelt_core::theme::Theme;
+    use smelt_buffer::theme::Theme;
     use smelt_transcript::content::builder::test_util::{read_buffer, TestLine};
     use smelt_transcript::content::{markdown_stream::thinking_summary, LayoutContext};
     use smelt_transcript::transcript_model::{

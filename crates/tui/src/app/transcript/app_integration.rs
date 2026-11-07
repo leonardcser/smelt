@@ -39,8 +39,8 @@ impl TuiApp {
             self.conversation.fold_transcript_node(
                 &self.lua,
                 width,
-                crate::content::transcript_scene::RenderNodeId::Block(id),
-                crate::content::transcript_buf::FoldAction::Peek,
+                smelt_view::transcript_scene::RenderNodeId::Block(id),
+                smelt_view::transcript_buf::FoldAction::Peek,
             );
         }
         if follow_tail {

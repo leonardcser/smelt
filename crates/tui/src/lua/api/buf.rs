@@ -574,7 +574,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
     crate::lua::with_ui_host(|host| {
         host.with_ui(|ui| {
             let theme_snap = ui.theme().clone();
-            let width = crate::content::term_width() as u16;
+            let width = smelt_view::term_width() as u16;
             let Some(buf) = ui.buf_mut(id) else {
                 return;
             };

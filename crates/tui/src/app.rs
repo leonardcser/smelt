@@ -1962,14 +1962,14 @@ impl TuiApp {
                 )
                 .expect("PROMPT_EDIT_BUF slot is free");
             let parser: std::sync::Arc<dyn crate::smelt_edit::BufferParser> = std::sync::Arc::new(
-                crate::content::prompt_parser::PromptBufferParser::with_placeholder(
+                smelt_view::prompt_parser::PromptBufferParser::with_placeholder(
                     input.store.clone(),
                     prompt_placeholder_display.clone(),
                     Arc::clone(&command_catalog),
                 ),
             );
             let copier: std::sync::Arc<dyn crate::smelt_edit::BufferCopy> = std::sync::Arc::new(
-                crate::content::prompt_parser::PromptCopier::new(input.store.clone()),
+                smelt_view::prompt_parser::PromptCopier::new(input.store.clone()),
             );
             if let Some(b) = ui.buf_mut(input_display_buf) {
                 b.set_parser(parser);
@@ -1978,7 +1978,7 @@ impl TuiApp {
             }
             let transcript_display_buf = ui.buf_create(crate::smelt_edit::BufCreateOpts::default());
             let transcript_copier: std::sync::Arc<dyn crate::smelt_edit::BufferCopy> =
-                std::sync::Arc::new(crate::content::transcript_buf::TranscriptCopier);
+                std::sync::Arc::new(smelt_view::transcript_buf::TranscriptCopier);
             if let Some(b) = ui.buf_mut(transcript_display_buf) {
                 b.readonly = true;
                 b.set_copier(transcript_copier);
@@ -3575,7 +3575,7 @@ impl TuiApp {
     }
 
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
-        crate::content::display_layout::set_kitty_probe_result(false);
+        smelt_view::display_layout::set_kitty_probe_result(false);
         let platform_startup = smelt_perf::perf::begin("startup:platform");
         let probe_input = crate::theme::detect_background(self.ui.theme_mut());
         // Install the background-aware baked theme before Lua loads so a
@@ -4035,7 +4035,7 @@ impl TuiApp {
                             TerminalReply::KittyGraphics(supported) => {
                                 kitty_probe_pending = false;
                                 kitty_supported = supported;
-                                crate::content::display_layout::set_kitty_probe_result(supported);
+                                smelt_view::display_layout::set_kitty_probe_result(supported);
                                 if supported {
                                     let _ = self.platform.write_terminal_control(
                                         &crate::term_input::cell_pixel_query(),
@@ -4043,7 +4043,7 @@ impl TuiApp {
                                 }
                             }
                             TerminalReply::CellPixels(pixels) => {
-                                crate::content::display_layout::set_kitty_cell_pixels(Some(pixels));
+                                smelt_view::display_layout::set_kitty_cell_pixels(Some(pixels));
                             }
                         }
                         self.request_urgent_render();

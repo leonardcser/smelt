@@ -13,7 +13,7 @@ use std::{
 };
 
 use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
-use smelt_core::theme::intern;
+use smelt_buffer::theme::intern;
 use smelt_transcript::content::builder::{display_width, wrapped_segments, LineBuilder};
 use smelt_transcript::content::code_block::{measure_code_block, parse_code_block};
 use smelt_transcript::content::highlight::{
@@ -31,7 +31,7 @@ use smelt_transcript::transcript_content::{
     ContentId, ContentRead, ContentTextWindow, TranscriptContent,
 };
 
-use smelt_core::buffer::{AtomicObject, AtomicSpan, SpanMeta};
+use smelt_buffer::buffer::{AtomicObject, AtomicSpan, SpanMeta};
 use smelt_term::kitty;
 use smelt_term::RasterImage;
 
@@ -313,7 +313,7 @@ fn wrap_markdown_spans(
     if !options.math_graphics {
         return wrap_inline_spans(spans, max_cols);
     }
-    let Some(geometry) = crate::content::display_layout::kitty_cell_pixels() else {
+    let Some(geometry) = crate::display_layout::kitty_cell_pixels() else {
         return wrap_inline_spans(spans, max_cols);
     };
     let mut prepared = spans.to_vec();
@@ -344,7 +344,7 @@ fn prepare_inline_math(
 fn table_math_preparer(options: &InlineOptions) -> impl FnMut(&mut [InlineSpan], usize) + '_ {
     let geometry = options
         .math_graphics
-        .then(crate::content::display_layout::kitty_cell_pixels)
+        .then(crate::display_layout::kitty_cell_pixels)
         .flatten();
     move |spans, cols| {
         if let Some(geometry) = geometry {
@@ -437,7 +437,7 @@ fn markdown_math_rows(
     options: &InlineOptions,
 ) -> (Vec<String>, Option<Arc<RasterImage>>) {
     if options.math_graphics {
-        if let Some(geometry) = crate::content::display_layout::kitty_cell_pixels() {
+        if let Some(geometry) = crate::display_layout::kitty_cell_pixels() {
             if let Some((rows, id)) =
                 graphic_math_rows(source, width, options.file_icons.light, geometry)
             {
@@ -1360,7 +1360,7 @@ fn ensure_retained_markdown_layout(
         .expect("retained Markdown layout clock overflow");
     let cell_pixels = inline_options
         .math_graphics
-        .then(crate::content::display_layout::kitty_cell_pixels)
+        .then(crate::display_layout::kitty_cell_pixels)
         .flatten();
     let image_generation = cell_pixels.map_or(0, |_| kitty::image_generation());
     let mut layout = parsed
@@ -1572,9 +1572,9 @@ fn render_markdown_docs_from_state<'a>(
                         let rows = measure_code_block(&code_block, width);
                         if clip.intersects(state.rows, rows) {
                             let inherited_style = out.current_style();
-                            let mut buf = smelt_core::buffer::Buffer::new(
-                                smelt_core::buffer::BufId(0),
-                                smelt_core::buffer::BufCreateOpts::default(),
+                            let mut buf = smelt_buffer::buffer::Buffer::new(
+                                smelt_buffer::buffer::BufId(0),
+                                smelt_buffer::buffer::BufCreateOpts::default(),
                             );
                             let start = clip.start.saturating_sub(state.rows).min(rows);
                             let end = clip.end.saturating_sub(state.rows).min(rows);
@@ -1674,9 +1674,9 @@ fn render_markdown_docs_from_state<'a>(
                         ));
                         if clip.intersects(state.rows, table_rows) {
                             let inherited_style = out.current_style();
-                            let mut buf = smelt_core::buffer::Buffer::new(
-                                smelt_core::buffer::BufId(0),
-                                smelt_core::buffer::BufCreateOpts::default(),
+                            let mut buf = smelt_buffer::buffer::Buffer::new(
+                                smelt_buffer::buffer::BufId(0),
+                                smelt_buffer::buffer::BufCreateOpts::default(),
                             );
                             let outcome = {
                                 let mut col =
@@ -1743,7 +1743,7 @@ fn render_markdown_docs_from_state<'a>(
 
 fn emit_temp_rows(
     out: &mut LineBuilder,
-    buf: &smelt_core::buffer::Buffer,
+    buf: &smelt_buffer::buffer::Buffer,
     width: usize,
     base_row: usize,
     rows: usize,
@@ -2673,7 +2673,7 @@ fn render_horizontal_rule(
     }
 
     out.push_dim();
-    out.print_with_meta(&hr, smelt_core::buffer::SpanMeta::copy_as("---"));
+    out.print_with_meta(&hr, smelt_buffer::buffer::SpanMeta::copy_as("---"));
     out.pop_style();
 
     if let Some(b) = bctx {
@@ -2718,7 +2718,7 @@ mod tests {
         let source = "\\[\n\\frac{a}{b}\n\\]";
         let (buf, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
-            &smelt_core::theme::Theme::default(),
+            &smelt_buffer::theme::Theme::default(),
             |out| {
                 render_markdown_inner(out, source, 60, "", false, None);
             },
@@ -2746,7 +2746,7 @@ mod tests {
 
         let (buf, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
-            &smelt_core::theme::Theme::default(),
+            &smelt_buffer::theme::Theme::default(),
             |out| {
                 render_markdown_inner(
                     out,
@@ -2772,7 +2772,7 @@ mod tests {
         let source = r"\[\frac{a}{b}\]";
         let (scratch, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
-            &smelt_core::theme::Theme::default(),
+            &smelt_buffer::theme::Theme::default(),
             |out| {
                 render_markdown_inner(
                     out,
@@ -2786,7 +2786,7 @@ mod tests {
         );
         let (projected, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
-            &smelt_core::theme::Theme::default(),
+            &smelt_buffer::theme::Theme::default(),
             |out| {
                 emit_temp_rows(
                     out,
@@ -3065,7 +3065,7 @@ mod tests {
         assert!(graphics
             .iter()
             .all(|span| span.text.starts_with('\u{10eeee}')));
-        let theme = smelt_core::theme::Theme::default();
+        let theme = smelt_buffer::theme::Theme::default();
         let (buf, _) = smelt_transcript::content::builder::render_into_fresh(80, &theme, |out| {
             emit_inline_spans(out, &spans);
             out.newline();
@@ -3122,7 +3122,7 @@ mod tests {
         let prepare = |spans: &mut [InlineSpan], cols| {
             prepare_inline_math(spans, cols, false, (10, 20));
         };
-        let theme = smelt_core::theme::Theme::default();
+        let theme = smelt_buffer::theme::Theme::default();
         for width in [40, 23, 5] {
             let expected = measure_markdown_table_with_prepare(
                 &rows,
@@ -3234,7 +3234,7 @@ mod tests {
         );
         let (buf, rendered) = smelt_transcript::content::builder::render_into_fresh(
             80,
-            &smelt_core::theme::Theme::default(),
+            &smelt_buffer::theme::Theme::default(),
             |out| {
                 render_markdown_table_with_prepare(
                     out,

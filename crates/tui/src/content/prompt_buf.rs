@@ -92,7 +92,7 @@ mod tests {
             crate::smelt_edit::BufCreateOpts::default(),
         );
         input_buf.set_parser(std::sync::Arc::new(
-            crate::content::prompt_parser::PromptBufferParser::new(input_state.store.clone()),
+            smelt_view::prompt_parser::PromptBufferParser::new(input_state.store.clone()),
         ));
         input_buf.ensure_rendered_at(78);
         sync_prompt_overlays(&inp, &mut input_buf);

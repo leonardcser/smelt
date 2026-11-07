@@ -1,12 +1,12 @@
 //! Prompt text spans and styled source token detection.
 
-use crate::input::ATTACHMENT_MARKER;
 use smelt_core::attachment::{AttachmentId, AttachmentStore};
-pub(crate) use smelt_transcript::content::selection::{scan_at_token, try_at_ref};
+use smelt_text::ATTACHMENT_MARKER;
+pub use smelt_transcript::content::selection::{scan_at_token, try_at_ref};
 
-pub(crate) const TAB_DISPLAY: &str = "    ";
+pub const TAB_DISPLAY: &str = "    ";
 
-pub(crate) enum Span {
+pub enum Span {
     Plain(String),
     Tab,
     Attachment(String),
@@ -14,13 +14,13 @@ pub(crate) enum Span {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum SpanKind {
+pub enum SpanKind {
     Plain,
     Attachment,
     AtRef,
 }
 
-pub(crate) fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
+pub fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
     let mut kinds = Vec::new();
     for span in spans {
         let (text, kind) = match span {
@@ -34,7 +34,7 @@ pub(crate) fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
     kinds
 }
 
-pub(crate) fn build_display_spans(
+pub fn build_display_spans(
     buf: &str,
     att_ids: &[AttachmentId],
     store: &AttachmentStore,
@@ -68,16 +68,16 @@ pub(crate) fn build_display_spans(
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            spans.push(Span::AtRef(crate::content::display_safe_text(&token)));
+            spans.push(Span::AtRef(crate::display_safe_text(&token)));
             i = end;
         } else if let Some((token, _, end)) = scan_at_token(&chars, i) {
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            spans.push(Span::Plain(crate::content::display_safe_text(&token)));
+            spans.push(Span::Plain(crate::display_safe_text(&token)));
             i = end;
         } else {
-            plain.push(crate::content::display_safe_char(chars[i]));
+            plain.push(crate::display_safe_char(chars[i]));
             i += 1;
         }
     }
@@ -87,7 +87,7 @@ pub(crate) fn build_display_spans(
     spans
 }
 
-pub(crate) fn spans_to_string(spans: &[Span]) -> String {
+pub fn spans_to_string(spans: &[Span]) -> String {
     let mut s = String::new();
     for span in spans {
         match span {

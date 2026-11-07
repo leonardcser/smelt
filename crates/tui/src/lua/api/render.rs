@@ -10,18 +10,18 @@
 //! `smelt.layout.{diff,file_view,vbox}{...}` instead - the host renders
 //! it directly into the block buffer with no scratch-buffer seam.
 
-use crate::content::highlight::{
-    compute_split_diff, lang_to_ext, print_code_lines, print_split_diff_side,
-};
-use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_edit::BufId;
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::theme::intern;
+use smelt_transcript::content::builder::render_into as render_into_buffer;
 use smelt_transcript::content::builder::{wrapped_segments, LineBuilder};
 use smelt_transcript::content::highlight::SplitSide;
+use smelt_transcript::content::highlight::{
+    compute_split_diff, lang_to_ext, print_code_lines, print_split_diff_side,
+};
 
 use super::buf::LuaBuf;
 
@@ -116,7 +116,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let width_opt = opts.as_ref().and_then(|opts| opts.width).filter(|w| *w > 0);
             crate::lua::with_ui_host(|host| host.with_ui(|ui| {
                 let theme_snap = ui.theme().clone();
-                let width = width_opt.unwrap_or_else(|| crate::content::term_width() as u16);
+                let width = width_opt.unwrap_or_else(|| smelt_view::term_width() as u16);
                 if let Some(buf) = ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         render_text_content(sink, &content, width, hl_group);
@@ -134,10 +134,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, (buf, source): (LuaBuf, String)| -> LuaResult<()> {
             crate::lua::with_ui_host(|host| host.with_ui(|ui| {
                 let theme_snap = ui.theme().clone();
-                let width = crate::content::term_width() as u16;
+                let width = smelt_view::term_width() as u16;
                 if let Some(buf) = ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
-                        crate::content::display_renderers::render_markdown_inner(
+                        smelt_view::display_renderers::render_markdown_inner(
                             sink,
                             &source,
                             width as usize,
@@ -162,7 +162,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let path = opts.path;
             crate::lua::with_ui_host(|host| host.with_ui(|ui| {
                 let theme_snap = ui.theme().clone();
-                let width = crate::content::term_width() as u16;
+                let width = smelt_view::term_width() as u16;
                 if let Some(buf) = ui.buf_mut(buf.id) {
                     let rendered = render_into_buffer(buf, width, &theme_snap, |sink| {
                         let lang_token = lang.as_deref().unwrap_or_else(|| {
@@ -227,7 +227,7 @@ fn render_split_into_pair(
     ext: Option<&str>,
 ) {
     let theme = ui.theme().clone();
-    let width = crate::content::term_width() as u16;
+    let width = smelt_view::term_width() as u16;
     let plan = compute_split_diff(old, new);
     if let Some(buf) = ui.buf_mut(left_id) {
         render_into_buffer(buf, width, &theme, |sink| {

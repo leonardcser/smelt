@@ -12,9 +12,9 @@ use super::markdown::{
 use super::temp_rows::{
     apply_temp_decoration, emit_buffer_row_clipped, emit_buffer_row_clipped_with_scratch,
 };
-use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
-use smelt_core::buffer::{BufCreateOpts, BufId, Buffer, Span, SpanMeta};
-use smelt_core::theme::{intern, Theme};
+use crate::source_view::{render_source_view, SourceView, SourceViewTarget};
+use smelt_buffer::buffer::{BufCreateOpts, BufId, Buffer, Span, SpanMeta};
+use smelt_buffer::theme::{intern, Theme};
 use smelt_transcript::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_transcript::content::block_layout::{
     solve_hbox_widths_with_fit, BlockLayout, CodeSpec, ContentRenderSpec, GutterSpec, IrLeaf,
@@ -39,7 +39,7 @@ std::thread_local! {
     };
 }
 
-pub(crate) fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, width: u16) -> u16 {
+pub fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, width: u16) -> u16 {
     render_layout_ir_range_measured(
         out,
         layout,
@@ -53,7 +53,7 @@ pub(crate) fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, wi
     )
 }
 
-pub(crate) fn render_layout_ir_into_with_history(
+pub fn render_layout_ir_into_with_history(
     out: &mut LineBuilder,
     layout: &LayoutIr,
     width: u16,
@@ -74,12 +74,12 @@ pub(crate) fn render_layout_ir_into_with_history(
 }
 
 #[cfg(test)]
-pub(crate) fn measure_layout_ir(layout: &LayoutIr, width: u16) -> usize {
+pub fn measure_layout_ir(layout: &LayoutIr, width: u16) -> usize {
     measure_layout_ir_with_options(layout, width, &InlineOptions::default())
 }
 
 #[cfg(test)]
-pub(crate) fn measure_layout_ir_with_options(
+pub fn measure_layout_ir_with_options(
     layout: &LayoutIr,
     width: u16,
     inline_options: &InlineOptions,
@@ -88,7 +88,7 @@ pub(crate) fn measure_layout_ir_with_options(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct MeasuredLayout {
+pub struct MeasuredLayout {
     rows: usize,
     kind: MeasuredLayoutKind,
 }
@@ -124,7 +124,7 @@ impl RenderMeasurement<'_> {
 }
 
 impl MeasuredLayout {
-    pub(crate) fn rows(&self) -> usize {
+    pub fn rows(&self) -> usize {
         self.rows
     }
 
@@ -151,7 +151,7 @@ impl MeasuredLayout {
         }
     }
 
-    pub(crate) fn retained_bytes(&self) -> usize {
+    pub fn retained_bytes(&self) -> usize {
         let own = std::mem::size_of::<Self>();
         match &self.kind {
             MeasuredLayoutKind::Terminal => own,
@@ -166,7 +166,7 @@ impl MeasuredLayout {
     }
 }
 
-pub(crate) fn measure_layout_ir_plan(
+pub fn measure_layout_ir_plan(
     layout: &LayoutIr,
     width: u16,
     inline_options: &InlineOptions,
@@ -174,7 +174,7 @@ pub(crate) fn measure_layout_ir_plan(
     measure_layout_ir_plan_with_gutter(layout, width, 0, inline_options)
 }
 
-pub(crate) fn refresh_layout_ir_content_measurements(
+pub fn refresh_layout_ir_content_measurements(
     layout: &LayoutIr,
     measured: &mut MeasuredLayout,
     width: u16,
@@ -452,7 +452,7 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_layout_ir_range_into_measured(
+pub fn render_layout_ir_range_into_measured(
     out: &mut LineBuilder,
     layout: &LayoutIr,
     measured: &MeasuredLayout,
@@ -1289,7 +1289,7 @@ fn render_content_text_spec(
 fn render_content_text_row(
     out: &mut LineBuilder,
     row: smelt_transcript::transcript_content::ContentTextRow<'_>,
-    hl: Option<smelt_core::theme::HlGroup>,
+    hl: Option<smelt_buffer::theme::HlGroup>,
     ansi: bool,
     gutter: Option<&GutterSpec>,
 ) {
@@ -1320,7 +1320,7 @@ fn render_content_text_row(
                 ));
             }
             let span_text = smelt_buffer::text::slice(&text, span.byte_range.clone());
-            if span.style == smelt_core::style::Style::default() {
+            if span.style == smelt_buffer::style::Style::default() {
                 out.print(span_text);
             } else {
                 out.push(None, span.style);
@@ -2031,9 +2031,9 @@ fn render_via_temp(
     render: impl FnOnce(&mut LineBuilder) -> u16,
 ) -> u16 {
     let inherited_style = out.current_style();
-    let mut buf = smelt_core::buffer::Buffer::new(
-        smelt_core::buffer::BufId(0),
-        smelt_core::buffer::BufCreateOpts::default(),
+    let mut buf = smelt_buffer::buffer::Buffer::new(
+        smelt_buffer::buffer::BufId(0),
+        smelt_buffer::buffer::BufCreateOpts::default(),
     );
     let outcome = {
         let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
@@ -2434,9 +2434,9 @@ fn render_ir_row_prefix(
     let prefix_width = row_prefix_width(spec);
     let child_width = child_width_after_gutter(width, prefix_width);
     let inherited_style = out.current_style();
-    let mut buf = smelt_core::buffer::Buffer::new(
-        smelt_core::buffer::BufId(0),
-        smelt_core::buffer::BufCreateOpts::default(),
+    let mut buf = smelt_buffer::buffer::Buffer::new(
+        smelt_buffer::buffer::BufId(0),
+        smelt_buffer::buffer::BufCreateOpts::default(),
     );
     let outcome = {
         let mut col = LineBuilder::new(&mut buf, out.theme(), child_width);
@@ -3138,7 +3138,7 @@ fn retained_text_cap_leaf(
     child: &LayoutIr,
 ) -> Option<(
     &RetainedContentSpec,
-    Option<smelt_core::theme::HlGroup>,
+    Option<smelt_buffer::theme::HlGroup>,
     bool,
 )> {
     let BlockLayout::Leaf(IrLeaf::Content(content)) = child else {
@@ -3233,7 +3233,8 @@ fn omitted_rows_have_visible_text(
         &fallback_theme
     };
     let measured = measure_layout_ir_plan(child, width, inline_options);
-    let mut buf = smelt_core::buffer::Buffer::new(smelt_core::buffer::BufId(0), Default::default());
+    let mut buf =
+        smelt_buffer::buffer::Buffer::new(smelt_buffer::buffer::BufId(0), Default::default());
     let mut out = LineBuilder::new(&mut buf, theme, width);
     let rows = render_layout_ir_range_measured(
         &mut out,
@@ -3396,7 +3397,7 @@ fn render_retained_text_cap_edge(
     out: &mut LineBuilder,
     state: &mut CapRenderRange,
     content: &RetainedContentSpec,
-    hl: Option<smelt_core::theme::HlGroup>,
+    hl: Option<smelt_buffer::theme::HlGroup>,
     ansi: bool,
     width: u16,
     tail: bool,
@@ -3619,7 +3620,7 @@ fn replay_bounded_edge_buffer(out: &mut LineBuilder, buf: &Buffer, outcome: Outc
 fn render_bounded_layout_edge_to_buffer(
     layout: &LayoutIr,
     theme: &Theme,
-    inherited_style: smelt_core::style::Style,
+    inherited_style: smelt_buffer::style::Style,
     width: u16,
     max_rows: usize,
     tail: bool,
@@ -3650,8 +3651,8 @@ fn render_panel_edge_row(
     out: &mut LineBuilder,
     child: Option<(&Buffer, usize)>,
     child_width: u16,
-    panel_hl: smelt_core::theme::HlGroup,
-    panel_bg: smelt_core::style::Color,
+    panel_hl: smelt_buffer::theme::HlGroup,
+    panel_bg: smelt_buffer::style::Color,
     padding: u16,
 ) {
     out.set_hl(panel_hl);
@@ -3840,7 +3841,7 @@ fn render_bounded_layout_edge_inner(
                 .theme()
                 .resolve(panel_hl)
                 .bg
-                .unwrap_or(smelt_core::style::Color::Reset);
+                .unwrap_or(smelt_buffer::style::Color::Reset);
             let (top_rows, child_limit, bottom_rows) = if tail {
                 let bottom = padding.min(window.row_count);
                 let child_limit = window.row_count.saturating_sub(bottom);
@@ -4401,7 +4402,7 @@ use hbox::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
+    use smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
     use smelt_transcript::content::block_layout::{
         CapKeep, CapMarker, CapSpec, Constraint, GutterSpec, HboxItem, LayoutLeaf, LineSpec,
         MarkdownSpec, RowPrefixSpec, SeparatorSpec, TextSpec,
@@ -4487,7 +4488,7 @@ mod tests {
 
         assert_eq!(buf.lines(), &[" ", " abc", " def", " "]);
         assert!((0..buf.line_count())
-            .all(|row| buf.decoration_at(row).fill_bg == Some(smelt_core::style::Color::Reset)));
+            .all(|row| buf.decoration_at(row).fill_bg == Some(smelt_buffer::style::Color::Reset)));
         assert!(buf.decoration_at(2).soft_wrapped);
         let text = buf.text();
         assert_eq!(
@@ -4498,11 +4499,11 @@ mod tests {
 
     #[test]
     fn panel_in_hbox_column_fills_its_column_with_its_background() {
-        let bg = smelt_core::style::Color::AnsiValue(4);
+        let bg = smelt_buffer::style::Color::AnsiValue(4);
         let mut theme = Theme::default();
         theme.set(
             "Bubble",
-            smelt_core::style::Style {
+            smelt_buffer::style::Style {
                 bg: Some(bg),
                 ..Default::default()
             },

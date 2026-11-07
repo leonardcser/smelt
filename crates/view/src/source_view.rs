@@ -2,7 +2,7 @@ use smelt_transcript::content::builder::LineBuilder;
 use smelt_transcript::content::highlight::{DiffIr, GutterStyle};
 
 /// Semantic source-view content returned by Lua block-layout leaves.
-pub(crate) enum SourceView<'a> {
+pub enum SourceView<'a> {
     DiffIr(&'a DiffIr),
 }
 
@@ -10,7 +10,7 @@ pub(crate) enum SourceView<'a> {
 /// (line-number column, diff signs, syntax, wrapping); callers only choose the
 /// surrounding indentation and row budget.
 #[derive(Clone, Copy)]
-pub(crate) struct SourceViewTarget {
+pub struct SourceViewTarget {
     indent_cells: u16,
     layout_width: u16,
     skip_rows: usize,
@@ -18,7 +18,7 @@ pub(crate) struct SourceViewTarget {
 }
 
 impl SourceViewTarget {
-    pub(crate) const fn new(
+    pub const fn new(
         indent_cells: u16,
         layout_width: u16,
         skip_rows: usize,
@@ -33,7 +33,7 @@ impl SourceViewTarget {
     }
 }
 
-pub(crate) fn render_source_view(
+pub fn render_source_view(
     out: &mut LineBuilder,
     view: SourceView<'_>,
     target: SourceViewTarget,

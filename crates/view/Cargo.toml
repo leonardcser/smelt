@@ -1,0 +1,39 @@
+[package]
+name = "smelt-view"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "Transcript and prompt presentation: layout, display rows, and renderers."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[dependencies]
+smelt-core = { workspace = true }
+smelt-protocol = { workspace = true }
+smelt-engine = { workspace = true }
+smelt-perf = { workspace = true }
+smelt-buffer = { workspace = true }
+smelt-edit = { workspace = true }
+smelt-term = { workspace = true }
+smelt-store = { workspace = true }
+smelt-transcript = { workspace = true }
+smelt-text = { workspace = true }
+crossterm = { workspace = true }
+mlua = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+tiny-skia = "0.11.4"
+ratex-render = { version = "0.1.14", features = ["embed-fonts"] }
+ratex-parser = "0.1.14"
+ratex-layout = "0.1.14"
+ratex-types = "0.1.14"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tempfile = { workspace = true }
+
+[features]
+# Exposes the test-only constructors and counters the `smelt-tui` harness uses.
+harness = []

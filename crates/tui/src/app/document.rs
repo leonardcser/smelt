@@ -172,11 +172,10 @@ impl TuiApp {
             Some(RegisteredDocument::Transcript) => {
                 self.sync_transcript_renderer_generation();
                 let inline_options = self.inline_options();
-                let renderer_cache_key =
-                    crate::content::display_layout::transcript_renderer_cache_key(
-                        &self.lua,
-                        &inline_options,
-                    );
+                let renderer_cache_key = smelt_view::display_layout::transcript_renderer_cache_key(
+                    &self.lua,
+                    &inline_options,
+                );
                 Some(DocumentRenderCacheKey {
                     document: DocumentRenderCacheDocument::Registered(handle?),
                     generation: self.conversation.transcript().projection_generation(),

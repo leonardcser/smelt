@@ -2,7 +2,7 @@
 //! display rows, highlights them, and writes source↔display coord maps to the
 //! buffer for cursor mapping. Window layout owns soft wrapping.
 
-use crate::content::prompt_spans::{
+use crate::prompt_spans::{
     build_char_kinds, build_display_spans, spans_to_string, Span, SpanKind, TAB_DISPLAY,
 };
 use smelt_buffer::attachment::{AttachmentId, AttachmentStore, ATTACHMENT_MARKER};
@@ -11,7 +11,7 @@ use smelt_buffer::buffer::{
 };
 use smelt_buffer::cell_width;
 use smelt_buffer::coords::ProjectionMaps;
-use smelt_core::theme::intern;
+use smelt_buffer::theme::intern;
 use std::sync::{Arc, Mutex};
 
 pub struct PromptBufferParser {
@@ -21,7 +21,7 @@ pub struct PromptBufferParser {
 }
 
 impl PromptBufferParser {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "harness"))]
     pub fn new(store: Arc<Mutex<AttachmentStore>>) -> Self {
         Self::with_placeholder(
             store,

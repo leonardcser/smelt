@@ -123,13 +123,13 @@ fn default_ui_frame_benchmark_suite() {
 #[test]
 #[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_layout_projection_benchmark_suite() {
-    crate::content::transcript_buf::tests::benchmark_support::run_layout_benchmark();
+    crate::transcript_layout_bench::run_layout_benchmark();
 }
 
 #[test]
 #[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_true_resume_benchmark_suite() {
-    crate::content::transcript_buf::tests::benchmark_support::run_true_resume_benchmark();
+    crate::transcript_layout_bench::run_true_resume_benchmark();
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -6223,8 +6223,8 @@ const SCALING_OPS: [&str; 14] = [
 ];
 
 fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<ScalingOpSample> {
-    use crate::content::transcript_buf::FoldAction;
-    use crate::content::transcript_scene::RenderNodeId;
+    use smelt_view::transcript_buf::FoldAction;
+    use smelt_view::transcript_scene::RenderNodeId;
 
     let ScalingFixture {
         mut app,

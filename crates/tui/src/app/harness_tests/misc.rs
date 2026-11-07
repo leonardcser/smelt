@@ -6063,7 +6063,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
         .expect("semantic block reveal must resolve an exact content anchor");
     assert_eq!(
         first_visible.node_id,
-        crate::content::transcript_scene::RenderNodeId::Block(
+        smelt_view::transcript_scene::RenderNodeId::Block(
             smelt_transcript::transcript_model::BlockId::new(block.block_id),
         ),
         "semantic block reveal must align its target block to the viewport top: {frame:?}"
