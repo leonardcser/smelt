@@ -856,6 +856,8 @@ async fn async_main() {
             cwd = restored_cwd;
         }
     }
+    // Git runs while Lua loads; the workspace reads the result when it is built.
+    smelt_core::worktree::ProjectSnapshot::prefetch(env.cwd().to_path_buf());
 
     let resolution_startup = smelt_perf::perf::begin("startup:resolution");
     if let Some(ref path) = args.config {

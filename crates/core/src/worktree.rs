@@ -288,48 +288,110 @@ pub struct ProjectSnapshot {
     inputs: crate::file_stamp::FileStamps,
 }
 
+/// What Git reports about the repository around a directory. It does not
+/// depend on the managed worktree root, so it can be read before settings load.
+#[derive(Debug, Clone)]
+struct GitFacts {
+    repository_key: Option<PathBuf>,
+    /// `git rev-parse --show-toplevel`, absent outside a work tree.
+    toplevel: Option<PathBuf>,
+    active_root: PathBuf,
+    branch: String,
+    base: String,
+    worktrees: Vec<GitWorktree>,
+    inputs: crate::file_stamp::FileStamps,
+}
+
+/// The last Git facts, by the directory they describe.
+static LAST_FACTS: std::sync::Mutex<Option<(PathBuf, GitFacts)>> = std::sync::Mutex::new(None);
+
 impl ProjectSnapshot {
     /// The project around `cwd`. Startup and refreshes ask repeatedly, so the
-    /// last snapshot is returned while its Git metadata is unchanged.
+    /// last Git facts are reused while its Git metadata is unchanged.
     pub fn discover(cwd: &Path, root: Option<&Path>) -> Self {
-        type Last = Option<(PathBuf, Option<PathBuf>, ProjectSnapshot)>;
-        static LAST: std::sync::Mutex<Last> = std::sync::Mutex::new(None);
-        let mut last = LAST.lock().unwrap_or_else(|poison| poison.into_inner());
-        if let Some((last_cwd, last_root, snapshot)) = last.as_ref() {
-            if last_cwd == cwd && last_root.as_deref() == root && snapshot.is_reusable() {
-                return snapshot.clone();
-            }
+        let facts = cached_git_facts(cwd);
+        Self {
+            context: project_context_from(root, &facts),
+            inputs: facts.inputs,
         }
-        let snapshot = Self::run_git(cwd, root);
-        *last = Some((
-            cwd.to_path_buf(),
-            root.map(Path::to_path_buf),
-            snapshot.clone(),
-        ));
-        snapshot
     }
 
-    fn run_git(cwd: &Path, root: Option<&Path>) -> Self {
-        let mut inputs = crate::file_stamp::FileStamps::default();
-        // A repository or worktree link appearing in any ancestor changes
-        // which repository owns `cwd`.
-        for dir in cwd.ancestors() {
-            inputs.track_kind(dir.join(".git"));
-        }
-        let repository_key = git_common_dir(cwd);
-        if let Some(common) = &repository_key {
-            track_git_metadata(&mut inputs, common);
-        }
-        Self {
-            context: discover_project_context(cwd, root, repository_key),
-            inputs,
-        }
+    /// Reads the Git facts of `cwd` on a background thread, so a later
+    /// [`discover`](Self::discover) of the same directory finds them ready.
+    pub fn prefetch(cwd: PathBuf) {
+        let _ = std::thread::Builder::new()
+            .name("smelt-project".into())
+            .spawn(move || {
+                cached_git_facts(&cwd);
+            });
     }
 
     /// Whether discovery would still produce this context, so it can be used
     /// instead of running Git again.
     pub fn is_reusable(&self) -> bool {
         self.inputs.is_reusable()
+    }
+}
+
+/// The top of the Git work tree around `cwd`, from the same discovery as the
+/// project context.
+pub fn repository_root(cwd: &Path) -> Option<PathBuf> {
+    cached_git_facts(cwd).toplevel
+}
+
+/// Holds the lock while Git runs, so a discovery that starts during a
+/// prefetch waits for its result instead of running Git again. Callers name
+/// the same directory in different forms, so the canonical path is the key.
+fn cached_git_facts(cwd: &Path) -> GitFacts {
+    let key = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut last = LAST_FACTS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some((last_key, facts)) = last.as_ref() {
+        if *last_key == key && facts.inputs.is_reusable() {
+            return facts.clone();
+        }
+    }
+    let facts = read_git_facts(cwd);
+    *last = Some((key, facts.clone()));
+    facts
+}
+
+fn read_git_facts(cwd: &Path) -> GitFacts {
+    let mut inputs = crate::file_stamp::FileStamps::default();
+    // A repository or worktree link appearing in any ancestor changes
+    // which repository owns `cwd`.
+    for dir in cwd.ancestors() {
+        inputs.track_kind(dir.join(".git"));
+    }
+    let repository_key = git_common_dir(cwd);
+    if let Some(common) = &repository_key {
+        track_git_metadata(&mut inputs, common);
+    }
+    // Outside a repository every other Git query fails, so none runs.
+    let in_repository = repository_key.is_some();
+    let toplevel = in_repository.then(|| worktree_root(cwd).ok()).flatten();
+    let active_root = toplevel
+        .clone()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .unwrap_or_else(|| std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
+    let (branch, base, worktrees) = if in_repository {
+        (
+            current_branch(&active_root).unwrap_or_default(),
+            default_base_ref(&active_root),
+            git_worktrees(&active_root).unwrap_or_default(),
+        )
+    } else {
+        (String::new(), "HEAD".to_string(), Vec::new())
+    };
+    GitFacts {
+        repository_key,
+        toplevel,
+        active_root,
+        branch,
+        base,
+        worktrees,
+        inputs,
     }
 }
 
@@ -357,41 +419,30 @@ pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
     ProjectSnapshot::discover(cwd, root).context
 }
 
-fn discover_project_context(
-    cwd: &Path,
-    root: Option<&Path>,
-    repository_key: Option<PathBuf>,
-) -> ProjectContext {
-    // Outside a repository every other Git query fails, so none runs.
-    let in_repository = repository_key.is_some();
-    let git_root = in_repository.then(|| worktree_root(cwd).ok()).flatten();
-    let active_root = git_root
-        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-        .unwrap_or_else(|| std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
-    let (branch, base, worktrees) = if in_repository {
-        (
-            current_branch(&active_root).unwrap_or_default(),
-            default_base_ref(&active_root),
-            git_worktrees(&active_root).unwrap_or_default(),
-        )
-    } else {
-        (String::new(), "HEAD".to_string(), Vec::new())
-    };
+fn project_context_from(root: Option<&Path>, facts: &GitFacts) -> ProjectContext {
+    let GitFacts {
+        repository_key,
+        active_root,
+        branch,
+        base,
+        worktrees,
+        ..
+    } = facts;
     let default_base_path =
-        find_branch_worktree(&worktrees, &base).map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+        find_branch_worktree(worktrees, base).map(|p| std::fs::canonicalize(&p).unwrap_or(p));
     let base_path = default_base_path
         .clone()
         .or_else(|| repository_key.as_deref().and_then(common_dir_repo_root))
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
-    let managed_worktree = is_managed_worktree_path(&active_root, root);
+    let managed_worktree = is_managed_worktree_path(active_root, root);
     let project_root = base_path.as_deref().unwrap_or(active_root.as_path());
     let project_name = path_name(project_root)
-        .or_else(|| path_name(&active_root))
+        .or_else(|| path_name(active_root))
         .unwrap_or_else(|| active_root.display().to_string());
 
     let mut allowed_roots = Vec::new();
     for wt in worktrees {
-        push_unique_path(&mut allowed_roots, wt.path);
+        push_unique_path(&mut allowed_roots, wt.path.clone());
     }
     push_unique_path(&mut allowed_roots, active_root.clone());
     if let Some(base_path) = base_path.clone() {
@@ -400,16 +451,16 @@ fn discover_project_context(
 
     ProjectContext {
         project_name,
-        active_root,
+        active_root: active_root.clone(),
         branch: branch.clone(),
-        default_base: base,
+        default_base: base.clone(),
         default_base_path,
         managed_worktree,
         worktree_name: managed_worktree
             .then(|| branch.clone())
             .filter(|name| !name.is_empty()),
         base_path,
-        repository_key,
+        repository_key: repository_key.clone(),
         allowed_roots,
     }
 }

@@ -558,7 +558,9 @@ impl WorkspaceFiles {
         if let Some(root) = self.roots.get(&cwd) {
             return root.clone();
         }
-        let root = if let Some(root) = engine::paths::git_root(&cwd) {
+        let root = if let Some(root) =
+            crate::worktree::repository_root(&cwd).and_then(engine::paths::workspace_boundary)
+        {
             self.git_roots.insert(root.clone());
             root
         } else {

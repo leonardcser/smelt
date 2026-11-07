@@ -130,9 +130,14 @@ pub fn git_root(cwd: &std::path::Path) -> Option<PathBuf> {
         return None;
     }
     let root_text = String::from_utf8_lossy(&output.stdout);
-    let root = PathBuf::from(smelt_buffer::text::trim_whitespace(&root_text));
-    let home = home_dir();
-    if root == home || root.as_os_str() == "/" {
+    workspace_boundary(PathBuf::from(smelt_buffer::text::trim_whitespace(
+        &root_text,
+    )))
+}
+
+/// `root` as a workspace boundary, or `None` when it is `~` or `/`.
+pub fn workspace_boundary(root: PathBuf) -> Option<PathBuf> {
+    if root == home_dir() || root.as_os_str() == "/" {
         return None;
     }
     Some(root)
