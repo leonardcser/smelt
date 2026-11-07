@@ -181,6 +181,16 @@ fun(text: string): nil
 
 Replace the prompt buffer with `text`. The cursor lands at the end and undo state is reset.
 
+## `smelt.prompt.submit`
+
+```lua
+fun(text: string?): nil
+```
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Submit the prompt as Enter does: send it, queue it while the agent works, or run the command it holds. With `text`, the prompt holds `text` first. The app submits after the current Lua callback returns.
+
 ## `smelt.prompt.text`
 
 ```lua

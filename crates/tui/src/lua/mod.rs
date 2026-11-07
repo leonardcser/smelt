@@ -390,7 +390,7 @@ pub(crate) use smelt_core::lua::{LuaWorkGuard, LUA_WORK_BATCH};
 pub(crate) struct LuaShared {
     pub(crate) core: Arc<smelt_core::lua::LuaShared>,
     pub(crate) pending_invocations: Mutex<std::collections::VecDeque<PendingInvocation>>,
-    pending_commands: Mutex<std::collections::VecDeque<String>>,
+    pending_commands: Mutex<std::collections::VecDeque<DeferredCommand>>,
     command_drain_active: AtomicBool,
     layout_refresh_pending: AtomicBool,
     pending_focus: Mutex<Option<crate::smelt_edit::WinId>>,
@@ -416,6 +416,14 @@ impl std::ops::Deref for LuaShared {
 
 pub(crate) const MAX_PENDING_LUA_COMMANDS: usize = 256;
 
+/// Work a Lua callback schedules for the app once it returns.
+pub(crate) enum DeferredCommand {
+    /// A command line, run as `smelt.cmd.run` describes.
+    Line(String),
+    /// Submit the prompt as Enter does, after replacing its text when given.
+    SubmitPrompt(Option<String>),
+}
+
 impl LuaShared {
     fn with_core(core: Arc<smelt_core::lua::LuaShared>) -> Self {
         Self {
@@ -432,6 +440,14 @@ impl LuaShared {
     }
 
     pub(crate) fn queue_command(&self, line: String) -> Result<(), String> {
+        self.queue_deferred(DeferredCommand::Line(line))
+    }
+
+    pub(crate) fn queue_prompt_submit(&self, text: Option<String>) -> Result<(), String> {
+        self.queue_deferred(DeferredCommand::SubmitPrompt(text))
+    }
+
+    fn queue_deferred(&self, command: DeferredCommand) -> Result<(), String> {
         let mut commands = self
             .pending_commands
             .lock()
@@ -441,11 +457,11 @@ impl LuaShared {
                 "deferred Lua command queue is full ({MAX_PENDING_LUA_COMMANDS})"
             ));
         }
-        commands.push_back(line);
+        commands.push_back(command);
         Ok(())
     }
 
-    pub(crate) fn pop_command(&self) -> Option<String> {
+    pub(crate) fn pop_command(&self) -> Option<DeferredCommand> {
         self.pending_commands.lock().ok()?.pop_front()
     }
 

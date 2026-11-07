@@ -142,10 +142,11 @@ impl TuiApp {
             {
                 break;
             }
-            let Some(line) = shared.pop_command() else {
-                break;
-            };
-            self.apply_lua_command(&line);
+            match shared.pop_command() {
+                Some(crate::lua::DeferredCommand::Line(line)) => self.apply_lua_command(&line),
+                Some(crate::lua::DeferredCommand::SubmitPrompt(text)) => self.submit_prompt(text),
+                None => break,
+            }
         }
         shared.end_command_drain();
     }

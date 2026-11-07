@@ -1800,6 +1800,8 @@ fn submit_that_restores_the_stash_clears_its_marker() {
         ("idle command", false, "/fast on"),
         ("queued during turn", true, "send this"),
         ("command during turn", true, "/fast on"),
+        ("completer command", false, "/fast"),
+        ("completer command during turn", true, "/fast"),
     ] {
         let mut app = TestApp::builder().with_vim(false).build();
         if running {

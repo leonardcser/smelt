@@ -335,6 +335,10 @@ impl ConversationLuaHost<'_> {
         let _ = self.app.queue_prompt_text_changed_if_dirty();
     }
 
+    pub(crate) fn queue_prompt_submit(&self, text: Option<String>) -> Result<(), String> {
+        self.app.lua.shared().queue_prompt_submit(text)
+    }
+
     pub(crate) fn prompt_text(&self) -> String {
         self.app
             .prompt_buf()

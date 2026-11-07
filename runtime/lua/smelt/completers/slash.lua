@@ -39,10 +39,8 @@ smelt.prompt.register_completer({
       smelt.prompt.cursor(#item.label + 2)
       return
     end
-    -- Enter: dispatch the command and clear the prompt. Lua-registered
-    -- commands without args run inline; arg-taking commands open their own
-    -- picker via `smelt.cmd.register_picker`.
-    smelt.prompt.set_text("")
-    smelt.cmd.run("/" .. item.label)
+    -- Enter: submit the command as typing it would. Arg-taking commands
+    -- open their own picker via `smelt.cmd.register_picker`.
+    smelt.prompt.submit("/" .. item.label)
   end,
 })

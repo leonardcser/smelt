@@ -366,9 +366,34 @@ impl TuiApp {
         }
     }
 
+    /// Submits the prompt as Enter does, for Lua that owns the Enter key,
+    /// such as a completer. `text` replaces the prompt's text first.
+    pub(crate) fn submit_prompt(&mut self, text: Option<String>) {
+        let action = {
+            let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+            if let Some(text) = text {
+                self.prompt.replace_text(&mut pctx, text);
+            }
+            self.prompt.submit_action(&mut pctx)
+        };
+        let outcome = if self.prompt_work_state().is_busy() {
+            self.dispatch_running_input_action(action)
+        } else {
+            self.dispatch_input_action(action)
+        };
+        self.emit_prompt_text_changed_if_dirty();
+        if matches!(outcome, EventOutcome::Quit) {
+            self.pending_quit = true;
+        }
+        self.apply_event_outcome(outcome);
+    }
+
     fn commit_prompt_submission(&mut self, edit: crate::input::SubmitEdit) {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.apply_submit_edit(&mut pctx, edit);
+        // Publish the edit before the submission runs, so a picker it opens
+        // does not take the cleared prompt for its query.
+        let _ = self.queue_prompt_text_changed_if_dirty();
     }
 
     /// Brings the stashed draft back once a submission empties the prompt,

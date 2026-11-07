@@ -84,6 +84,10 @@ prompt.set_resize_handle = nil
 ---@type fun(text: string): nil
 prompt.set_text = nil
 
+--- Submit the prompt as Enter does: send it, queue it while the agent works, or run the command it holds. With `text`, the prompt holds `text` first. The app submits after the current Lua callback returns.
+---@type fun(text: string?): nil
+prompt.submit = nil
+
 --- Return the prompt input buffer's current text. Internal attachment markers are stripped - plugins see only the user-visible characters.
 ---@type fun(): string
 prompt.text = nil

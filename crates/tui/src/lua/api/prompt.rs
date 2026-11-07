@@ -55,6 +55,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.live_only_fn(
+        "submit",
+        "Submit the prompt as Enter does: send it, queue it while the agent works, or run the command it holds. With `text`, the prompt holds `text` first. The app submits after the current Lua callback returns.",
+        &["text"],
+        |_, text: Option<String>| -> LuaResult<()> {
+            crate::lua::with_conversation_host(|host| host.queue_prompt_submit(text))
+                .map_err(LuaError::RuntimeError)
+        },
+    )?;
+    m.live_only_fn(
         "cursor",
         "Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.",
         &["pos"],
