@@ -11,6 +11,8 @@ const SCHEMA: &str = include_str!("schema.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// SQLite keeps a checkpointed WAL at its largest size unless this caps it.
 const WAL_SIZE_LIMIT: i64 = 1024 * 1024;
+/// Checkpoint before the WAL outgrows its size limit, in 4 KiB pages.
+const WAL_CHECKPOINT_PAGES: i64 = WAL_SIZE_LIMIT / 4096;
 
 /// Opens the shared database, creating it and its schema on first use.
 pub(crate) fn open(path: &Path) -> Result<Connection> {
@@ -38,6 +40,7 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
          PRAGMA temp_store = MEMORY;",
     )?;
     conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
+    conn.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
     match version {
         SCHEMA_VERSION => Ok(conn),
         0 => {
@@ -230,27 +233,22 @@ mod tests {
     }
 
     #[test]
-    fn checkpointed_wal_shrinks_to_the_size_limit() {
+    fn wal_stays_near_its_size_limit_while_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("smelt.db");
-        let conn = open(&path).unwrap();
+        let conn = open(&dir.path().join("smelt.db")).unwrap();
         conn.execute_batch("CREATE TABLE filler (body BLOB)")
             .unwrap();
-        conn.execute(
-            "INSERT INTO filler VALUES (zeroblob(?1))",
-            [4 * WAL_SIZE_LIMIT],
-        )
-        .unwrap();
-        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)")
-            .unwrap();
-        conn.execute("INSERT INTO filler VALUES (zeroblob(1))", [])
-            .unwrap();
-
-        let wal = std::fs::metadata(dir.path().join("smelt.db-wal")).unwrap();
+        let wal = dir.path().join("smelt.db-wal");
+        let mut largest = 0;
+        for _ in 0..200 {
+            conn.execute("INSERT INTO filler VALUES (zeroblob(65536))", [])
+                .unwrap();
+            largest = largest.max(std::fs::metadata(&wal).unwrap().len());
+        }
+        // 200 saves of 64 KiB write 12.5 MiB in all.
         assert!(
-            wal.len() <= WAL_SIZE_LIMIT as u64,
-            "WAL is {} bytes",
-            wal.len()
+            largest <= 2 * WAL_SIZE_LIMIT as u64,
+            "WAL reached {largest} bytes"
         );
     }
 
