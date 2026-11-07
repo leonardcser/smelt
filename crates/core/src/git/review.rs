@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(snapshot.view.diff.files.len(), 1);
         let file = &snapshot.view.diff.files[0];
         assert_eq!(file.path, "file");
-        assert_eq!(file.section, crate::diff::Section::Changes);
+        assert_eq!(file.section, smelt_transcript::diff::Section::Changes);
         assert_eq!((file.additions, file.deletions), (2, 1));
         assert!(update_index(
             root.into(),

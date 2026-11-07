@@ -26,7 +26,7 @@ fn prompt_bottom_chrome_click_focuses_prompt() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = TestApp::builder().with_vim(false).build();
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "transcript content".into(),
     });
     app.render_silent();
@@ -69,13 +69,13 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
     let mut app = TestApp::builder().with_ephemeral(true).build();
     app.set_terminal_size(80, 16);
     for turn in 0..4 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
             text: format!("user turn {turn}"),
             image_labels: Vec::new(),
             command: false,
             sent_at_ms: None,
         });
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: (0..18)
                 .map(|line| format!("assistant turn {turn} line {line:02}"))
                 .collect::<Vec<_>>()
@@ -227,7 +227,7 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
 
     let mut app = TestApp::builder().with_vim(false).build();
     let expected = "Bestellung 10500 besta\u{308}tigt.pdf 日本 👩\u{200d}💻 🇨🇦";
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: format!("```text\nalpha\nbeta\ngamma\n```\n\n{expected}").into(),
     });
     app.render_silent();
@@ -353,17 +353,17 @@ fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.set_terminal_size(52, 16);
     for i in 0..40 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("filler row {i:02}").into(),
         });
     }
     let expected = "This paragraph includes **markdown** and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.";
     app
-        .push_transcript_block(smelt_core::transcript_model::Block::Text {
+        .push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: "This paragraph includes **markdown** and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.".into(),
         });
     for i in 0..20 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("trailing row {i:02}").into(),
         });
     }
@@ -454,7 +454,7 @@ fn user_message_padding_click_snaps_cursor_after_left_pad() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = TestApp::builder().with_vim(true).build();
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "hello".into(),
         image_labels: vec![],
         command: false,
@@ -497,7 +497,7 @@ fn user_message_drag_to_line_end_does_not_select_bottom_padding_row() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = TestApp::builder().with_vim(true).build();
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "hello".into(),
         image_labels: vec![],
         command: false,
@@ -568,7 +568,7 @@ fn transcript_click_drag_in_vim_survives_multiple_drag_events() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = TestApp::builder().with_vim(true).build();
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "hello world".into(),
     });
     app.render_silent();

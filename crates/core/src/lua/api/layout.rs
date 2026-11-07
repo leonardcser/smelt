@@ -1,14 +1,14 @@
 //! `smelt.layout` - declarative, width-independent content layout returned from Lua display callbacks.
 
-use crate::content::block_layout::{
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
+use mlua::prelude::*;
+use smelt_transcript::content::block_layout::{
     BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, ContentDiffSpec,
     ContentRenderSpec, ContentSpec, DiffSpec, FileViewSpec, GutterSpec, HboxItem, LineSpec,
     LuaLeaf, MarkdownSpec, PanelSpec, RefreshSpec, RowPrefixSpec, RunsSpec, SeparatorSpec,
     StyleSpec, TextSpec,
 };
-use crate::lua::doc::Tier;
-use crate::lua::module::LuaMod;
-use mlua::prelude::*;
 
 pub struct LuaBlockLayout(pub BlockLayout);
 
@@ -229,7 +229,7 @@ pub(super) fn register(
             };
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Content(
                 ContentSpec {
-                    id: crate::transcript_content::ContentId::new(content_id),
+                    id: smelt_transcript::transcript_content::ContentId::new(content_id),
                     render,
                 },
             ))))
@@ -243,7 +243,7 @@ pub(super) fn register(
             let anchor_id = opts
                 .as_ref()
                 .and_then(|table| table.get::<Option<u64>>("anchor_content_id").ok().flatten())
-                .map(crate::transcript_content::ContentId::new);
+                .map(smelt_transcript::transcript_content::ContentId::new);
             let path = opts
                 .as_ref()
                 .and_then(|table| table.get::<Option<String>>("path").ok().flatten())
@@ -257,8 +257,8 @@ pub(super) fn register(
                 .unwrap_or(false);
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::ContentDiff(
                 ContentDiffSpec {
-                    old_id: crate::transcript_content::ContentId::new(old_content_id),
-                    new_id: crate::transcript_content::ContentId::new(new_content_id),
+                    old_id: smelt_transcript::transcript_content::ContentId::new(old_content_id),
+                    new_id: smelt_transcript::transcript_content::ContentId::new(new_content_id),
                     anchor_id,
                     path,
                     lang,

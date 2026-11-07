@@ -4,12 +4,12 @@
 use crate::app::transcript::TranscriptNavigationDirection;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::content::stream_parser::StreamParser;
-use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
+use smelt_transcript::content::stream_parser::StreamParser;
+use smelt_transcript::content::transcript::Transcript;
 
 use super::buf::LuaBuf;
 use super::win::LuaWin;
@@ -93,7 +93,7 @@ pub(crate) fn block_snapshot_table(
 pub(crate) struct LuaTranscriptTarget {
     session_id: String,
     record_index: usize,
-    block_id: smelt_core::transcript_model::BlockId,
+    block_id: smelt_transcript::transcript_model::BlockId,
     role: &'static str,
     first_line: String,
 }
@@ -379,13 +379,13 @@ impl mlua::UserData for LuaTranscriptStream {
     }
 }
 
-fn view_state_label(view_state: smelt_core::transcript_model::ViewState) -> &'static str {
+fn view_state_label(view_state: smelt_transcript::transcript_model::ViewState) -> &'static str {
     match view_state {
-        smelt_core::transcript_model::ViewState::Expanded => "expanded",
-        smelt_core::transcript_model::ViewState::Peek => "peek",
-        smelt_core::transcript_model::ViewState::Collapsed => "collapsed",
-        smelt_core::transcript_model::ViewState::TrimmedHead { .. } => "trimmed_head",
-        smelt_core::transcript_model::ViewState::TrimmedTail { .. } => "trimmed_tail",
+        smelt_transcript::transcript_model::ViewState::Expanded => "expanded",
+        smelt_transcript::transcript_model::ViewState::Peek => "peek",
+        smelt_transcript::transcript_model::ViewState::Collapsed => "collapsed",
+        smelt_transcript::transcript_model::ViewState::TrimmedHead { .. } => "trimmed_head",
+        smelt_transcript::transcript_model::ViewState::TrimmedTail { .. } => "trimmed_tail",
     }
 }
 
@@ -432,7 +432,7 @@ fn render_node_id_from_table(
         Some("block") => {
             let id = t.get::<u64>("block_id").or_else(|_| t.get::<u64>("id"))?;
             Ok(Some(crate::content::transcript_scene::RenderNodeId::Block(
-                smelt_core::transcript_model::BlockId::new(id),
+                smelt_transcript::transcript_model::BlockId::new(id),
             )))
         }
         Some("group") => {

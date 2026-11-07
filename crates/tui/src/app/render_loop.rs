@@ -2023,7 +2023,7 @@ mod tests {
                 .history()
                 .last_block_id()
                 .expect("streamed text block");
-            let smelt_core::transcript_model::Block::Text { content } = app
+            let smelt_transcript::transcript_model::Block::Text { content } = app
                 .tui
                 .conversation
                 .transcript()
@@ -2264,7 +2264,7 @@ mod tests {
 
         app.tui.append_exec_output("first".into());
         app.tui.append_exec_output(" second".into());
-        let smelt_core::transcript_model::Block::Exec { output, .. } = app
+        let smelt_transcript::transcript_model::Block::Exec { output, .. } = app
             .tui
             .conversation
             .transcript()
@@ -2282,7 +2282,7 @@ mod tests {
             .render_pending_transient_frame_to(&mut std::io::sink()));
 
         let history = app.tui.conversation.transcript().history();
-        let smelt_core::transcript_model::Block::Exec { output, .. } =
+        let smelt_transcript::transcript_model::Block::Exec { output, .. } =
             history.block(block_id).expect("completed exec block")
         else {
             panic!("last block is exec output");
@@ -2290,7 +2290,7 @@ mod tests {
         assert_eq!(output.snapshot(), "first\n second");
         assert_eq!(
             history.status(block_id),
-            Some(smelt_core::transcript_model::Status::Done)
+            Some(smelt_transcript::transcript_model::Status::Done)
         );
     }
 

@@ -27,8 +27,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 ),
                 None => (true, false),
             };
-            let options = crate::content::file_icons::FileIconOptions::new(true, colors, light, None);
-            Ok(match crate::content::file_icons::lookup_path_with_color(Path::new(&p), &options) {
+            let options = smelt_transcript::content::file_icons::FileIconOptions::new(true, colors, light, None);
+            Ok(match smelt_transcript::content::file_icons::lookup_path_with_color(Path::new(&p), &options) {
                 Some((icon, color)) => {
                     let color = match color {
                         Some(crate::style::Color::Rgb { r, g, b }) => Some(format!("#{r:02x}{g:02x}{b:02x}")),

@@ -4,7 +4,7 @@ use protocol::{
     AssistantStep, Content, EngineEvent, HistoryAppend, HistoryAppendResult, HistoryItem, Role,
     TokenUsage, ToolInvocation, ToolOutcome,
 };
-use smelt_core::transcript_model::Block;
+use smelt_transcript::transcript_model::Block;
 
 /// Saves `session` with `records` as its transcript straight to the app's store.
 fn commit_session_fixture(
@@ -52,7 +52,7 @@ fn stored_session_info_counts_canonical_users_without_opening_history() {
         &app,
         &session,
         vec![
-            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+            smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                 0,
                 record.block_id.get(),
                 &record.record,

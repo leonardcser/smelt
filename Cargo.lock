@@ -3559,6 +3559,7 @@ dependencies = [
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-test-support",
+ "smelt-transcript",
  "smelt-tui",
  "smelt-worktree",
  "tempfile",
@@ -3620,19 +3621,13 @@ dependencies = [
  "neo_frizbee",
  "notify",
  "process-wrap",
- "pulldown-cmark",
- "ratex-font",
- "ratex-parser",
  "reqwest",
  "rmcp",
- "rust-latex-parser",
  "scoped-tls-hkt",
  "scraper",
- "seahash",
  "serde",
  "serde_json",
  "sha2",
- "similar 3.2.1",
  "smelt-ansi",
  "smelt-buffer 0.0.0-dev",
  "smelt-engine",
@@ -3646,13 +3641,11 @@ dependencies = [
  "smelt-store 0.0.0-dev (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
  "smelt-test-support",
  "smelt-text",
+ "smelt-transcript",
  "smelt-worktree",
- "syntect",
  "tempfile",
- "term-maths",
  "tokio",
  "tokio-util",
- "two-face",
  "url",
 ]
 
@@ -3875,6 +3868,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-transcript"
+version = "0.0.0-dev"
+dependencies = [
+ "pulldown-cmark",
+ "ratex-font",
+ "ratex-parser",
+ "rust-latex-parser",
+ "seahash",
+ "serde",
+ "serde_json",
+ "similar 3.2.1",
+ "smelt-ansi",
+ "smelt-buffer 0.0.0-dev",
+ "smelt-perf 0.3.0",
+ "smelt-permissions",
+ "smelt-protocol 0.0.0-dev",
+ "smelt-store 0.0.0-dev",
+ "smelt-text",
+ "syntect",
+ "tempfile",
+ "term-maths",
+ "tokio",
+ "two-face",
+ "url",
+]
+
+[[package]]
 name = "smelt-tui"
 version = "0.0.0-dev"
 dependencies = [
@@ -3910,6 +3930,7 @@ dependencies = [
  "smelt-store 0.0.0-dev",
  "smelt-term",
  "smelt-test-support",
+ "smelt-transcript",
  "smelt-worktree",
  "tempfile",
  "tiny-skia",
@@ -5020,6 +5041,7 @@ dependencies = [
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
+ "smelt-transcript",
  "smelt-tui",
  "tempfile",
  "tokio",

@@ -217,7 +217,7 @@ fn row_document_transcript_app(rows: usize, vim: bool) -> TestApp {
     let mut app = TestApp::builder().with_vim(vim).build();
     app.set_terminal_size(80, 16);
     for i in 0..rows {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("row {i:03} alpha beta").into(),
         });
     }
@@ -232,13 +232,13 @@ fn user_answer_transcript_app(pairs: usize, answer_lines: usize) -> TestApp {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     for i in 0..pairs {
-        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
             text: format!("user target {i:03}"),
             image_labels: Vec::new(),
             command: false,
             sent_at_ms: None,
         });
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: (0..answer_lines)
                 .map(|line| format!("answer {i:03} line {line}"))
                 .collect::<Vec<_>>()

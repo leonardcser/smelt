@@ -68,8 +68,8 @@ struct SummaryDraft {
 
 struct SummaryPart {
     id: String,
-    block_id: Option<smelt_core::transcript_model::BlockId>,
-    after: Option<smelt_core::transcript_model::BlockId>,
+    block_id: Option<smelt_transcript::transcript_model::BlockId>,
+    after: Option<smelt_transcript::transcript_model::BlockId>,
     draft: Option<SummaryDraft>,
 }
 
@@ -79,7 +79,7 @@ pub(crate) struct ConversationRuntime {
     session: smelt_core::session::Session,
     document: TuiSessionDocument,
     committed_transcript_view: Option<CommittedTranscriptView>,
-    parser: smelt_core::content::stream_parser::StreamParser,
+    parser: smelt_transcript::content::stream_parser::StreamParser,
     /// Paces the newest glyphs of streamed transcript blocks on screen.
     reveal: StreamReveal<RevealKey>,
     /// The channel the response streamed into last, while its reveal runs.
@@ -87,7 +87,7 @@ pub(crate) struct ConversationRuntime {
     // Keep completed slots until response acceptance so delayed parts retain their position.
     summary_parts: Vec<SummaryPart>,
     compaction_source: String,
-    response_draft_blocks: Vec<smelt_core::transcript_model::BlockId>,
+    response_draft_blocks: Vec<smelt_transcript::transcript_model::BlockId>,
     /// Earliest canonical suffix whose transcript projection must be rebuilt
     /// after live stream-parser blocks finish.
     pending_transcript_history_rebuild_from: Option<usize>,
@@ -128,7 +128,7 @@ impl ConversationRuntime {
             session,
             document,
             committed_transcript_view: None,
-            parser: smelt_core::content::stream_parser::StreamParser::new(),
+            parser: smelt_transcript::content::stream_parser::StreamParser::new(),
             reveal: StreamReveal::default(),
             streaming_kind: None,
             summary_parts: Default::default(),
@@ -173,14 +173,14 @@ impl ConversationRuntime {
     pub(crate) fn active_tool_block_id(
         &self,
         invocation_id: protocol::InvocationId,
-    ) -> Option<smelt_core::transcript_model::BlockId> {
+    ) -> Option<smelt_transcript::transcript_model::BlockId> {
         self.parser.active_tool_block_id(invocation_id)
     }
 
     pub(crate) fn active_tool_output_content(
         &self,
         invocation_id: protocol::InvocationId,
-    ) -> Option<smelt_core::transcript_content::TranscriptContent> {
+    ) -> Option<smelt_transcript::transcript_content::TranscriptContent> {
         let block_id = self.parser.active_tool_block_id(invocation_id)?;
         self.document
             .transcript
@@ -193,7 +193,7 @@ impl ConversationRuntime {
 
     pub(crate) fn defer_last_reasoning_summary_hydration(
         &mut self,
-    ) -> Option<smelt_core::transcript_model::BlockId> {
+    ) -> Option<smelt_transcript::transcript_model::BlockId> {
         self.document
             .transcript
             .defer_last_reasoning_summary_hydration()
@@ -201,21 +201,21 @@ impl ConversationRuntime {
 
     pub(crate) fn deferred_engine_block_is_ready(
         &self,
-        id: smelt_core::transcript_model::BlockId,
+        id: smelt_transcript::transcript_model::BlockId,
     ) -> bool {
         self.document.transcript.deferred_engine_block_is_ready(id)
     }
 
     pub(crate) fn deferred_engine_block_failed(
         &self,
-        id: smelt_core::transcript_model::BlockId,
+        id: smelt_transcript::transcript_model::BlockId,
     ) -> bool {
         self.document.transcript.deferred_engine_block_failed(id)
     }
 
     pub(crate) fn release_deferred_engine_block(
         &mut self,
-        id: smelt_core::transcript_model::BlockId,
+        id: smelt_transcript::transcript_model::BlockId,
     ) {
         self.document.transcript.release_deferred_engine_block(id);
     }
@@ -238,13 +238,13 @@ impl ConversationRuntime {
 
     pub(crate) fn transcript_compaction_preview_id(
         &self,
-    ) -> Option<smelt_core::transcript_model::BlockId> {
+    ) -> Option<smelt_transcript::transcript_model::BlockId> {
         self.document.transcript.compaction_preview_id()
     }
 
     pub(super) fn set_transcript_search_hydration_pin(
         &mut self,
-        block_id: Option<smelt_core::transcript_model::BlockId>,
+        block_id: Option<smelt_transcript::transcript_model::BlockId>,
     ) {
         self.document.transcript.set_search_hydration_pin(block_id);
     }
@@ -278,7 +278,7 @@ impl ConversationRuntime {
         width: u16,
         row: crate::smelt_edit::RowIndex,
         forward: bool,
-    ) -> Option<smelt_core::transcript_model::BlockId> {
+    ) -> Option<smelt_transcript::transcript_model::BlockId> {
         self.document
             .transcript
             .block_id_at_or_before_row(lua, width, row, forward)
@@ -496,7 +496,7 @@ impl ConversationRuntime {
 
     pub(crate) fn drain_finished_transcript_blocks(
         &mut self,
-    ) -> Vec<smelt_core::transcript_model::BlockId> {
+    ) -> Vec<smelt_transcript::transcript_model::BlockId> {
         self.document.transcript.drain_finished_blocks()
     }
 
@@ -583,20 +583,22 @@ impl ConversationRuntime {
         self.document.transcript.install_hydration_result(result)
     }
 
-    pub(super) fn loaded_transcript_block_ids(&self) -> Vec<smelt_core::transcript_model::BlockId> {
+    pub(super) fn loaded_transcript_block_ids(
+        &self,
+    ) -> Vec<smelt_transcript::transcript_model::BlockId> {
         self.document.transcript.history().order.clone()
     }
 
     pub(super) fn pin_deferred_transcript_operation(
         &mut self,
-        ids: &[smelt_core::transcript_model::BlockId],
+        ids: &[smelt_transcript::transcript_model::BlockId],
     ) {
         self.document.transcript.pin_deferred_operation_blocks(ids);
     }
 
     pub(super) fn deferred_transcript_operation_is_ready(
         &self,
-        ids: &[smelt_core::transcript_model::BlockId],
+        ids: &[smelt_transcript::transcript_model::BlockId],
     ) -> bool {
         self.document
             .transcript
@@ -605,7 +607,7 @@ impl ConversationRuntime {
 
     pub(super) fn deferred_transcript_operation_failed(
         &self,
-        ids: &[smelt_core::transcript_model::BlockId],
+        ids: &[smelt_transcript::transcript_model::BlockId],
     ) -> bool {
         self.document
             .transcript
@@ -614,7 +616,7 @@ impl ConversationRuntime {
 
     pub(super) fn request_deferred_transcript_operation(
         &mut self,
-        ids: &[smelt_core::transcript_model::BlockId],
+        ids: &[smelt_transcript::transcript_model::BlockId],
     ) {
         self.document
             .transcript
@@ -623,7 +625,7 @@ impl ConversationRuntime {
 
     pub(super) fn unpin_transcript_operation(
         &mut self,
-        ids: &[smelt_core::transcript_model::BlockId],
+        ids: &[smelt_transcript::transcript_model::BlockId],
     ) {
         self.document.transcript.unpin_operation_blocks(ids);
     }
@@ -737,7 +739,7 @@ impl ConversationRuntime {
     #[cfg(any(test, feature = "transcript-bench"))]
     pub(crate) fn ensure_transcript_blocks_hydrated_for_harness(
         &mut self,
-        ids: &[smelt_core::transcript_model::BlockId],
+        ids: &[smelt_transcript::transcript_model::BlockId],
     ) -> bool {
         self.document.transcript.ensure_hydrated_ids(ids)
     }
@@ -774,7 +776,7 @@ impl ConversationRuntime {
     #[cfg(test)]
     pub(crate) fn transcript_tail_state_for_harness(
         &self,
-    ) -> Option<(usize, smelt_core::transcript_model::BlockId, bool)> {
+    ) -> Option<(usize, smelt_transcript::transcript_model::BlockId, bool)> {
         let history = self.document.transcript.history();
         let id = history.last_block_id()?;
         Some((history.len(), id, history.is_materialized(id)))
@@ -817,8 +819,8 @@ impl ConversationRuntime {
 
     pub(crate) fn with_pinned_transcript_blocks<R>(
         &mut self,
-        ids: &[smelt_core::transcript_model::BlockId],
-        f: impl FnOnce(&smelt_core::transcript_model::BlockHistory) -> R,
+        ids: &[smelt_transcript::transcript_model::BlockId],
+        f: impl FnOnce(&smelt_transcript::transcript_model::BlockHistory) -> R,
     ) -> Option<R> {
         if !self.document.transcript.pin_operation_blocks(ids) {
             return None;
@@ -1037,7 +1039,7 @@ impl ConversationRuntime {
     pub(crate) fn commit_request_history_item(
         &mut self,
         item: protocol::HistoryItem,
-        block: Option<smelt_core::transcript_model::Block>,
+        block: Option<smelt_transcript::transcript_model::Block>,
         first_user_message: Option<String>,
     ) -> usize {
         self.apply_history_mutation(
@@ -1252,8 +1254,8 @@ impl ConversationRuntime {
 
     pub(super) fn append_accepted_block(
         &mut self,
-        block: smelt_core::transcript_model::Block,
-    ) -> smelt_core::transcript_model::BlockId {
+        block: smelt_transcript::transcript_model::Block,
+    ) -> smelt_transcript::transcript_model::BlockId {
         self.apply_transcript_mutation(
             super::session_document::TranscriptMutation::AppendAccepted { block },
         )
@@ -1263,7 +1265,7 @@ impl ConversationRuntime {
 
     pub(super) fn promote_accepted_block(
         &mut self,
-        id: smelt_core::transcript_model::BlockId,
+        id: smelt_transcript::transcript_model::BlockId,
         history_index: usize,
     ) -> bool {
         self.apply_transcript_mutation(
@@ -1272,7 +1274,10 @@ impl ConversationRuntime {
         .applied
     }
 
-    pub(super) fn remove_accepted_block(&mut self, id: smelt_core::transcript_model::BlockId) {
+    pub(super) fn remove_accepted_block(
+        &mut self,
+        id: smelt_transcript::transcript_model::BlockId,
+    ) {
         self.apply_transcript_mutation(
             super::session_document::TranscriptMutation::RemoveAccepted { id },
         );
@@ -1280,7 +1285,7 @@ impl ConversationRuntime {
 
     pub(super) fn remove_submitted_user_block(
         &mut self,
-        id: smelt_core::transcript_model::BlockId,
+        id: smelt_transcript::transcript_model::BlockId,
         history_index: usize,
     ) {
         self.apply_transcript_mutation(
@@ -1288,7 +1293,10 @@ impl ConversationRuntime {
         );
     }
 
-    pub(crate) fn append_block(&mut self, block: smelt_core::transcript_model::Block) -> bool {
+    pub(crate) fn append_block(
+        &mut self,
+        block: smelt_transcript::transcript_model::Block,
+    ) -> bool {
         self.finish_stream_reveal();
         self.apply_transcript_mutation(super::session_document::TranscriptMutation::AppendBlock {
             block,
@@ -1300,7 +1308,7 @@ impl ConversationRuntime {
         &mut self,
         block_index: usize,
         history_index: usize,
-        block: smelt_core::transcript_model::Block,
+        block: smelt_transcript::transcript_model::Block,
     ) {
         self.apply_transcript_mutation(
             super::session_document::TranscriptMutation::InsertCheckpointMarker {
@@ -1339,7 +1347,7 @@ impl ConversationRuntime {
 
     pub(crate) fn replace_transcript_from_history(
         &mut self,
-        transcript: smelt_core::content::transcript::Transcript,
+        transcript: smelt_transcript::content::transcript::Transcript,
     ) {
         self.apply_transcript_mutation(
             super::session_document::TranscriptMutation::ReplaceFromHistory {
@@ -1366,7 +1374,7 @@ impl ConversationRuntime {
         &mut self,
         summary: String,
         arrived_at: std::time::Instant,
-    ) -> Option<smelt_core::transcript_model::BlockId> {
+    ) -> Option<smelt_transcript::transcript_model::BlockId> {
         if summary == self.compaction_source {
             if let Some(id) = self.document.transcript.compaction_preview_id() {
                 return Some(id);
@@ -1403,8 +1411,8 @@ impl ConversationRuntime {
 
     pub(crate) fn rewrite_block(
         &mut self,
-        id: smelt_core::transcript_model::BlockId,
-        block: smelt_core::transcript_model::Block,
+        id: smelt_transcript::transcript_model::BlockId,
+        block: smelt_transcript::transcript_model::Block,
     ) -> bool {
         self.apply_transcript_mutation(super::session_document::TranscriptMutation::RewriteBlock {
             id,
@@ -1637,7 +1645,7 @@ impl ConversationRuntime {
 
     pub(crate) fn start_tool(
         &mut self,
-        start: smelt_core::content::stream_parser::ToolStart,
+        start: smelt_transcript::content::stream_parser::ToolStart,
         now: std::time::Instant,
     ) {
         self.finish_stream_reveal();
@@ -1669,7 +1677,10 @@ impl ConversationRuntime {
         );
         self.append_tool_output_slice(
             block_id,
-            smelt_core::transcript_content::SharedContentSlice::new(Arc::clone(&source), 0..end),
+            smelt_transcript::transcript_content::SharedContentSlice::new(
+                Arc::clone(&source),
+                0..end,
+            ),
             true,
         );
         (end < source.len()).then(|| {
@@ -1693,7 +1704,7 @@ impl ConversationRuntime {
             start,
             super::transcript_work::STREAM_CONTENT_SLICE_BYTES,
         );
-        let chunk = smelt_core::transcript_content::SharedContentSlice::new(
+        let chunk = smelt_transcript::transcript_content::SharedContentSlice::new(
             Arc::clone(&pending.source),
             start..end,
         );
@@ -1705,8 +1716,8 @@ impl ConversationRuntime {
 
     fn append_tool_output_slice(
         &mut self,
-        block_id: smelt_core::transcript_model::BlockId,
-        chunk: smelt_core::transcript_content::SharedContentSlice,
+        block_id: smelt_transcript::transcript_model::BlockId,
+        chunk: smelt_transcript::transcript_content::SharedContentSlice,
         line_start: bool,
     ) {
         self.apply_stream_mutation(
@@ -1721,7 +1732,7 @@ impl ConversationRuntime {
     pub(crate) fn set_tool_status(
         &mut self,
         invocation_id: protocol::InvocationId,
-        status: smelt_core::transcript_model::ToolStatus,
+        status: smelt_transcript::transcript_model::ToolStatus,
         now: std::time::Instant,
     ) {
         self.apply_stream_mutation(super::session_document::StreamMutation::SetToolStatus {
@@ -1747,8 +1758,8 @@ impl ConversationRuntime {
     pub(crate) fn finish_tool(
         &mut self,
         invocation_id: protocol::InvocationId,
-        status: smelt_core::transcript_model::ToolStatus,
-        output: Option<smelt_core::transcript_model::ToolOutputRef>,
+        status: smelt_transcript::transcript_model::ToolStatus,
+        output: Option<smelt_transcript::transcript_model::ToolOutputRef>,
         engine_elapsed: Option<std::time::Duration>,
         now: std::time::Instant,
     ) {
@@ -1768,7 +1779,7 @@ impl ConversationRuntime {
     pub(crate) fn promote_tool_draft(
         &mut self,
         stream_id: Option<String>,
-        start: smelt_core::content::stream_parser::ToolStart,
+        start: smelt_transcript::content::stream_parser::ToolStart,
         now: std::time::Instant,
     ) -> bool {
         self.finish_stream_reveal();
@@ -1838,7 +1849,7 @@ impl ConversationRuntime {
         call_id: Option<String>,
         name: Option<String>,
         native: bool,
-    ) -> Option<smelt_core::transcript_model::BlockId> {
+    ) -> Option<smelt_transcript::transcript_model::BlockId> {
         self.finish_stream_reveal();
         let first = self.response_draft_boundary();
         let id = self
@@ -1862,7 +1873,7 @@ impl ConversationRuntime {
         name: Option<String>,
         delta: String,
         arrived_at: std::time::Instant,
-    ) -> Option<(smelt_core::transcript_model::BlockId, bool)> {
+    ) -> Option<(smelt_transcript::transcript_model::BlockId, bool)> {
         if delta.is_empty() {
             return None;
         }
@@ -1907,7 +1918,7 @@ impl ConversationRuntime {
         call_id: String,
         name: String,
         arguments: String,
-    ) -> Option<smelt_core::transcript_model::BlockId> {
+    ) -> Option<smelt_transcript::transcript_model::BlockId> {
         self.reveal.finish(&RevealKey::ToolDraft(stream_id.clone()));
         self.apply_stream_mutation(super::session_document::StreamMutation::FinishToolDraft {
             stream_id,
@@ -1920,7 +1931,7 @@ impl ConversationRuntime {
 
     pub(crate) fn set_tool_draft_summary(
         &mut self,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
         summary: protocol::StyledLines,
     ) {
         self.apply_stream_mutation(
@@ -1930,13 +1941,13 @@ impl ConversationRuntime {
 
     pub(crate) fn tool_draft_preview(
         &self,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
     ) -> Option<(
         String,
         std::collections::HashMap<String, serde_json::Value>,
         bool,
     )> {
-        let smelt_core::transcript_model::Block::ToolDraft(draft) =
+        let smelt_transcript::transcript_model::Block::ToolDraft(draft) =
             self.document.transcript.history().block(block_id)?
         else {
             return None;
@@ -2343,7 +2354,7 @@ impl ConversationRuntime {
         else {
             return (None, false);
         };
-        let Some(smelt_core::transcript_model::Block::ToolDraft(draft)) =
+        let Some(smelt_transcript::transcript_model::Block::ToolDraft(draft)) =
             self.document.transcript.history().block(block_id)
         else {
             return (None, false);
@@ -2384,7 +2395,7 @@ impl ConversationRuntime {
 
     pub(crate) fn set_transcript_inline_options(
         &mut self,
-        options: smelt_core::content::highlight::InlineOptions,
+        options: smelt_transcript::content::highlight::InlineOptions,
     ) {
         self.document.transcript.set_inline_options(options.clone());
         self.resume_preview_cache.set_inline_options(options);

@@ -1406,7 +1406,7 @@ fn oversized_provider_output_is_sliced_before_completion_and_turn_finalization()
             .history()
             .tool_state(block_id)
             .map(|state| state.status),
-        Some(smelt_core::transcript_model::ToolStatus::Pending),
+        Some(smelt_transcript::transcript_model::ToolStatus::Pending),
         "tool completion must wait for queued output slices"
     );
 
@@ -1439,7 +1439,7 @@ fn oversized_provider_output_is_sliced_before_completion_and_turn_finalization()
         .expect("streaming tool state");
     assert_eq!(
         state.status,
-        smelt_core::transcript_model::ToolStatus::Pending
+        smelt_transcript::transcript_model::ToolStatus::Pending
     );
     assert_eq!(
         state.output.as_ref().map(|output| output.content.len()),
@@ -1454,7 +1454,10 @@ fn oversized_provider_output_is_sliced_before_completion_and_turn_finalization()
         .tool_state(block_id)
         .expect("completed tool state");
     let output = state.output.as_ref().expect("completed output");
-    assert_eq!(state.status, smelt_core::transcript_model::ToolStatus::Ok);
+    assert_eq!(
+        state.status,
+        smelt_transcript::transcript_model::ToolStatus::Ok
+    );
     assert_eq!(output.content.id(), streamed_id);
     assert_eq!(output.content.snapshot(), "x".repeat(3 * SLICE_BYTES));
     assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 0 })));
@@ -1525,7 +1528,7 @@ fn oversized_output_does_not_block_an_independent_tool() {
     let history = app.conversation_probe().transcript().history();
     assert_eq!(
         history.tool_state(second_block).map(|state| state.status),
-        Some(smelt_core::transcript_model::ToolStatus::Ok)
+        Some(smelt_transcript::transcript_model::ToolStatus::Ok)
     );
     assert_eq!(
         history
@@ -1568,7 +1571,7 @@ fn oversized_output_does_not_block_an_independent_tool() {
             .history()
             .tool_state(first_block)
             .map(|state| state.status),
-        Some(smelt_core::transcript_model::ToolStatus::Ok)
+        Some(smelt_transcript::transcript_model::ToolStatus::Ok)
     );
 }
 
@@ -1627,7 +1630,7 @@ fn cancellation_discards_queued_provider_output_and_lifecycle_events() {
     );
     assert_ne!(
         state.status,
-        smelt_core::transcript_model::ToolStatus::Ok,
+        smelt_transcript::transcript_model::ToolStatus::Ok,
         "deferred completion must not apply after cancellation"
     );
     assert!(!app.agent_running());
@@ -1748,7 +1751,9 @@ fn repeated_provider_call_ids_keep_distinct_live_tool_blocks() {
         .history()
         .block_records_with_ids();
     let mut restored =
-        smelt_core::transcript_model::BlockHistory::from_block_records_with_ids(records.clone());
+        smelt_transcript::transcript_model::BlockHistory::from_block_records_with_ids(
+            records.clone(),
+        );
     for record in records {
         let stored = restored
             .stored_ref(record.block_id)
@@ -1896,8 +1901,8 @@ fn display_only_resume_sets_resume_hint_state() {
     let session =
         smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     let session_id = session.id.clone();
-    let mut transcript = smelt_core::content::transcript::Transcript::new();
-    transcript.push(smelt_core::transcript_model::Block::Text {
+    let mut transcript = smelt_transcript::content::transcript::Transcript::new();
+    transcript.push(smelt_transcript::transcript_model::Block::Text {
         content: "restored transcript".into(),
     });
 
@@ -1962,7 +1967,7 @@ fn assert_resume_preview_is_visible(
 fn open_sparse_resume_preview(guard: &TestEnvironmentGuard) -> TestApp {
     {
         let mut app = TestApp::builder().build_with_test_home_guard(guard);
-        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
             text: "resume preview regression".into(),
             image_labels: Vec::new(),
             command: false,
@@ -1978,8 +1983,8 @@ fn open_sparse_resume_preview(guard: &TestEnvironmentGuard) -> TestApp {
             );
             app.finish_tool(
                 invocation_id,
-                smelt_core::transcript_model::ToolStatus::Ok,
-                Some(Box::new(smelt_core::transcript_model::ToolOutput {
+                smelt_transcript::transcript_model::ToolStatus::Ok,
+                Some(Box::new(smelt_transcript::transcript_model::ToolOutput {
                     content: format!("tool-{index} output ").repeat(180).into(),
                     is_error: false,
                     metadata: None,
@@ -2146,7 +2151,7 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for index in 0..80 {
-            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!("corrupt preview fixture {index}").into(),
             });
         }
@@ -2527,14 +2532,14 @@ fn prepared_edit_file_diff_survives_promotion_until_tool_finish() {
     assert_eq!(
         preview_output
             .content_field("old_content")
-            .map(smelt_core::transcript_content::TranscriptContent::snapshot)
+            .map(smelt_transcript::transcript_content::TranscriptContent::snapshot)
             .as_deref(),
         Some(old_content)
     );
     assert_eq!(
         preview_output
             .content_field("new_content")
-            .map(smelt_core::transcript_content::TranscriptContent::snapshot)
+            .map(smelt_transcript::transcript_content::TranscriptContent::snapshot)
             .as_deref(),
         Some(new_content)
     );
@@ -3246,7 +3251,7 @@ fn short_transcript_display_document_surfaces_actions() {
     let url = "https://example.test/short";
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: format!("short [link]({url})").into(),
     });
     app.render_silent();
@@ -3271,11 +3276,11 @@ fn row_backed_transcript_display_document_surfaces_actions() {
     let url = "https://example.test/row-backed";
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: format!("head [link]({url})").into(),
     });
     for i in 0..120 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("tail {i}").into(),
         });
     }
@@ -3382,14 +3387,14 @@ fn transcript_user_resize_keeps_viewport_top_content_stable() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(56, 20);
     let before = "before wrapping content ".repeat(6);
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: format!("{before}\nANCHOR stay at viewport top\nafter"),
         image_labels: vec![],
         command: false,
         sent_at_ms: None,
     });
     for i in 0..120 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("tail {i}").into(),
         });
     }
@@ -3421,11 +3426,11 @@ fn transcript_resize_keeps_wrapped_line_anchor_visible() {
     app.set_terminal_size(56, 20);
     let before = "before wrapping content ".repeat(10);
     let after = " after wrapping content".repeat(10);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: format!("{before} ANCHOR stay at viewport top {after}").into(),
     });
     for i in 0..120 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("tail {i}").into(),
         });
     }
@@ -3459,7 +3464,7 @@ fn transcript_resize_keeps_wrapped_line_anchor_visible() {
 fn transcript_resize_keeps_markdown_anchor_visible() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(58, 20);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: format!(
             "# Heading\n\n{} ANCHOR markdown paragraph {}\n\n- {}\n- tail item",
             "paragraph with `inline code`, **bold text**, and wrap pressure".repeat(5),
@@ -3469,7 +3474,7 @@ fn transcript_resize_keeps_markdown_anchor_visible() {
         .into(),
     });
     for i in 0..120 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("tail {i}").into(),
         });
     }
@@ -3501,11 +3506,11 @@ fn transcript_resize_keeps_markdown_anchor_visible() {
 fn transcript_height_resize_keeps_top_when_cursor_is_lower_in_viewport() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(64, 28);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "ANCHOR pinned top before height resize".into(),
     });
     for i in 0..160 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("tail {i}").into(),
         });
     }
@@ -3534,7 +3539,7 @@ fn transcript_height_resize_keeps_top_when_cursor_is_lower_in_viewport() {
 fn transcript_width_resize_keeps_top_when_cursor_is_lower_in_viewport() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 28);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: format!(
             "{} ANCHOR pinned top before width resize {}",
             "leading wrapped text".repeat(4),
@@ -3543,7 +3548,7 @@ fn transcript_width_resize_keeps_top_when_cursor_is_lower_in_viewport() {
         .into(),
     });
     for i in 0..160 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("tail {i}").into(),
         });
     }
@@ -3578,7 +3583,7 @@ fn wrapped_prose_transcript_scrolled_into_the_middle() -> TestApp {
             .join(" ")
     };
     for idx in 0..120 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!(
                 "{}\n\n- {}\n- item\n\n{}",
                 words(idx, "p", 60),
@@ -4177,7 +4182,7 @@ fn cold_transcript_wheel_moves_exact_visible_rows() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(78, 18);
     for index in 0..700 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!(
                 "record-{index:04} assistant paragraph\n\n```rust\nlet value = {index};\n```\n{}",
                 "variable wrapped content ".repeat(index % 23),
@@ -4415,7 +4420,7 @@ fn resumed_session_wheel_moves_exact_visible_rows_end_to_end() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for index in 0..700 {
-            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!(
                     "record-{index:04} assistant paragraph\n\n```rust\nlet value = {index};\n```\n{}",
                     "variable wrapped content ".repeat(index % 23),
@@ -4699,7 +4704,7 @@ fn settle_transcript_vim_tail(app: &mut TestApp) {
 fn assert_transcript_tail_follows_append(app: &mut TestApp, label: &str) {
     assert_transcript_window_at_tail(app, label);
     let append_marker = format!("tail-follow append via {label}");
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: append_marker.clone().into(),
     });
     app.render_silent();
@@ -4746,7 +4751,7 @@ fn resumed_sparse_vim_g_after_gg_pins_semantic_tail() {
     jump_transcript_top(&mut app);
     app.type_char('G');
     let pending_tail_marker = "tail content appended while G is pending";
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: pending_tail_marker.into(),
     });
     settle_transcript_vim_tail(&mut app);
@@ -4862,16 +4867,16 @@ fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
 fn committed_view_previous_user_includes_block_containing_viewport_top() {
     let mut app = TestApp::builder().with_ephemeral(true).build();
     app.set_terminal_size(80, 16);
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "older user target".into(),
         image_labels: Vec::new(),
         command: false,
         sent_at_ms: None,
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "older assistant response".into(),
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: (0..24)
             .map(|line| format!("CURRENT USER line {line:02}"))
             .collect::<Vec<_>>()
@@ -4880,7 +4885,7 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
         command: false,
         sent_at_ms: None,
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: (0..40)
             .map(|line| format!("tail assistant line {line:02}"))
             .collect::<Vec<_>>()
@@ -4969,7 +4974,7 @@ fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
         .build();
     app.set_terminal_size(100, 24);
     for i in 0..120 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
             text: format!("user target {i:03}"),
             image_labels: Vec::new(),
             command: false,
@@ -4983,7 +4988,7 @@ fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
         } else {
             format!("assistant response {i:03}")
         };
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: content.into(),
         });
     }
@@ -5099,7 +5104,7 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
         .build();
     app.set_terminal_size(100, 24);
     for i in 0..20 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("before write {i:02}").into(),
         });
     }
@@ -5118,12 +5123,12 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
     );
     app.finish_tool(
         invocation_id,
-        smelt_core::transcript_model::ToolStatus::Ok,
+        smelt_transcript::transcript_model::ToolStatus::Ok,
         None,
         Some(std::time::Duration::from_millis(50)),
     );
     for i in 0..20 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("after write {i:02}").into(),
         });
     }
@@ -5165,13 +5170,13 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
 fn committed_view_watcher_dispatches_once_per_revision() {
     let mut app = TestApp::builder().with_ephemeral(true).build();
     app.set_terminal_size(80, 16);
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "anchored user".into(),
         image_labels: Vec::new(),
         command: false,
         sent_at_ms: None,
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: (0..40)
             .map(|line| format!("assistant line {line:02}"))
             .collect::<Vec<_>>()
@@ -5213,7 +5218,7 @@ fn committed_view_watcher_dispatches_once_per_revision() {
     assert_eq!(app.lua_int_global("committed_view_calls"), Some(1));
     assert_eq!(app.lua_int_global("second_committed_view_calls"), Some(1));
 
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "new assistant navigation target".into(),
     });
     app.render_silent();
@@ -5257,22 +5262,22 @@ fn committed_view_watcher_reuses_the_retained_sparse_reader() {
 fn stale_committed_views_and_cross_session_targets_are_rejected() {
     let mut app = TestApp::builder().with_ephemeral(true).build();
     app.set_terminal_size(80, 16);
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "first user".into(),
         image_labels: Vec::new(),
         command: false,
         sent_at_ms: None,
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "first response".into(),
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "second user".into(),
         image_labels: Vec::new(),
         command: false,
         sent_at_ms: None,
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: (0..30)
             .map(|line| format!("second response {line:02}"))
             .collect::<Vec<_>>()
@@ -5295,7 +5300,7 @@ fn stale_committed_views_and_cross_session_targets_are_rejected() {
         "#
     ));
 
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "third assistant response".into(),
     });
     assert!(app.run_lua(
@@ -5808,7 +5813,7 @@ impl TranscriptScrollReplay {
                 }
                 TranscriptReplayStep::StreamingAppend => {
                     let before = app.transcript_window().scroll_top;
-                    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                         content: "replay streaming append should not move pinned viewport".into(),
                     });
                     set_replay_trace_input(
@@ -6059,7 +6064,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
     assert_eq!(
         first_visible.node_id,
         crate::content::transcript_scene::RenderNodeId::Block(
-            smelt_core::transcript_model::BlockId::new(block.block_id),
+            smelt_transcript::transcript_model::BlockId::new(block.block_id),
         ),
         "semantic block reveal must align its target block to the viewport top: {frame:?}"
     );
@@ -6077,7 +6082,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
             assert_eq!(record_index, block.record_index);
             assert_eq!(
                 block_id,
-                smelt_core::transcript_model::BlockId::new(block.block_id)
+                smelt_transcript::transcript_model::BlockId::new(block.block_id)
             );
             assert_eq!(screen_padding_top, 1, "the scroll pill's top inset");
             assert_eq!(
@@ -6236,7 +6241,7 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
 
 fn semantic_viewport_anchor(
     frame: &TranscriptScrollTraceFrame,
-) -> Option<(usize, smelt_core::transcript_model::BlockId, RowIndex)> {
+) -> Option<(usize, smelt_transcript::transcript_model::BlockId, RowIndex)> {
     match frame.viewport_anchor_after {
         Some(TranscriptTraceAnchor::Content {
             record_index,
@@ -6249,7 +6254,7 @@ fn semantic_viewport_anchor(
 }
 
 fn assert_monotonic_visible_anchors(frames: &[TranscriptScrollTraceFrame], upward: bool) {
-    let mut previous: Option<(usize, smelt_core::transcript_model::BlockId, RowIndex)> = None;
+    let mut previous: Option<(usize, smelt_transcript::transcript_model::BlockId, RowIndex)> = None;
     let mut compared = 0;
     for frame in frames {
         let Some(current) = semantic_viewport_anchor(frame) else {
@@ -7853,9 +7858,9 @@ pub(super) fn resumed_transcript_app_from_records(
 }
 
 fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
-    use smelt_core::transcript_model::Block;
+    use smelt_transcript::transcript_model::Block;
 
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for idx in 0..count {
         let marker = format!("record-{idx:04}");
         match idx % 10 {
@@ -7929,9 +7934,9 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
 }
 
 fn consecutive_tool_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
-    use smelt_core::transcript_model::Block;
+    use smelt_transcript::transcript_model::Block;
 
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for idx in 0..count {
         source.push(Block::ToolCall {
             call_id: format!("read-file-{idx}"),
@@ -7948,9 +7953,9 @@ fn consecutive_tool_records(count: usize) -> Vec<smelt_core::TranscriptBlockReco
 }
 
 fn tail_consecutive_user_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
-    use smelt_core::transcript_model::Block;
+    use smelt_transcript::transcript_model::Block;
 
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for idx in 0..count {
         let marker = format!("record-{idx:04}");
         if idx % 10 == 0 || idx >= count.saturating_sub(2) {
@@ -8148,7 +8153,7 @@ fn transcript_tail_follow_keeps_cursor_fixed_relative_to_viewport() {
     );
 
     for i in 0..10 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("new row {i:03} alpha beta").into(),
         });
     }
@@ -8290,14 +8295,14 @@ fn block_nav_app(vim: bool) -> TestApp {
     let mut app = TestApp::builder().with_vim(vim).build();
     app.set_terminal_size(80, 16);
     for turn in ["first", "second"] {
-        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
             text: format!("{turn} question"),
             image_labels: Vec::new(),
             command: false,
             sent_at_ms: None,
         });
         for i in 0..30 {
-            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!("{turn} answer {i}").into(),
             });
         }
@@ -8343,7 +8348,7 @@ fn user_message_jumps_align_multiline_prompts_at_top() {
         let mut app = TestApp::builder().with_vim(vim).build();
         app.set_terminal_size(80, 16);
         for turn in ["first", "second", "third"] {
-            app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
                 text: format!(
                     "{turn} question\n{}{turn} final line",
                     format!("{turn} details\n").repeat(detail_lines)
@@ -8352,7 +8357,7 @@ fn user_message_jumps_align_multiline_prompts_at_top() {
                 command: false,
                 sent_at_ms: None,
             });
-            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                 content: (0..30)
                     .map(|i| format!("{turn} answer {i}\n"))
                     .collect::<String>()
@@ -8407,7 +8412,7 @@ fn user_message_jumps_align_multiline_prompts_at_top() {
 #[test]
 fn user_message_jump_at_tail_keeps_the_full_prompt_visible() {
     let mut app = block_nav_app(true);
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "final question\nfinal details\nfinal line".into(),
         image_labels: Vec::new(),
         command: false,
@@ -8730,14 +8735,14 @@ fn user_message_jump_lands_on_the_text_below_the_pill_row() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.set_terminal_size(80, 16);
         for turn in ["first", "second", "third"] {
-            app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
                 text: format!("{turn} question"),
                 image_labels: Vec::new(),
                 command: false,
                 sent_at_ms,
             });
             for i in 0..30 {
-                app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                     content: format!("{turn} answer {i}").into(),
                 });
             }
@@ -8786,8 +8791,8 @@ fn user_message_jump_lands_on_the_text_below_the_pill_row() {
 /// A chat of `turns` timestamped turns whose user messages cycle through a
 /// short line, three lines, a message taller than the viewport and a wrapped
 /// paragraph. Every answer spans several rows and every third turn runs a tool.
-fn varied_chat_blocks(turns: usize) -> Vec<smelt_core::transcript_model::Block> {
-    use smelt_core::transcript_model::Block;
+fn varied_chat_blocks(turns: usize) -> Vec<smelt_transcript::transcript_model::Block> {
+    use smelt_transcript::transcript_model::Block;
     let mut blocks = Vec::new();
     for t in 0..turns {
         let text = match t % 4 {
@@ -8841,7 +8846,7 @@ fn varied_chat_app(turns: usize) -> TestApp {
 }
 
 fn resumed_varied_chat_app(turns: usize) -> (TestApp, tempfile::TempDir) {
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for block in varied_chat_blocks(turns) {
         source.push(block);
     }
@@ -8942,14 +8947,14 @@ fn resumed_user_message_jumps_land_on_every_message_text_below_the_pill() {
 /// Every display row of turn `t` names it: `u{t:03}` or `a{t:03}`. Prompts
 /// carry a send time, so each opens with a header row above its text.
 fn store_backed_tall_chat_app(turns: usize) -> TestApp {
-    use smelt_core::transcript_model::Block;
+    use smelt_transcript::transcript_model::Block;
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 20);
     let session_id = app.session_snapshot().id.clone();
     let mut session =
         smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     session.id = session_id.clone();
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for t in 0..turns {
         source.push(Block::User {
             text: format!("u{t:03} question"),
@@ -9285,7 +9290,7 @@ fn resume_preview_mouse_drag_paints_selection_and_copies() {
     {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for index in 0..20 {
-            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!("resume selectable line {index}").into(),
             });
         }

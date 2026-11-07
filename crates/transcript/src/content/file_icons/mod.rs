@@ -79,7 +79,7 @@ pub fn lookup_path(path: &Path, options: &FileIconOptions) -> Option<FileIcon> {
     })
 }
 
-pub(crate) fn lookup_path_with_color(
+pub fn lookup_path_with_color(
     path: &Path,
     options: &FileIconOptions,
 ) -> Option<(&'static str, Option<Color>)> {

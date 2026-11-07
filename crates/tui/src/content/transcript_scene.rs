@@ -1,7 +1,7 @@
 use mlua::{Lua, Table, Value};
 use smelt_core::lua::TranscriptGroupSpec;
-use smelt_core::transcript_content::ContentId;
-use smelt_core::transcript_model::{
+use smelt_transcript::transcript_content::ContentId;
+use smelt_transcript::transcript_model::{
     BlockHistory, BlockId, ContentChannel, LayoutKey, TranscriptGroupChildMetadata,
     TranscriptPatchOperation, ViewState,
 };
@@ -252,7 +252,10 @@ impl TranscriptDefaultViewPolicy {
     }
 
     #[cfg(test)]
-    fn block_default_view_state(&self, block: &smelt_core::transcript_model::Block) -> ViewState {
+    fn block_default_view_state(
+        &self,
+        block: &smelt_transcript::transcript_model::Block,
+    ) -> ViewState {
         tool_name(block)
             .and_then(|name| self.tools.get(name).copied())
             .or_else(|| self.block_kinds.get(block_kind(block)).copied())
@@ -614,7 +617,7 @@ impl TranscriptScene {
             return;
         }
         if presentation_changed {
-            group.presentation_revision = smelt_core::utils::hash_serializable(&(
+            group.presentation_revision = smelt_transcript::hash::hash_serializable(&(
                 group.presentation_revision,
                 patch_revision,
                 id,
@@ -945,7 +948,7 @@ impl TranscriptScene {
                 width: base_key.width,
                 view_state,
                 content_hash: group.id,
-                sidecar_hash: smelt_core::utils::hash_serializable(&(
+                sidecar_hash: smelt_transcript::hash::hash_serializable(&(
                     group.presentation_revision,
                     self.group_generation,
                     self.group_cache_key,
@@ -1050,12 +1053,12 @@ fn build_nodes_from(
             .copied()
             .map(|id| render_group_child(history, id))
             .collect::<Vec<_>>();
-        let id = smelt_core::utils::hash_serializable(&GroupIdKey {
+        let id = smelt_transcript::hash::hash_serializable(&GroupIdKey {
             name: &spec.name,
             bucket: &bucket,
             first_child: children[0].id,
         });
-        let presentation_revision = smelt_core::utils::hash_serializable(&(
+        let presentation_revision = smelt_transcript::hash::hash_serializable(&(
             id,
             children
                 .iter()
@@ -1221,16 +1224,16 @@ fn json_bucket_value(value: &serde_json::Value) -> String {
 }
 
 #[cfg(test)]
-fn tool_name(block: &smelt_core::transcript_model::Block) -> Option<&str> {
+fn tool_name(block: &smelt_transcript::transcript_model::Block) -> Option<&str> {
     match block {
-        smelt_core::transcript_model::Block::ToolDraft(draft) => Some(&draft.name),
-        smelt_core::transcript_model::Block::ToolCall { name, .. } => Some(name),
+        smelt_transcript::transcript_model::Block::ToolDraft(draft) => Some(&draft.name),
+        smelt_transcript::transcript_model::Block::ToolCall { name, .. } => Some(name),
         _ => None,
     }
 }
 
 #[cfg(test)]
-fn block_kind(block: &smelt_core::transcript_model::Block) -> &'static str {
+fn block_kind(block: &smelt_transcript::transcript_model::Block) -> &'static str {
     block.kind()
 }
 
@@ -1247,8 +1250,8 @@ fn view_state(value: Option<&str>) -> ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::stream_parser::{StreamParser, ToolStart};
-    use smelt_core::transcript_model::{
+    use smelt_transcript::content::stream_parser::{StreamParser, ToolStart};
+    use smelt_transcript::transcript_model::{
         Block, BlockHistory, ToolOutput, ToolState, ToolStateMutation, ToolStatus,
         TranscriptBlockRecord,
     };
@@ -1338,7 +1341,7 @@ mod tests {
 
     #[test]
     fn process_status_typed_fields_match_selectors_and_buckets() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(Block::ProcessStatus {
             text: "Background process 1 finished successfully.".into(),
             output: None,
@@ -1399,7 +1402,7 @@ mod tests {
 
     #[test]
     fn tool_name_sets_group_mixed_adjacent_tools() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         for name in ["read_file", "grep", "outline", "edit_file"] {
             transcript.push(Block::ToolCall {
                 call_id: format!("call-{name}"),
@@ -1519,7 +1522,7 @@ mod tests {
 
     #[test]
     fn lower_priority_group_can_match_when_higher_priority_run_is_below_min() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(Block::Text {
             content: "first".into(),
         });
@@ -1575,7 +1578,7 @@ mod tests {
 
     #[test]
     fn ungrouped_plan_extends_for_append_without_pruning() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(Block::Text {
             content: "first".into(),
         });
@@ -1608,7 +1611,7 @@ mod tests {
 
     #[test]
     fn content_patch_refresh_preserves_append_ranges() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(Block::User {
             text: "continue".into(),
             image_labels: Vec::new(),
@@ -1649,7 +1652,7 @@ mod tests {
 
     #[test]
     fn animation_patch_advances_history_without_invalidating_scene() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         let mut parser = StreamParser::new();
         parser.start_tool(
             &mut transcript.history,
@@ -1690,7 +1693,7 @@ mod tests {
 
     #[test]
     fn ungrouped_plan_reuses_structure_for_content_update() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(Block::Text {
             content: "first".into(),
         });
@@ -1719,7 +1722,7 @@ mod tests {
 
     #[test]
     fn grouped_child_payload_append_isolated_from_siblings_and_group_presentation() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         let mut parser = StreamParser::new();
         let first_invocation = protocol::InvocationId::new(1);
         let second_invocation = protocol::InvocationId::new(2);
@@ -1839,7 +1842,7 @@ mod tests {
 
     #[test]
     fn grouped_plan_rebuilds_on_append() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(Block::Text {
             content: "first".into(),
         });
@@ -1910,7 +1913,7 @@ mod tests {
 
     #[test]
     fn suffix_change_with_append_keeps_the_unchanged_prefix() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         for index in 0..4 {
             transcript.push(user_block(&format!("prompt {index}")));
         }
@@ -1930,7 +1933,7 @@ mod tests {
 
     #[test]
     fn suffix_change_that_splits_a_group_rebuilds_from_the_group_start() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(user_block("prompt"));
         transcript.push(Block::Text {
             content: "first".into(),
@@ -1963,7 +1966,7 @@ mod tests {
 
     #[test]
     fn disabling_groups_rebuilds_grouped_plan_as_blocks() {
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(Block::Text {
             content: "first".into(),
         });
@@ -2011,7 +2014,7 @@ mod tests {
         policy
             .groups
             .insert("tools".to_string(), ViewState::Expanded);
-        let transcript = smelt_core::content::transcript::Transcript::new();
+        let transcript = smelt_transcript::content::transcript::Transcript::new();
         let node = RenderNode::Group(Box::new(RenderGroupNode {
             id: 1,
             name: "tools".into(),

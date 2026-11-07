@@ -7,13 +7,13 @@ fn user_blocks(app: &mut TestApp) -> Vec<(String, Vec<String>)> {
         .history()
         .order
         .clone();
-    let inspect = |history: &smelt_core::transcript_model::BlockHistory| {
+    let inspect = |history: &smelt_transcript::transcript_model::BlockHistory| {
         history
             .order
             .iter()
             .filter_map(|id| history.block(*id))
             .filter_map(|block| match block {
-                smelt_core::transcript_model::Block::User {
+                smelt_transcript::transcript_model::Block::User {
                     text, image_labels, ..
                 } => Some((text.clone(), image_labels.clone())),
                 _ => None,
@@ -853,7 +853,7 @@ fn transcript_paragraph_motions_land_on_blank_rows() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     for i in 0..40 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("para {i} one\nstill {i}\n\npara {i} two").into(),
         });
     }
@@ -887,14 +887,14 @@ fn transcript_paragraph_motions_land_on_blank_rows() {
 fn transcript_cursor_stays_visible_on_the_timestamp_row_at_the_top() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(100, 24);
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "give me a tour".into(),
         image_labels: Vec::new(),
         command: false,
         sent_at_ms: Some(1_700_000_000_000),
     });
     for i in 0..6 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("para {i} one\n\npara {i} two line").into(),
         });
     }
@@ -999,7 +999,7 @@ fn transcript_yank_to_a_found_character() {
 fn transcript_percent_jumps_between_brackets_across_rows() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "call(one, [two])\nfn open {\n    body\n}\n".into(),
     });
     app.render_silent();
@@ -1211,7 +1211,7 @@ fn viewer_gv_reselects_the_last_visual_selection() {
 fn transcript_with_code_block() -> (TestApp, usize) {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 24);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "intro\n\n```rust\nfn main() {}\nlet x = 1;\n```\n\noutro\n".into(),
     });
     app.render_silent();
@@ -1284,7 +1284,7 @@ fn transcript_code_block_object_finds_nothing_after_the_last_block() {
 fn transcript_pair_object_looks_ahead_on_the_line() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 24);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "intro\n\nsee the docs (chapter two) first\n".into(),
     });
     app.render_silent();

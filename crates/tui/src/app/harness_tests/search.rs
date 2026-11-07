@@ -217,7 +217,7 @@ fn interrupted_tool_turn_in_a_sparse_transcript_saves_after_hydration() {
 fn transcript_search_renders_and_edits_unicode_by_grapheme() {
     let mut app = searchable_transcript_app();
     let input = "e\u{301}👩\u{200d}💻9\u{fe0f}🇨🇦";
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: format!("prefix {input} suffix").into(),
     });
     app.render_silent();
@@ -256,7 +256,7 @@ fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTransc
         tool_state: None,
         tool_render_revision: 0,
     };
-    smelt_core::transcript_model::transcript_block_row_with_block_idx(
+    smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
         block_idx as usize,
         block_idx,
         &record,
@@ -936,7 +936,7 @@ fn run_cmdline(app: &mut TestApp, command: &str) {
 #[test]
 fn transcript_search_finds_compacted_divider_label() {
     let mut app = searchable_transcript_app();
-    app.push_transcript_block(smelt_core::transcript_model::Block::Compacted {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Compacted {
         summary: "archived earlier turns".into(),
         kept: Vec::new(),
     });
@@ -963,7 +963,7 @@ fn transcript_search_finds_compacted_divider_label() {
 #[test]
 fn transcript_search_includes_selectable_compacted_separator_chrome() {
     let mut app = searchable_transcript_app();
-    app.push_transcript_block(smelt_core::transcript_model::Block::Compacted {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Compacted {
         summary: "archived earlier turns".into(),
         kept: Vec::new(),
     });
@@ -1000,8 +1000,8 @@ fn transcript_search_finds_lua_rendered_collapsed_tool_detail() {
     );
     app.finish_tool(
         invocation_id,
-        smelt_core::transcript_model::ToolStatus::Ok,
-        Some(Box::new(smelt_core::transcript_model::ToolOutput {
+        smelt_transcript::transcript_model::ToolStatus::Ok,
+        Some(Box::new(smelt_transcript::transcript_model::ToolOutput {
             content: "src/a.rs\nsrc/b.rs".into(),
             is_error: false,
             metadata: Some(serde_json::json!({
@@ -1297,7 +1297,7 @@ fn transcript_star_skips_rows_where_the_word_is_part_of_a_longer_word() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     for text in ["first alpha", "alphabet soup", "tail alpha"] {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: text.into(),
         });
     }

@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 smelt-core = { workspace = true }
 smelt-tui = { workspace = true, features = ["transcript-fixture"] }
+smelt-transcript = { workspace = true }
 smelt-protocol = { workspace = true }
 smelt-store = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use crate::diff::{Diff, DiffView};
+use smelt_transcript::diff::{Diff, DiffView};
 
 pub mod review;
 
@@ -31,7 +31,7 @@ pub(crate) struct FileStatus {
 pub(crate) type Status = HashMap<Vec<u8>, FileStatus>;
 
 #[cfg(test)]
-fn file_status(file: &crate::diff::File, status: &Status) -> (char, char) {
+fn file_status(file: &smelt_transcript::diff::File, status: &Status) -> (char, char) {
     let mut columns = status
         .get(&file.raw_path)
         .map_or((' ', ' '), |s| (s.index, s.worktree));
@@ -111,14 +111,14 @@ pub(crate) enum IndexAction {
 /// acts on their shared section, not another section containing the same paths.
 pub(crate) async fn update_index(
     root: PathBuf,
-    files: &[crate::diff::File],
+    files: &[smelt_transcript::diff::File],
     action: IndexAction,
     cancel: CancellationToken,
 ) -> Result<(), String> {
     let Some(first) = files.first() else {
         return Ok(());
     };
-    if first.section == crate::diff::Section::Changes {
+    if first.section == smelt_transcript::diff::Section::Changes {
         return Err("historical comparisons are read-only".into());
     }
     if files.iter().any(|file| file.section != first.section) {
@@ -128,7 +128,7 @@ pub(crate) async fn update_index(
     let stage = match action {
         IndexAction::Stage => true,
         IndexAction::Unstage => false,
-        IndexAction::Toggle => first.section == crate::diff::Section::Unstaged,
+        IndexAction::Toggle => first.section == smelt_transcript::diff::Section::Unstaged,
     };
     let mut paths = Vec::new();
     for file in files {
@@ -531,7 +531,7 @@ async fn load_working_diff(
             .map(|(path, _)| path.clone())
             .collect();
         for file in &mut diff.files {
-            if file.section == crate::diff::Section::Unstaged {
+            if file.section == smelt_transcript::diff::Section::Unstaged {
                 if unmerged.remove(&file.raw_path) {
                     file.status = "U";
                 } else if file.status == "A"
@@ -826,8 +826,11 @@ mod tests {
         for path in ["tracked", "recreated"] {
             let entries: Vec<_> = files.iter().filter(|f| f.path == path).collect();
             assert_eq!(entries.len(), 2);
-            assert_eq!(entries[0].section, crate::diff::Section::Unstaged);
-            assert_eq!(entries[1].section, crate::diff::Section::Staged);
+            assert_eq!(
+                entries[0].section,
+                smelt_transcript::diff::Section::Unstaged
+            );
+            assert_eq!(entries[1].section, smelt_transcript::diff::Section::Staged);
         }
         assert!(files
             .iter()
@@ -1294,7 +1297,7 @@ mod tests {
             .diff
             .files
             .iter()
-            .all(|file| file.section == crate::diff::Section::Staged));
+            .all(|file| file.section == smelt_transcript::diff::Section::Staged));
         update_index(
             root.to_owned(),
             &staged.view.diff.files,
@@ -1327,7 +1330,7 @@ mod tests {
         assert_eq!(snapshot.view.diff.files[0].status, "?");
         assert_eq!(
             snapshot.view.diff.files[0].section,
-            crate::diff::Section::Unstaged
+            smelt_transcript::diff::Section::Unstaged
         );
         run(dir.path(), &["add", "."]);
         let snapshot = working_diff(dir.path().to_owned(), 3, CancellationToken::new())

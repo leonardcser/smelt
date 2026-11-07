@@ -139,7 +139,7 @@ impl ToolArguments {
             })
             .collect::<Vec<_>>();
         fields.sort_unstable_by_key(|field| field.0);
-        crate::utils::hash_serializable(&(self.structured_hash, fields))
+        crate::hash::hash_serializable(&(self.structured_hash, fields))
     }
 
     pub fn dynamic_retained_bytes(&self) -> usize {
@@ -309,7 +309,7 @@ impl ToolDraft {
     }
 
     pub fn content_hash(&self) -> u64 {
-        crate::utils::hash_serializable(&(
+        crate::hash::hash_serializable(&(
             &self.stream_id,
             &self.call_id,
             &self.name,
@@ -976,10 +976,10 @@ fn cap_structured_value(value: &serde_json::Value, budget: &mut usize) -> serde_
 fn hash_structured_values(values: &HashMap<String, serde_json::Value>) -> u64 {
     let mut fields = values
         .iter()
-        .map(|(name, value)| (name.as_str(), crate::utils::hash_serializable(value)))
+        .map(|(name, value)| (name.as_str(), crate::hash::hash_serializable(value)))
         .collect::<Vec<_>>();
     fields.sort_unstable_by_key(|field| field.0);
-    crate::utils::hash_serializable(&fields)
+    crate::hash::hash_serializable(&fields)
 }
 
 fn content_matches(content: &TranscriptContent, value: &str) -> bool {

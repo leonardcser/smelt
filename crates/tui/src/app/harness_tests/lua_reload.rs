@@ -2779,7 +2779,7 @@ fn loading_session_restores_persisted_cwd() {
     let display_session =
         smelt_core::session::Session::new(app.core_probe().env.pid(), display_target.clone());
     let display_session_id = display_session.id.clone();
-    let transcript = smelt_core::content::transcript::Transcript::new();
+    let transcript = smelt_transcript::content::transcript::Transcript::new();
 
     app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
@@ -3433,8 +3433,8 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
     );
     app.finish_tool(
         invocation_id,
-        smelt_core::transcript_model::ToolStatus::Ok,
-        Some(Box::new(smelt_core::transcript_model::ToolOutput {
+        smelt_transcript::transcript_model::ToolStatus::Ok,
+        Some(Box::new(smelt_transcript::transcript_model::ToolOutput {
             content: "reload output".into(),
             is_error: false,
             metadata: None,

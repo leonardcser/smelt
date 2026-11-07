@@ -1760,7 +1760,7 @@ fn compaction_blocks(app: &TestApp) -> (Vec<String>, bool) {
         .order
         .iter()
         .filter_map(|id| match history.block(*id) {
-            Some(smelt_core::transcript_model::Block::Compacted { summary, .. }) => {
+            Some(smelt_transcript::transcript_model::Block::Compacted { summary, .. }) => {
                 Some(summary.clone())
             }
             _ => None,

@@ -25,7 +25,7 @@ fn error_messages(app: &TestApp) -> Vec<String> {
 /// failed and a finished tool, a shell command and an answer.
 fn play_turn(app: &mut TestApp) {
     app.push_user_block("fix the lamp\nit should cost $45, not $0");
-    app.push_transcript_block(smelt_core::transcript_model::Block::Thinking {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Thinking {
         title: Some("Reading the pricing".into()),
         summary_titles: Vec::new(),
         content: "The divisor looks wrong.".into(),
@@ -46,7 +46,7 @@ fn play_turn(app: &mut TestApp) {
         protocol::ToolOutcome::new("test result: ok".into(), false, None),
         Some(40),
     );
-    app.push_transcript_block(smelt_core::transcript_model::Block::Exec {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Exec {
         command: "git status".into(),
         output: "nothing to commit".into(),
     });
@@ -202,13 +202,13 @@ fn mono_recolors_visible_scroll_pill_without_scrolling() {
     app.set_terminal_size(60, 16);
     let source = std::fs::read_to_string(gallery_dir().join("mono.lua")).unwrap();
     app.run_lua_result(&source).unwrap();
-    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
         text: "fix the lamp".into(),
         image_labels: Vec::new(),
         command: false,
         sent_at_ms: None,
     });
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: (0..40)
             .map(|n| format!("line {n}\n\n"))
             .collect::<String>()

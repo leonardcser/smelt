@@ -1,8 +1,8 @@
 use super::*;
-use smelt_core::transcript_content::TranscriptContent;
+use smelt_transcript::transcript_content::TranscriptContent;
 
 pub(super) fn solve_ir_hbox_widths(
-    items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
+    items: &[smelt_transcript::content::block_layout::HboxItem<IrLeaf>],
     total_width: u16,
 ) -> Vec<u16> {
     let constraints: Vec<_> = items.iter().map(|item| item.constraint).collect();
@@ -166,7 +166,7 @@ pub(super) fn print_hbox_padding(out: &mut LineBuilder<'_>, mut cells: u16) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_ir_hbox(
     out: &mut LineBuilder,
-    items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
+    items: &[smelt_transcript::content::block_layout::HboxItem<IrLeaf>],
     total_width: u16,
     row_start: usize,
     row_count: usize,

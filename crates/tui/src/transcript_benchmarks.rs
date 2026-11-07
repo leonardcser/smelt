@@ -30,13 +30,13 @@ fn default_ui_frame_benchmark_suite() {
         app.set_terminal_size(120, 40);
         app.animate_with_virtual_clock();
         for i in 0..100 {
-            app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
                 text: format!("default UI prompt {i}"),
                 image_labels: Vec::new(),
                 command: false,
                 sent_at_ms: None,
             });
-            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!(
                     "default UI response {i}\n{}",
                     "alpha beta gamma delta\n".repeat(4)
@@ -165,7 +165,7 @@ fn transcript_navigation_bench_app() -> TestApp {
     app.tui.handle_resize(100, 32);
     for i in 0..4_000 {
         app.tui
-            .push_block(smelt_core::transcript_model::Block::User {
+            .push_block(smelt_transcript::transcript_model::Block::User {
                 text: format!("navigation bench prompt {i:04}"),
                 image_labels: Vec::new(),
                 command: false,
@@ -189,7 +189,7 @@ fn transcript_navigation_bench_app() -> TestApp {
             )
         };
         app.tui
-            .push_block(smelt_core::transcript_model::Block::Text {
+            .push_block(smelt_transcript::transcript_model::Block::Text {
                 content: content.into(),
             });
     }
@@ -293,7 +293,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
         );
         approx_bytes += user.len();
         app.tui
-            .push_block(smelt_core::transcript_model::Block::User {
+            .push_block(smelt_transcript::transcript_model::Block::User {
                 text: user,
                 image_labels: vec![],
                 command: false,
@@ -307,7 +307,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
         );
         approx_bytes += assistant.len();
         app.tui
-            .push_block(smelt_core::transcript_model::Block::Text {
+            .push_block(smelt_transcript::transcript_model::Block::Text {
                 content: assistant.into(),
             });
 
@@ -324,7 +324,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
                 .join("\n");
             approx_bytes += command.len() + output.len();
             app.tui
-                .push_block(smelt_core::transcript_model::Block::Exec {
+                .push_block(smelt_transcript::transcript_model::Block::Exec {
                     command,
                     output: output.into(),
                 });
@@ -838,7 +838,7 @@ fn prepare_burst_bench_position(app: &mut TestApp, position: BurstBenchPosition)
                 .record_total_count()
                 .expect("sparse record count")
                 / 2;
-            let block_id = smelt_core::transcript_model::BlockId::new(record as u64);
+            let block_id = smelt_transcript::transcript_model::BlockId::new(record as u64);
             assert!(
                 app.tui
                     .reveal_transcript_target_at_top(record, block_id, 1, true),
@@ -1520,7 +1520,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
 
     smelt_perf::perf::clear();
     app.tui
-        .push_block(smelt_core::transcript_model::Block::Text {
+        .push_block(smelt_transcript::transcript_model::Block::Text {
             content: "append after index common-token incremental-index-probe".into(),
         });
     let after_append_start = std::time::Instant::now();
@@ -2079,7 +2079,7 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
     app.tui.handle_resize(120, 40);
     for i in 0..80 {
         app.tui
-            .push_block(smelt_core::transcript_model::Block::Text {
+            .push_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!("collapsed transcript row before tool {i:03}").into(),
             });
     }
@@ -2102,13 +2102,13 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
     );
     app.finish_tool(
         invocation_id,
-        smelt_core::transcript_model::ToolStatus::Ok,
+        smelt_transcript::transcript_model::ToolStatus::Ok,
         None,
         Some(std::time::Duration::from_millis(250)),
     );
     for i in 0..80 {
         app.tui
-            .push_block(smelt_core::transcript_model::Block::Text {
+            .push_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!("collapsed transcript row after tool {i:03}").into(),
             });
     }
@@ -2295,7 +2295,7 @@ fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
     app.tui.handle_resize(120, 40);
     for i in 0..100 {
         app.tui
-            .push_block(smelt_core::transcript_model::Block::Text {
+            .push_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!("retained diff history row {i:03}").into(),
             });
     }
@@ -2330,16 +2330,16 @@ fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
             ("new_string".into(), serde_json::json!(new_line)),
         ]),
     );
-    let output = smelt_core::transcript_model::ToolOutput {
+    let output = smelt_transcript::transcript_model::ToolOutput {
         content: "edited generated/large.rs".into(),
         is_error: false,
         metadata: Some(serde_json::json!({ "path": "generated/large.rs" })),
         content_fields: vec![
-            smelt_core::transcript_model::ToolOutputContentField {
+            smelt_transcript::transcript_model::ToolOutputContentField {
                 name: "old_content".into(),
                 content: old_content.into(),
             },
-            smelt_core::transcript_model::ToolOutputContentField {
+            smelt_transcript::transcript_model::ToolOutputContentField {
                 name: "new_content".into(),
                 content: new_content.into(),
             },
@@ -2347,7 +2347,7 @@ fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
     };
     app.finish_tool(
         invocation_id,
-        smelt_core::transcript_model::ToolStatus::Ok,
+        smelt_transcript::transcript_model::ToolStatus::Ok,
         Some(Box::new(output)),
         Some(std::time::Duration::from_millis(250)),
     );
@@ -2635,14 +2635,14 @@ fn transcript_sparse_watcher_benchmark_suite() {
     app.tui.handle_resize(100, 32);
     for index in 0..block_count {
         let block = if index.is_multiple_of(10) {
-            smelt_core::transcript_model::Block::User {
+            smelt_transcript::transcript_model::Block::User {
                 text: format!("sparse watcher user {index}"),
                 image_labels: Vec::new(),
                 command: false,
                 sent_at_ms: None,
             }
         } else {
-            smelt_core::transcript_model::Block::Text {
+            smelt_transcript::transcript_model::Block::Text {
                 content: format!("sparse watcher response {index}").into(),
             }
         };
@@ -3225,14 +3225,14 @@ fn push_stream_boundary_transcript(app: &mut TestApp, record_bytes: usize) -> us
         }
         generated_bytes = generated_bytes.saturating_add(content.len());
         let block = if index.is_multiple_of(2) {
-            smelt_core::transcript_model::Block::User {
+            smelt_transcript::transcript_model::Block::User {
                 text: content,
                 image_labels: Vec::new(),
                 command: false,
                 sent_at_ms: None,
             }
         } else {
-            smelt_core::transcript_model::Block::Text {
+            smelt_transcript::transcript_model::Block::Text {
                 content: content.into(),
             }
         };
@@ -3277,7 +3277,7 @@ fn stream_benchmark_app(
     } else {
         for index in 0..history_blocks {
             let block = match index % 4 {
-                0 => smelt_core::transcript_model::Block::User {
+                0 => smelt_transcript::transcript_model::Block::User {
                     text: format!(
                         "stream benchmark prompt {index}: inspect the command output and summarize failures"
                     ),
@@ -3285,21 +3285,21 @@ fn stream_benchmark_app(
                     command: false,
                     sent_at_ms: None,
                 },
-                1 => smelt_core::transcript_model::Block::Text {
+                1 => smelt_transcript::transcript_model::Block::Text {
                     content: format!(
                         "## Earlier result {index}\n\n- parsed output\n- checked status\n\n{}",
                         "alpha beta gamma delta ".repeat(5)
                     )
                     .into(),
                 },
-                2 => smelt_core::transcript_model::Block::Thinking {
+                2 => smelt_transcript::transcript_model::Block::Thinking {
                     title: None,
                     summary_titles: Vec::new(),
                     content: format!("Inspecting earlier result {index} and comparing the logs.")
                         .into(),
                     kind: protocol::ReasoningKind::Raw,
                 },
-                _ => smelt_core::transcript_model::Block::Text {
+                _ => smelt_transcript::transcript_model::Block::Text {
                     content: format!(
                         "```text\nfinished previous task {index}\nstatus: ok\n```\n\nReady for the next command."
                     )
@@ -4423,7 +4423,7 @@ fn saved_hot_path_app(
             .iter()
             .enumerate()
             .map(|(index, record)| {
-                smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                     index,
                     record.block_id.get(),
                     &record.record,
@@ -5337,7 +5337,8 @@ fn session_storage_clean_fork_capture_is_independent_of_record_count() {
                         tool_state: None,
                         tool_render_revision: 0,
                     };
-                    smelt_core::transcript_model::transcript_block_row(index, &record).unwrap()
+                    smelt_transcript::transcript_model::transcript_block_row(index, &record)
+                        .unwrap()
                 })
                 .collect(),
         });
@@ -5757,7 +5758,7 @@ fn transcript_active_memory_benchmark_suite() {
             let content = format!("# Active block {block_count}\n\n{marker}\n\n{body}");
             generated_bytes = generated_bytes.saturating_add(content.len());
             app.tui
-                .push_block(smelt_core::transcript_model::Block::Text {
+                .push_block(smelt_transcript::transcript_model::Block::Text {
                     content: content.into(),
                 });
             block_count += 1;
@@ -6016,8 +6017,8 @@ fn scaling_bench_reps() -> usize {
 }
 
 /// One block of a repeating user/thinking/tool/answer agent turn.
-fn scaling_bench_block(index: usize) -> smelt_core::transcript_model::Block {
-    use smelt_core::transcript_model::Block;
+fn scaling_bench_block(index: usize) -> smelt_transcript::transcript_model::Block {
+    use smelt_transcript::transcript_model::Block;
     match index % 4 {
         0 => Block::User {
             text: format!("scaling prompt {index}: inspect the failing test and propose a fix"),
@@ -6049,7 +6050,7 @@ fn scaling_bench_block(index: usize) -> smelt_core::transcript_model::Block {
     }
 }
 
-fn scaling_bench_block_bytes(block: &smelt_core::transcript_model::Block) -> usize {
+fn scaling_bench_block_bytes(block: &smelt_transcript::transcript_model::Block) -> usize {
     block.raw_text().map(|text| text.len()).unwrap_or_default()
 }
 
@@ -6098,7 +6099,7 @@ fn scaling_save(app: &mut TestApp, save_ms: &mut Vec<f64>) {
 fn scaling_bench_app(
     blocks: usize,
     compacted: bool,
-    block_at: fn(usize) -> smelt_core::transcript_model::Block,
+    block_at: fn(usize) -> smelt_transcript::transcript_model::Block,
 ) -> ScalingFixture {
     const SAVE_BATCH_BLOCKS: usize = 256;
     const RENDER_EVERY_BLOCKS: usize = 64;
@@ -6449,9 +6450,9 @@ fn transcript_scaling_benchmark_suite() {
 
 /// A scaling block whose answers also carry inline code, quotes and a fenced
 /// code block, so text objects and `%` have something to act on.
-fn keys_bench_block(index: usize) -> smelt_core::transcript_model::Block {
+fn keys_bench_block(index: usize) -> smelt_transcript::transcript_model::Block {
     match index % 4 {
-        3 => smelt_core::transcript_model::Block::Text {
+        3 => smelt_transcript::transcript_model::Block::Text {
             content: format!(
                 "## Result {index}\n\nCall `keys_call({index}, b)` (see \"notes {index}\") then rerun it. The fix holds.\n\n```rust\nfn keys_bench_{index}(a: u32) -> u32 {{\n    (a + {index}) * 2\n}}\n```\n\n- checked output\n- updated module\n\nThe list [ {index} never closes.\n\n{}",
                 "alpha beta gamma delta ".repeat(6)

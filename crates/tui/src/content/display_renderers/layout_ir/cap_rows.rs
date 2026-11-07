@@ -119,9 +119,9 @@ impl CapRows {
 
 pub(super) fn cap_rows(
     child_rows: usize,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
 ) -> CapRows {
-    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+    use smelt_transcript::content::block_layout::{CapKeep, CapMarker};
 
     let cap_rows = usize::from(spec.rows);
     let truncated = child_rows > cap_rows;

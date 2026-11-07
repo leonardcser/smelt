@@ -1,5 +1,5 @@
 use super::*;
-use smelt_core::transcript_model::ViewState;
+use smelt_transcript::transcript_model::ViewState;
 
 fn finish_tool(app: &mut TestApp, call_id: &str, name: &str, content: &str) {
     let invocation_id = app.tool_started(call_id, name, std::collections::HashMap::new());
@@ -259,7 +259,7 @@ fn collapsing_bottom_pinned_block_hides_jump_to_bottom_pill() {
         .build();
     app.set_terminal_size(80, 12);
     for i in 0..20 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("history {i}").into(),
         });
     }

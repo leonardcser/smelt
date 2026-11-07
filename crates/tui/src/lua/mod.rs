@@ -1096,7 +1096,7 @@ pub(crate) fn mode_block(
     core: &smelt_core::lua::LuaRuntime,
     name: Option<&str>,
     note: &str,
-) -> smelt_core::transcript_model::Block {
+) -> smelt_transcript::transcript_model::Block {
     let result: mlua::Result<(String, String, String)> = (|| {
         let smelt: mlua::Table = core.lua.globals().get("smelt")?;
         let mode: mlua::Table = smelt.get("mode")?;
@@ -1142,7 +1142,7 @@ pub(crate) fn mode_block(
             note.to_string(),
         )
     });
-    smelt_core::transcript_model::Block::Mode {
+    smelt_transcript::transcript_model::Block::Mode {
         text,
         icon,
         hl_group,
@@ -1158,11 +1158,11 @@ impl Default for LuaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::block_layout::{
+    use smelt_transcript::content::block_layout::{
         BlockLayout, CapKeep, CapMarker, ContentRenderSpec, LuaLeaf, TextSpec,
     };
-    use smelt_core::transcript_content::ContentId;
-    use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
+    use smelt_transcript::transcript_content::ContentId;
+    use smelt_transcript::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
 
     #[test]
     fn keybind_f_is_a_character_unless_followed_by_function_number() {
@@ -2010,7 +2010,7 @@ mod tests {
         render_transcript_node(
             rt,
             &node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
         )
     }
@@ -2018,7 +2018,7 @@ mod tests {
     fn render_transcript_node(
         rt: &LuaRuntime,
         node: &smelt_core::lua::runtime::TranscriptRenderNode,
-        view_state: smelt_core::transcript_model::ViewState,
+        view_state: smelt_transcript::transcript_model::ViewState,
         now_ms: u64,
     ) -> BlockLayout {
         rt.render_transcript_layout(node, view_state, now_ms)
@@ -2266,7 +2266,7 @@ mod tests {
             &block,
             None,
         );
-        let view = smelt_core::transcript_model::ViewState::Expanded;
+        let view = smelt_transcript::transcript_model::ViewState::Expanded;
         let before = render_transcript_node(&rt, &node, view, midnight - 500);
         assert!(matches!(before, BlockLayout::Refresh { ref spec, .. } if spec.after_ms == 500));
         assert!(serde_json::to_string(&before).unwrap().contains("20:00:00"));
@@ -2471,7 +2471,7 @@ mod tests {
         let layout = render_transcript_node(
             &rt,
             &node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
         );
         let BlockLayout::Vbox(items) = layout else {
@@ -2489,7 +2489,7 @@ mod tests {
             ContentRenderSpec::File { path, .. } if path == "generated.rs"
         ));
 
-        let mut draft = smelt_core::content::tool_draft::ToolDraft::new(
+        let mut draft = smelt_transcript::content::tool_draft::ToolDraft::new(
             "write-stream".into(),
             Some("write-call".into()),
             "write_file".into(),
@@ -2671,7 +2671,7 @@ mod tests {
         let compact = render(
             "custom_error_compact",
             ToolStatus::Err,
-            smelt_core::transcript_model::ViewState::Collapsed,
+            smelt_transcript::transcript_model::ViewState::Collapsed,
             true,
         );
         let BlockLayout::Vbox(items) = compact else {
@@ -2699,7 +2699,7 @@ mod tests {
             let expanded = render(
                 name,
                 status,
-                smelt_core::transcript_model::ViewState::Expanded,
+                smelt_transcript::transcript_model::ViewState::Expanded,
                 is_error,
             );
             let BlockLayout::Vbox(items) = expanded else {
@@ -2744,7 +2744,7 @@ mod tests {
         let first = render_transcript_node(
             &rt,
             &node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
         );
         let BlockLayout::Vbox(first_items) = first else {
@@ -2758,7 +2758,7 @@ mod tests {
         let second = render_transcript_node(
             &rt,
             &node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
         );
         let BlockLayout::Vbox(second_items) = second else {
@@ -2805,7 +2805,7 @@ mod tests {
             let (block, state) = tool_block(name, "output");
             let _ = render_transcript_block(&rt, &block, Some(&state));
         }
-        let draft = Block::ToolDraft(smelt_core::content::tool_draft::ToolDraft::new(
+        let draft = Block::ToolDraft(smelt_transcript::content::tool_draft::ToolDraft::new(
             "draft-1".into(),
             None,
             "invalid_draft".into(),
@@ -2819,7 +2819,7 @@ mod tests {
         let _ = render_transcript_node(
             &rt,
             &draft_node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
         );
         let (compact, compact_state) = tool_block("invalid_compact", "");
@@ -2832,7 +2832,7 @@ mod tests {
         let _ = render_transcript_node(
             &rt,
             &compact_node,
-            smelt_core::transcript_model::ViewState::Collapsed,
+            smelt_transcript::transcript_model::ViewState::Collapsed,
             1_742_573_823_000,
         );
 
@@ -2886,7 +2886,7 @@ mod tests {
             &tool,
             Some(&tool_state),
         );
-        let child = smelt_core::transcript_model::TranscriptGroupChildMetadata {
+        let child = smelt_transcript::transcript_model::TranscriptGroupChildMetadata {
             id: BlockId::new(1),
             kind: "tool",
             name: Some("probe".into()),
@@ -2914,7 +2914,7 @@ mod tests {
         let standalone = render_transcript_node(
             &rt,
             &tool_node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             4_242,
         );
         let BlockLayout::Gutter { child, spec } = standalone else {
@@ -2926,7 +2926,7 @@ mod tests {
         let collapsed = render_transcript_node(
             &rt,
             &group_node,
-            smelt_core::transcript_model::ViewState::Collapsed,
+            smelt_transcript::transcript_model::ViewState::Collapsed,
             4_242,
         );
         let BlockLayout::Gutter { child, .. } = collapsed else {
@@ -2941,7 +2941,7 @@ mod tests {
         let expanded = render_transcript_node(
             &rt,
             &group_node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             4_242,
         );
         let BlockLayout::Gutter { child, .. } = expanded else {
@@ -2988,7 +2988,7 @@ mod tests {
         let _ = render_transcript_node(
             &rt,
             &override_node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             10,
         );
         assert!(drain_errors(&rt)
@@ -3004,7 +3004,7 @@ mod tests {
         let _ = render_transcript_node(
             &rt,
             &recursive_node,
-            smelt_core::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             10,
         );
         assert!(drain_errors(&rt)

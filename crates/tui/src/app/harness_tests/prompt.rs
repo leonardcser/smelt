@@ -461,7 +461,7 @@ fn fast_mode_is_restored_per_loaded_session() {
         crate::app::session_document::StoreBackedSessionDocument::new(
             enabled,
             crate::app::transcript::LoadedTranscript::full(
-                smelt_core::content::transcript::Transcript::new(),
+                smelt_transcript::content::transcript::Transcript::new(),
             ),
             crate::app::history::live_session_for_test("fast-enabled".into(), 0),
             smelt_store::StoreHead::default(),
@@ -477,7 +477,7 @@ fn fast_mode_is_restored_per_loaded_session() {
         crate::app::session_document::StoreBackedSessionDocument::new(
             disabled,
             crate::app::transcript::LoadedTranscript::full(
-                smelt_core::content::transcript::Transcript::new(),
+                smelt_transcript::content::transcript::Transcript::new(),
             ),
             crate::app::history::live_session_for_test("fast-disabled".into(), 0),
             smelt_store::StoreHead::default(),

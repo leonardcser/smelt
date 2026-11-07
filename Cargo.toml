@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/text", "crates/paths", "crates/permissions", "crates/worktree", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support", "crates/mermaid"]
+members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/text", "crates/paths", "crates/permissions", "crates/worktree", "crates/transcript", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support", "crates/mermaid"]
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -20,6 +20,7 @@ smelt-text = { path = "crates/text" }
 smelt-paths = { path = "crates/paths" }
 smelt-permissions = { path = "crates/permissions" }
 smelt-worktree = { path = "crates/worktree" }
+smelt-transcript = { path = "crates/transcript" }
 smelt-buffer = { path = "crates/buffer" }
 smelt-term = { path = "crates/term", version = "0.7.0" }
 smelt-edit = { path = "crates/edit" }
@@ -88,6 +89,7 @@ path = "src/main.rs"
 [dependencies]
 smelt-protocol = { workspace = true }
 smelt-paths = { workspace = true }
+smelt-transcript = { workspace = true }
 smelt-permissions = { workspace = true }
 smelt-worktree = { workspace = true }
 smelt-provider = { workspace = true }

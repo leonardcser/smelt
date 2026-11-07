@@ -1,0 +1,34 @@
+[package]
+name = "smelt-transcript"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "Transcript model, shared content storage, markdown parsing, and highlighting."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[dependencies]
+smelt-protocol = { workspace = true }
+smelt-buffer = { workspace = true }
+smelt-perf = { workspace = true }
+smelt-ansi = { workspace = true }
+smelt-store = { workspace = true }
+smelt-permissions = { workspace = true }
+smelt-text = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+syntect = "5"
+two-face = "0.5"
+similar = { version = "3", features = ["inline"] }
+seahash = "4"
+pulldown-cmark = { version = "0.13", default-features = false }
+term-maths = "1.0.0"
+rust-latex-parser = "0.1.0"
+ratex-parser = "0.1.14"
+ratex-font = "0.1.14"
+
+[dev-dependencies]
+tempfile = { workspace = true }

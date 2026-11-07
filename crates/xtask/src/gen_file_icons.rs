@@ -31,7 +31,7 @@ pub(crate) fn run(args: Vec<String>) {
     let extension_icons = merge_icons(dark_ext, light_ext);
     let filename_icons = merge_icons(dark_name, light_name);
     let out = render_generated(&extension_icons, &filename_icons);
-    let path = PathBuf::from("crates/core/src/content/file_icons/generated.rs");
+    let path = PathBuf::from("crates/transcript/src/content/file_icons/generated.rs");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));

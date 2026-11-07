@@ -2724,7 +2724,7 @@ mod tests {
     }
 
     fn truncate(s: &str, max_len: usize) -> String {
-        crate::content::width::truncate_to_cells(s, max_len, "…")
+        smelt_transcript::content::width::truncate_to_cells(s, max_len, "…")
     }
 
     fn wait_until_ready(files: &mut WorkspaceFiles, cwd: &Path) {

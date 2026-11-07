@@ -310,7 +310,7 @@ mod tests {
             .last_block_id()
             .and_then(|id| history.block(id))
             .expect("completed exec block");
-        let smelt_core::transcript_model::Block::Exec { output, .. } = block else {
+        let smelt_transcript::transcript_model::Block::Exec { output, .. } = block else {
             panic!("last block is exec output");
         };
         let output = output.snapshot();

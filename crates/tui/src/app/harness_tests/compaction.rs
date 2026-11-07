@@ -329,7 +329,7 @@ fn compact_command_shows_preview_before_first_delta() {
         .expect("/compact should create a preview before the provider responds");
     assert!(matches!(
         app.conversation_probe().transcript().history().block(preview_id),
-        Some(smelt_core::transcript_model::Block::CompactionPreview { summary })
+        Some(smelt_transcript::transcript_model::Block::CompactionPreview { summary })
             if summary.is_empty()
     ));
     assert!(app.run_lua(
@@ -453,7 +453,7 @@ fn compact_command_retries_an_empty_answer() {
     let marker = *history.order.last().expect("compacted marker");
     assert!(matches!(
         history.block(marker),
-        Some(smelt_core::transcript_model::Block::Compacted { summary, .. })
+        Some(smelt_transcript::transcript_model::Block::Compacted { summary, .. })
             if summary == "# Goal\nretried summary"
     ));
 }
@@ -464,7 +464,7 @@ fn compact_command_keeps_completed_block_at_compaction_position() {
     app.set_terminal_size(60, 12);
     app.commit_request_history_item(
         protocol::HistoryItem::user(protocol::Content::text("old user")),
-        Some(smelt_core::transcript_model::Block::User {
+        Some(smelt_transcript::transcript_model::Block::User {
             text: "old user".into(),
             image_labels: Vec::new(),
             command: false,
@@ -477,14 +477,14 @@ fn compact_command_keeps_completed_block_at_compaction_position() {
             None,
             Vec::new(),
         )),
-        Some(smelt_core::transcript_model::Block::Text {
+        Some(smelt_transcript::transcript_model::Block::Text {
             content: "old assistant".into(),
         }),
     );
     let retained = "retained user line\n".repeat(20);
     app.commit_request_history_item(
         protocol::HistoryItem::user(protocol::Content::text(retained.clone())),
-        Some(smelt_core::transcript_model::Block::User {
+        Some(smelt_transcript::transcript_model::Block::User {
             text: retained,
             image_labels: Vec::new(),
             command: false,
@@ -516,7 +516,7 @@ fn compact_command_keeps_completed_block_at_compaction_position() {
         .expect("completed marker at transcript tail");
     assert!(matches!(
         history.block(marker_id),
-        Some(smelt_core::transcript_model::Block::Compacted { summary, kept })
+        Some(smelt_transcript::transcript_model::Block::Compacted { summary, kept })
             if summary == "# Goal\ncompleted marker"
                 && kept == &[smelt_core::KeptHistoryItem::User {
                     text: "retained user line\n".repeat(20),
@@ -990,7 +990,7 @@ fn engine_ask_delta_callbacks_can_update_compaction_preview_from_dispatch() {
         .expect("compaction preview id");
     assert!(matches!(
         app.conversation_probe().transcript().history().block(preview_id),
-        Some(smelt_core::transcript_model::Block::CompactionPreview { summary })
+        Some(smelt_transcript::transcript_model::Block::CompactionPreview { summary })
             if summary == "# Goal\nstream the summary"
     ));
 }
@@ -1006,7 +1006,7 @@ async fn timed_render_loop_shows_compaction_preview_only_while_following_tail() 
         app.push_assistant_text("a1");
         for index in 0..40 {
             app.push_user_block(&format!("transcript row {index}: {}", "content ".repeat(8)));
-            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
                 content: format!("assistant row {index}: {}", "response ".repeat(8)).into(),
             });
         }
@@ -1108,7 +1108,7 @@ fn wheel_scroll_moves_while_compaction_preview_streams() {
     app.push_assistant_text("a1");
     for index in 0..40 {
         app.push_user_block(&format!("transcript row {index}: {}", "content ".repeat(8)));
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("assistant row {index}: {}", "response ".repeat(8)).into(),
         });
     }
@@ -1666,7 +1666,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
         let user = format!("old user {index}");
         app.commit_request_history_item(
             protocol::HistoryItem::user(protocol::Content::text(user.clone())),
-            Some(smelt_core::transcript_model::Block::User {
+            Some(smelt_transcript::transcript_model::Block::User {
                 text: user,
                 image_labels: Vec::new(),
                 command: false,
@@ -1680,7 +1680,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
                 None,
                 Vec::new(),
             )),
-            Some(smelt_core::transcript_model::Block::Text {
+            Some(smelt_transcript::transcript_model::Block::Text {
                 content: assistant.into(),
             }),
         );

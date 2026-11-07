@@ -1,6 +1,6 @@
 use crate::app::TuiApp;
-use smelt_core::content::stream_parser::ToolStart;
-use smelt_core::transcript_model::BlockId;
+use smelt_transcript::content::stream_parser::ToolStart;
+use smelt_transcript::transcript_model::BlockId;
 use std::collections::HashMap;
 
 impl TuiApp {

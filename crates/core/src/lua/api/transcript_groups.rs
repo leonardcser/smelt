@@ -9,7 +9,7 @@ pub(crate) fn cache_key_hash(registry: &TranscriptGroupRegistry) -> u64 {
     if specs.is_empty() || specs.iter().any(|spec| spec.cache_key.is_none()) {
         return 0;
     }
-    let hash = crate::utils::hash_serializable(&specs);
+    let hash = smelt_transcript::hash::hash_serializable(&specs);
     if hash == 0 {
         1
     } else {

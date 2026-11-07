@@ -23,7 +23,7 @@ use mlua::prelude::*;
 
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use smelt_core::transcript_model::{ConfirmChoice, ConfirmRequest};
+use smelt_transcript::transcript_model::{ConfirmChoice, ConfirmRequest};
 
 use super::buf::LuaBuf;
 

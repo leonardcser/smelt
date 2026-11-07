@@ -859,7 +859,7 @@ impl TuiApp {
 mod tests {
     use super::*;
 
-    use smelt_core::transcript_model::Block;
+    use smelt_transcript::transcript_model::Block;
 
     fn slash<'a>(name: &'a str, arg: Option<&'a str>) -> ParsedCommand<'a> {
         ParsedCommand::Slash { name, arg }

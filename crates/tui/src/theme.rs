@@ -339,7 +339,7 @@ impl FromLua for ThemeSpec {
         let syntax_theme = t.get::<Option<String>>("syntax")?;
         let is_light = t.get::<Option<bool>>("light")?;
         if let Some(name) = syntax_theme.as_deref() {
-            if !smelt_core::content::highlight::syntax_theme_name_is_valid(name) {
+            if !smelt_transcript::content::highlight::syntax_theme_name_is_valid(name) {
                 return Err(LuaError::FromLuaConversionError {
                     from: "string",
                     to: "smelt.theme.ThemeSpec".into(),

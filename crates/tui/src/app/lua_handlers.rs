@@ -1,7 +1,7 @@
 //! Application operations exposed through the scoped Lua capability host.
 
 use crate::app::{ContextWindowRequest, LuaBringUpError, NotificationOperation, TuiApp};
-use smelt_core::transcript_model::ConfirmChoice;
+use smelt_transcript::transcript_model::ConfirmChoice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LuaReloadKind {

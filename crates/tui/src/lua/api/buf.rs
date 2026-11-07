@@ -528,9 +528,9 @@ pub(super) fn create_or_open(
 /// `buf:styled(spans)` - set a styled line list. Same semantics as the
 /// old `set_styled_lines`; lifted out so `Buf` methods stay tidy.
 fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResult<()> {
-    use smelt_core::content::builder::LineBuilder;
-    use smelt_core::content::highlight::print_inline_syntax;
     use smelt_core::style::Style;
+    use smelt_transcript::content::builder::LineBuilder;
+    use smelt_transcript::content::highlight::print_inline_syntax;
     struct Span {
         text: String,
         style: Style,

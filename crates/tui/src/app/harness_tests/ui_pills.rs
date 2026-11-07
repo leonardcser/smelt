@@ -8,13 +8,13 @@ fn conversation() -> TestApp {
         .build();
     app.set_terminal_size(80, 24);
     for i in 0..20 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::User {
             text: format!("user target {i:02}"),
             image_labels: Vec::new(),
             command: false,
             sent_at_ms: None,
         });
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: if i == 19 {
                 (0..50)
                     .map(|n| format!("assistant line {n}"))

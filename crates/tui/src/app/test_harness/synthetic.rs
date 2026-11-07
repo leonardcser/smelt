@@ -13,7 +13,10 @@ impl TestApp {
             .push_context_recalculation_token(label.into());
     }
 
-    pub(crate) fn push_transcript_block(&mut self, block: smelt_core::transcript_model::Block) {
+    pub(crate) fn push_transcript_block(
+        &mut self,
+        block: smelt_transcript::transcript_model::Block,
+    ) {
         self.tui.push_block(block);
     }
 
@@ -34,8 +37,8 @@ impl TestApp {
     pub(crate) fn finish_tool(
         &mut self,
         invocation_id: protocol::InvocationId,
-        status: smelt_core::transcript_model::ToolStatus,
-        output: Option<smelt_core::transcript_model::ToolOutputRef>,
+        status: smelt_transcript::transcript_model::ToolStatus,
+        output: Option<smelt_transcript::transcript_model::ToolOutputRef>,
         engine_elapsed: Option<std::time::Duration>,
     ) {
         self.tui
@@ -346,7 +349,7 @@ impl TestApp {
         let sent_at_ms = engine::clock::unix_time_ms(self.clock.as_ref());
         self.tui.stage_request_history_item(
             protocol::HistoryItem::user(protocol::Content::text(text)).with_sent_at_ms(sent_at_ms),
-            Some(smelt_core::transcript_model::Block::User {
+            Some(smelt_transcript::transcript_model::Block::User {
                 text: text.to_string(),
                 image_labels: Vec::new(),
                 command: false,
@@ -359,7 +362,7 @@ impl TestApp {
     pub fn push_command_block(&mut self, text: &str) {
         let sent_at_ms = engine::clock::unix_time_ms(self.clock.as_ref());
         self.tui
-            .push_block(smelt_core::transcript_model::Block::User {
+            .push_block(smelt_transcript::transcript_model::Block::User {
                 text: text.to_string(),
                 image_labels: Vec::new(),
                 command: true,
@@ -379,7 +382,7 @@ impl TestApp {
     /// receives verbatim after the checkpoint.
     pub fn push_compacted_kept(&mut self, summary: &str, kept: Vec<smelt_core::KeptHistoryItem>) {
         self.tui
-            .push_block(smelt_core::transcript_model::Block::Compacted {
+            .push_block(smelt_transcript::transcript_model::Block::Compacted {
                 summary: summary.to_string(),
                 kept,
             });
@@ -403,7 +406,7 @@ impl TestApp {
     /// Push a `Block::Mode` into the transcript without restoring a fixture.
     pub fn push_mode_block(&mut self, text: &str, icon: &str, hl_group: &str) {
         self.tui
-            .push_block(smelt_core::transcript_model::Block::Mode {
+            .push_block(smelt_transcript::transcript_model::Block::Mode {
                 text: text.to_string(),
                 icon: icon.to_string(),
                 hl_group: hl_group.to_string(),
@@ -413,7 +416,7 @@ impl TestApp {
     /// Push a `Block::CodeLine` into the transcript.
     pub fn push_code_line(&mut self, content: &str, lang: &str) {
         self.tui
-            .push_block(smelt_core::transcript_model::Block::CodeLine {
+            .push_block(smelt_transcript::transcript_model::Block::CodeLine {
                 content: content.to_string(),
                 lang: lang.to_string(),
             });

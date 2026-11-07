@@ -1,5 +1,5 @@
 use smelt_core::buffer::SpanMeta;
-use smelt_core::content::builder::{display_width, LineBuilder};
+use smelt_transcript::content::builder::{display_width, LineBuilder};
 
 pub(super) fn apply_temp_decoration(
     out: &mut LineBuilder,

@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use protocol::{HistoryItem, ReasoningEffort, TokenUsage, TurnMeta};
-use smelt_core::content::stream_parser::{StreamParser, ToolStart};
 use smelt_core::session::{ContextCheckpoint, ContextTokenIdentity, Session};
 use smelt_core::session_runtime::LiveSession;
-use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
+use smelt_transcript::content::stream_parser::{StreamParser, ToolStart};
+use smelt_transcript::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
 
 use crate::app::transcript::{
     RecordSaveBoundsError, TranscriptDocument, TranscriptRecordSaveBounds,
@@ -819,7 +819,7 @@ pub(crate) enum TranscriptMutation {
         block_index: usize,
     },
     ReplaceFromHistory {
-        transcript: Box<smelt_core::content::transcript::Transcript>,
+        transcript: Box<smelt_transcript::content::transcript::Transcript>,
     },
     TruncateTo {
         block_index: usize,
@@ -857,7 +857,7 @@ pub(crate) enum StreamMutation {
     },
     AppendToolOutputSlice {
         block_id: BlockId,
-        chunk: smelt_core::transcript_content::SharedContentSlice,
+        chunk: smelt_transcript::transcript_content::SharedContentSlice,
         line_start: bool,
     },
     SetToolStatus {
@@ -1636,8 +1636,10 @@ impl SessionDocument {
                 block_id.is_some()
             }
             TranscriptMutation::AppendAccepted { block } => {
-                transcript
-                    .push_with_origin(block, smelt_core::transcript_model::BlockOrigin::Accepted);
+                transcript.push_with_origin(
+                    block,
+                    smelt_transcript::transcript_model::BlockOrigin::Accepted,
+                );
                 block_id = transcript.history().last_block_id();
                 block_id.is_some()
             }
@@ -1741,7 +1743,7 @@ fn transcript_record_row(
     record: &smelt_core::TranscriptBlockRecordWithId,
 ) -> Result<smelt_store::StoredTranscriptBlock, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:project_transcript_record");
-    smelt_core::transcript_model::transcript_block_row_with_block_idx(
+    smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
         record_idx,
         record.block_id.get(),
         &record.record,
@@ -1863,7 +1865,7 @@ mod tests {
             .history
             .push(HistoryItem::user(Content::text("hello")));
         let transcript = crate::app::transcript::LoadedTranscript::full(
-            smelt_core::content::transcript::Transcript::new(),
+            smelt_transcript::content::transcript::Transcript::new(),
         );
 
         let projection = SessionDocument::from_full_session(session, transcript).into_full();
@@ -2475,7 +2477,7 @@ mod tests {
         });
         transcript.history_mut().clear_record_dirty();
 
-        let mut rebuilt = smelt_core::content::transcript::Transcript::new();
+        let mut rebuilt = smelt_transcript::content::transcript::Transcript::new();
         rebuilt.push_with_origin(
             Block::Text {
                 content: "rebuilt".into(),

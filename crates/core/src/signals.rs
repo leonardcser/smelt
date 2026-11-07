@@ -517,7 +517,7 @@ pub struct ConfirmRequested {
     /// Styled summary - the sole source of truth for the dialog body header.
     pub summary: protocol::StyledLines,
     pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub grant_options: Vec<crate::transcript_model::ConfirmApprovalOption>,
+    pub grant_options: Vec<smelt_transcript::transcript_model::ConfirmApprovalOption>,
 }
 
 /// Single entry in the `work_busy` signal payload. One per live
@@ -1579,10 +1579,10 @@ mod tests {
                 tool_name: "bash".into(),
                 summary: protocol::StyledLines::from_plain("ls"),
                 args: std::collections::HashMap::new(),
-                grant_options: vec![crate::transcript_model::ConfirmApprovalOption {
+                grant_options: vec![smelt_transcript::transcript_model::ConfirmApprovalOption {
                     id: "grant_0_session".into(),
                     label: "allow bash for this session".into(),
-                    target: crate::transcript_model::ApprovalTarget::Session,
+                    target: smelt_transcript::transcript_model::ApprovalTarget::Session,
                     grants: Vec::new(),
                 }],
             }),

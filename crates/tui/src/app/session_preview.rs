@@ -877,9 +877,9 @@ mod tests {
         session.id.clone_from(&session_id);
         storage.save(&session).expect("save preview session");
         let address = storage.address(session_id.clone());
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         for index in 0..64 {
-            transcript.push(smelt_core::transcript_model::Block::Text {
+            transcript.push(smelt_transcript::transcript_model::Block::Text {
                 content: format!("{marker} preview record {index}").into(),
             });
         }

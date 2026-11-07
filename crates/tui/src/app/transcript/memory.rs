@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use smelt_core::transcript_model::{
+use smelt_transcript::transcript_model::{
     block_retained_bytes, tool_state_retained_bytes, BlockId, StoredBlockRef, TranscriptBlockRecord,
 };
 

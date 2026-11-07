@@ -15,8 +15,8 @@ use smelt_buffer::coords::{copy_byte_range, CopyRangeAccumulator, CopyRow};
 #[cfg(test)]
 use smelt_core::buffer::{LineDecoration, Span};
 use smelt_core::buffer::{RenderedBufferRebuild, RenderedRowMetadata};
-use smelt_core::content::highlight::InlineOptions;
-use smelt_core::transcript_model::{BlockHistory, BlockId, BlockText, LayoutKey, ViewState};
+use smelt_transcript::content::highlight::InlineOptions;
+use smelt_transcript::transcript_model::{BlockHistory, BlockId, BlockText, LayoutKey, ViewState};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -619,7 +619,7 @@ impl TranscriptHeightIndex {
     }
 
     fn search_layout_hash(&self, projection_generation: u64) -> u64 {
-        smelt_core::utils::hash_serializable(&(
+        smelt_transcript::hash::hash_serializable(&(
             projection_generation,
             self.generation,
             self.renderer_generation,
@@ -1244,7 +1244,7 @@ fn estimate_text_rows_with_prefix(prefix: &str, text: &str, width: u16) -> RowIn
 }
 
 fn estimate_content_rows(
-    content: &smelt_core::transcript_content::TranscriptContent,
+    content: &smelt_transcript::transcript_content::TranscriptContent,
     width: u16,
 ) -> RowIndex {
     let content = content.read();
@@ -4367,9 +4367,9 @@ impl smelt_core::buffer::BufferCopy for TranscriptCopier {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use smelt_core::content::stream_parser::{StreamParser, ToolStart};
-    use smelt_core::content::transcript::Transcript;
-    use smelt_core::transcript_model::{
+    use smelt_transcript::content::stream_parser::{StreamParser, ToolStart};
+    use smelt_transcript::content::transcript::Transcript;
+    use smelt_transcript::transcript_model::{
         Block, BlockHistory, BlockId, ToolOutput, ToolState, ToolStatus,
     };
 
@@ -4702,7 +4702,7 @@ pub(crate) mod tests {
         let generation = transcript.history.generation();
         assert!(transcript.history.apply_tool_state_mutation(
             tool_block_id,
-            smelt_core::transcript_model::ToolStateMutation::SyncElapsed(
+            smelt_transcript::transcript_model::ToolStateMutation::SyncElapsed(
                 std::time::Duration::from_secs(2),
             ),
         ));
@@ -4941,7 +4941,9 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn project_fresh(history: &mut smelt_core::transcript_model::BlockHistory) -> Vec<RowSnapshot> {
+    fn project_fresh(
+        history: &mut smelt_transcript::transcript_model::BlockHistory,
+    ) -> Vec<RowSnapshot> {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         let mut buf = Buffer::new(crate::smelt_edit::BufId(99), Default::default());
@@ -8575,7 +8577,7 @@ pub(crate) mod tests {
         };
         let parsed = smelt_core::TranscriptBlockRecordWithId::try_from(row.clone())
             .expect("parse resume record");
-        row.summary = smelt_core::transcript_model::encode_record_summary(
+        row.summary = smelt_transcript::transcript_model::encode_record_summary(
             &parsed.record,
             &row.indexed_text,
             row.estimated_text_bytes,
@@ -9544,7 +9546,7 @@ pub(crate) mod tests {
             "expected stacked fallback, got {lines:?}"
         );
         for line in lines {
-            let width = smelt_core::content::builder::display_width(line);
+            let width = smelt_transcript::content::builder::display_width(line);
             assert!(
                 width <= 24,
                 "projected table row overflowed transcript width: width={width}, line={line:?}"

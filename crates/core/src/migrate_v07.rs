@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 use smelt_store_v07 as v07;
 
 use crate::session::{create_private_dir_all_in, SessionStorage};
-use crate::transcript_model::{transcript_block_row_with_block_idx, TranscriptBlockRecord};
+use smelt_transcript::transcript_model::{
+    transcript_block_row_with_block_idx, TranscriptBlockRecord,
+};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -420,7 +422,7 @@ mod tests {
     use protocol::{Content, HistoryItem};
 
     use super::*;
-    use crate::transcript_model::{transcript_block_row, Block, BlockOrigin};
+    use smelt_transcript::transcript_model::{transcript_block_row, Block, BlockOrigin};
 
     const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

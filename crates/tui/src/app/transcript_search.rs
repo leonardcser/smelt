@@ -20,18 +20,18 @@ const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
 pub(crate) struct DirtyTranscriptText {
     generation: u64,
     start: usize,
-    blocks: Vec<(smelt_core::transcript_model::BlockId, Box<str>)>,
+    blocks: Vec<(smelt_transcript::transcript_model::BlockId, Box<str>)>,
 }
 
 impl DirtyTranscriptText {
-    fn build(history: &smelt_core::transcript_model::BlockHistory, start: usize) -> Self {
+    fn build(history: &smelt_transcript::transcript_model::BlockHistory, start: usize) -> Self {
         let blocks = history
             .order
             .iter()
             .skip(start.min(history.order.len()))
             .filter_map(|id| {
                 let record = history.block(*id)?;
-                let indexed = smelt_core::transcript_model::transcript_indexed_text(
+                let indexed = smelt_transcript::transcript_model::transcript_indexed_text(
                     record,
                     history.tool_state(*id),
                 )
@@ -485,7 +485,7 @@ impl TuiApp {
         TranscriptSearchKey {
             layout_generation,
             width: self.transcript_width() as u16,
-            candidates_hash: smelt_core::utils::hash_serializable(&candidate_blocks),
+            candidates_hash: smelt_transcript::hash::hash_serializable(&candidate_blocks),
         }
     }
 
@@ -498,7 +498,7 @@ impl TuiApp {
             };
             let tool_state = history.tool_state(*id);
             let block_text =
-                smelt_core::transcript_model::transcript_indexed_text(record, tool_state)
+                smelt_transcript::transcript_model::transcript_indexed_text(record, tool_state)
                     .indexed_text;
             if !text.is_empty() {
                 text.push('\n');
@@ -531,7 +531,7 @@ impl TuiApp {
             return;
         };
         self.conversation.set_transcript_search_hydration_pin(Some(
-            smelt_core::transcript_model::BlockId::new(block_idx),
+            smelt_transcript::transcript_model::BlockId::new(block_idx),
         ));
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
@@ -1231,7 +1231,7 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("search:transcript:scan_candidate_block");
         self.sync_transcript_renderer_generation();
         self.conversation.set_transcript_search_hydration_pin(Some(
-            smelt_core::transcript_model::BlockId::new(block_idx),
+            smelt_transcript::transcript_model::BlockId::new(block_idx),
         ));
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
@@ -1430,7 +1430,7 @@ fn unique_trigrams(text: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::transcript_model::BlockId;
+    use smelt_transcript::transcript_model::BlockId;
 
     #[test]
     fn dropping_search_worker_cancels_and_joins_in_flight_work() {
@@ -1585,7 +1585,7 @@ mod tests {
                 "ordinary"
             };
             app.tui
-                .push_block(smelt_core::transcript_model::Block::Text {
+                .push_block(smelt_transcript::transcript_model::Block::Text {
                     content: format!("search block {index}: {marker}").into(),
                 });
         }
@@ -1603,7 +1603,7 @@ mod tests {
                     .transcript()
                     .history()
                     .block(*id)
-                    .and_then(smelt_core::transcript_model::Block::raw_text)
+                    .and_then(smelt_transcript::transcript_model::Block::raw_text)
                     .is_some_and(|text| text.contains(QUERY))
             })
             .expect("search target block");
@@ -1652,7 +1652,7 @@ mod tests {
             .order
             .iter()
             .filter_map(|id| app.tui.conversation.transcript().history().block(*id))
-            .filter_map(smelt_core::transcript_model::Block::raw_text)
+            .filter_map(smelt_transcript::transcript_model::Block::raw_text)
             .any(|text| text.contains(QUERY)));
 
         app.render_silent();
@@ -1670,7 +1670,7 @@ mod tests {
         app.render_silent();
         assert!(app.tui.reveal_transcript_target_at_top(
             699,
-            smelt_core::transcript_model::BlockId::new(699),
+            smelt_transcript::transcript_model::BlockId::new(699),
             0,
             true,
         ));
@@ -1705,7 +1705,7 @@ mod tests {
             .order
             .iter()
             .filter_map(|id| app.tui.conversation.transcript().history().block(*id))
-            .filter_map(smelt_core::transcript_model::Block::raw_text)
+            .filter_map(smelt_transcript::transcript_model::Block::raw_text)
             .any(|text| text.contains(QUERY)));
     }
 }

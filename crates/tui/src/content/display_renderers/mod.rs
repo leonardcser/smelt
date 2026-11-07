@@ -17,10 +17,12 @@ mod tests {
     use crate::content::display_layout::{compile_block, render_block_into, RenderCtx};
     use smelt_buffer::cell_width;
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
-    use smelt_core::content::builder::test_util::{read_buffer, TestLine};
-    use smelt_core::content::{markdown_stream::thinking_summary, LayoutContext};
     use smelt_core::theme::Theme;
-    use smelt_core::transcript_model::{gap_between, Block, ToolState, ToolStatus, ViewState};
+    use smelt_transcript::content::builder::test_util::{read_buffer, TestLine};
+    use smelt_transcript::content::{markdown_stream::thinking_summary, LayoutContext};
+    use smelt_transcript::transcript_model::{
+        gap_between, Block, ToolState, ToolStatus, ViewState,
+    };
     use std::collections::HashMap;
 
     const W: usize = 80;

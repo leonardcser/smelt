@@ -1,12 +1,12 @@
 //! Indexed diff and asynchronous Git snapshot primitives.
 
 use super::document::LuaDocument;
-use crate::diff::{Diff, DiffView};
 use crate::lua::doc::{record_class, Tier};
 use crate::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
 use mlua::prelude::*;
+use smelt_transcript::diff::{Diff, DiffView};
 use std::sync::{Arc, Mutex};
 
 struct Repository {
@@ -31,7 +31,7 @@ impl FromLua for LuaDiff {
     }
 }
 
-fn file_metadata(lua: &Lua, file: &crate::diff::File) -> LuaResult<mlua::Table> {
+fn file_metadata(lua: &Lua, file: &smelt_transcript::diff::File) -> LuaResult<mlua::Table> {
     let row = lua.create_table()?;
     row.set("key", lua.create_string(&file.raw_path)?)?;
     row.set("path", file.path.as_str())?;
@@ -45,18 +45,18 @@ fn file_metadata(lua: &Lua, file: &crate::diff::File) -> LuaResult<mlua::Table> 
     Ok(row)
 }
 
-fn section(name: &str) -> LuaResult<crate::diff::Section> {
+fn section(name: &str) -> LuaResult<smelt_transcript::diff::Section> {
     match name {
-        "unstaged" => Ok(crate::diff::Section::Unstaged),
-        "staged" => Ok(crate::diff::Section::Staged),
-        "changes" => Ok(crate::diff::Section::Changes),
+        "unstaged" => Ok(smelt_transcript::diff::Section::Unstaged),
+        "staged" => Ok(smelt_transcript::diff::Section::Staged),
+        "changes" => Ok(smelt_transcript::diff::Section::Changes),
         _ => Err(LuaError::external(
             "section must be unstaged, staged, or changes",
         )),
     }
 }
 
-struct LuaDiffTree(Arc<crate::diff::tree::DiffTree>);
+struct LuaDiffTree(Arc<smelt_transcript::diff::tree::DiffTree>);
 
 impl LuaType for LuaDiffTree {
     fn lua_type() -> String {

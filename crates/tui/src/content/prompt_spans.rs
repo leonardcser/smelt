@@ -2,7 +2,7 @@
 
 use crate::input::ATTACHMENT_MARKER;
 use smelt_core::attachment::{AttachmentId, AttachmentStore};
-pub(crate) use smelt_core::content::selection::{scan_at_token, try_at_ref};
+pub(crate) use smelt_transcript::content::selection::{scan_at_token, try_at_ref};
 
 pub(crate) const TAB_DISPLAY: &str = "    ";
 

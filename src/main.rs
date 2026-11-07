@@ -783,7 +783,7 @@ async fn async_main() {
         eprintln!("smelt: upgrading the session database; this can take a minute");
         if let Err(err) = sessions
             .store()
-            .upgrade(&smelt_core::transcript_model::stored_record_summary)
+            .upgrade(&smelt_transcript::transcript_model::stored_record_summary)
         {
             eprintln!("error: failed to upgrade the session database: {err}");
             std::process::exit(1);

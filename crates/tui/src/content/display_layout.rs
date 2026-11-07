@@ -2,18 +2,18 @@ use crate::content::transcript_scene::{
     NodeLayoutKey, RenderGroupNode, RenderNode, RenderNodeId, TranscriptDefaultViewPolicy,
 };
 use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
-use smelt_core::content::block_layout::{
+use smelt_core::lua::runtime::{LuaRuntime, TranscriptRenderNode};
+use smelt_core::theme::intern;
+use smelt_transcript::content::block_layout::{
     BlockLayout, ContentRenderSpec, GutterSpec, HboxItem, IrLeaf, LayoutIr, LineSpec, LuaLeaf,
     RetainedContentSpec, RetainedInlineSyntax, SourceViewIr, StyleSpec, TextSpec,
 };
-use smelt_core::content::builder::{LineBuilder, Outcome};
-use smelt_core::content::highlight::InlineOptions;
-use smelt_core::lua::runtime::{LuaRuntime, TranscriptRenderNode};
-use smelt_core::theme::intern;
-use smelt_core::transcript_content::TranscriptContent;
+use smelt_transcript::content::builder::{LineBuilder, Outcome};
+use smelt_transcript::content::highlight::InlineOptions;
+use smelt_transcript::transcript_content::TranscriptContent;
 #[cfg(test)]
-use smelt_core::transcript_model::BlockId;
-use smelt_core::transcript_model::{Block, BlockHistory, Status, ViewState};
+use smelt_transcript::transcript_model::BlockId;
+use smelt_transcript::transcript_model::{Block, BlockHistory, Status, ViewState};
 use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -133,7 +133,7 @@ impl DisplayCacheKey {
             key.sidecar_hash,
             renderer_generation,
             renderer_cache_key,
-            smelt_core::utils::hash_serializable(&key.view_state),
+            smelt_transcript::hash::hash_serializable(&key.view_state),
         )
     }
 
@@ -473,7 +473,7 @@ const INLINE_SYNTAX_CACHE_BUDGET: usize = 256 * 1024;
 struct CachedInlineSyntax {
     language: String,
     source: String,
-    spans: Arc<[smelt_core::content::highlight::InlineSyntaxSpan]>,
+    spans: Arc<[smelt_transcript::content::highlight::InlineSyntaxSpan]>,
     retained_bytes: usize,
 }
 
@@ -546,7 +546,7 @@ impl InlineSyntaxCache {
         theme: &Theme,
         language: &str,
         source: &str,
-    ) -> Arc<[smelt_core::content::highlight::InlineSyntaxSpan]> {
+    ) -> Arc<[smelt_transcript::content::highlight::InlineSyntaxSpan]> {
         self.ensure_theme(theme.revision());
         let mut hasher = DefaultHasher::new();
         language.hash(&mut hasher);
@@ -563,12 +563,13 @@ impl InlineSyntaxCache {
         }
 
         let spans: Arc<[_]> =
-            smelt_core::content::highlight::inline_syntax_spans(language, source, theme).into();
+            smelt_transcript::content::highlight::inline_syntax_spans(language, source, theme)
+                .into();
         let retained_bytes = std::mem::size_of::<CachedInlineSyntax>()
             .saturating_add(language.len())
             .saturating_add(source.len())
             .saturating_add(spans.len().saturating_mul(std::mem::size_of::<
-                smelt_core::content::highlight::InlineSyntaxSpan,
+                smelt_transcript::content::highlight::InlineSyntaxSpan,
             >()));
         if retained_bytes <= INLINE_SYNTAX_CACHE_BUDGET {
             self.entries
@@ -1289,7 +1290,7 @@ impl LayoutCache {
 
 fn block_content_sources(
     block: &Block,
-    state: Option<&smelt_core::transcript_model::ToolState>,
+    state: Option<&smelt_transcript::transcript_model::ToolState>,
 ) -> Vec<TranscriptContent> {
     let mut sources = block
         .registered_contents()
@@ -1350,7 +1351,7 @@ fn markdown_content_layout(content: TranscriptContent, dim: bool, italic: bool) 
 
 fn retained_content_spec_mut(
     layout: &mut LayoutIr,
-    content_id: smelt_core::transcript_content::ContentId,
+    content_id: smelt_transcript::transcript_content::ContentId,
 ) -> Option<&mut RetainedContentSpec> {
     match layout {
         BlockLayout::Leaf(IrLeaf::Content(spec)) if spec.content.id() == content_id => Some(spec),
@@ -1445,7 +1446,7 @@ fn group_child_compile_sources(
 
 fn block_render_node(
     history: &BlockHistory,
-    id: smelt_core::transcript_model::BlockId,
+    id: smelt_transcript::transcript_model::BlockId,
     block_index: usize,
 ) -> Option<TranscriptRenderNode> {
     let _perf = smelt_perf::perf::begin("transcript:layout_cache:block_render_metadata");
@@ -1537,7 +1538,7 @@ fn compile_layout_ir_with_cache(
             })))
         }
         BlockLayout::Leaf(LuaLeaf::ContentDiff(spec)) => {
-            let source = |id: smelt_core::transcript_content::ContentId| {
+            let source = |id: smelt_transcript::transcript_content::ContentId| {
                 cache
                     .content_sources
                     .iter()
@@ -1549,9 +1550,10 @@ fn compile_layout_ir_with_cache(
             let ext = spec
                 .lang
                 .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext);
-            let ir =
-                smelt_core::content::highlight::build_retained_diff_ir(old, new, &spec.path, ext);
+                .map(smelt_transcript::content::highlight::lang_to_ext);
+            let ir = smelt_transcript::content::highlight::build_retained_diff_ir(
+                old, new, &spec.path, ext,
+            );
             Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
                 ir,
             ))))
@@ -1573,9 +1575,9 @@ fn compile_layout_ir_with_cache(
             let ext = spec
                 .lang
                 .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext);
+                .map(smelt_transcript::content::highlight::lang_to_ext);
             let ir = if spec.full_file {
-                smelt_core::content::highlight::build_diff_ir_ext_with_base(
+                smelt_transcript::content::highlight::build_diff_ir_ext_with_base(
                     &spec.old,
                     &spec.new,
                     &spec.path,
@@ -1584,7 +1586,7 @@ fn compile_layout_ir_with_cache(
                     Some(&spec.old),
                 )
             } else {
-                smelt_core::content::highlight::build_diff_ir_ext_with_source(
+                smelt_transcript::content::highlight::build_diff_ir_ext_with_source(
                     &spec.old,
                     &spec.new,
                     &spec.path,
@@ -1601,13 +1603,13 @@ fn compile_layout_ir_with_cache(
             let ext = spec
                 .lang
                 .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext)
+                .map(smelt_transcript::content::highlight::lang_to_ext)
                 .or_else(|| {
                     std::path::Path::new(&spec.path)
                         .extension()
                         .and_then(|e| e.to_str())
                 });
-            let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
+            let ir = smelt_transcript::content::highlight::build_file_view_ir(&spec.content, ext);
             Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
                 ir,
             ))))
@@ -1734,7 +1736,7 @@ fn append_span_syntax(
     spans: &[protocol::StyledSpan],
     inline_syntax: &mut InlineSyntaxCache,
     theme: &Theme,
-    out: &mut Vec<Arc<[smelt_core::content::highlight::InlineSyntaxSpan]>>,
+    out: &mut Vec<Arc<[smelt_transcript::content::highlight::InlineSyntaxSpan]>>,
 ) {
     out.extend(spans.iter().map(|span| {
         span.syntax
@@ -2123,9 +2125,9 @@ fn append_ellipsis(
 mod tests {
     use super::*;
     use crate::smelt_edit::{BufCreateOpts, BufId};
-    use smelt_core::content::block_layout::RunsSpec;
-    use smelt_core::content::transcript::Transcript;
-    use smelt_core::transcript_model::LayoutKey;
+    use smelt_transcript::content::block_layout::RunsSpec;
+    use smelt_transcript::content::transcript::Transcript;
+    use smelt_transcript::transcript_model::LayoutKey;
 
     fn base_key(history: &BlockHistory, id: BlockId) -> NodeLayoutKey {
         history.resolve_key(
@@ -2328,7 +2330,7 @@ mod tests {
         let old: TranscriptContent = "fn answer() -> i32 { 41 }\n".into();
         let new: TranscriptContent = "fn answer() -> i32 { 42 }\n".into();
         let input = BlockLayout::Leaf(LuaLeaf::ContentDiff(
-            smelt_core::content::block_layout::ContentDiffSpec {
+            smelt_transcript::content::block_layout::ContentDiffSpec {
                 old_id: old.id(),
                 new_id: new.id(),
                 anchor_id: None,
@@ -2633,14 +2635,14 @@ mod tests {
             child: Box::new(BlockLayout::Vbox(vec![
                 BlockLayout::Refresh {
                     child: Box::new(child),
-                    spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 400 },
+                    spec: smelt_transcript::content::block_layout::RefreshSpec { after_ms: 400 },
                 },
                 BlockLayout::Refresh {
                     child: Box::new(BlockLayout::Empty),
-                    spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 75 },
+                    spec: smelt_transcript::content::block_layout::RefreshSpec { after_ms: 75 },
                 },
             ])),
-            spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 250 },
+            spec: smelt_transcript::content::block_layout::RefreshSpec { after_ms: 250 },
         };
         let mut cache = CompileLayoutCache {
             content_sources: &[],

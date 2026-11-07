@@ -28,7 +28,7 @@ fn main() {
     match cmd.as_deref() {
         Some("bench-diff") => {
             for (package, test_filter, features) in [
-                ("smelt-core", "diff_index_benchmark", &[][..]),
+                ("smelt-transcript", "diff_index_benchmark", &[][..]),
                 ("smelt-tui", "diff_viewer_benchmark", &["harness"][..]),
                 ("smelt-tui", "diff_loading_benchmark", &["harness"][..]),
                 ("smelt-tui", "diff_interaction_benchmark", &["harness"][..]),

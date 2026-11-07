@@ -547,9 +547,9 @@ impl TestApp {
         };
         let req = entry.req;
         let choice = if approve {
-            smelt_core::transcript_model::ConfirmChoice::Yes
+            smelt_transcript::transcript_model::ConfirmChoice::Yes
         } else {
-            smelt_core::transcript_model::ConfirmChoice::No
+            smelt_transcript::transcript_model::ConfirmChoice::No
         };
         {
             let cancel = self.tui.resolve_confirm(
@@ -607,7 +607,7 @@ impl TestApp {
         let req = entry.req;
         let cancel = self.tui.resolve_confirm(
             (
-                smelt_core::transcript_model::ConfirmChoice::Grant(option),
+                smelt_transcript::transcript_model::ConfirmChoice::Grant(option),
                 None,
             ),
             req.invocation_id,
@@ -1010,7 +1010,7 @@ impl TestApp {
     pub(crate) fn commit_request_history_item(
         &mut self,
         item: protocol::HistoryItem,
-        block: Option<smelt_core::transcript_model::Block>,
+        block: Option<smelt_transcript::transcript_model::Block>,
     ) -> protocol::ModelHistorySource {
         self.tui.commit_request_history_item(item, block)
     }
@@ -1018,7 +1018,7 @@ impl TestApp {
     pub(crate) fn history_note_to_block(
         &self,
         note: &protocol::HistoryNote,
-    ) -> Option<smelt_core::transcript_model::Block> {
+    ) -> Option<smelt_transcript::transcript_model::Block> {
         crate::app::history::history_note_to_block(&self.tui.lua, note)
     }
 

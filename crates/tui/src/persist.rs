@@ -567,7 +567,7 @@ pub(crate) fn write_transcript_record_suffix_with_ids(
         .iter()
         .enumerate()
         .map(|(offset, record)| {
-            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+            smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                 start_record_idx + offset,
                 record.block_id.get(),
                 &record.record,

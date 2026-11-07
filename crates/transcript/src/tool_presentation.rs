@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
 
-pub(crate) const LUA_CONTENT_PREVIEW_BYTES: usize = 4 * 1024;
+pub const LUA_CONTENT_PREVIEW_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct TranscriptContentMetadata {
+pub struct TranscriptContentMetadata {
     // Content handles are process-local, not part of a persisted presentation.
     #[serde(skip)]
     pub content_id: Option<u64>,
@@ -24,13 +24,13 @@ pub(crate) struct TranscriptContentMetadata {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct TranscriptToolOutputContentFieldMetadata {
+pub struct TranscriptToolOutputContentFieldMetadata {
     pub name: String,
     pub content: TranscriptContentMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct TranscriptToolOutputMetadata {
+pub struct TranscriptToolOutputMetadata {
     pub content: TranscriptContentMetadata,
     pub is_error: bool,
     pub metadata: Option<serde_json::Value>,
@@ -38,7 +38,7 @@ pub(crate) struct TranscriptToolOutputMetadata {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct TranscriptArgumentFieldMetadata {
+pub struct TranscriptArgumentFieldMetadata {
     pub name: String,
     pub content: TranscriptContentMetadata,
     pub complete: bool,
@@ -46,13 +46,13 @@ pub(crate) struct TranscriptArgumentFieldMetadata {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolPresentation {
-    pub(crate) args: HashMap<String, serde_json::Value>,
-    pub(crate) argument_fields: Vec<TranscriptArgumentFieldMetadata>,
-    pub(crate) output: Option<Box<TranscriptToolOutputMetadata>>,
+    pub args: HashMap<String, serde_json::Value>,
+    pub argument_fields: Vec<TranscriptArgumentFieldMetadata>,
+    pub output: Option<Box<TranscriptToolOutputMetadata>>,
 }
 
 impl ToolPresentation {
-    pub(crate) fn new(args: &ToolArguments, output: Option<&ToolOutput>) -> Self {
+    pub fn new(args: &ToolArguments, output: Option<&ToolOutput>) -> Self {
         Self {
             args: args.preview().clone(),
             argument_fields: transcript_argument_field_metadata(args.string_fields()),
@@ -99,7 +99,7 @@ impl ToolPresentation {
         }
     }
 
-    pub(crate) fn dynamic_retained_bytes(&self) -> usize {
+    pub fn dynamic_retained_bytes(&self) -> usize {
         json_map_dynamic_retained_bytes(&self.args)
             .saturating_add(
                 self.argument_fields.capacity()
@@ -161,9 +161,7 @@ fn text_metadata(content: &str) -> TranscriptContentMetadata {
     }
 }
 
-pub(crate) fn transcript_content_metadata(
-    content: &TranscriptContent,
-) -> TranscriptContentMetadata {
+pub fn transcript_content_metadata(content: &TranscriptContent) -> TranscriptContentMetadata {
     let read = content.read();
     TranscriptContentMetadata {
         content_id: Some(content.id().get()),
@@ -176,7 +174,7 @@ pub(crate) fn transcript_content_metadata(
     }
 }
 
-pub(crate) fn transcript_argument_field_metadata(
+pub fn transcript_argument_field_metadata(
     fields: &[ToolArgumentField],
 ) -> Vec<TranscriptArgumentFieldMetadata> {
     fields
@@ -189,7 +187,7 @@ pub(crate) fn transcript_argument_field_metadata(
         .collect()
 }
 
-pub(crate) fn transcript_tool_output_metadata(output: &ToolOutput) -> TranscriptToolOutputMetadata {
+pub fn transcript_tool_output_metadata(output: &ToolOutput) -> TranscriptToolOutputMetadata {
     TranscriptToolOutputMetadata {
         content: transcript_content_metadata(&output.content),
         is_error: output.is_error,

@@ -14,23 +14,23 @@ use super::temp_rows::{
 };
 use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
 use smelt_core::buffer::{BufCreateOpts, BufId, Buffer, Span, SpanMeta};
-use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
-use smelt_core::content::block_layout::{
+use smelt_core::theme::{intern, Theme};
+use smelt_transcript::content::ansi::{emit_ansi_row, wrap_ansi};
+use smelt_transcript::content::block_layout::{
     solve_hbox_widths_with_fit, BlockLayout, CodeSpec, ContentRenderSpec, GutterSpec, IrLeaf,
     LayoutIr, LineSpec, MarkdownSpec, PanelSpec, RetainedContentSpec, RetainedInlineSyntax,
     RowPrefixSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
-use smelt_core::content::builder::{
+use smelt_transcript::content::builder::{
     display_width, wrapped_segments, LineBuilder, Outcome, WrappedSegmentKind,
 };
-use smelt_core::content::code_block::{measure_code_block, parse_code_block};
-use smelt_core::content::highlight::{
+use smelt_transcript::content::code_block::{measure_code_block, parse_code_block};
+use smelt_transcript::content::highlight::{
     emit_inline_spans, parse_inline_spans_with_options, print_inline_syntax, render_code_block,
     wrap_inline_spans, InlineOptions, InlineSpan, InlineSyntaxSpan,
 };
-use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
-use smelt_core::theme::{intern, Theme};
-use smelt_core::transcript_model::BlockHistory;
+use smelt_transcript::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
+use smelt_transcript::transcript_model::BlockHistory;
 
 #[cfg(test)]
 std::thread_local! {
@@ -759,7 +759,7 @@ fn render_ir_leaf(
         IrLeaf::Separator(spec) => {
             render_separator_spec(out, spec, width, row_start, row_count, gutter)
         }
-        IrLeaf::SourceView(smelt_core::content::block_layout::SourceViewIr::Diff(cache)) => {
+        IrLeaf::SourceView(smelt_transcript::content::block_layout::SourceViewIr::Diff(cache)) => {
             let indent = gutter_width(gutter);
             let target =
                 SourceViewTarget::new(indent, width.saturating_add(indent), row_start, row_count);
@@ -782,11 +782,11 @@ fn measure_ir_leaf(
         IrLeaf::Markdown(spec) => measure_markdown_spec(spec, width, inline_options),
         IrLeaf::Code(spec) => measure_code_spec(spec, width),
         IrLeaf::Separator(spec) => measure_separator_spec(spec),
-        IrLeaf::SourceView(smelt_core::content::block_layout::SourceViewIr::Diff(cache)) => {
-            smelt_core::content::highlight::measure_diff_ir(
+        IrLeaf::SourceView(smelt_transcript::content::block_layout::SourceViewIr::Diff(cache)) => {
+            smelt_transcript::content::highlight::measure_diff_ir(
                 cache,
                 width.saturating_add(gutter_cells),
-                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                smelt_transcript::content::highlight::GutterStyle::InlineLineNumbers,
                 gutter_cells,
             )
         }
@@ -852,19 +852,19 @@ fn render_content_spec(
             let indent = gutter_width(gutter);
             let syntax_ext = lang
                 .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext)
+                .map(smelt_transcript::content::highlight::lang_to_ext)
                 .or_else(|| {
                     std::path::Path::new(path)
                         .extension()
                         .and_then(|ext| ext.to_str())
                 })
                 .unwrap_or("txt");
-            smelt_core::content::highlight::print_retained_file_view(
+            smelt_transcript::content::highlight::print_retained_file_view(
                 out,
                 &spec.content,
                 cache,
                 syntax_ext,
-                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                smelt_transcript::content::highlight::GutterStyle::InlineLineNumbers,
                 indent,
                 width.saturating_add(indent),
                 row_start,
@@ -888,13 +888,13 @@ fn measure_content_spec(
             inline,
         } => measure_retained_markdown_spec(spec, *dim, *italic, *inline, width, inline_options),
         ContentRenderSpec::Code { .. } => {
-            smelt_core::content::highlight::measure_retained_code_block(&spec.content, width)
+            smelt_transcript::content::highlight::measure_retained_code_block(&spec.content, width)
         }
         ContentRenderSpec::File { .. } => {
-            smelt_core::content::highlight::measure_retained_file_view(
+            smelt_transcript::content::highlight::measure_retained_file_view(
                 &spec.content,
                 width.saturating_add(gutter_cells),
-                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                smelt_transcript::content::highlight::GutterStyle::InlineLineNumbers,
                 gutter_cells,
             )
         }
@@ -906,7 +906,7 @@ fn render_retained_code_spec(
     out: &mut LineBuilder,
     spec: &RetainedContentSpec,
     lang: &str,
-    cache: &smelt_core::content::highlight::RetainedFileViewCache,
+    cache: &smelt_transcript::content::highlight::RetainedFileViewCache,
     width: u16,
     row_start: usize,
     row_count: usize,
@@ -916,7 +916,7 @@ fn render_retained_code_spec(
         return 0;
     }
     if gutter.is_none() {
-        return smelt_core::content::highlight::print_retained_code_block(
+        return smelt_transcript::content::highlight::print_retained_code_block(
             out,
             &spec.content,
             cache,
@@ -933,7 +933,7 @@ fn render_retained_code_spec(
         gutter.expect("guttered retained code render requires gutter"),
         None,
         |col| {
-            smelt_core::content::highlight::print_retained_code_block(
+            smelt_transcript::content::highlight::print_retained_code_block(
                 col,
                 &spec.content,
                 cache,
@@ -1212,7 +1212,7 @@ fn measure_retained_plain_markdown_line(spec: &RetainedContentSpec, width: u16) 
 
 fn render_retained_plain_markdown_row(
     out: &mut LineBuilder,
-    row: smelt_core::transcript_content::ContentTextRow<'_>,
+    row: smelt_transcript::transcript_content::ContentTextRow<'_>,
     dim: bool,
     italic: bool,
     gutter: Option<&GutterSpec>,
@@ -1288,7 +1288,7 @@ fn render_content_text_spec(
 
 fn render_content_text_row(
     out: &mut LineBuilder,
-    row: smelt_core::transcript_content::ContentTextRow<'_>,
+    row: smelt_transcript::transcript_content::ContentTextRow<'_>,
     hl: Option<smelt_core::theme::HlGroup>,
     ansi: bool,
     gutter: Option<&GutterSpec>,
@@ -1973,7 +1973,7 @@ fn measure_code_spec(spec: &CodeSpec, width: u16) -> usize {
     measure_code_block(&code_block_from_spec(spec), width as usize)
 }
 
-fn code_block_from_spec(spec: &CodeSpec) -> smelt_core::content::code_block::CodeBlock {
+fn code_block_from_spec(spec: &CodeSpec) -> smelt_transcript::content::code_block::CodeBlock {
     let lines: Vec<&str> = if spec.content.is_empty() {
         vec![""]
     } else {
@@ -2302,7 +2302,7 @@ fn render_row_prefix_runs(
 fn render_row_prefix_runs_cap(
     out: &mut LineBuilder,
     runs: &RunsSpec,
-    cap: &smelt_core::content::block_layout::CapSpec,
+    cap: &smelt_transcript::content::block_layout::CapSpec,
     prefix: &RowPrefixSpec,
     width: u16,
     row_start: usize,
@@ -2679,7 +2679,7 @@ fn measure_retained_markdown_edge(
     width: u16,
     inline_options: &InlineOptions,
     max_rows: usize,
-) -> smelt_core::transcript_content::ContentTextWindow {
+) -> smelt_transcript::transcript_content::ContentTextWindow {
     match retained_markdown_edge_mode(content, inline) {
         RetainedMarkdownEdgeMode::Literal => {
             return content
@@ -2687,7 +2687,7 @@ fn measure_retained_markdown_edge(
                 .visit_text_layout_head_rows(width, false, max_rows, |_| {});
         }
         RetainedMarkdownEdgeMode::Omitted => {
-            return smelt_core::transcript_content::ContentTextWindow {
+            return smelt_transcript::transcript_content::ContentTextWindow {
                 row_count: max_rows.min(1),
                 truncated: max_rows == 0,
             };
@@ -2708,7 +2708,7 @@ fn measure_retained_markdown_edge(
             max_rows,
         );
     };
-    smelt_core::transcript_content::ContentTextWindow {
+    smelt_transcript::transcript_content::ContentTextWindow {
         row_count: total.min(max_rows),
         truncated: total > max_rows,
     }
@@ -2725,7 +2725,7 @@ fn render_retained_markdown_edge(
     inline_options: &InlineOptions,
     max_rows: usize,
     tail: bool,
-) -> smelt_core::transcript_content::ContentTextWindow {
+) -> smelt_transcript::transcript_content::ContentTextWindow {
     let mode = retained_markdown_edge_mode(content, inline);
     let window = measure_retained_markdown_edge(
         content,
@@ -2823,14 +2823,14 @@ const MAX_BOUNDED_EDGE_DEPTH: usize = 32;
 const BOUNDED_TRANSIENT_OMITTED: &str = "[large transient layout omitted]";
 
 fn measure_retained_text_edge(
-    content: &smelt_core::transcript_content::TranscriptContent,
+    content: &smelt_transcript::transcript_content::TranscriptContent,
     width: u16,
     ansi: bool,
     max_rows: usize,
-) -> smelt_core::transcript_content::ContentTextWindow {
+) -> smelt_transcript::transcript_content::ContentTextWindow {
     let logical_lines = content.read().logical_line_count();
     if max_rows != 0 && logical_lines > max_rows {
-        return smelt_core::transcript_content::ContentTextWindow {
+        return smelt_transcript::transcript_content::ContentTextWindow {
             row_count: max_rows,
             truncated: true,
         };
@@ -2843,7 +2843,7 @@ fn measure_retained_content_edge(
     width: u16,
     max_rows: usize,
     inline_options: &InlineOptions,
-) -> smelt_core::transcript_content::ContentTextWindow {
+) -> smelt_transcript::transcript_content::ContentTextWindow {
     match &content.render {
         ContentRenderSpec::Text { ansi, .. } => {
             measure_retained_text_edge(&content.content, width, *ansi, max_rows)
@@ -2862,17 +2862,17 @@ fn measure_retained_content_edge(
             max_rows,
         ),
         ContentRenderSpec::Code { .. } => {
-            smelt_core::content::highlight::measure_retained_code_block_edge(
+            smelt_transcript::content::highlight::measure_retained_code_block_edge(
                 &content.content,
                 width,
                 max_rows,
             )
         }
         ContentRenderSpec::File { .. } => {
-            smelt_core::content::highlight::measure_retained_file_view_edge(
+            smelt_transcript::content::highlight::measure_retained_file_view_edge(
                 &content.content,
                 width,
-                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                smelt_transcript::content::highlight::GutterStyle::InlineLineNumbers,
                 0,
                 max_rows,
             )
@@ -2976,8 +2976,8 @@ fn measure_bounded_layout_edge_inner(
     max_rows: usize,
     inline_options: &InlineOptions,
     depth: usize,
-) -> Option<smelt_core::transcript_content::ContentTextWindow> {
-    use smelt_core::transcript_content::ContentTextWindow;
+) -> Option<smelt_transcript::transcript_content::ContentTextWindow> {
+    use smelt_transcript::transcript_content::ContentTextWindow;
 
     if depth > MAX_BOUNDED_EDGE_DEPTH {
         return Some(ContentTextWindow {
@@ -3152,7 +3152,7 @@ fn retained_text_cap_leaf(
 
 fn measure_bounded_cap_rows(
     child: &LayoutIr,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     width: u16,
     inline_options: &InlineOptions,
 ) -> Option<usize> {
@@ -3161,12 +3161,12 @@ fn measure_bounded_cap_rows(
 
 fn measure_bounded_cap_rows_inner(
     child: &LayoutIr,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     width: u16,
     inline_options: &InlineOptions,
     depth: usize,
 ) -> Option<usize> {
-    use smelt_core::content::block_layout::CapKeep;
+    use smelt_transcript::content::block_layout::CapKeep;
 
     if depth <= MAX_BOUNDED_EDGE_DEPTH {
         if let Some(child_rows) = bounded_exact_layout_rows(child, width, inline_options) {
@@ -3194,7 +3194,7 @@ use cap_rows::*;
 
 fn cap_rows_for_child(
     child_rows: usize,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     child: &LayoutIr,
     width: u16,
     history: Option<&BlockHistory>,
@@ -3372,7 +3372,7 @@ impl CapRenderRange {
 fn render_retained_text_cap_marker(
     out: &mut LineBuilder,
     state: &mut CapRenderRange,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     kept: usize,
     direction: &'static str,
     total: Option<u64>,
@@ -3430,13 +3430,13 @@ fn render_retained_text_cap_edge(
 fn render_retained_text_cap(
     out: &mut LineBuilder,
     child: &LayoutIr,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     width: u16,
     row_start: usize,
     row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> Option<u16> {
-    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+    use smelt_transcript::content::block_layout::{CapKeep, CapMarker};
 
     let (content, hl, ansi) = retained_text_cap_leaf(child)?;
     let probe_rows = usize::from(spec.rows).saturating_add(1);
@@ -3508,7 +3508,7 @@ fn render_retained_text_cap(
 
 fn render_retained_cap_marker(
     out: &mut LineBuilder,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     kept: usize,
     direction: &'static str,
     known_rows: Option<usize>,
@@ -3551,7 +3551,7 @@ fn render_retained_content_edge(
             }
         }
         ContentRenderSpec::Code { lang, cache } => {
-            smelt_core::content::highlight::print_retained_code_block_edge(
+            smelt_transcript::content::highlight::print_retained_code_block_edge(
                 out,
                 &content.content,
                 cache,
@@ -3564,19 +3564,19 @@ fn render_retained_content_edge(
         ContentRenderSpec::File { path, lang, cache } => {
             let syntax_ext = lang
                 .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext)
+                .map(smelt_transcript::content::highlight::lang_to_ext)
                 .or_else(|| {
                     std::path::Path::new(path)
                         .extension()
                         .and_then(|ext| ext.to_str())
                 })
                 .unwrap_or("txt");
-            smelt_core::content::highlight::print_retained_file_view_edge(
+            smelt_transcript::content::highlight::print_retained_file_view_edge(
                 out,
                 &content.content,
                 cache,
                 syntax_ext,
-                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                smelt_transcript::content::highlight::GutterStyle::InlineLineNumbers,
                 0,
                 width,
                 count,
@@ -3628,7 +3628,7 @@ fn render_bounded_layout_edge_to_buffer(
 ) -> Option<(
     Buffer,
     Outcome,
-    smelt_core::transcript_content::ContentTextWindow,
+    smelt_transcript::transcript_content::ContentTextWindow,
 )> {
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let mut col = LineBuilder::new(&mut buf, theme, width.max(1));
@@ -3676,9 +3676,9 @@ fn render_bounded_layout_edge_inner(
     tail: bool,
     inline_options: &InlineOptions,
     depth: usize,
-) -> Option<smelt_core::transcript_content::ContentTextWindow> {
+) -> Option<smelt_transcript::transcript_content::ContentTextWindow> {
     if depth > MAX_BOUNDED_EDGE_DEPTH {
-        let window = smelt_core::transcript_content::ContentTextWindow {
+        let window = smelt_transcript::transcript_content::ContentTextWindow {
             row_count: max_rows.min(1),
             truncated: true,
         };
@@ -4039,7 +4039,7 @@ fn render_bounded_layout_edge_inner(
 fn render_bounded_layout_cap(
     out: &mut LineBuilder,
     child: &LayoutIr,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     width: u16,
     row_start: usize,
     row_count: usize,
@@ -4063,7 +4063,7 @@ fn render_bounded_layout_cap(
 fn render_bounded_layout_cap_inner(
     out: &mut LineBuilder,
     child: &LayoutIr,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     width: u16,
     row_start: usize,
     row_count: usize,
@@ -4071,7 +4071,7 @@ fn render_bounded_layout_cap_inner(
     inline_options: &InlineOptions,
     depth: usize,
 ) -> Option<u16> {
-    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+    use smelt_transcript::content::block_layout::{CapKeep, CapMarker};
 
     let cap = usize::from(spec.rows);
     let exact_child_rows = (depth <= MAX_BOUNDED_EDGE_DEPTH)
@@ -4265,7 +4265,7 @@ fn print_bounded_cap_gutter(
     out: &mut LineBuilder,
     gutter: &GutterSpec,
     child: &LayoutIr,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     truncated: bool,
     marker_visible: bool,
     kept: usize,
@@ -4286,13 +4286,13 @@ fn print_bounded_cap_gutter(
 }
 
 fn bounded_cap_row_is_marker(
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     truncated: bool,
     marker_visible: bool,
     kept: usize,
     row: usize,
 ) -> bool {
-    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+    use smelt_transcript::content::block_layout::{CapKeep, CapMarker};
 
     if !truncated || !marker_visible {
         return false;
@@ -4330,7 +4330,7 @@ fn apply_outer_layout_styles(out: &mut LineBuilder, layout: &LayoutIr) {
 fn render_ir_cap(
     out: &mut LineBuilder,
     child: &LayoutIr,
-    spec: &smelt_core::content::block_layout::CapSpec,
+    spec: &smelt_transcript::content::block_layout::CapSpec,
     width: u16,
     row_start: usize,
     row_count: usize,
@@ -4402,7 +4402,7 @@ use hbox::*;
 mod tests {
     use super::*;
     use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
-    use smelt_core::content::block_layout::{
+    use smelt_transcript::content::block_layout::{
         CapKeep, CapMarker, CapSpec, Constraint, GutterSpec, HboxItem, LayoutLeaf, LineSpec,
         MarkdownSpec, RowPrefixSpec, SeparatorSpec, TextSpec,
     };
@@ -4430,7 +4430,7 @@ mod tests {
 
     fn retained_text_layout(content: impl Into<String>) -> LayoutIr {
         BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
-            content: smelt_core::transcript_content::TranscriptContent::from(content.into()),
+            content: smelt_transcript::transcript_content::TranscriptContent::from(content.into()),
             render: ContentRenderSpec::Text {
                 hl_group: None,
                 ansi: true,
@@ -4577,7 +4577,8 @@ mod tests {
 
     #[test]
     fn retained_measurement_refresh_matches_full_rebuild_without_reallocating_tree() {
-        let content = smelt_core::transcript_content::TranscriptContent::from("one".to_string());
+        let content =
+            smelt_transcript::transcript_content::TranscriptContent::from("one".to_string());
         let content_leaf = || {
             BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
                 content: content.clone(),
@@ -4669,8 +4670,9 @@ mod tests {
             content: source.to_string(),
             lang: "rust".into(),
         }));
-        let content =
-            smelt_core::transcript_content::TranscriptContent::from("fn main() {\n".to_string());
+        let content = smelt_transcript::transcript_content::TranscriptContent::from(
+            "fn main() {\n".to_string(),
+        );
         content.append_owned("\tprintln!(\"hello world\");\n}\n".to_string());
         let retained = BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
             content,
@@ -4693,7 +4695,8 @@ mod tests {
 
     #[test]
     fn retained_code_tail_cap_does_not_build_a_full_file_layout() {
-        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let content =
+            smelt_transcript::transcript_content::TranscriptContent::from("x".repeat(70_001));
         drop(content.read());
         let retained_bytes = content.retained_bytes();
         let layout = BlockLayout::Cap {
@@ -4732,7 +4735,8 @@ mod tests {
 
     #[test]
     fn retained_file_tail_cap_does_not_build_a_full_file_layout() {
-        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let content =
+            smelt_transcript::transcript_content::TranscriptContent::from("x".repeat(70_001));
         drop(content.read());
         let retained_bytes = content.retained_bytes();
         let layout = BlockLayout::Cap {
@@ -4765,7 +4769,8 @@ mod tests {
 
     #[test]
     fn retained_code_renders_ranges_past_terminal_row_limits() {
-        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let content =
+            smelt_transcript::transcript_content::TranscriptContent::from("x".repeat(70_001));
         let layout = BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
             content,
             render: ContentRenderSpec::Code {
@@ -4794,7 +4799,8 @@ mod tests {
 
     #[test]
     fn retained_markdown_ascii_word_renders_deep_ranges_without_snapshotting() {
-        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let content =
+            smelt_transcript::transcript_content::TranscriptContent::from("x".repeat(70_001));
         let layout = BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
             content,
             render: ContentRenderSpec::Markdown {
@@ -5170,7 +5176,7 @@ mod tests {
     fn fit_column_shrinks_to_retained_markdown() {
         let markdown = |text: &str| {
             BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
-                content: smelt_core::transcript_content::TranscriptContent::from(text),
+                content: smelt_transcript::transcript_content::TranscriptContent::from(text),
                 render: ContentRenderSpec::Markdown {
                     dim: false,
                     italic: false,
@@ -5221,7 +5227,7 @@ mod tests {
 
     #[test]
     fn retained_text_tail_cap_keeps_measurement_and_rendering_bounded() {
-        let content = smelt_core::transcript_content::TranscriptContent::from(
+        let content = smelt_transcript::transcript_content::TranscriptContent::from(
             (0..100_000)
                 .map(|line| format!("line {line:06}"))
                 .collect::<Vec<_>>()
@@ -5274,40 +5280,41 @@ mod tests {
 
     #[test]
     fn retained_text_edge_measurement_preserves_wrapping_ansi_and_truncation() {
-        let wrapped = smelt_core::transcript_content::TranscriptContent::from("abcdefgh");
+        let wrapped = smelt_transcript::transcript_content::TranscriptContent::from("abcdefgh");
         assert_eq!(
             measure_retained_text_edge(&wrapped, 4, false, 3),
-            smelt_core::transcript_content::ContentTextWindow {
+            smelt_transcript::transcript_content::ContentTextWindow {
                 row_count: 2,
                 truncated: false,
             }
         );
 
-        let ansi =
-            smelt_core::transcript_content::TranscriptContent::from("\u{1b}[31mabcdefgh\u{1b}[0m");
+        let ansi = smelt_transcript::transcript_content::TranscriptContent::from(
+            "\u{1b}[31mabcdefgh\u{1b}[0m",
+        );
         assert_eq!(
             measure_retained_text_edge(&ansi, 4, true, 3),
-            smelt_core::transcript_content::ContentTextWindow {
+            smelt_transcript::transcript_content::ContentTextWindow {
                 row_count: 2,
                 truncated: false,
             }
         );
 
         let multiline =
-            smelt_core::transcript_content::TranscriptContent::from("one\ntwo\nthree\nfour");
+            smelt_transcript::transcript_content::TranscriptContent::from("one\ntwo\nthree\nfour");
         assert_eq!(
             measure_retained_text_edge(&multiline, 80, false, 3),
-            smelt_core::transcript_content::ContentTextWindow {
+            smelt_transcript::transcript_content::ContentTextWindow {
                 row_count: 3,
                 truncated: true,
             }
         );
 
         let equal_lines_with_wrap =
-            smelt_core::transcript_content::TranscriptContent::from("abcdefgh\nx\ny");
+            smelt_transcript::transcript_content::TranscriptContent::from("abcdefgh\nx\ny");
         assert_eq!(
             measure_retained_text_edge(&equal_lines_with_wrap, 4, false, 3),
-            smelt_core::transcript_content::ContentTextWindow {
+            smelt_transcript::transcript_content::ContentTextWindow {
                 row_count: 3,
                 truncated: true,
             }
@@ -5316,7 +5323,7 @@ mod tests {
 
     #[test]
     fn thinking_peek_cap_queries_wrapped_retained_markdown_edges() {
-        let content = smelt_core::transcript_content::TranscriptContent::from(format!(
+        let content = smelt_transcript::transcript_content::TranscriptContent::from(format!(
             "{}x",
             "word ".repeat(14_000)
         ));
@@ -5383,7 +5390,7 @@ mod tests {
 
     #[test]
     fn pathological_retained_markdown_nodes_use_bounded_literal_edges() {
-        let content = smelt_core::transcript_content::TranscriptContent::from(format!(
+        let content = smelt_transcript::transcript_content::TranscriptContent::from(format!(
             "# {}",
             "word ".repeat(14_000)
         ));
@@ -5425,7 +5432,8 @@ mod tests {
 
     #[test]
     fn pathological_non_ascii_markdown_uses_bounded_omission() {
-        let content = smelt_core::transcript_content::TranscriptContent::from("界".repeat(30_000));
+        let content =
+            smelt_transcript::transcript_content::TranscriptContent::from("界".repeat(30_000));
         drop(content.read());
         let retained_before = content.retained_bytes();
         let layout = BlockLayout::Cap {
@@ -5455,7 +5463,7 @@ mod tests {
 
     #[test]
     fn pathological_multiline_markdown_nodes_use_bounded_literal_edges() {
-        let content = smelt_core::transcript_content::TranscriptContent::from(format!(
+        let content = smelt_transcript::transcript_content::TranscriptContent::from(format!(
             "```\n{}\n```",
             (0..10_000)
                 .map(|line| format!("line {line:05}"))
@@ -5833,7 +5841,7 @@ mod tests {
 
     #[test]
     fn retained_text_range_renders_past_terminal_row_limits_through_wrappers() {
-        let content = smelt_core::transcript_content::TranscriptContent::from(
+        let content = smelt_transcript::transcript_content::TranscriptContent::from(
             (0..70_000)
                 .map(|line| format!("line {line}"))
                 .collect::<Vec<_>>()
@@ -5927,7 +5935,7 @@ mod tests {
 
     #[test]
     fn retained_markdown_cap_suppresses_marker_for_blank_omitted_row() {
-        let content = smelt_core::transcript_content::TranscriptContent::from(
+        let content = smelt_transcript::transcript_content::TranscriptContent::from(
             "first paragraph\n\nsecond paragraph\nthird paragraph\nfourth paragraph".to_string(),
         );
         let layout = BlockLayout::Cap {

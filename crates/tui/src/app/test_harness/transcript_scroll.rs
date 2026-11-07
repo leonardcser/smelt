@@ -1,7 +1,7 @@
 use super::*;
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use smelt_core::transcript_model::{Block, TranscriptBlockRecord};
+use smelt_transcript::transcript_model::{Block, TranscriptBlockRecord};
 
 use crate::app::search::SearchDirection;
 use crate::app::transcript::TranscriptDocument;
@@ -37,7 +37,7 @@ struct UserDeltaAnchor {
     viewport_top: crate::smelt_edit::RowIndex,
     virtual_row: crate::smelt_edit::RowIndex,
     record_index: usize,
-    block_id: smelt_core::transcript_model::BlockId,
+    block_id: smelt_transcript::transcript_model::BlockId,
     row_offset: crate::smelt_edit::RowIndex,
 }
 
@@ -195,7 +195,7 @@ impl TestApp {
     #[cfg(any(test, feature = "transcript-bench"))]
     pub(crate) fn hydrate_transcript_blocks(
         &mut self,
-        ids: &[smelt_core::transcript_model::BlockId],
+        ids: &[smelt_transcript::transcript_model::BlockId],
     ) -> bool {
         if ids.is_empty() {
             return true;
@@ -348,7 +348,7 @@ impl TestApp {
     #[cfg(test)]
     pub(crate) fn transcript_tail_state_for_harness(
         &self,
-    ) -> Option<(usize, smelt_core::transcript_model::BlockId, bool)> {
+    ) -> Option<(usize, smelt_transcript::transcript_model::BlockId, bool)> {
         self.tui.conversation.transcript_tail_state_for_harness()
     }
 
@@ -364,7 +364,7 @@ impl TestApp {
         &mut self,
         block_index: usize,
         history_index: usize,
-        block: smelt_core::transcript_model::Block,
+        block: smelt_transcript::transcript_model::Block,
     ) {
         self.tui
             .conversation
@@ -392,8 +392,8 @@ impl TestApp {
 
     pub(crate) fn with_pinned_transcript_blocks<R>(
         &mut self,
-        ids: &[smelt_core::transcript_model::BlockId],
-        f: impl FnOnce(&smelt_core::transcript_model::BlockHistory) -> R,
+        ids: &[smelt_transcript::transcript_model::BlockId],
+        f: impl FnOnce(&smelt_transcript::transcript_model::BlockHistory) -> R,
     ) -> Option<R> {
         self.tui.conversation.with_pinned_transcript_blocks(ids, f)
     }
@@ -1497,7 +1497,7 @@ fn record_range_contains(range: TranscriptRecordTraceRange, record: usize) -> bo
 }
 
 fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for idx in 0..count {
         let marker = format!("record-{idx:04}");
         match idx % 10 {

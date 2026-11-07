@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use smelt_core::transcript_model::{
+use smelt_transcript::transcript_model::{
     BlockId, StoredBlockRef, StoredBlockWithId, TranscriptBlockRecordWithId,
 };
 
@@ -44,7 +44,7 @@ impl LoadedRecordWindow {
         let total_count = slice.total_count;
         let _perf = smelt_perf::perf::begin("transcript:record_window:compact_records");
         smelt_perf::perf::record_value("transcript:record_window:decode_rows", slice.len() as u64);
-        let records = smelt_core::transcript_model::compact_record_summaries(
+        let records = smelt_transcript::transcript_model::compact_record_summaries(
             start.get(),
             slice.into_records(),
         )
@@ -615,9 +615,9 @@ mod tests {
         let session_id = marker.to_string().repeat(64);
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.id.clone_from(&session_id);
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         for index in 0..32 {
-            transcript.push(smelt_core::transcript_model::Block::Text {
+            transcript.push(smelt_transcript::transcript_model::Block::Text {
                 content: format!("{marker} record {index}").into(),
             });
         }

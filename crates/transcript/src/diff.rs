@@ -60,8 +60,8 @@ pub struct File {
     pub status: &'static str,
     pub additions: u64,
     pub deletions: u64,
-    pub(crate) raw_path: Vec<u8>,
-    pub(crate) raw_old_path: Vec<u8>,
+    pub raw_path: Vec<u8>,
+    pub raw_old_path: Vec<u8>,
     pub section: Section,
     pub binary: bool,
     start: usize,
@@ -108,12 +108,12 @@ impl Diff {
         Self::parse_cancellable(patch, || false).expect("uncancelled diff index")
     }
 
-    pub(crate) fn parse_cancellable(patch: String, cancelled: impl Fn() -> bool) -> Option<Self> {
+    pub fn parse_cancellable(patch: String, cancelled: impl Fn() -> bool) -> Option<Self> {
         let boundary = patch.len();
         Self::parse_sections(patch, boundary, cancelled, |_, _| true)
     }
 
-    pub(crate) fn parse_comparison(patch: String, cancelled: impl Fn() -> bool) -> Option<Self> {
+    pub fn parse_comparison(patch: String, cancelled: impl Fn() -> bool) -> Option<Self> {
         let mut diff = Self::parse_cancellable(patch, cancelled)?;
         diff.comparison = true;
         for file in &mut diff.files {
@@ -123,11 +123,11 @@ impl Diff {
     }
 
     /// A read-only comparison between two revisions, with no index to stage.
-    pub(crate) fn is_comparison(&self) -> bool {
+    pub fn is_comparison(&self) -> bool {
         self.comparison
     }
 
-    pub(crate) fn sections(&self) -> &[Section] {
+    pub fn sections(&self) -> &[Section] {
         if self.comparison {
             &[Section::Changes]
         } else {
@@ -135,7 +135,7 @@ impl Diff {
         }
     }
 
-    pub(crate) fn parse_sections(
+    pub fn parse_sections(
         patch: String,
         staged_start: usize,
         cancelled: impl Fn() -> bool,
@@ -320,7 +320,7 @@ impl Diff {
 
     /// Keep unresolved paths visible even when the worktree matches the ours
     /// stage, or that stage is missing and Git emits no unified patch.
-    pub(crate) fn add_unmerged_file(&mut self, path: Vec<u8>) {
+    pub fn add_unmerged_file(&mut self, path: Vec<u8>) {
         self.files.push(File {
             path: String::from_utf8_lossy(&path).into_owned(),
             old_path: String::from_utf8_lossy(&path).into_owned(),
@@ -354,7 +354,7 @@ impl Diff {
 
     /// Directory-first preorder shared by the preview and Lua tree. Only compact
     /// row indexes move; patch bytes and per-file source order remain untouched.
-    pub(crate) fn sort_files(&mut self, cancelled: &impl Fn() -> bool) -> Option<()> {
+    pub fn sort_files(&mut self, cancelled: &impl Fn() -> bool) -> Option<()> {
         fn compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
             let (mut a, mut b) = (
                 a.split(|b| *b == b'/').peekable(),
@@ -701,7 +701,7 @@ impl DiffView {
         tree::DiffTree::from_index(Arc::clone(&self.tree))
     }
 
-    pub(crate) fn set_wakeup(&self, wakeup: Option<tokio::sync::mpsc::UnboundedSender<()>>) {
+    pub fn set_wakeup(&self, wakeup: Option<tokio::sync::mpsc::UnboundedSender<()>>) {
         self.syntax.set_wakeup(wakeup);
     }
 

@@ -1,4 +1,4 @@
-use smelt_core::transcript_model::BlockId;
+use smelt_transcript::transcript_model::BlockId;
 
 use super::TuiApp;
 

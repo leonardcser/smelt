@@ -10,6 +10,7 @@ build = "build.rs"
 name = "tui"
 
 [dependencies]
+smelt-transcript = { workspace = true }
 smelt-paths = { workspace = true }
 smelt-permissions = { workspace = true }
 smelt-worktree = { workspace = true }

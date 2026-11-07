@@ -790,7 +790,7 @@ smelt.provider.register("probe", {
     )
     .unwrap();
     let mut session = smelt_core::session::Session::new(1, root.path().to_owned());
-    let mut transcript = smelt_core::content::transcript::Transcript::new();
+    let mut transcript = smelt_transcript::content::transcript::Transcript::new();
     for turn in 0..1_024 {
         let text = format!("rewind fixture {turn}");
         let index = session.history.len();
@@ -830,7 +830,7 @@ smelt.provider.register("probe", {
         .iter()
         .enumerate()
         .map(|(index, record)| {
-            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+            smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                 index,
                 index as u64,
                 record,
@@ -2246,7 +2246,7 @@ end)
             transcript_marker,
         )));
     let state_root = state_home.join("smelt");
-    let mut transcript = smelt_core::content::transcript::Transcript::new();
+    let mut transcript = smelt_transcript::content::transcript::Transcript::new();
     transcript.push(smelt_core::Block::Text {
         content: transcript_marker.into(),
     });
@@ -2256,7 +2256,7 @@ end)
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+            smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                 index,
                 index as u64,
                 &record,

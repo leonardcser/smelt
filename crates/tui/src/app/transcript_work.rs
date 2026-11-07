@@ -6,7 +6,7 @@ use protocol::{EngineEvent, InvocationId};
 pub(super) const STREAM_CONTENT_SLICE_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) struct PendingToolOutputAppend {
-    pub(super) block_id: smelt_core::transcript_model::BlockId,
+    pub(super) block_id: smelt_transcript::transcript_model::BlockId,
     pub(super) invocation_id: InvocationId,
     pub(super) source: Arc<String>,
     pub(super) offset: usize,
@@ -16,7 +16,7 @@ pub(super) struct PendingToolOutputAppend {
 
 impl PendingToolOutputAppend {
     pub(super) fn new(
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
         invocation_id: InvocationId,
         source: Arc<String>,
         offset: usize,
@@ -45,7 +45,7 @@ pub(super) enum TranscriptWork {
     ToolOutputAppend(PendingToolOutputAppend),
     DeferredReasoningSummary {
         event: EngineEvent,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
     },
     OrderedEngineEvent(EngineEvent),
     AppendExecOutput(String),
@@ -79,7 +79,7 @@ impl TranscriptWork {
 pub(super) struct TranscriptWorkQueue {
     items: VecDeque<TranscriptWork>,
     pending_tool_outputs: HashMap<InvocationId, usize>,
-    pending_tool_draft_summaries: Vec<smelt_core::transcript_model::BlockId>,
+    pending_tool_draft_summaries: Vec<smelt_transcript::transcript_model::BlockId>,
     main_turn_work_count: usize,
 }
 
@@ -103,7 +103,7 @@ impl TranscriptWorkQueue {
     pub(super) fn push_deferred_reasoning_summary(
         &mut self,
         event: EngineEvent,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
     ) {
         self.push_back(TranscriptWork::DeferredReasoningSummary { event, block_id });
     }
@@ -111,7 +111,7 @@ impl TranscriptWorkQueue {
     pub(super) fn push_front_deferred_reasoning_summary(
         &mut self,
         event: EngineEvent,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
     ) {
         let work = TranscriptWork::DeferredReasoningSummary { event, block_id };
         self.increment_work_counts(&work);
@@ -150,7 +150,7 @@ impl TranscriptWorkQueue {
 
     pub(super) fn request_tool_draft_summary(
         &mut self,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
     ) {
         if !self.pending_tool_draft_summaries.contains(&block_id) {
             self.pending_tool_draft_summaries.push(block_id);
@@ -159,7 +159,7 @@ impl TranscriptWorkQueue {
 
     pub(super) fn cancel_tool_draft_summary(
         &mut self,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
     ) {
         self.pending_tool_draft_summaries
             .retain(|pending| *pending != block_id);
@@ -167,7 +167,7 @@ impl TranscriptWorkQueue {
 
     pub(super) fn take_tool_draft_summaries(
         &mut self,
-    ) -> Vec<smelt_core::transcript_model::BlockId> {
+    ) -> Vec<smelt_transcript::transcript_model::BlockId> {
         std::mem::take(&mut self.pending_tool_draft_summaries)
     }
 
@@ -268,8 +268,8 @@ mod tests {
     #[test]
     fn tool_draft_summary_requests_coalesce_in_order() {
         let mut work = TranscriptWorkQueue::default();
-        let first = smelt_core::transcript_model::BlockId::new(1);
-        let second = smelt_core::transcript_model::BlockId::new(2);
+        let first = smelt_transcript::transcript_model::BlockId::new(1);
+        let second = smelt_transcript::transcript_model::BlockId::new(2);
 
         work.request_tool_draft_summary(first);
         work.request_tool_draft_summary(first);

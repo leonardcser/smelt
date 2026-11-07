@@ -55,10 +55,10 @@ fn view(app: &TestApp) -> View {
 }
 
 fn diff_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
-    use smelt_core::transcript_model::{
+    use smelt_transcript::transcript_model::{
         Block, ToolOutput, ToolOutputContentField, ToolState, ToolStatus,
     };
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for idx in 0..count {
         let marker = format!("record-{idx:04}");
         match idx % 4 {
@@ -146,8 +146,8 @@ fn diff_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
 }
 
 fn exec_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
-    use smelt_core::transcript_model::Block;
-    let mut source = smelt_core::content::transcript::Transcript::new();
+    use smelt_transcript::transcript_model::Block;
+    let mut source = smelt_transcript::content::transcript::Transcript::new();
     for idx in 0..count {
         let marker = format!("record-{idx:04}");
         match idx % 3 {

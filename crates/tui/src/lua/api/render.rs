@@ -17,11 +17,11 @@ use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_edit::BufId;
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
-use smelt_core::content::builder::{wrapped_segments, LineBuilder};
-use smelt_core::content::highlight::SplitSide;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::theme::intern;
+use smelt_transcript::content::builder::{wrapped_segments, LineBuilder};
+use smelt_transcript::content::highlight::SplitSide;
 
 use super::buf::LuaBuf;
 
@@ -80,10 +80,17 @@ fn render_text_content(
     }
     for line in content.lines() {
         let expanded = line.replace('\t', "    ");
-        let (spans, ranges, boundaries) = smelt_core::content::ansi::wrap_ansi(&expanded, max_cols);
+        let (spans, ranges, boundaries) =
+            smelt_transcript::content::ansi::wrap_ansi(&expanded, max_cols);
         for segment in wrapped_segments(sink, &ranges) {
             segment.emit(sink, |sink, &(start, end), _| {
-                smelt_core::content::ansi::emit_ansi_row(sink, &spans, &boundaries, start, end);
+                smelt_transcript::content::ansi::emit_ansi_row(
+                    sink,
+                    &spans,
+                    &boundaries,
+                    start,
+                    end,
+                );
             });
             sink.newline();
         }

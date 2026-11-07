@@ -399,7 +399,7 @@ impl TestApp {
             assert!(
                 matches!(
                     history.block(block_id),
-                    Some(smelt_core::transcript_model::Block::ToolCall { .. })
+                    Some(smelt_transcript::transcript_model::Block::ToolCall { .. })
                 ),
                 "tool_state for {block_id:?} has no matching Block::ToolCall in history",
             );

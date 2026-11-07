@@ -12,13 +12,13 @@ use crate::smelt_edit::{
     add_signed_row, Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition,
     DocRange, DocumentCommand, RowIndex, TextRange, Theme, VerticalScroll,
 };
-use smelt_core::content::file_icons::FileIconOptions;
-use smelt_core::content::highlight::InlineOptions;
+use smelt_transcript::content::file_icons::FileIconOptions;
+use smelt_transcript::content::highlight::InlineOptions;
 
-use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
-use smelt_core::transcript_content::TranscriptContent;
-use smelt_core::transcript_model::{
+use smelt_transcript::content::transcript::Transcript;
+use smelt_transcript::transcript_content::TranscriptContent;
+use smelt_transcript::transcript_model::{
     Block, BlockHistory, BlockId, Status, StoredBlockWithId, ToolOutputRef, ToolStatus,
     TranscriptBlockRecordWithId,
 };
@@ -3701,7 +3701,7 @@ impl TranscriptDocument {
         let estimated_text_bytes = record.estimated_text_bytes;
         let indexed_text = std::mem::take(&mut record.indexed_text);
         let record = TranscriptBlockRecordWithId::try_from(record).ok()?;
-        let (block_id, stored) = smelt_core::transcript_model::StoredBlockRef::from_record(
+        let (block_id, stored) = smelt_transcript::transcript_model::StoredBlockRef::from_record(
             index,
             record.block_id,
             &record.record,
@@ -6923,7 +6923,7 @@ impl TranscriptDocument {
     pub(crate) fn push_tool_call(
         &mut self,
         block: Block,
-        state: smelt_core::transcript_model::ToolState,
+        state: smelt_transcript::transcript_model::ToolState,
     ) {
         self.content.transcript.push_tool_call(block, state);
     }
@@ -6935,7 +6935,7 @@ impl TranscriptDocument {
     pub(crate) fn push_with_origin(
         &mut self,
         block: Block,
-        origin: smelt_core::transcript_model::BlockOrigin,
+        origin: smelt_transcript::transcript_model::BlockOrigin,
     ) {
         self.content.transcript.push_with_origin(block, origin);
     }
@@ -7055,7 +7055,9 @@ mod document_tests {
         TranscriptProjectionTargetTrace, TranscriptRecordTraceRange, TranscriptScrollIntent,
         TranscriptScrollTraceRenderInput, TranscriptTraceAnchor,
     };
-    use smelt_core::transcript_model::{block_retained_bytes, ToolState, TranscriptBlockRecord};
+    use smelt_transcript::transcript_model::{
+        block_retained_bytes, ToolState, TranscriptBlockRecord,
+    };
 
     fn stored_count(document: &TranscriptDocument) -> usize {
         document
@@ -7985,7 +7987,7 @@ mod document_tests {
 
         assert!(document.history_mut().apply_tool_state_mutation(
             ids[1],
-            smelt_core::transcript_model::ToolStateMutation::SetStatus {
+            smelt_transcript::transcript_model::ToolStateMutation::SetStatus {
                 status: ToolStatus::Ok,
                 elapsed: None,
             },
@@ -8232,7 +8234,7 @@ mod document_tests {
         let width = 80;
         let viewport_rows = 5;
         let mut source = Transcript::new();
-        let mut draft = smelt_core::content::tool_draft::ToolDraft::new(
+        let mut draft = smelt_transcript::content::tool_draft::ToolDraft::new(
             "plan-stream".into(),
             Some("plan-call".into()),
             "present_plan".into(),
@@ -8275,7 +8277,7 @@ mod document_tests {
             .collect::<Vec<_>>()
             .join("\n");
         let mut source = Transcript::new();
-        let mut draft = smelt_core::content::tool_draft::ToolDraft::new(
+        let mut draft = smelt_transcript::content::tool_draft::ToolDraft::new(
             "plan-stream".into(),
             Some("plan-call".into()),
             "present_plan".into(),
@@ -8307,7 +8309,7 @@ mod document_tests {
             .chain((0..30).map(|i| format!("draft line {i}")))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut rewritten_draft = smelt_core::content::tool_draft::ToolDraft::new(
+        let mut rewritten_draft = smelt_transcript::content::tool_draft::ToolDraft::new(
             "plan-stream".into(),
             Some("plan-call".into()),
             "present_plan".into(),
@@ -9228,12 +9230,12 @@ mod document_tests {
                         )])
                         .into(),
                     },
-                    smelt_core::transcript_model::ToolState {
-                        status: smelt_core::transcript_model::ToolStatus::Ok,
+                    smelt_transcript::transcript_model::ToolState {
+                        status: smelt_transcript::transcript_model::ToolStatus::Ok,
                         elapsed: Some(std::time::Duration::from_millis(25)),
                         called_at_ms: None,
                         elapsed_active: false,
-                        output: Some(Box::new(smelt_core::transcript_model::ToolOutput {
+                        output: Some(Box::new(smelt_transcript::transcript_model::ToolOutput {
                             content: format!(
                                 "{marker} output\n{}",
                                 "compact tool detail\n".repeat(2 + idx % 5)
@@ -9260,7 +9262,7 @@ mod document_tests {
             .iter()
             .enumerate()
             .map(|(offset, record)| {
-                smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                     block_id_start.saturating_add(offset),
                     block_id_start.saturating_add(offset) as u64,
                     record,
@@ -9272,7 +9274,7 @@ mod document_tests {
                 summary: row.summary,
             })
             .collect();
-        smelt_core::transcript_model::compact_record_summaries(block_id_start, rows)
+        smelt_transcript::transcript_model::compact_record_summaries(block_id_start, rows)
             .expect("compact record summaries")
     }
 
@@ -10551,7 +10553,7 @@ mod document_tests {
                     elapsed: Some(Duration::from_millis(1)),
                     called_at_ms: None,
                     elapsed_active: false,
-                    output: Some(Box::new(smelt_core::transcript_model::ToolOutput {
+                    output: Some(Box::new(smelt_transcript::transcript_model::ToolOutput {
                         content: format!("{name} output").into(),
                         is_error: false,
                         metadata: None,
@@ -11661,7 +11663,7 @@ mod tests {
     #[test]
     fn grouped_content_anchor_keeps_projection_and_block_offsets_separate() {
         let lua = smelt_core::lua::runtime::LuaRuntime::new();
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         for index in 0..2 {
             transcript.push(smelt_core::Block::ToolCall {
                 call_id: format!("read-{index}"),
@@ -11815,7 +11817,7 @@ mod tests {
             tool_state: None,
             tool_render_revision: 0,
         };
-        smelt_core::transcript_model::transcript_block_row_with_block_idx(
+        smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
             idx as usize,
             idx,
             &record,
@@ -11902,8 +11904,8 @@ mod tests {
         assert_eq!(
             document.history().order,
             vec![
-                smelt_core::transcript_model::BlockId::new(1),
-                smelt_core::transcript_model::BlockId::new(2),
+                smelt_transcript::transcript_model::BlockId::new(1),
+                smelt_transcript::transcript_model::BlockId::new(2),
             ]
         );
         let origins = document
@@ -12179,7 +12181,7 @@ mod tests {
 
     #[test]
     fn record_save_pins_history_dirty_prefix() {
-        let mut source = smelt_core::content::transcript::Transcript::new();
+        let mut source = smelt_transcript::content::transcript::Transcript::new();
         for index in 0..2 {
             source.push_with_origin(
                 smelt_core::Block::Text {
@@ -12195,7 +12197,7 @@ mod tests {
             .enumerate()
             .map(|(index, mut record)| {
                 record.origin = None;
-                smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                     index,
                     index as u64,
                     &record,

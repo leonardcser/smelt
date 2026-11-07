@@ -8,8 +8,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
-use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
-use smelt_core::content::builder::render_into;
+use smelt_transcript::content::ansi::{emit_ansi_row, wrap_ansi};
+use smelt_transcript::content::builder::render_into;
 use smelt_core::theme::Theme;
 
 #[derive(Arbitrary, Debug)]

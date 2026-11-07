@@ -2,9 +2,9 @@
 //! result. Separate slots prevent the render loop from mistaking a completed
 //! turn for an ongoing animation (which would pin CPU at 60 Hz).
 
-use crate::paused_timer::PausedTimer;
 use engine::clock::Clock;
 use protocol::TurnMeta;
+use smelt_transcript::paused_timer::PausedTimer;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

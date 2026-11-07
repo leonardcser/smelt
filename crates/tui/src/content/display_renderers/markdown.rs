@@ -13,21 +13,21 @@ use std::{
 };
 
 use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
-use smelt_core::content::builder::{display_width, wrapped_segments, LineBuilder};
-use smelt_core::content::code_block::{measure_code_block, parse_code_block};
-use smelt_core::content::highlight::{
+use smelt_core::theme::intern;
+use smelt_transcript::content::builder::{display_width, wrapped_segments, LineBuilder};
+use smelt_transcript::content::code_block::{measure_code_block, parse_code_block};
+use smelt_transcript::content::highlight::{
     emit_inline_spans, inline_spans_width, measure_markdown_table_with_prepare,
     parse_inline_spans_with_options, render_code_block, render_code_block_range,
     render_markdown_table_with_prepare, wrap_inline_spans, InlineOptions, InlineSpan, InlineStyle,
 };
-use smelt_core::content::inline_line::BreakPolicy;
-use smelt_core::content::markdown_ir::{
+use smelt_transcript::content::inline_line::BreakPolicy;
+use smelt_transcript::content::markdown_ir::{
     markdown_nodes_retained_bytes, math_body, math_rows, parse_markdown_with_options, MarkdownLine,
     MarkdownNode, MarkdownTextKind,
 };
-use smelt_core::content::{is_markdown_list_item, split_markdown_list_prefix};
-use smelt_core::theme::intern;
-use smelt_core::transcript_content::{
+use smelt_transcript::content::{is_markdown_list_item, split_markdown_list_prefix};
+use smelt_transcript::transcript_content::{
     ContentId, ContentRead, ContentTextWindow, TranscriptContent,
 };
 
@@ -454,7 +454,7 @@ pub fn render_markdown_inner(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
 ) -> u16 {
     render_markdown_inner_with_options(
         out,
@@ -473,7 +473,7 @@ pub fn render_markdown_inner_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:markdown");
@@ -497,7 +497,7 @@ pub fn render_markdown_inner_range_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     row_start: usize,
     row_count: usize,
@@ -531,7 +531,7 @@ pub fn measure_markdown_inner_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
 ) -> usize {
     let block = parse_markdown_cached(content, inline_options);
@@ -545,7 +545,7 @@ pub fn render_retained_markdown_inner_range_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     row_start: usize,
     row_count: usize,
@@ -611,7 +611,7 @@ pub fn measure_retained_markdown_inner_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
 ) -> usize {
     let parsed = parse_retained_markdown_cached(content, inline_options);
@@ -659,7 +659,7 @@ fn retained_markdown_edge(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     max_rows: usize,
     tail: bool,
@@ -771,7 +771,7 @@ pub fn measure_retained_markdown_inner_edge_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     max_rows: usize,
 ) -> ContentTextWindow {
@@ -795,7 +795,7 @@ pub fn render_retained_markdown_inner_edge_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     max_rows: usize,
     tail: bool,
@@ -837,7 +837,7 @@ pub(super) fn markdown_range_has_visible_text_with_options(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     row_start: usize,
     row_count: usize,
@@ -1475,7 +1475,7 @@ fn render_markdown_block(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     clip: Option<RowClip>,
 ) -> u16 {
@@ -1499,7 +1499,7 @@ fn render_markdown_docs<'a>(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     clip: Option<RowClip>,
 ) -> usize {
@@ -1525,7 +1525,7 @@ fn render_markdown_docs_from_state<'a>(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     clip: Option<RowClip>,
     state: &mut RenderState,
@@ -1774,7 +1774,7 @@ fn markdown_block_range_has_visible_text(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     clip: RowClip,
 ) -> bool {
@@ -1894,7 +1894,7 @@ fn measure_markdown_block(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
 ) -> usize {
     measure_markdown_docs(
@@ -1912,7 +1912,7 @@ fn measure_markdown_docs<'a>(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
 ) -> usize {
     let mut state = MeasureState::default();
@@ -1928,7 +1928,7 @@ fn measure_markdown_doc(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     inline_options: &InlineOptions,
     state: &mut MeasureState,
 ) {
@@ -2208,7 +2208,7 @@ struct RenderTextCtx<'a> {
     max_cols: usize,
     indent: &'a str,
     dim: bool,
-    bctx: Option<&'a smelt_core::content::BoxContext>,
+    bctx: Option<&'a smelt_transcript::content::BoxContext>,
     inline_options: &'a InlineOptions,
     clip: Option<RowClip>,
 }
@@ -2661,7 +2661,7 @@ fn markdown_line_spans(
 
 fn render_horizontal_rule(
     out: &mut LineBuilder,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    bctx: Option<&smelt_transcript::content::BoxContext>,
     indent: &str,
 ) -> u16 {
     let hr = "─".repeat(3);
@@ -2687,7 +2687,7 @@ fn render_horizontal_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::builder::test_util::render_test;
+    use smelt_transcript::content::builder::test_util::render_test;
 
     #[test]
     fn math_block_projects_and_copies_from_original_source() {
@@ -2716,7 +2716,7 @@ mod tests {
     #[test]
     fn copying_any_part_of_display_math_yields_the_markdown_source() {
         let source = "\\[\n\\frac{a}{b}\n\\]";
-        let (buf, _) = smelt_core::content::builder::render_into_fresh(
+        let (buf, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
             &smelt_core::theme::Theme::default(),
             |out| {
@@ -2744,7 +2744,7 @@ mod tests {
             source
         );
 
-        let (buf, _) = smelt_core::content::builder::render_into_fresh(
+        let (buf, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
             &smelt_core::theme::Theme::default(),
             |out| {
@@ -2770,7 +2770,7 @@ mod tests {
     #[test]
     fn mouse_range_copy_survives_virtual_row_replay() {
         let source = r"\[\frac{a}{b}\]";
-        let (scratch, _) = smelt_core::content::builder::render_into_fresh(
+        let (scratch, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
             &smelt_core::theme::Theme::default(),
             |out| {
@@ -2784,7 +2784,7 @@ mod tests {
                 );
             },
         );
-        let (projected, _) = smelt_core::content::builder::render_into_fresh(
+        let (projected, _) = smelt_transcript::content::builder::render_into_fresh(
             60,
             &smelt_core::theme::Theme::default(),
             |out| {
@@ -3066,7 +3066,7 @@ mod tests {
             .iter()
             .all(|span| span.text.starts_with('\u{10eeee}')));
         let theme = smelt_core::theme::Theme::default();
-        let (buf, _) = smelt_core::content::builder::render_into_fresh(80, &theme, |out| {
+        let (buf, _) = smelt_transcript::content::builder::render_into_fresh(80, &theme, |out| {
             emit_inline_spans(out, &spans);
             out.newline();
         });
@@ -3134,8 +3134,10 @@ mod tests {
                 &options,
                 &mut prepare.clone(),
             );
-            let (buf, rendered) =
-                smelt_core::content::builder::render_into_fresh(width as u16, &theme, |out| {
+            let (buf, rendered) = smelt_transcript::content::builder::render_into_fresh(
+                width as u16,
+                &theme,
+                |out| {
                     let start = out.line_count();
                     assert_eq!(
                         render_markdown_table_with_prepare(
@@ -3155,7 +3157,8 @@ mod tests {
                         start,
                         "| Formula | Note |\n| --- | --- |\n| math $x=1$ done | ok |",
                     );
-                });
+                },
+            );
             assert_eq!(rendered.line_count, usize::from(expected), "width={width}");
             let output = buf.text();
             if width != 5 {
@@ -3178,8 +3181,10 @@ mod tests {
                     smelt_buffer::coords::copy_byte_range(&buf, marker, next),
                     "$x=1$"
                 );
-                let (clipped, _) =
-                    smelt_core::content::builder::render_into_fresh(width as u16, &theme, |out| {
+                let (clipped, _) = smelt_transcript::content::builder::render_into_fresh(
+                    width as u16,
+                    &theme,
+                    |out| {
                         emit_temp_rows(
                             out,
                             &buf,
@@ -3189,7 +3194,8 @@ mod tests {
                             RowClip { start: 3, end: 4 },
                             None,
                         );
-                    });
+                    },
+                );
                 let marker = clipped.text().find('\u{10eeee}').unwrap();
                 let end = marker
                     + smelt_buffer::cell_width::grapheme_indices(&clipped.text()[marker..])
@@ -3226,7 +3232,7 @@ mod tests {
             &options,
             &mut prepare.clone(),
         );
-        let (buf, rendered) = smelt_core::content::builder::render_into_fresh(
+        let (buf, rendered) = smelt_transcript::content::builder::render_into_fresh(
             80,
             &smelt_core::theme::Theme::default(),
             |out| {
@@ -3686,10 +3692,12 @@ mod tests {
 
     #[test]
     fn streamed_table_never_renders_raw_delimiter_row() {
-        fn rendered_rows(history: &smelt_core::transcript_model::BlockHistory) -> Vec<String> {
+        fn rendered_rows(
+            history: &smelt_transcript::transcript_model::BlockHistory,
+        ) -> Vec<String> {
             let mut rows = Vec::new();
             for index in 0..history.len() {
-                if let Some(smelt_core::transcript_model::Block::Text { content }) =
+                if let Some(smelt_transcript::transcript_model::Block::Text { content }) =
                     history.materialized_block_at(index)
                 {
                     let content = content.snapshot();
@@ -3702,8 +3710,8 @@ mod tests {
             rows
         }
 
-        let mut parser = smelt_core::content::stream_parser::StreamParser::new();
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut parser = smelt_transcript::content::stream_parser::StreamParser::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         let mut previous_row_count = 0;
 
         for (chunk, completes_table_row) in [

@@ -141,7 +141,7 @@ app_story!(compacted_block_kept_states, |ctx| {
                 summary: StyledLines::from_plain("crates/core/src/session.rs"),
                 status: ToolStatus::Ok,
                 presentation: Some(Box::new(
-                    smelt_core::tool_presentation::ToolPresentation::from_result(
+                    smelt_transcript::tool_presentation::ToolPresentation::from_result(
                         std::collections::HashMap::from([(
                             "file_path".into(),
                             json!("crates/core/src/session.rs"),

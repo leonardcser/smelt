@@ -443,7 +443,7 @@ impl ConversationLuaHost<'_> {
         buffer_id: crate::smelt_edit::BufId,
         width: Option<u16>,
         projection: &mut crate::content::transcript_buf::TranscriptProjection,
-        history: &mut smelt_core::transcript_model::BlockHistory,
+        history: &mut smelt_transcript::transcript_model::BlockHistory,
     ) {
         let target_width = self
             .app
@@ -534,7 +534,7 @@ impl ConversationLuaHost<'_> {
         &mut self,
         session_id: &str,
         record_index: usize,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
         top_padding: crate::smelt_edit::RowIndex,
         move_cursor: bool,
     ) -> bool {

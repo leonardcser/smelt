@@ -9,10 +9,10 @@
 use crate::theme::{StyleDecl, ThemeSpec};
 use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
-use smelt_core::content::highlight::syntax_theme_names;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::style::Style;
+use smelt_transcript::content::highlight::syntax_theme_names;
 
 /// Which side of a cell a color paints, for `smelt.theme.rgb`.
 #[derive(Clone, Copy, Debug, LuaAlias)]

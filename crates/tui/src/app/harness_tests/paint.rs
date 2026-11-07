@@ -36,7 +36,7 @@ fn overlay_paint(app: &mut TestApp, body: &str, opts: &str) {
 fn frame_paint_recolors_real_transcript_text() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 12);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "melting text".into(),
     });
     assert!(app.run_lua(
@@ -500,7 +500,7 @@ fn scrolling_reports_the_move_and_leaves_only_new_rows_as_damage() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 16);
     for i in 0..40 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("reply number {i}").into(),
         });
     }
@@ -587,7 +587,7 @@ fn scrolling_reports_the_move_and_leaves_only_new_rows_as_damage() {
 fn visible_blocks_report_screen_rects_and_streaming() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 30);
-    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
         content: "settled reply".into(),
     });
     app.start_submitted_turn("question");
@@ -711,7 +711,7 @@ fn freshink_example_inks_only_new_text_while_the_view_follows_it() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 14);
     for i in 0..30 {
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
             content: format!("reply number {i}").into(),
         });
     }

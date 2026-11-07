@@ -3331,7 +3331,7 @@ mod tests {
         ));
         app.tui.handle_resize(80, 16);
         app.tui
-            .push_block(smelt_core::transcript_model::Block::Text {
+            .push_block(smelt_transcript::transcript_model::Block::Text {
                 content: "transcript row".to_string().into(),
             });
         app.render_silent();

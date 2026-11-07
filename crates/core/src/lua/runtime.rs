@@ -8,27 +8,27 @@ use std::time::Instant;
 use include_dir::{include_dir, Dir, DirEntry};
 use mlua::prelude::*;
 
-use crate::content::block_layout::{
-    BlockLayout, ContentRenderSpec, ContentSpec, LuaLeaf, TextSpec,
-};
-use crate::content::display_safe_text;
-#[cfg(test)]
-use crate::content::markdown_stream::thinking_summary;
 use crate::lua::{
     value, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent, ToolCallIds,
     ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
+use smelt_permissions::{PathTargetKind, ToolPath};
+use smelt_transcript::content::block_layout::{
+    BlockLayout, ContentRenderSpec, ContentSpec, LuaLeaf, TextSpec,
+};
+use smelt_transcript::content::display_safe_text;
 #[cfg(test)]
-use crate::tool_presentation::LUA_CONTENT_PREVIEW_BYTES;
-use crate::tool_presentation::{
+use smelt_transcript::content::markdown_stream::thinking_summary;
+#[cfg(test)]
+use smelt_transcript::tool_presentation::LUA_CONTENT_PREVIEW_BYTES;
+use smelt_transcript::tool_presentation::{
     transcript_argument_field_metadata, transcript_content_metadata,
     transcript_tool_output_metadata, ToolPresentation, TranscriptArgumentFieldMetadata,
     TranscriptContentMetadata, TranscriptToolOutputMetadata,
 };
-use crate::transcript_model::{
+use smelt_transcript::transcript_model::{
     Block, BlockId, KeptHistoryItem, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
-use smelt_permissions::{PathTargetKind, ToolPath};
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
@@ -2372,7 +2372,7 @@ impl LuaRuntime {
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
         invocation_id: Option<protocol::InvocationId>,
-    ) -> Result<Option<crate::content::block_layout::BlockLayout>, String> {
+    ) -> Result<Option<smelt_transcript::content::block_layout::BlockLayout>, String> {
         let preview_fn = {
             let handlers = shared
                 .tools
@@ -2713,7 +2713,7 @@ impl LuaRuntime {
                     .ok()
                     .flatten()
             })?;
-        Some(crate::utils::hash_serializable(
+        Some(smelt_transcript::hash::hash_serializable(
             &value::table_to_json(&self.lua, &transcript).ok()?,
         ))
     }
@@ -2763,7 +2763,7 @@ impl LuaRuntime {
     pub fn render_transcript_layout(
         &self,
         node: &TranscriptRenderNode,
-        view_state: crate::transcript_model::ViewState,
+        view_state: smelt_transcript::transcript_model::ViewState,
         now_ms: u64,
     ) -> BlockLayout {
         let fallback = || fallback_transcript_node_layout(node);
@@ -3171,19 +3171,19 @@ impl LuaRuntime {
     }
 }
 
-fn view_state_label(view_state: crate::transcript_model::ViewState) -> &'static str {
+fn view_state_label(view_state: smelt_transcript::transcript_model::ViewState) -> &'static str {
     match view_state {
-        crate::transcript_model::ViewState::Expanded => "expanded",
-        crate::transcript_model::ViewState::Peek => "peek",
-        crate::transcript_model::ViewState::Collapsed => "collapsed",
-        crate::transcript_model::ViewState::TrimmedHead { .. } => "trimmed_head",
-        crate::transcript_model::ViewState::TrimmedTail { .. } => "trimmed_tail",
+        smelt_transcript::transcript_model::ViewState::Expanded => "expanded",
+        smelt_transcript::transcript_model::ViewState::Peek => "peek",
+        smelt_transcript::transcript_model::ViewState::Collapsed => "collapsed",
+        smelt_transcript::transcript_model::ViewState::TrimmedHead { .. } => "trimmed_head",
+        smelt_transcript::transcript_model::ViewState::TrimmedTail { .. } => "trimmed_tail",
     }
 }
 
 fn transcript_render_ctx_to_lua_table(
     lua: &Lua,
-    view_state: crate::transcript_model::ViewState,
+    view_state: smelt_transcript::transcript_model::ViewState,
     renderer_generation: u64,
     now_ms: u64,
 ) -> LuaResult<mlua::Table> {
@@ -3194,7 +3194,7 @@ fn transcript_render_ctx_to_lua_table(
     ctx.set("now_ms", now_ms)?;
 
     let configured_limits = transcript_limits_table(lua)?;
-    let default_rows = crate::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS;
+    let default_rows = smelt_transcript::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS;
     let tool_rows =
         transcript_limit(configured_limits.as_ref(), "tool_rows")?.unwrap_or(default_rows);
 
@@ -3741,7 +3741,7 @@ enum TranscriptRenderFields {
         name: String,
         bucket: String,
         view_state: &'static str,
-        children: Vec<crate::transcript_model::TranscriptGroupChildMetadata>,
+        children: Vec<smelt_transcript::transcript_model::TranscriptGroupChildMetadata>,
         child_ids: Vec<BlockId>,
     },
 }
@@ -3753,7 +3753,7 @@ impl TranscriptRenderNode {
         group_kind: String,
         bucket: String,
         view_state: &'static str,
-        children: Vec<crate::transcript_model::TranscriptGroupChildMetadata>,
+        children: Vec<smelt_transcript::transcript_model::TranscriptGroupChildMetadata>,
         child_ids: Vec<BlockId>,
     ) -> Self {
         Self {
@@ -4025,7 +4025,7 @@ fn user_line_spans(
             }
         }
 
-        if let Some((token, end)) = crate::content::selection::try_at_ref(&chars, i) {
+        if let Some((token, end)) = smelt_transcript::content::selection::try_at_ref(&chars, i) {
             flush_plain(&mut out, &mut plain);
             push_accent(&mut out, token);
             i = end;
@@ -4092,7 +4092,7 @@ fn fallback_transcript_node_layout(node: &TranscriptRenderNode) -> BlockLayout {
             }
         };
         return BlockLayout::Leaf(LuaLeaf::Content(ContentSpec {
-            id: crate::transcript_content::ContentId::new(id),
+            id: smelt_transcript::transcript_content::ContentId::new(id),
             render,
         }));
     }
@@ -5042,7 +5042,7 @@ mod tests {
             "background_process_completed"
         );
         let output = block
-            .content(crate::transcript_model::ContentChannel::Primary)
+            .content(smelt_transcript::transcript_model::ContentChannel::Primary)
             .unwrap();
         assert_eq!(table.get::<u64>("output_id").unwrap(), output.id().get());
         assert_eq!(table.get::<usize>("output_lines").unwrap(), 2_000);
@@ -5062,7 +5062,7 @@ mod tests {
         let lua = Lua::new();
         let payload = "αβγ\n".repeat(2_000);
 
-        let assistant_content: crate::transcript_content::TranscriptContent =
+        let assistant_content: smelt_transcript::transcript_content::TranscriptContent =
             payload.clone().into();
         let assistant_id = assistant_content.id().get();
         let assistant_node = transcript_block_render_node(
@@ -5085,7 +5085,8 @@ mod tests {
             assistant.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
         );
 
-        let thinking_content: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let thinking_content: smelt_transcript::transcript_content::TranscriptContent =
+            payload.clone().into();
         let thinking_node = transcript_block_render_node(
             BlockId::new(2),
             1,
@@ -5103,10 +5104,14 @@ mod tests {
             thinking.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
         );
 
-        let draft_arguments: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let draft_arguments: smelt_transcript::transcript_content::TranscriptContent =
+            payload.clone().into();
         let draft_id = draft_arguments.id().get();
-        let mut draft_state =
-            crate::content::tool_draft::ToolDraft::new("draft-1".into(), None, "write_file".into());
+        let mut draft_state = smelt_transcript::content::tool_draft::ToolDraft::new(
+            "draft-1".into(),
+            None,
+            "write_file".into(),
+        );
         draft_state.summary = protocol::StyledLines::empty();
         draft_state.raw_arguments = draft_arguments;
         let draft_node =
@@ -5124,17 +5129,18 @@ mod tests {
                 <= LUA_CONTENT_PREVIEW_BYTES
         );
 
-        let tool_output: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let tool_output: smelt_transcript::transcript_content::TranscriptContent =
+            payload.clone().into();
         let tool_output_id = tool_output.id().get();
         let old_source_payload = "before source payload\n".repeat(100_000);
         let new_source_payload = "after source payload\n".repeat(100_000);
-        let old_source: crate::transcript_content::TranscriptContent =
+        let old_source: smelt_transcript::transcript_content::TranscriptContent =
             old_source_payload.clone().into();
-        let new_source: crate::transcript_content::TranscriptContent =
+        let new_source: smelt_transcript::transcript_content::TranscriptContent =
             new_source_payload.clone().into();
         let old_source_id = old_source.id().get();
         let new_source_id = new_source.id().get();
-        let tool_args: crate::content::tool_draft::ToolArguments =
+        let tool_args: smelt_transcript::content::tool_draft::ToolArguments =
             HashMap::from([("content".into(), serde_json::Value::String(payload.clone()))]).into();
         let argument_content_id = tool_args
             .string_field("content")
@@ -5158,11 +5164,11 @@ mod tests {
                 is_error: false,
                 metadata: Some(serde_json::json!({ "path": "src/lib.rs" })),
                 content_fields: vec![
-                    crate::transcript_model::ToolOutputContentField {
+                    smelt_transcript::transcript_model::ToolOutputContentField {
                         name: "old_source".into(),
                         content: old_source,
                     },
-                    crate::transcript_model::ToolOutputContentField {
+                    smelt_transcript::transcript_model::ToolOutputContentField {
                         name: "new_source".into(),
                         content: new_source,
                     },
@@ -5222,7 +5228,8 @@ mod tests {
             new_source.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
         );
 
-        let exec_output: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let exec_output: smelt_transcript::transcript_content::TranscriptContent =
+            payload.clone().into();
         let exec_id = exec_output.id().get();
         let exec_node = transcript_block_render_node(
             BlockId::new(5),
@@ -5510,21 +5517,23 @@ mod tests {
         let children = child_ids
             .iter()
             .copied()
-            .map(|id| crate::transcript_model::TranscriptGroupChildMetadata {
-                id,
-                kind: "tool",
-                name: Some("bash".into()),
-                status: Some("ok"),
-                summary_text: None,
-                called_at_ms: None,
-                args: None,
-                output: Default::default(),
-                event: None,
-                process_id: None,
-                exit_code: None,
-                termination: None,
-                event_data: Default::default(),
-            })
+            .map(
+                |id| smelt_transcript::transcript_model::TranscriptGroupChildMetadata {
+                    id,
+                    kind: "tool",
+                    name: Some("bash".into()),
+                    status: Some("ok"),
+                    summary_text: None,
+                    called_at_ms: None,
+                    args: None,
+                    output: Default::default(),
+                    event: None,
+                    process_id: None,
+                    exit_code: None,
+                    termination: None,
+                    event_data: Default::default(),
+                },
+            )
             .collect();
         let node = TranscriptRenderNode::group(
             7,
@@ -5537,7 +5546,7 @@ mod tests {
         );
         let layout = rt.render_transcript_layout(
             &node,
-            crate::transcript_model::ViewState::Expanded,
+            smelt_transcript::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
         );
         match layout {

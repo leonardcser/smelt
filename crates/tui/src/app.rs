@@ -50,9 +50,9 @@ use crate::input::{PromptState, SubmitEdit};
 use engine::EngineHandle;
 use protocol::Content;
 use smelt_core::history::History;
-use smelt_core::transcript_model::Block;
 use smelt_core::ConfirmRequest;
 use smelt_core::FrontendKind;
+use smelt_transcript::transcript_model::Block;
 use std::sync::Arc;
 
 use crossterm::{event, terminal};
@@ -2058,8 +2058,8 @@ impl TuiApp {
             )
         };
 
-        let inline_options = smelt_core::content::highlight::InlineOptions {
-            file_icons: smelt_core::content::file_icons::FileIconOptions::new(
+        let inline_options = smelt_transcript::content::highlight::InlineOptions {
+            file_icons: smelt_transcript::content::file_icons::FileIconOptions::new(
                 runtime_state.settings.file_icons,
                 runtime_state.settings.file_icon_colors,
                 ui.theme().is_light(),
@@ -3266,8 +3266,9 @@ impl TuiApp {
         // viewport width.
         let prefix_w = smelt_buffer::cell_width::joined_text_width([indent, label, gap]);
         let available = width.saturating_sub(prefix_w);
-        let summary =
-            smelt_core::content::width::truncate_with_right_padding(summary, available, 2, "…");
+        let summary = smelt_transcript::content::width::truncate_with_right_padding(
+            summary, available, 2, "…",
+        );
         let line = format!("{indent}{label}{gap}{}", summary.text);
 
         let label_start = smelt_buffer::cell_width::text_width_u16(indent);

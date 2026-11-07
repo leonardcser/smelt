@@ -1,9 +1,9 @@
 use crate::app::{PendingTool, SessionControl, TuiApp};
 use protocol::EngineEvent;
-use smelt_core::content::stream_parser::ToolStart;
-use smelt_core::transcript_model::{Block, ToolOutput, ToolStatus};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::ConfirmRequest;
+use smelt_transcript::content::stream_parser::ToolStart;
+use smelt_transcript::transcript_model::{Block, ToolOutput, ToolStatus};
 use std::time::Duration;
 
 use super::conversation::StreamKind;
@@ -50,7 +50,7 @@ fn is_reasoning_summary(event: &EngineEvent) -> bool {
 
 /// Whether a live preview ends at the job's truncation notice, so the final
 /// bounded output must replace it.
-fn live_output_truncated(live: &smelt_core::transcript_content::TranscriptContent) -> bool {
+fn live_output_truncated(live: &smelt_transcript::transcript_content::TranscriptContent) -> bool {
     let read = live.read();
     read.logical_line_count()
         .checked_sub(1)

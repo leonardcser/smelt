@@ -15,7 +15,7 @@ pub struct Agent {
     pub live_tools: Vec<(
         protocol::InvocationId,
         crate::Block,
-        crate::transcript_model::ToolState,
+        smelt_transcript::transcript_model::ToolState,
     )>,
     pub revision: u64,
     pub history_revision: u64,
@@ -168,7 +168,7 @@ impl Agents {
 
 impl Agent {
     fn output(&mut self, event: &EngineEvent) {
-        use crate::transcript_model::{ToolOutput, ToolState, ToolStatus};
+        use smelt_transcript::transcript_model::{ToolOutput, ToolState, ToolStatus};
         self.revision = self.revision.wrapping_add(1);
         match event {
             EngineEvent::TextDelta { delta } => self.streaming_text.push_str(delta),

@@ -3,10 +3,10 @@
 use smelt_core::buffer::{
     ExtmarkOpts, ExtmarkPayload, HlMode, LineDecoration, SpanMeta, VirtTextPos,
 };
-use smelt_core::content::builder::render_into;
-use smelt_core::content::highlight::render_markdown_table;
 use smelt_core::style::{Color, Style};
 use smelt_core::theme::{intern, Theme};
+use smelt_transcript::content::builder::render_into;
+use smelt_transcript::content::highlight::render_markdown_table;
 use tui::smelt_edit::layout::Constraint;
 use tui::smelt_edit::Gutters;
 use tui::smelt_edit::{BufId, LayoutTree, SplitConfig};

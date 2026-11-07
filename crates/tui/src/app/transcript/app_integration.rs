@@ -67,7 +67,7 @@ impl TuiApp {
         called_at_ms: u64,
     ) {
         self.conversation.start_tool(
-            smelt_core::content::stream_parser::ToolStart {
+            smelt_transcript::content::stream_parser::ToolStart {
                 invocation_id,
                 call_id,
                 name,

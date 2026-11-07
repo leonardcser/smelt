@@ -4,9 +4,9 @@
 
 use mlua::prelude::*;
 use smelt_buffer::{cell_width, text};
-use smelt_core::content::width::{pad_left_to_cells, pad_right_to_cells, truncate_to_cells};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
+use smelt_transcript::content::width::{pad_left_to_cells, pad_right_to_cells, truncate_to_cells};
 
 fn lossy_utf8(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()

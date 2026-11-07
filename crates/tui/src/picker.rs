@@ -16,9 +16,9 @@ use crate::smelt_edit::{
     BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, RowIndex, SplitConfig,
     WinId,
 };
-use smelt_core::content::builder::render_into;
-use smelt_core::content::selection::truncate_str;
 use smelt_core::style::Style;
+use smelt_transcript::content::builder::render_into;
+use smelt_transcript::content::selection::truncate_str;
 
 /// One row in a picker. Description (if any) is column-aligned after the
 /// longest label across the set.

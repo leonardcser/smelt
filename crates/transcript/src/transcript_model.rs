@@ -366,7 +366,7 @@ pub enum Block {
 }
 
 impl Block {
-    pub(crate) fn normalize_content(self) -> Self {
+    pub fn normalize_content(self) -> Self {
         match self {
             Block::Thinking {
                 title,
@@ -450,14 +450,14 @@ impl Block {
                 name,
                 summary,
                 args,
-            } => crate::utils::hash_serializable(&(
+            } => crate::hash::hash_serializable(&(
                 "tool_call",
                 call_id,
                 name,
                 summary,
                 args.content_hash(),
             )),
-            _ => crate::utils::hash_serializable(self),
+            _ => crate::hash::hash_serializable(self),
         }
     }
 
@@ -669,7 +669,7 @@ pub enum ConfirmChoice {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-pub struct BlockId(pub(crate) u64);
+pub struct BlockId(pub u64);
 
 impl BlockId {
     pub const fn new(id: u64) -> Self {
@@ -4578,7 +4578,7 @@ impl BlockHistory {
     fn layout_sidecar_hash(&self, id: BlockId) -> u64 {
         let revision = self.sidecar_hash(id);
         if self.status(id) == Some(Status::Streaming) {
-            crate::utils::hash_serializable(&(revision, Status::Streaming))
+            crate::hash::hash_serializable(&(revision, Status::Streaming))
         } else {
             revision
         }

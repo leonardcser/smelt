@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::transcript_model::ConfirmRequest;
+use smelt_transcript::transcript_model::ConfirmRequest;
 
 pub struct ConfirmEntry {
     pub req: ConfirmRequest,

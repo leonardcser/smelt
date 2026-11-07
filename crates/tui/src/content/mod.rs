@@ -1,5 +1,5 @@
-pub use smelt_core::content::builder;
-pub use smelt_core::content::highlight;
+pub use smelt_transcript::content::builder;
+pub use smelt_transcript::content::highlight;
 pub(crate) mod prompt_spans;
 
 pub(crate) mod display_layout;
@@ -12,7 +12,7 @@ pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 pub(crate) mod transcript_scene;
 
-pub(crate) use smelt_core::content::{display_safe_char, display_safe_text};
+pub(crate) use smelt_transcript::content::{display_safe_char, display_safe_text};
 
 pub(crate) fn estimate_text_rows(text: &str, width: u16) -> crate::smelt_edit::RowIndex {
     let width = usize::from(width.max(1));

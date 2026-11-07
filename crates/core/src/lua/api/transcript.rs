@@ -12,7 +12,7 @@ fn renderer_cache_key_hash(cache_key: Option<String>) -> u64 {
     let Some(cache_key) = cache_key else {
         return 0;
     };
-    let hash = crate::utils::hash_serializable(&cache_key);
+    let hash = smelt_transcript::hash::hash_serializable(&cache_key);
     if hash == 0 {
         1
     } else {

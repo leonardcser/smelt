@@ -1,8 +1,8 @@
 use crate::app::{NotificationOperation, TuiApp};
-use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
-use smelt_core::transcript_model::BlockHistory;
 use smelt_core::{Block, KeptHistoryItem, ToolOutput, ToolState, ToolStatus};
+use smelt_transcript::content::transcript::Transcript;
+use smelt_transcript::transcript_model::BlockHistory;
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::{BTreeMap, HashMap};
@@ -468,7 +468,7 @@ fn kept_history_items(
                         summary: summary_resolver.resolve(&inv.name, &args),
                         status: invocation_status(inv),
                         presentation: Some(Box::new(
-                            smelt_core::tool_presentation::ToolPresentation::from_result(
+                            smelt_transcript::tool_presentation::ToolPresentation::from_result(
                                 args,
                                 &inv.result,
                             ),
@@ -559,7 +559,7 @@ pub(crate) fn project_session_transcript_records(
         .iter()
         .enumerate()
         .map(|(record_idx, record)| {
-            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+            smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
                 record_idx,
                 record.block_id.get(),
                 &record.record,
@@ -1124,7 +1124,7 @@ mod tests {
                         )])),
                         status: ToolStatus::Ok,
                         presentation: Some(Box::new(
-                            smelt_core::tool_presentation::ToolPresentation::from_result(
+                            smelt_transcript::tool_presentation::ToolPresentation::from_result(
                                 HashMap::from([("label".into(), serde_json::json!("ok"))]),
                                 &protocol::ToolOutcome::new("done".into(), false, None),
                             )
@@ -1405,7 +1405,7 @@ mod tests {
             tool_state: None,
             tool_render_revision: 0,
         };
-        smelt_core::transcript_model::transcript_block_row_with_block_idx(
+        smelt_transcript::transcript_model::transcript_block_row_with_block_idx(
             block_idx as usize,
             block_idx,
             &record,

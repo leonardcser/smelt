@@ -389,7 +389,7 @@ struct StagedTurnRollback {
     history_len: Option<usize>,
     user_turn_count: usize,
     transcript_len: Option<usize>,
-    submitted_block: Option<(smelt_core::transcript_model::BlockId, usize)>,
+    submitted_block: Option<(smelt_transcript::transcript_model::BlockId, usize)>,
 }
 
 struct PreparedTurn {
@@ -409,11 +409,11 @@ struct PreparedTurn {
 #[derive(Clone, Copy)]
 enum PendingTurnSubmitState {
     Context {
-        provisional: Option<smelt_core::transcript_model::BlockId>,
+        provisional: Option<smelt_transcript::transcript_model::BlockId>,
     },
     Input {
         request_id: u64,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
         history_epoch: u64,
     },
 }
@@ -748,7 +748,7 @@ impl TuiApp {
     fn stage_accepted_input(
         &mut self,
         mut dispatch: PreparedTurnDispatch,
-        block_id: smelt_core::transcript_model::BlockId,
+        block_id: smelt_transcript::transcript_model::BlockId,
         prepared_content: Content,
         observations: Vec<(String, smelt_core::fs::FileState)>,
     ) -> Option<TurnState> {
@@ -868,7 +868,7 @@ impl TuiApp {
     fn prepare_turn_dispatch(
         &mut self,
         turn: PreparedTurn,
-        provisional: Option<smelt_core::transcript_model::BlockId>,
+        provisional: Option<smelt_transcript::transcript_model::BlockId>,
     ) -> Option<PreparedTurnDispatch> {
         self.conversation.begin_prepared_turn(turn.command.clone());
         let operation_id = self
@@ -2349,17 +2349,17 @@ fn confirm_grant_options(
     cwd: &str,
     repository: Option<(&std::path::Path, &std::path::Path)>,
     home: &std::path::Path,
-) -> Vec<smelt_core::transcript_model::ConfirmApprovalOption> {
+) -> Vec<smelt_transcript::transcript_model::ConfirmApprovalOption> {
     let mut out = Vec::new();
     for (idx, grants) in grant_sets.into_iter().enumerate() {
         let subject = smelt_permissions::PermissionGrant::display_subjects(&grants, home);
-        out.push(smelt_core::transcript_model::ConfirmApprovalOption {
+        out.push(smelt_transcript::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_session"),
             label: format!("allow {subject} for this session"),
             target: ApprovalTarget::Session,
             grants: grants.clone(),
         });
-        out.push(smelt_core::transcript_model::ConfirmApprovalOption {
+        out.push(smelt_transcript::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_workspace"),
             label: format!(
                 "allow {subject} in {} {}",
@@ -2376,7 +2376,7 @@ fn confirm_grant_options(
             grants: grants.clone(),
         });
         if let Some((repository_key, display_root)) = repository {
-            out.push(smelt_core::transcript_model::ConfirmApprovalOption {
+            out.push(smelt_transcript::transcript_model::ConfirmApprovalOption {
                 id: format!("grant_{idx}_repository"),
                 label: format!(
                     "allow {subject} in project {} (all worktrees)",
@@ -2502,7 +2502,7 @@ mod tests {
     ) {
         app.tui.core.sessions.save(session).expect("save session");
         let address = app.tui.core.sessions.address(session.id.clone());
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut transcript = smelt_transcript::content::transcript::Transcript::new();
         transcript.push(smelt_core::Block::Text {
             content: transcript_text.into(),
         });

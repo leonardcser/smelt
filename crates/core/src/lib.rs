@@ -13,11 +13,9 @@ pub mod claude_code_policy;
 pub mod commands;
 pub mod config;
 pub mod confirms;
-pub mod content;
 pub mod context_estimate;
 pub mod context_notes;
 pub mod custom_commands;
-pub mod diff;
 pub mod engine_client;
 pub mod file_ref;
 pub mod fs;
@@ -42,7 +40,6 @@ pub mod migrate_v07;
 pub mod notebook;
 pub mod output_limit;
 pub mod path_display;
-pub(crate) mod paused_timer;
 pub mod process;
 pub mod processes;
 pub mod public_status;
@@ -56,10 +53,7 @@ pub mod session_store;
 pub mod signals;
 pub mod state;
 pub mod timers;
-pub mod tool_presentation;
 pub mod tools;
-pub mod transcript_content;
-pub mod transcript_model;
 pub mod trust;
 pub mod utils;
 pub mod working;
@@ -104,7 +98,7 @@ pub use session::{ContextCheckpoint, Session};
 pub use signals::Signals;
 pub use timers::Timers;
 
-pub use crate::transcript_model::{
+pub use smelt_transcript::transcript_model::{
     ApprovalTarget, Block, BlockId, BlockOrigin, ConfirmChoice, ConfirmRequest, KeptHistoryItem,
     PermissionEntry, ToolOutput, ToolState, ToolStatus, TranscriptBlockRecord,
     TranscriptBlockRecordWithId, ViewState,
