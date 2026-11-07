@@ -11,7 +11,9 @@ use smelt_buffer::text::{byte_of_char, slice, trim_whitespace};
 
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
 const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
-const MAX_BRACE_EXPANSION_DEPTH: usize = 16;
+/// The brace parser backtracks roughly 3x per open brace, so deeper words
+/// stall permission checks.
+const MAX_BRACE_EXPANSION_DEPTH: usize = 8;
 const MIN_OVERFLOWING_DIGITS: usize = 19;
 
 pub(super) fn parse(command: &str) -> Option<ast::Program> {
