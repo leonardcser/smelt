@@ -284,7 +284,7 @@ const MAX_SHELL_NESTING: usize = 32;
 const LOOP_UNROLL_LIMIT: usize = 4;
 
 pub(super) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnalysis {
-    analyze_shell_command_in(command, base_dir, &engine::paths::home_dir())
+    analyze_shell_command_in(command, base_dir, &smelt_paths::home_dir())
 }
 
 pub(super) fn analyze_shell_command_in(

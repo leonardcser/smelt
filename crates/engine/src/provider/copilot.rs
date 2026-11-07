@@ -20,7 +20,7 @@ fn cred_store() -> &'static CredStore {
         CredStore::production(
             "smelt-copilot-auth",
             "default",
-            crate::paths::auth_path("copilot.json"),
+            smelt_paths::auth_path("copilot.json"),
             COPILOT_TOKENS_ENV,
         )
     })
@@ -146,7 +146,7 @@ async fn ensure_access_token_full_with_env(
 }
 
 fn cache_path() -> PathBuf {
-    crate::paths::model_cache_path("copilot.json")
+    smelt_paths::model_cache_path("copilot.json")
 }
 
 pub(crate) fn load_cached_models() -> Vec<CopilotModel> {

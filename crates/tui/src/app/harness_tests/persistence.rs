@@ -1566,7 +1566,7 @@ fn failed_submit_save_is_written_once_after_explicit_retry() {
 fn lua_delete_returns_actionable_error_for_malicious_id() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let target = engine::state_dir().join("must-not-delete");
+    let target = smelt_paths::state_dir().join("must-not-delete");
     std::fs::create_dir_all(&target).unwrap();
     app.set_lua_string_global("DELETE_TARGET", target.to_string_lossy())
         .unwrap();

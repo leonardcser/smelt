@@ -367,7 +367,7 @@ fn permissions_from_mode(
         mode_behaviors,
         restrict_to_workspace,
         active_root: workspace.clone(),
-        home: engine::paths::home_dir(),
+        home: smelt_paths::home_dir(),
         allowed_roots: if workspace.as_os_str().is_empty() {
             Vec::new()
         } else {
@@ -1670,7 +1670,7 @@ fn workspace_path_bash_expands_bare_tilde() {
     assert_eq!(
         outcome.missing_requirements,
         vec![PermissionRequirement::PathPrefix {
-            dir: resolved_filesystem_path(&engine::paths::home_dir())
+            dir: resolved_filesystem_path(&smelt_paths::home_dir())
         }]
     );
 }
@@ -1710,7 +1710,7 @@ fn workspace_path_bash_expands_environment_variables() {
     assert_eq!(
         outcome.missing_requirements,
         vec![PermissionRequirement::PathPrefix {
-            dir: resolved_filesystem_path(&engine::paths::home_dir().join(".config/smelt"))
+            dir: resolved_filesystem_path(&smelt_paths::home_dir().join(".config/smelt"))
         }]
     );
 }
@@ -4466,14 +4466,14 @@ fn runtime_dir_approval_does_not_affect_inside_workspace_request() {
 fn dirs_approved_tilde_stored_absolute_queried() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let abs = format!("{}/syncthing/vault/file.txt", home.display());
     assert!(dirs_approved(&rt, &[&abs]));
 }
 
 #[test]
 fn dirs_approved_absolute_stored_tilde_queried() {
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(home.join("syncthing"));
     assert!(dirs_approved(&rt, &["~/syncthing/vault/file.txt"]));
@@ -4560,7 +4560,7 @@ fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Perm
 
 #[test]
 fn tilde_dir_approval_works_for_absolute_read_file() {
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace(&workspace);
     let mut rt = RuntimeApprovals::new();
@@ -4572,7 +4572,7 @@ fn tilde_dir_approval_works_for_absolute_read_file() {
 
 #[test]
 fn absolute_dir_approval_works_for_tilde_bash() {
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace(&workspace);
     let mut rt = RuntimeApprovals::new();
@@ -4583,7 +4583,7 @@ fn absolute_dir_approval_works_for_tilde_bash() {
 
 #[test]
 fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_bash_allow(&workspace, &[]);
     let mut rt = RuntimeApprovals::new();
@@ -4594,7 +4594,7 @@ fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
 
 #[test]
 fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_bash_allow(&workspace, &[]);
     let mut rt = RuntimeApprovals::new();
@@ -4615,7 +4615,7 @@ fn compound_command_default_allowed_with_dir_approval() {
 
 #[test]
 fn compound_command_with_ask_subcommand_needs_tool_approval() {
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_bash_allow(&workspace, &["find *"]);
     let mut rt = RuntimeApprovals::new();
@@ -4626,7 +4626,7 @@ fn compound_command_with_ask_subcommand_needs_tool_approval() {
 
 #[test]
 fn compound_command_with_ask_subcommand_and_tool_approval() {
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_bash_allow(&workspace, &["find *"]);
     let mut rt = RuntimeApprovals::new();

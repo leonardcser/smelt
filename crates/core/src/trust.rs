@@ -39,7 +39,7 @@ impl TrustStore {
     }
 
     pub fn from_process() -> Self {
-        Self::new(engine::state_dir())
+        Self::new(smelt_paths::state_dir())
     }
 
     pub fn project_trust_state(&self, cwd: &Path) -> TrustState {
@@ -83,7 +83,7 @@ impl TrustStore {
 }
 
 pub fn trust_path() -> PathBuf {
-    engine::state_dir().join(TRUST_FILE)
+    smelt_paths::state_dir().join(TRUST_FILE)
 }
 
 /// SHA-256 of `.smelt/` files walked in sorted order (deterministic).

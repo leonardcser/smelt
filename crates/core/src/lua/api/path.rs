@@ -45,7 +45,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "normalize",
         "Normalize `p` by collapsing redundant `.`, `..`, and separator components without touching the filesystem.",
         &["p"],
-        |_, p: String| Ok(to_string(crate::path::normalize(&p))),
+        |_, p: String| Ok(to_string(smelt_paths::path::normalize(&p))),
     )?;
 
     let canonical_context = Arc::clone(shared);
@@ -54,7 +54,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Resolve `p` to its canonical absolute form (following symlinks). Returns `(path, nil)` on success or `(nil, err_string)` on failure.",
         &["p"],
         move |_, p: String| {
-            match crate::path::canonical(canonical_context.resolve_project_path(p)) {
+            match smelt_paths::path::canonical(canonical_context.resolve_project_path(p)) {
                 Ok(resolved) => Ok((Some(to_string(resolved)), None)),
                 Err(err) => Ok((None, Some(err.to_string()))),
             }
@@ -65,7 +65,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "relative",
         "Return the path of `target` expressed relative to `base`.",
         &["base", "target"],
-        |_, (base, target): (String, String)| Ok(to_string(crate::path::relative(&base, &target))),
+        |_, (base, target): (String, String)| {
+            Ok(to_string(smelt_paths::path::relative(&base, &target)))
+        },
     )?;
 
     let expand_context = Arc::clone(shared);
@@ -74,7 +76,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`. Does not invoke a shell, expand globs, or canonicalize symlinks.",
         &["p"],
         move |_, p: String| -> LuaResult<String> {
-            crate::path::expand_from(&p, &expand_context.runtime_home())
+            smelt_paths::path::expand_from(&p, &expand_context.runtime_home())
                 .map(to_string)
                 .map_err(mlua::Error::external)
         },
@@ -86,7 +88,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Resolve runtime path `p` to a normalized absolute path. Expands a leading `~` using the runtime home and resolves relative paths from the runtime cwd without touching the filesystem or expanding environment variables.",
         &["p"],
         move |_, p: String| {
-            Ok(to_string(crate::path::resolve_from(
+            Ok(to_string(smelt_paths::path::resolve_from(
                 p,
                 resolve_context.evaluation_cwd(),
                 resolve_context.runtime_home(),

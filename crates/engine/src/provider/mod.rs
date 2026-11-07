@@ -120,7 +120,7 @@ where
         models: models.to_vec(),
     };
     let json = serde_json::to_vec_pretty(&cache).map_err(|error| error.to_string())?;
-    crate::paths::write_atomic(path, &json).map_err(|error| error.to_string())
+    smelt_paths::write_atomic(path, &json).map_err(|error| error.to_string())
 }
 
 use smelt_provider::ProviderError;

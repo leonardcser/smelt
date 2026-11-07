@@ -3,11 +3,11 @@ use std::path::PathBuf;
 pub use protocol::{ModelCatalogMetadata, ModelConfig};
 
 pub fn config_dir() -> PathBuf {
-    engine::config_dir()
+    smelt_paths::config_dir()
 }
 
 pub fn state_dir() -> PathBuf {
-    engine::state_dir()
+    smelt_paths::state_dir()
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]

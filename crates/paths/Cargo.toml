@@ -1,0 +1,20 @@
+[package]
+name = "smelt-paths"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "Application directories, path normalisation, and atomic file writes."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[dependencies]
+smelt-text = { workspace = true }
+dirs = { workspace = true }
+atomic-write-file = "0.3.1"
+shellexpand = "3.1.2"
+
+[dev-dependencies]
+smelt-test-support = { workspace = true }
+serial_test = "4.0.1"
+tempfile = { workspace = true }

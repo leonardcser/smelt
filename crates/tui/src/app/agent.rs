@@ -2399,7 +2399,7 @@ fn pretty_cwd(cwd: &str, home: &std::path::Path) -> String {
 }
 
 fn pretty_path(path: &std::path::Path, home: &std::path::Path) -> String {
-    engine::paths::collapse_tilde_from(path, home)
+    smelt_paths::collapse_tilde_from(path, home)
         .to_string_lossy()
         .into_owned()
 }

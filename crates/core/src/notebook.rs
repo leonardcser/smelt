@@ -690,7 +690,7 @@ pub fn apply_edit(
     files: &FileStateCache,
 ) -> Result<NotebookEditOutcome, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let home = engine::paths::home_dir();
+    let home = smelt_paths::home_dir();
     apply_edit_with_roots(args, files, &cwd, &home)
 }
 

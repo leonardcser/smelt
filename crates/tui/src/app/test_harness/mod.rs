@@ -351,18 +351,18 @@ impl TestAppBuilder {
 
     pub(crate) fn build_with_test_home_guard(self, guard: &ProcessEnvironmentGuard) -> TestApp {
         reset_test_home(guard);
-        let home = engine::paths::home_dir();
+        let home = smelt_paths::home_dir();
         self.build_with_runtime_home(home, None)
     }
 
     pub(crate) fn build_with_test_environment_guard(self, guard: &TestEnvironmentGuard) -> TestApp {
         reset_test_home(guard);
-        let home = engine::paths::home_dir();
+        let home = smelt_paths::home_dir();
         self.build_with_runtime_home(home, None)
     }
 
     pub(crate) fn build_without_test_home_reset(self, _guard: &ProcessEnvironmentGuard) -> TestApp {
-        let home = engine::paths::home_dir();
+        let home = smelt_paths::home_dir();
         self.build_with_runtime_home(home, None)
     }
 

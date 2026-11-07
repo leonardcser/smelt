@@ -78,7 +78,7 @@ fn read(artifact_dir: &Path) -> Option<SessionLink> {
 
 fn write(artifact_dir: &Path, link: &SessionLink) -> Result<(), String> {
     let bytes = serde_json::to_vec(link).map_err(|e| e.to_string())?;
-    crate::paths::write_atomic(&link_path(artifact_dir), &bytes)
+    smelt_paths::write_atomic(&link_path(artifact_dir), &bytes)
         .map_err(|e| format!("could not save Claude Code session link: {e}"))
 }
 

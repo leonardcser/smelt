@@ -1,3 +1,5 @@
+pub mod path;
+
 use std::path::{Path, PathBuf};
 
 const APP_NAME: &str = "smelt";
@@ -160,7 +162,7 @@ pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
     Some(branch)
 }
 
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {

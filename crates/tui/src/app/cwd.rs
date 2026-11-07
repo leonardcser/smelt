@@ -361,7 +361,7 @@ fn worktree_display_path(
             return suffix.display().to_string();
         }
     }
-    engine::paths::collapse_tilde_from(&context.active_root, home)
+    smelt_paths::collapse_tilde_from(&context.active_root, home)
         .display()
         .to_string()
 }
@@ -388,7 +388,7 @@ impl TuiApp {
 
     fn resolve_cwd_target(&self, path: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
         let path =
-            smelt_core::path::resolve_from(path, self.current_project_cwd(), self.core.env.home());
+            smelt_paths::path::resolve_from(path, self.current_project_cwd(), self.core.env.home());
         let path = std::fs::canonicalize(&path)
             .map_err(|error| format!("resolve cwd {}: {error}", path.display()))?;
         if !path.is_dir() {

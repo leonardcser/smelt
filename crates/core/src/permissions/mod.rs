@@ -259,7 +259,7 @@ impl PermissionGrant {
                     .map(|(_, rest)| rest.to_string())
                     .unwrap_or_else(|| display.to_string())
             }
-            PermissionGrant::PathPrefix { dir } => engine::paths::collapse_tilde_from(dir, home)
+            PermissionGrant::PathPrefix { dir } => smelt_paths::collapse_tilde_from(dir, home)
                 .to_string_lossy()
                 .into_owned(),
         }
@@ -758,7 +758,7 @@ impl Permissions {
             mode_behaviors,
             restrict_to_workspace: true,
             active_root: PathBuf::new(),
-            home: engine::paths::home_dir(),
+            home: smelt_paths::home_dir(),
             allowed_roots: Vec::new(),
             paths_fn: None,
             tool_decisions: tool_defaults.tool_decisions.clone(),

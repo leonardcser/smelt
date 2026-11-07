@@ -97,9 +97,9 @@ impl SkillLoader {
     /// directories. Later sources override earlier ones, so user skills
     /// can shadow built-ins by sharing the same `name:` in frontmatter.
     pub fn load(extra_paths: &[PathBuf]) -> Self {
-        let home = crate::home_dir();
-        let config_dir = crate::config_dir();
-        let data_dir = crate::data_dir();
+        let home = smelt_paths::home_dir();
+        let config_dir = smelt_paths::config_dir();
+        let data_dir = smelt_paths::data_dir();
         let cwd = std::env::current_dir().ok();
         Self::load_from_paths(extra_paths, &home, &config_dir, &data_dir, cwd.as_deref())
     }

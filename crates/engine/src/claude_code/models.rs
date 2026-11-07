@@ -18,7 +18,7 @@ struct Cache {
 }
 
 fn cache_path() -> PathBuf {
-    crate::paths::model_cache_path("claude-code.json")
+    smelt_paths::model_cache_path("claude-code.json")
 }
 
 fn load() -> Option<Cache> {
@@ -48,7 +48,7 @@ fn store(models: Vec<ModelMetadata>) -> Result<(), String> {
         return Ok(());
     }
     let bytes = serde_json::to_vec(&cache).map_err(|e| e.to_string())?;
-    crate::paths::write_atomic(&cache_path(), &bytes)
+    smelt_paths::write_atomic(&cache_path(), &bytes)
         .map_err(|e| format!("could not cache Claude Code models: {e}"))
 }
 

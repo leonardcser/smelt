@@ -17,8 +17,6 @@ mod native_prompt;
 pub use native_prompt::build_native_system_prompt;
 pub mod opener;
 
-pub mod paths;
-
 pub mod provider;
 mod request_log;
 pub(crate) mod result_dedup;
@@ -32,8 +30,6 @@ use protocol::{EngineEvent, UiCommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
-pub use paths::{config_dir, data_dir, home_dir, state_dir};
 
 /// Re-export so non-engine crates (the TUI) can store an HTTP client
 /// without depending on `reqwest` directly.

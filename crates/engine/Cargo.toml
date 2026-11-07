@@ -9,6 +9,7 @@ publish = false
 name = "engine"
 
 [dependencies]
+smelt-paths = { workspace = true }
 smelt-protocol = { workspace = true }
 smelt-provider = { workspace = true }
 smelt-store = { workspace = true }
@@ -26,8 +27,6 @@ rand = "0.10"
 smelt-perf = { version = "0.3.0", path = "../perf" }
 keyring-core = "1.0.0"
 smelt-text = { workspace = true }
-dirs.workspace = true
-atomic-write-file = "0.3.1"
 uuid = { version = "1.29.0", features = ["v4"] }
 
 [features]

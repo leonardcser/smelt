@@ -276,14 +276,14 @@ impl LuaLoadPaths {
 
     fn from_process() -> Self {
         Self {
-            home: engine::paths::home_dir(),
+            home: smelt_paths::home_dir(),
             config_dir: crate::config::config_dir(),
             state_root: crate::config::state_dir(),
-            cache_root: engine::paths::cache_dir(),
+            cache_root: smelt_paths::cache_dir(),
             runtime_override: std::env::var_os("SMELT_RUNTIME_DIR").map(PathBuf::from),
             development_runtime: Self::development_runtime(),
             project_cwd: std::env::current_dir().ok(),
-            data_runtime: engine::data_dir().join("runtime"),
+            data_runtime: smelt_paths::data_dir().join("runtime"),
         }
     }
 
@@ -4546,7 +4546,7 @@ fn lua_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 pub fn init_lua_path() -> Option<PathBuf> {
-    Some(engine::config_dir().join("init.lua"))
+    Some(smelt_paths::config_dir().join("init.lua"))
 }
 
 fn build_tool_ctx(

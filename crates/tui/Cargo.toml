@@ -10,6 +10,7 @@ build = "build.rs"
 name = "tui"
 
 [dependencies]
+smelt-paths = { workspace = true }
 smelt-protocol = { workspace = true }
 smelt-engine = { workspace = true }
 smelt-provider = { workspace = true }

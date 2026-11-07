@@ -53,7 +53,7 @@ fn unresolved_path(path: &str, base_dir: &Path) -> PathResolution {
     } else {
         base_dir.join(path)
     };
-    PathResolution::Unresolved(crate::path::normalize(path))
+    PathResolution::Unresolved(smelt_paths::path::normalize(path))
 }
 
 pub(super) fn normalize_approval_path(path: &Path) -> PathBuf {
@@ -61,7 +61,7 @@ pub(super) fn normalize_approval_path(path: &Path) -> PathBuf {
 }
 
 fn resolve_approval_path(path: &Path) -> PathResolution {
-    resolve_approval_path_from(path, &engine::paths::home_dir())
+    resolve_approval_path_from(path, &smelt_paths::home_dir())
 }
 
 pub(super) fn resolve_approval_path_from(path: &Path, home: &Path) -> PathResolution {
@@ -98,7 +98,7 @@ pub(super) fn resolve_filesystem_path(path: &Path) -> PathResolution {
 }
 
 fn resolve_filesystem_path_inner(path: &Path, followed_symlinks: usize) -> PathResolution {
-    let fallback = || PathResolution::Unresolved(crate::path::normalize(path));
+    let fallback = || PathResolution::Unresolved(smelt_paths::path::normalize(path));
     if !path.is_absolute() {
         return fallback();
     }
@@ -114,7 +114,7 @@ fn resolve_filesystem_path_inner(path: &Path, followed_symlinks: usize) -> PathR
                 for component in missing.iter().rev() {
                     canonical.push(component);
                 }
-                return PathResolution::Resolved(crate::path::normalize(canonical));
+                return PathResolution::Resolved(smelt_paths::path::normalize(canonical));
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(_) => return fallback(),

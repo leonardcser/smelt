@@ -45,7 +45,7 @@ impl EngineKimiEnv {
 }
 
 fn token_path() -> PathBuf {
-    crate::paths::auth_path("kimi-code.json")
+    smelt_paths::auth_path("kimi-code.json")
 }
 
 fn save_tokens_to(tokens: &KimiCodeTokens, store: &CredStore) -> Result<(), String> {
@@ -91,7 +91,7 @@ pub fn api_base() -> String {
 }
 
 fn device_id_path() -> PathBuf {
-    crate::paths::auth_path("kimi-code-device-id")
+    smelt_paths::auth_path("kimi-code-device-id")
 }
 
 fn create_device_id() -> String {
@@ -280,7 +280,7 @@ async fn authenticated_request_with_env(
 }
 
 fn models_cache_path() -> PathBuf {
-    crate::paths::model_cache_path("kimi-code.json")
+    smelt_paths::model_cache_path("kimi-code.json")
 }
 
 pub fn load_cached_model_info() -> Vec<KimiCodeModelInfo> {

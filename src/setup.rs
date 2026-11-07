@@ -663,7 +663,7 @@ pub async fn run_auth_command() {
             ProviderOutcome::Back => continue,
             ProviderOutcome::Cancel => return,
         };
-        let config_path = engine::config_dir().join("init.lua");
+        let config_path = smelt_paths::config_dir().join("init.lua");
         match offer_to_write_provider(&config_path, &provider) {
             Ok(()) => {}
             Err(e) => {

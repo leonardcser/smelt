@@ -137,7 +137,7 @@ pub fn generated_name() -> String {
 }
 
 pub fn enter_or_create(cwd: &Path, spec: WorktreeSpec<'_>) -> Result<WorktreeInfo, String> {
-    let root = engine::paths::git_root(cwd).ok_or_else(|| "not in a git repository".to_string())?;
+    let root = smelt_paths::git_root(cwd).ok_or_else(|| "not in a git repository".to_string())?;
     let requested = match spec.name {
         Some(name) => {
             Some(sanitize_name(name).ok_or_else(|| format!("invalid worktree name: {name:?}"))?)
@@ -574,7 +574,7 @@ fn resolve_worktree_root(root: Option<&Path>) -> Result<ResolvedWorktreeRoot, St
     let raw = root
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new(".worktrees"));
-    let expanded = crate::path::expand(raw)
+    let expanded = smelt_paths::path::expand(raw)
         .map_err(|e| format!("invalid worktree_root {:?}: {e}", raw.display().to_string()))?;
     if expanded.is_absolute() {
         if expanded.parent().is_none() {

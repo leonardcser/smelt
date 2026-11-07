@@ -559,7 +559,7 @@ impl WorkspaceFiles {
             return root.clone();
         }
         let root = if let Some(root) =
-            crate::worktree::repository_root(&cwd).and_then(engine::paths::workspace_boundary)
+            crate::worktree::repository_root(&cwd).and_then(smelt_paths::workspace_boundary)
         {
             self.git_roots.insert(root.clone());
             root

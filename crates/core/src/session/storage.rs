@@ -719,7 +719,7 @@ fn create_private_dir(state_root: &Path, path: &Path, recursive: bool) -> std::i
 }
 
 pub fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
-    let state_root = engine::state_dir();
+    let state_root = smelt_paths::state_dir();
     let root = if path.starts_with(&state_root) {
         state_root.as_path()
     } else {
@@ -755,7 +755,7 @@ pub fn create_private_dir_all_in(state_root: &Path, path: &Path) -> std::io::Res
 }
 
 pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let state_root = engine::state_dir();
+    let state_root = smelt_paths::state_dir();
     let root = if path.starts_with(&state_root) {
         state_root.as_path()
     } else {

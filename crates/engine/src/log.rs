@@ -75,7 +75,7 @@ fn rotate_logs(dir: &std::path::Path) {
 }
 
 fn dirs() -> PathBuf {
-    crate::paths::state_dir().join("logs")
+    smelt_paths::state_dir().join("logs")
 }
 
 pub fn logs_dir() -> PathBuf {

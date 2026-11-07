@@ -17,7 +17,7 @@ fn cred_store() -> &'static CredStore {
         CredStore::production(
             "smelt-codex-auth",
             "default",
-            crate::paths::auth_path("codex.json"),
+            smelt_paths::auth_path("codex.json"),
             CODEX_TOKENS_ENV,
         )
     })
@@ -126,7 +126,7 @@ pub(crate) fn load_cached_models() -> Vec<CodexModel> {
 
 pub(crate) fn load_cached_models_for(account_fingerprint: &str) -> Vec<CodexModel> {
     super::load_managed_model_cache(
-        &crate::paths::model_cache_path("codex.json"),
+        &smelt_paths::model_cache_path("codex.json"),
         crate::auth::AuthProvider::Codex.provider_type(),
         account_fingerprint,
     )
@@ -137,7 +137,7 @@ pub(crate) fn save_models_cache_for(
     models: &[CodexModel],
 ) -> Result<(), String> {
     super::save_managed_model_cache(
-        &crate::paths::model_cache_path("codex.json"),
+        &smelt_paths::model_cache_path("codex.json"),
         crate::auth::AuthProvider::Codex.provider_type(),
         account_fingerprint,
         models,

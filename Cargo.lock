@@ -3552,6 +3552,7 @@ dependencies = [
  "sha2",
  "smelt-core",
  "smelt-engine",
+ "smelt-paths",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
@@ -3629,12 +3630,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "shellexpand",
  "similar 3.2.1",
  "smelt-ansi",
  "smelt-buffer 0.0.0-dev",
  "smelt-engine",
  "smelt-lua-doc-derive",
+ "smelt-paths",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
@@ -3664,9 +3665,7 @@ name = "smelt-engine"
 version = "0.0.0-dev"
 dependencies = [
  "apple-native-keyring-store",
- "atomic-write-file",
  "base64 0.22.1",
- "dirs",
  "futures-util",
  "keyring-core",
  "libc",
@@ -3676,6 +3675,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2",
+ "smelt-paths",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
@@ -3706,6 +3706,19 @@ version = "0.0.0-dev"
 dependencies = [
  "insta",
  "unicode-width",
+]
+
+[[package]]
+name = "smelt-paths"
+version = "0.0.0-dev"
+dependencies = [
+ "atomic-write-file",
+ "dirs",
+ "serial_test",
+ "shellexpand",
+ "smelt-test-support",
+ "smelt-text",
+ "tempfile",
 ]
 
 [[package]]
@@ -3868,6 +3881,7 @@ dependencies = [
  "smelt-engine",
  "smelt-lua-doc-derive",
  "smelt-mermaid",
+ "smelt-paths",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",

@@ -31,11 +31,11 @@ pub struct RuntimeEnv {
 impl RuntimeEnv {
     /// Capture the real process environment. Call once at startup.
     pub fn snapshot() -> Self {
-        let home = crate::paths::home_dir();
-        let config_dir = crate::paths::config_dir();
-        let state_dir = crate::paths::state_dir();
-        let cache_dir = crate::paths::cache_dir();
-        let data_dir = crate::paths::data_dir();
+        let home = smelt_paths::home_dir();
+        let config_dir = smelt_paths::config_dir();
+        let state_dir = smelt_paths::state_dir();
+        let cache_dir = smelt_paths::cache_dir();
+        let data_dir = smelt_paths::data_dir();
         let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty())

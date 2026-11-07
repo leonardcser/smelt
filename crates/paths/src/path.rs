@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 /// Leading `..` against a relative root are preserved (matches
 /// `cargo`-style normalization, not `std::fs::canonicalize`). For
 /// absolute paths, `..` past the root is dropped.
-pub(crate) fn normalize(input: impl AsRef<Path>) -> PathBuf {
+pub fn normalize(input: impl AsRef<Path>) -> PathBuf {
     let path = input.as_ref();
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -41,7 +41,7 @@ pub(crate) fn normalize(input: impl AsRef<Path>) -> PathBuf {
     out
 }
 
-pub(crate) fn canonical(input: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+pub fn canonical(input: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(input)
 }
 
@@ -67,7 +67,7 @@ pub fn resolve_from(
 
 /// Compute `target` relative to `base` (pure arithmetic, no symlink resolution).
 /// Uses `..` when `target` is outside `base`. Both inputs are normalized first.
-pub(crate) fn relative(base: impl AsRef<Path>, target: impl AsRef<Path>) -> PathBuf {
+pub fn relative(base: impl AsRef<Path>, target: impl AsRef<Path>) -> PathBuf {
     let base = normalize(base.as_ref());
     let target = normalize(target.as_ref());
 
