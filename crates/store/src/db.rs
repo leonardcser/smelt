@@ -61,6 +61,15 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
     }
 }
 
+pub(crate) fn upgrade_pending(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    Ok((1..SCHEMA_VERSION).contains(&version))
+}
+
 /// Runs `step` and marks the schema current, in one write transaction, if the
 /// database is still at version `from`. Another process may have done it while
 /// this one waited for the lock.
@@ -375,7 +384,9 @@ mod tests {
         }
         drop(conn);
 
+        assert!(upgrade_pending(&path).unwrap());
         let conn = open(&path).unwrap();
+        assert!(!upgrade_pending(&path).unwrap());
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();

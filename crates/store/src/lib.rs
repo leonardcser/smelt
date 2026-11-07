@@ -76,6 +76,17 @@ impl Store {
         self.artifacts_dir().join(session_id)
     }
 
+    /// Whether the next open upgrades an older schema first, which takes a
+    /// while on a large database.
+    pub fn upgrade_pending(&self) -> Result<bool> {
+        db::upgrade_pending(&self.database_path())
+    }
+
+    /// Opens the database once, upgrading an older schema.
+    pub fn upgrade(&self) -> Result<()> {
+        self.connect().map(drop)
+    }
+
     pub(crate) fn connect(&self) -> Result<rusqlite::Connection> {
         db::open(&self.database_path())
     }

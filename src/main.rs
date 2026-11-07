@@ -776,6 +776,16 @@ async fn async_main() {
     lua_runtime.freeze_launch_inputs();
     drop(cli_parse_startup);
 
+    // COMPAT(store-schema-v1): the first open of an older database rewrites it.
+    let sessions = smelt_core::session::storage();
+    if sessions.store().upgrade_pending().unwrap_or(false) {
+        eprintln!("smelt: upgrading the session database; this can take a minute");
+        if let Err(err) = sessions.store().upgrade() {
+            eprintln!("error: failed to upgrade the session database: {err}");
+            std::process::exit(1);
+        }
+    }
+
     // COMPAT(state-v0.7): `session migrate` runs the import itself.
     let migrating = matches!(
         &args.command,
