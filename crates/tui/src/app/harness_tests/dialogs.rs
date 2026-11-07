@@ -1547,8 +1547,8 @@ fn tool_result<'a>(app: &'a TestApp, call_id: &str) -> Option<(&'a str, bool)> {
     })
 }
 
-fn confirm_test_permissions() -> smelt_core::permissions::Permissions {
-    use smelt_core::permissions::rules::{RawModePerms, RawPerms, RawRuleSet, ToolDefaults};
+fn confirm_test_permissions() -> smelt_permissions::Permissions {
+    use smelt_permissions::rules::{RawModePerms, RawPerms, RawRuleSet, ToolDefaults};
     let mut modes = std::collections::HashMap::new();
     modes.insert(
         "apply".to_string(),
@@ -1570,7 +1570,7 @@ fn confirm_test_permissions() -> smelt_core::permissions::Permissions {
             ..Default::default()
         },
     );
-    smelt_core::permissions::Permissions::from_raw(
+    smelt_permissions::Permissions::from_raw(
         &RawPerms {
             default: RawModePerms::default(),
             modes,
@@ -1759,10 +1759,10 @@ fn open_repository_permission_dialog(fixture: &GitWorktreeFixture) -> TestApp {
     app
 }
 
-fn is_cargo_test_grant(grants: &[smelt_core::permissions::PermissionGrant]) -> bool {
+fn is_cargo_test_grant(grants: &[smelt_permissions::PermissionGrant]) -> bool {
     matches!(
         grants,
-        [smelt_core::permissions::PermissionGrant::Command { tool, pattern }]
+        [smelt_permissions::PermissionGrant::Command { tool, pattern }]
             if tool == "bash" && pattern == "cargo test *"
     )
 }
@@ -1829,7 +1829,7 @@ fn repository_approval_persists_under_git_common_directory_key() {
     assert!(store
         .load(
             &fixture.feature.to_string_lossy(),
-            smelt_core::permissions::store::PersistenceScope::Workspace,
+            smelt_permissions::store::PersistenceScope::Workspace,
         )
         .unwrap()
         .is_empty());
@@ -1837,7 +1837,7 @@ fn repository_approval_persists_under_git_common_directory_key() {
         store
             .load(
                 &fixture.repository_key().to_string_lossy(),
-                smelt_core::permissions::store::PersistenceScope::Repository,
+                smelt_permissions::store::PersistenceScope::Repository,
             )
             .unwrap()
             .len(),
@@ -1879,7 +1879,7 @@ fn running_peer_in_same_workspace_lazily_loads_new_workspace_approval() {
         .permission_store
         .remove(
             granter.cwd_str(),
-            smelt_core::permissions::store::PersistenceScope::Workspace,
+            smelt_permissions::store::PersistenceScope::Workspace,
             "bash",
             "cargo test *",
         )
@@ -1895,7 +1895,7 @@ fn persistent_permission_failure_is_reported_and_does_not_run_tool() {
         .permission_store
         .add_tool(
             app.cwd_str(),
-            smelt_core::permissions::store::PersistenceScope::Workspace,
+            smelt_permissions::store::PersistenceScope::Workspace,
             "bash",
             vec!["existing command".into()],
         )
@@ -1932,10 +1932,10 @@ fn persistent_permission_failure_is_reported_and_does_not_run_tool() {
             .permission_store
             .load(
                 app.cwd_str(),
-                smelt_core::permissions::store::PersistenceScope::Workspace,
+                smelt_permissions::store::PersistenceScope::Workspace,
             )
             .unwrap(),
-        vec![smelt_core::permissions::store::Rule {
+        vec![smelt_permissions::store::Rule {
             tool: "bash".into(),
             patterns: vec!["existing command".into()],
         }]
@@ -1954,7 +1954,7 @@ fn successful_persistent_grant_is_approved_when_other_scope_is_malformed() {
         .permission_store
         .add_tool(
             &fixture.repository_key().to_string_lossy(),
-            smelt_core::permissions::store::PersistenceScope::Repository,
+            smelt_permissions::store::PersistenceScope::Repository,
             "bash",
             vec!["git status".into()],
         )
@@ -1982,10 +1982,10 @@ fn successful_persistent_grant_is_approved_when_other_scope_is_malformed() {
             .permission_store
             .load(
                 app.cwd_str(),
-                smelt_core::permissions::store::PersistenceScope::Workspace,
+                smelt_permissions::store::PersistenceScope::Workspace,
             )
             .unwrap(),
-        vec![smelt_core::permissions::store::Rule {
+        vec![smelt_permissions::store::Rule {
             tool: "bash".into(),
             patterns: vec!["cargo test *".into()],
         }]
@@ -2042,7 +2042,7 @@ fn permissions_lua_transactional_revoke_preserves_concurrent_rules() {
         .permission_store
         .add_tool(
             &fixture.repository_key().to_string_lossy(),
-            smelt_core::permissions::store::PersistenceScope::Repository,
+            smelt_permissions::store::PersistenceScope::Repository,
             "web_fetch",
             vec!["https://example.com/*".into()],
         )
@@ -2063,10 +2063,10 @@ fn permissions_lua_transactional_revoke_preserves_concurrent_rules() {
             .permission_store
             .load(
                 &fixture.repository_key().to_string_lossy(),
-                smelt_core::permissions::store::PersistenceScope::Repository,
+                smelt_permissions::store::PersistenceScope::Repository,
             )
             .unwrap(),
-        vec![smelt_core::permissions::store::Rule {
+        vec![smelt_permissions::store::Rule {
             tool: "web_fetch".into(),
             patterns: vec!["https://example.com/*".into()],
         }]
@@ -2091,7 +2091,7 @@ fn permissions_lua_sync_rejects_stale_repository_snapshot() {
         .permission_store
         .add_tool(
             &fixture.repository_key().to_string_lossy(),
-            smelt_core::permissions::store::PersistenceScope::Repository,
+            smelt_permissions::store::PersistenceScope::Repository,
             "web_fetch",
             vec!["https://example.com/*".into()],
         )
@@ -2116,15 +2116,15 @@ fn permissions_lua_sync_rejects_stale_repository_snapshot() {
             .permission_store
             .load(
                 &fixture.repository_key().to_string_lossy(),
-                smelt_core::permissions::store::PersistenceScope::Repository,
+                smelt_permissions::store::PersistenceScope::Repository,
             )
             .unwrap(),
         vec![
-            smelt_core::permissions::store::Rule {
+            smelt_permissions::store::Rule {
                 tool: "bash".into(),
                 patterns: vec!["cargo test *".into()],
             },
-            smelt_core::permissions::store::Rule {
+            smelt_permissions::store::Rule {
                 tool: "web_fetch".into(),
                 patterns: vec!["https://example.com/*".into()],
             },
@@ -2140,7 +2140,7 @@ fn permissions_lua_sync_rejects_two_persisted_scopes_without_writing_either() {
         .permission_store
         .add_tool(
             app.cwd_str(),
-            smelt_core::permissions::store::PersistenceScope::Workspace,
+            smelt_permissions::store::PersistenceScope::Workspace,
             "bash",
             vec!["workspace command".into()],
         )
@@ -2149,7 +2149,7 @@ fn permissions_lua_sync_rejects_two_persisted_scopes_without_writing_either() {
         .permission_store
         .add_tool(
             &fixture.repository_key().to_string_lossy(),
-            smelt_core::permissions::store::PersistenceScope::Repository,
+            smelt_permissions::store::PersistenceScope::Repository,
             "bash",
             vec!["repository command".into()],
         )
@@ -2179,7 +2179,7 @@ fn permissions_lua_sync_rejects_two_persisted_scopes_without_writing_either() {
             .permission_store
             .load(
                 app.cwd_str(),
-                smelt_core::permissions::store::PersistenceScope::Workspace,
+                smelt_permissions::store::PersistenceScope::Workspace,
             )
             .unwrap()[0]
             .patterns,
@@ -2190,7 +2190,7 @@ fn permissions_lua_sync_rejects_two_persisted_scopes_without_writing_either() {
             .permission_store
             .load(
                 &fixture.repository_key().to_string_lossy(),
-                smelt_core::permissions::store::PersistenceScope::Repository,
+                smelt_permissions::store::PersistenceScope::Repository,
             )
             .unwrap()[0]
             .patterns,
@@ -2206,8 +2206,8 @@ fn external_sibling_worktree_inherits_repository_but_not_workspace_rules() {
     store
         .add_grant(
             &fixture.repository_key().to_string_lossy(),
-            smelt_core::permissions::store::PersistenceScope::Repository,
-            smelt_core::permissions::PermissionGrant::Command {
+            smelt_permissions::store::PersistenceScope::Repository,
+            smelt_permissions::PermissionGrant::Command {
                 tool: "bash".into(),
                 pattern: "cargo test *".into(),
             },
@@ -2216,27 +2216,26 @@ fn external_sibling_worktree_inherits_repository_but_not_workspace_rules() {
     store
         .add_tool(
             &fixture.feature.to_string_lossy(),
-            smelt_core::permissions::store::PersistenceScope::Workspace,
+            smelt_permissions::store::PersistenceScope::Workspace,
             "bash",
             vec!["worktree-only *".into()],
         )
         .unwrap();
     let sibling = fixture.add_sibling();
 
-    let resolution = smelt_core::permissions::resolve_permissions(
-        &smelt_core::permissions::rules::RawPerms::default(),
-        &smelt_core::permissions::rules::ToolDefaults::default(),
+    let resolution = smelt_permissions::resolve_permissions(
+        &smelt_permissions::rules::RawPerms::default(),
+        &smelt_permissions::rules::ToolDefaults::default(),
         std::collections::HashMap::new(),
-        &smelt_core::config::ResolvedSettings::default(),
-        smelt_core::permissions::PermissionRuntimePaths {
+        smelt_permissions::WorkspacePolicy::default(),
+        smelt_permissions::PermissionRuntimePaths {
             cwd: &sibling,
             home: app.runtime_home(),
         },
         store,
         None,
     );
-    let permissions =
-        smelt_core::permissions::PermissionsHandle::from_resolution(resolution.unwrap());
+    let permissions = smelt_permissions::PermissionsHandle::from_resolution(resolution.unwrap());
     let approvals = permissions.approvals();
     let approvals = approvals.read().unwrap();
     assert!(approvals.has_pattern("bash", "cargo test *"));
@@ -2367,14 +2366,14 @@ fn bash_session_grants_for_cd_prefixed_outside_path_survive_cancel_and_rewind() 
             let has_command_grant = grants.iter().any(|grant| {
                 matches!(
                     grant,
-                    smelt_core::permissions::PermissionGrant::Command { tool, pattern }
+                    smelt_permissions::PermissionGrant::Command { tool, pattern }
                         if tool == "bash" && pattern == approval_pattern
                 )
             });
             let has_path_grant = grants.iter().any(|grant| {
                 matches!(
                     grant,
-                    smelt_core::permissions::PermissionGrant::PathPrefix { dir }
+                    smelt_permissions::PermissionGrant::PathPrefix { dir }
                         if dir == &outside_dir
                 )
             });
@@ -2417,7 +2416,7 @@ fn command_session_grant_survives_cancel_and_rewind() {
             grants.iter().any(|grant| {
                 matches!(
                     grant,
-                    smelt_core::permissions::PermissionGrant::Command { tool, pattern }
+                    smelt_permissions::PermissionGrant::Command { tool, pattern }
                         if tool == "bash" && pattern == approval_pattern
                 )
             })
@@ -2593,21 +2592,21 @@ fn switch_cwd_outside_workspace_requires_destination_permission() {
         .req;
     assert_eq!(
         request.tool_paths,
-        vec![smelt_core::permissions::ToolPath::directory(
+        vec![smelt_permissions::ToolPath::directory(
             target.to_string_lossy()
         )]
     );
     assert!(request.grant_options.iter().any(|option| {
         matches!(option.target, smelt_core::ApprovalTarget::Session)
             && option.grants
-                == vec![smelt_core::permissions::PermissionGrant::PathPrefix {
+                == vec![smelt_permissions::PermissionGrant::PathPrefix {
                     dir: target.clone(),
                 }]
     }));
     assert!(request.grant_options.iter().any(|option| {
         matches!(option.target, smelt_core::ApprovalTarget::Workspace { .. })
             && option.grants
-                == vec![smelt_core::permissions::PermissionGrant::PathPrefix {
+                == vec![smelt_permissions::PermissionGrant::PathPrefix {
                     dir: target.clone(),
                 }]
     }));
@@ -2696,7 +2695,7 @@ fn switch_cwd_outside_repository_offers_repository_scoped_destination_grant() {
     );
     assert_eq!(
         repository.grants,
-        vec![smelt_core::permissions::PermissionGrant::PathPrefix { dir: target }]
+        vec![smelt_permissions::PermissionGrant::PathPrefix { dir: target }]
     );
 }
 
@@ -3342,13 +3341,13 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
     assert!(grants.iter().any(|grant| {
         grant.mode.is_none()
             && grant.tool == "read_file"
-            && grant.access == smelt_core::permissions::PathAccess::Read
+            && grant.access == smelt_permissions::PathAccess::Read
             && grant.dir == artifact_dir
     }));
     assert!(grants.iter().any(|grant| {
         grant.mode.is_none()
             && grant.tool == "edit_file"
-            && grant.access == smelt_core::permissions::PathAccess::Write
+            && grant.access == smelt_permissions::PathAccess::Write
             && grant.dir == artifact_dir
     }));
     assert!(grants.iter().any(|grant| {
@@ -3357,7 +3356,7 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
             .as_ref()
             .is_some_and(|mode| mode.as_str() == "plan")
             && grant.tool == "edit_file"
-            && grant.access == smelt_core::permissions::PathAccess::Write
+            && grant.access == smelt_permissions::PathAccess::Write
             && grant.dir == artifact_dir
     }));
 

@@ -401,7 +401,7 @@ impl TestApp {
 
     pub(crate) fn replace_permissions_for_harness(
         &mut self,
-        permissions: smelt_core::permissions::Permissions,
+        permissions: smelt_permissions::Permissions,
     ) {
         self.tui.core.permissions.replace(permissions);
     }
@@ -568,7 +568,7 @@ impl TestApp {
 
     pub(crate) fn resolve_first_session_grant_where(
         &mut self,
-        matches_grants: impl Fn(&[smelt_core::permissions::PermissionGrant]) -> bool,
+        matches_grants: impl Fn(&[smelt_permissions::PermissionGrant]) -> bool,
     ) -> bool {
         self.resolve_first_grant_where(
             |target| matches!(target, smelt_core::ApprovalTarget::Session),
@@ -579,7 +579,7 @@ impl TestApp {
     pub(crate) fn resolve_first_grant_where(
         &mut self,
         matches_target: impl Fn(&smelt_core::ApprovalTarget) -> bool,
-        matches_grants: impl Fn(&[smelt_core::permissions::PermissionGrant]) -> bool,
+        matches_grants: impl Fn(&[smelt_permissions::PermissionGrant]) -> bool,
     ) -> bool {
         let Some(handle_id) = self.first_pending_confirm() else {
             return false;
@@ -668,10 +668,10 @@ impl TestApp {
             .core
             .permissions
             .snapshot()
-            .effects_for_tool(smelt_core::permissions::ToolOrigin::Lua, "bash", &args)
+            .effects_for_tool(smelt_permissions::ToolOrigin::Lua, "bash", &args)
             .into_iter()
             .flat_map(|effect| match effect {
-                smelt_core::permissions::ToolEffect::Shell { paths, .. } => paths,
+                smelt_permissions::ToolEffect::Shell { paths, .. } => paths,
                 _ => Vec::new(),
             })
             .map(|effect| effect.resolution.path().to_path_buf())
@@ -1046,13 +1046,11 @@ impl TestApp {
         self.tui.record_visible_token_usage(usage);
     }
 
-    pub(crate) fn active_permissions(
-        &self,
-    ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
+    pub(crate) fn active_permissions(&self) -> std::sync::Arc<smelt_permissions::Permissions> {
         self.tui.active_permissions()
     }
 
-    pub(crate) fn session_path_grants(&self) -> Vec<smelt_core::permissions::SessionPathGrant> {
+    pub(crate) fn session_path_grants(&self) -> Vec<smelt_permissions::SessionPathGrant> {
         self.tui.session_path_grants()
     }
 
@@ -1255,7 +1253,7 @@ impl TestApp {
         &mut self,
         mode: Option<protocol::AgentMode>,
         tool: String,
-        access: smelt_core::permissions::PathAccess,
+        access: smelt_permissions::PathAccess,
         dir: std::path::PathBuf,
     ) {
         self.tui.grant_session_path(mode, tool, access, dir);

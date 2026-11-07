@@ -1,5 +1,5 @@
 //! `smelt.permissions` bindings - list, sync, and extend permission policy state.
-//! Session/workspace/repository entries sit over `RuntimeApprovals` + [`crate::permissions::store`];
+//! Session/workspace/repository entries sit over `RuntimeApprovals` + [`smelt_permissions::store`];
 //! policy extensions layer on top of generated defaults.
 
 use lua_doc_derive::{LuaAlias, LuaOpts};
@@ -110,8 +110,8 @@ impl IntoLua for LuaPermissionList {
 
 fn lua_workspace_rule_to_runtime(
     rule: LuaPermissionWorkspaceRule,
-) -> crate::permissions::store::Rule {
-    crate::permissions::store::Rule {
+) -> smelt_permissions::store::Rule {
+    smelt_permissions::store::Rule {
         tool: rule.tool,
         patterns: rule.patterns,
     }
@@ -119,8 +119,8 @@ fn lua_workspace_rule_to_runtime(
 
 fn lua_scope_replacement_to_runtime(
     replacement: LuaPermissionScopeReplacement,
-) -> crate::permissions::store::Replacement {
-    crate::permissions::store::Replacement {
+) -> smelt_permissions::store::Replacement {
+    smelt_permissions::store::Replacement {
         expected_revision: replacement.revision,
         rules: replacement
             .rules
@@ -132,7 +132,7 @@ fn lua_scope_replacement_to_runtime(
 
 fn permission_rules_to_lua(
     lua: &Lua,
-    rules: Vec<crate::permissions::store::Rule>,
+    rules: Vec<smelt_permissions::store::Rule>,
 ) -> LuaResult<mlua::Table> {
     let array = lua.create_table()?;
     for (i, rule) in rules.into_iter().enumerate() {
@@ -199,7 +199,7 @@ pub struct LuaRuleSet {
     pub deny: Vec<String>,
 }
 
-impl From<LuaRuleSet> for crate::permissions::rules::RawRuleSet {
+impl From<LuaRuleSet> for smelt_permissions::rules::RawRuleSet {
     fn from(r: LuaRuleSet) -> Self {
         Self {
             allow: r.allow,
@@ -248,7 +248,7 @@ pub struct LuaEffectRules {
     pub other: Option<LuaPermissionDecision>,
 }
 
-impl From<LuaEffectRules> for crate::permissions::rules::RawEffectRules {
+impl From<LuaEffectRules> for smelt_permissions::rules::RawEffectRules {
     fn from(e: LuaEffectRules) -> Self {
         Self {
             read: e.read.map(Into::into),
@@ -285,12 +285,12 @@ pub struct LuaModePerms {
     pub patterns: Option<std::collections::HashMap<String, LuaRuleSet>>,
 }
 
-impl From<LuaModePerms> for crate::permissions::rules::RawModePerms {
+impl From<LuaModePerms> for smelt_permissions::rules::RawModePerms {
     fn from(m: LuaModePerms) -> Self {
         Self {
             tools: m.tools.map(Into::into).unwrap_or_default(),
             effects: m.effects.map(Into::into).unwrap_or_default(),
-            paths: crate::permissions::rules::RawPathRules {
+            paths: smelt_permissions::rules::RawPathRules {
                 allow: m.paths.map(|paths| paths.allow).unwrap_or_default(),
             },
             patterns: m
@@ -448,7 +448,7 @@ pub(super) fn register(
             "Extend the generated permission policy with user rules. Supports `tools`, `effects`, `paths`, and `patterns` sections under `default` or any mode name.",
             &["spec"],
             move |_, spec: LuaPermissionPolicySpec| -> LuaResult<()> {
-                let incoming = crate::permissions::rules::RawPerms {
+                let incoming = smelt_permissions::rules::RawPerms {
                     default: spec.default.map(Into::into).unwrap_or_default(),
                     modes: spec
                         .modes
@@ -500,7 +500,7 @@ pub(super) fn register(
 fn lua_path_grant_to_runtime(
     grant: LuaPermissionSessionPathGrant,
     context: &smelt_core::lua::LuaShared,
-) -> LuaResult<smelt_core::permissions::SessionPathGrant> {
+) -> LuaResult<smelt_permissions::SessionPathGrant> {
     if grant.kind != "path" {
         return Err(LuaError::RuntimeError(format!(
             "unsupported session grant kind `{}`",
@@ -517,7 +517,7 @@ fn lua_path_grant_to_runtime(
             "session path grant requires path_prefix".to_string(),
         ));
     }
-    Ok(smelt_core::permissions::SessionPathGrant {
+    Ok(smelt_permissions::SessionPathGrant {
         mode: grant.mode.map(|mode| parse_grant_mode(&mode)).transpose()?,
         tool: grant.tool,
         access: parse_path_access(&grant.access)?,
@@ -530,27 +530,27 @@ fn parse_grant_mode(mode: &str) -> LuaResult<protocol::AgentMode> {
         .ok_or_else(|| LuaError::RuntimeError(format!("invalid session grant mode `{mode}`")))
 }
 
-fn parse_path_access(access: &str) -> LuaResult<smelt_core::permissions::PathAccess> {
+fn parse_path_access(access: &str) -> LuaResult<smelt_permissions::PathAccess> {
     match access {
-        "read" => Ok(smelt_core::permissions::PathAccess::Read),
-        "write" => Ok(smelt_core::permissions::PathAccess::Write),
+        "read" => Ok(smelt_permissions::PathAccess::Read),
+        "write" => Ok(smelt_permissions::PathAccess::Write),
         _ => Err(LuaError::RuntimeError(format!(
             "unsupported session path grant access `{access}`"
         ))),
     }
 }
 
-fn path_access_label(access: &smelt_core::permissions::PathAccess) -> &'static str {
+fn path_access_label(access: &smelt_permissions::PathAccess) -> &'static str {
     match access {
-        smelt_core::permissions::PathAccess::Read => "read",
-        smelt_core::permissions::PathAccess::Write => "write",
-        smelt_core::permissions::PathAccess::Unknown => "unknown",
+        smelt_permissions::PathAccess::Read => "read",
+        smelt_permissions::PathAccess::Write => "write",
+        smelt_permissions::PathAccess::Unknown => "unknown",
     }
 }
 
 fn merge_ruleset(
-    base: &mut crate::permissions::rules::RawRuleSet,
-    incoming: crate::permissions::rules::RawRuleSet,
+    base: &mut smelt_permissions::rules::RawRuleSet,
+    incoming: smelt_permissions::rules::RawRuleSet,
 ) {
     base.allow.extend(incoming.allow);
     base.ask.extend(incoming.ask);
@@ -558,8 +558,8 @@ fn merge_ruleset(
 }
 
 fn merge_effects(
-    base: &mut crate::permissions::rules::RawEffectRules,
-    incoming: crate::permissions::rules::RawEffectRules,
+    base: &mut smelt_permissions::rules::RawEffectRules,
+    incoming: smelt_permissions::rules::RawEffectRules,
 ) {
     if incoming.read.is_some() {
         base.read = incoming.read;
@@ -585,8 +585,8 @@ fn merge_effects(
 }
 
 fn merge_mode(
-    base: &mut crate::permissions::rules::RawModePerms,
-    incoming: crate::permissions::rules::RawModePerms,
+    base: &mut smelt_permissions::rules::RawModePerms,
+    incoming: smelt_permissions::rules::RawModePerms,
 ) {
     merge_ruleset(&mut base.tools, incoming.tools);
     merge_effects(&mut base.effects, incoming.effects);
@@ -597,8 +597,8 @@ fn merge_mode(
 }
 
 fn merge_policy(
-    base: &mut crate::permissions::rules::RawPerms,
-    incoming: crate::permissions::rules::RawPerms,
+    base: &mut smelt_permissions::rules::RawPerms,
+    incoming: smelt_permissions::rules::RawPerms,
 ) {
     merge_mode(&mut base.default, incoming.default);
     for (name, mode) in incoming.modes {

@@ -150,7 +150,7 @@ fn run(input: Input) {
             Op::SetCursor { pos } => {
                 let source = ui.buf_mut(buf).unwrap().source().to_string();
                 let p =
-                    smelt_buffer::text::snap_grapheme(&source, (pos as usize).min(source.len()));
+                    smelt_text::snap_grapheme(&source, (pos as usize).min(source.len()));
                 ui.win_mut(win).unwrap().set_cpos(p);
             }
             Op::KeyChar {
@@ -249,7 +249,7 @@ fn insert_via_dispatch(
     let pos = pos.min(source.len());
     // A paste can be ignored (empty text, vim normal mode), so a stale offset
     // would stay as the cursor.
-    let pos = smelt_buffer::text::snap_grapheme(source, pos);
+    let pos = smelt_text::snap_grapheme(source, pos);
     let window = ui.win_mut(win).unwrap();
     window.set_cpos(pos);
     window.clear_selection_anchor();
@@ -267,8 +267,8 @@ fn replace_via_dispatch(
     let source = ui.buf(buf).unwrap().source();
     let start = start.min(source.len());
     let end = end.min(source.len()).max(start);
-    let start = smelt_buffer::text::snap_grapheme(source, start);
-    let end = smelt_buffer::text::snap_grapheme(source, end);
+    let start = smelt_text::snap_grapheme(source, start);
+    let end = smelt_text::snap_grapheme(source, end);
     let window = ui.win_mut(win).unwrap();
     window.set_selection_anchor(Some(start));
     window.set_cpos(end);
@@ -338,7 +338,7 @@ fn assert_window_invariants(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit
         w.cpos()
     );
     assert_eq!(
-        smelt_buffer::text::snap_grapheme(&source, w.cpos()),
+        smelt_text::snap_grapheme(&source, w.cpos()),
         w.cpos(),
         "cursor inside grapheme"
     );
@@ -348,7 +348,7 @@ fn assert_window_invariants(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit
             "selection anchor beyond source: {anchor} > {len}"
         );
         assert_eq!(
-            smelt_buffer::text::snap_grapheme(&source, anchor),
+            smelt_text::snap_grapheme(&source, anchor),
             anchor,
             "selection anchor inside grapheme"
         );

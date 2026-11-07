@@ -107,7 +107,7 @@ impl HeadlessApp {
         permissions
             .evaluate_tool_with_paths(
                 mode.clone(),
-                crate::permissions::ToolOrigin::Lua,
+                smelt_permissions::ToolOrigin::Lua,
                 tool_name,
                 args,
                 tool_paths.as_slice(),
@@ -115,7 +115,7 @@ impl HeadlessApp {
             .decision
             == Decision::Allow
             || permissions
-                .evaluate_tool(mode, crate::permissions::ToolOrigin::Mcp, tool_name, args)
+                .evaluate_tool(mode, smelt_permissions::ToolOrigin::Mcp, tool_name, args)
                 .decision
                 == Decision::Allow
     }
@@ -212,7 +212,7 @@ impl HeadlessApp {
                         .snapshot()
                         .evaluate_tool_with_paths_and_approvals(
                             mode,
-                            crate::permissions::ToolOrigin::Lua,
+                            smelt_permissions::ToolOrigin::Lua,
                             &tool_name,
                             &args,
                             tool_paths.as_slice(),
@@ -600,7 +600,7 @@ impl HeadlessApp {
         };
         let claude_code = smelt_provider::BackendKind::is_claude_code(&model_target.provider_type);
         if claude_code {
-            crate::permissions::claude_code::grant_plan_artifacts(
+            crate::claude_code_policy::grant_plan_artifacts(
                 &self.core.permissions,
                 &self.core.sessions.artifact_dir_for(&self.session),
             );
@@ -712,7 +712,7 @@ impl HeadlessApp {
                     let evaluation = if session_id == self.session.id
                         && self.core.native_session.as_deref() == Some(&session_id)
                     {
-                        crate::permissions::claude_code::evaluate(
+                        crate::claude_code_policy::evaluate(
                             &self.core.permissions.snapshot(),
                             Some(&cwd),
                             mode,
@@ -950,7 +950,8 @@ impl HeadlessApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config, permissions, FrontendKind, RuntimeState, StartupOverrides};
+    use crate::{config, FrontendKind, RuntimeState, StartupOverrides};
+    use smelt_permissions as permissions;
 
     fn runtime_state(tool_calling: bool) -> RuntimeState {
         let config = config::Config {

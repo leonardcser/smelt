@@ -29,7 +29,7 @@ pub(crate) struct TurnLifecycle {
     applied_reasoning_effort: protocol::ReasoningEffort,
     cancel_generation: u64,
     dispatching_turn_id: Option<u64>,
-    dispatching_permissions: Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
+    dispatching_permissions: Option<std::sync::Arc<smelt_permissions::Permissions>>,
 }
 
 /// The command a turn runs for and the request settings it scopes to the turn.
@@ -51,7 +51,7 @@ pub(crate) struct TurnPause {
 pub(crate) struct DispatchingTurn {
     pub(crate) state: TurnState,
     previous_turn_id: Option<u64>,
-    previous_permissions: Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
+    previous_permissions: Option<std::sync::Arc<smelt_permissions::Permissions>>,
 }
 
 pub(super) struct LuaToolCompletion {
@@ -281,8 +281,8 @@ impl TurnLifecycle {
 
     pub(crate) fn active_permissions(
         &self,
-        fallback: std::sync::Arc<smelt_core::permissions::Permissions>,
-    ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
+        fallback: std::sync::Arc<smelt_permissions::Permissions>,
+    ) -> std::sync::Arc<smelt_permissions::Permissions> {
         self.active
             .as_ref()
             .map(|turn| turn.permissions.clone())
@@ -292,7 +292,7 @@ impl TurnLifecycle {
 
     pub(crate) fn refresh_active_permissions(
         &mut self,
-        permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+        permissions: std::sync::Arc<smelt_permissions::Permissions>,
     ) {
         if self.dispatching_turn_id.is_some() {
             self.dispatching_permissions = Some(permissions);
@@ -400,7 +400,7 @@ struct PreparedTurn {
     request_config: protocol::RequestRuntimeConfig,
     reasoning_effort: protocol::ReasoningEffort,
     permission_overrides: Option<protocol::PermissionOverrides>,
-    permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+    permissions: std::sync::Arc<smelt_permissions::Permissions>,
     command: CommandScope,
     rewind_history_idx: Option<usize>,
     rollback: Option<StagedTurnRollback>,
@@ -511,9 +511,7 @@ impl TuiApp {
         });
     }
 
-    pub(crate) fn active_permissions(
-        &self,
-    ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
+    pub(crate) fn active_permissions(&self) -> std::sync::Arc<smelt_permissions::Permissions> {
         self.conversation
             .active_permissions(self.core.permissions.snapshot())
     }
@@ -987,7 +985,7 @@ impl TuiApp {
             .begin_turn(&self.conversation.session().id, turn_id);
 
         if smelt_provider::BackendKind::is_claude_code(&turn.model_target.provider_type) {
-            smelt_core::permissions::claude_code::grant_plan_artifacts(
+            smelt_core::claude_code_policy::grant_plan_artifacts(
                 &self.core.permissions,
                 &self
                     .core
@@ -1897,7 +1895,7 @@ impl TuiApp {
     }
 
     #[cfg(any(test, feature = "harness"))]
-    pub(crate) fn session_path_grants(&self) -> Vec<smelt_core::permissions::SessionPathGrant> {
+    pub(crate) fn session_path_grants(&self) -> Vec<smelt_permissions::SessionPathGrant> {
         self.core
             .permissions
             .approvals()
@@ -1910,7 +1908,7 @@ impl TuiApp {
         &mut self,
         mode: Option<protocol::AgentMode>,
         tool: String,
-        access: smelt_core::permissions::PathAccess,
+        access: smelt_permissions::PathAccess,
         dir: PathBuf,
     ) {
         let approval_store = self.core.permissions.approvals();
@@ -1925,9 +1923,9 @@ impl TuiApp {
     pub(crate) fn sync_permissions(
         &mut self,
         session_entries: Option<Vec<PermissionEntry>>,
-        session_path_grants: Option<Vec<smelt_core::permissions::SessionPathGrant>>,
-        workspace: Option<smelt_core::permissions::store::Replacement>,
-        repository: Option<smelt_core::permissions::store::Replacement>,
+        session_path_grants: Option<Vec<smelt_permissions::SessionPathGrant>>,
+        workspace: Option<smelt_permissions::store::Replacement>,
+        repository: Option<smelt_permissions::store::Replacement>,
     ) -> Result<(), String> {
         if workspace.is_some() && repository.is_some() {
             return Err(
@@ -1956,7 +1954,7 @@ impl TuiApp {
                                 format!("invalid session pattern for {}: {error}", entry.tool)
                             })?;
                         }
-                        tools.push(smelt_core::permissions::SessionToolApproval {
+                        tools.push(smelt_permissions::SessionToolApproval {
                             tool: entry.tool,
                             pattern,
                         });
@@ -1971,7 +1969,7 @@ impl TuiApp {
                 .permission_store
                 .replace(
                     self.workspace.cwd(),
-                    smelt_core::permissions::store::PersistenceScope::Workspace,
+                    smelt_permissions::store::PersistenceScope::Workspace,
                     replacement,
                 )
                 .map_err(|error| format!("replace workspace permissions: {error}"))?;
@@ -1986,7 +1984,7 @@ impl TuiApp {
                 .permission_store
                 .replace(
                     &repository_key.to_string_lossy(),
-                    smelt_core::permissions::store::PersistenceScope::Repository,
+                    smelt_permissions::store::PersistenceScope::Repository,
                     replacement,
                 )
                 .map_err(|error| format!("replace repository permissions: {error}"))?;
@@ -2026,14 +2024,14 @@ impl TuiApp {
         let (root, persistence_scope) = match scope {
             "workspace" => (
                 std::path::PathBuf::from(self.workspace.cwd()),
-                smelt_core::permissions::store::PersistenceScope::Workspace,
+                smelt_permissions::store::PersistenceScope::Workspace,
             ),
             "repository" => (
                 self.workspace
                     .repository_permission_context()
                     .map(|(key, _)| key.to_path_buf())
                     .ok_or_else(|| "repository permissions require a Git repository".to_string())?,
-                smelt_core::permissions::store::PersistenceScope::Repository,
+                smelt_permissions::store::PersistenceScope::Repository,
             ),
             _ => return Err(format!("unsupported permission scope `{scope}`")),
         };
@@ -2101,7 +2099,7 @@ impl TuiApp {
                         let result = add_persisted_grants(
                             &self.core.permission_store,
                             &root,
-                            smelt_core::permissions::store::PersistenceScope::Workspace,
+                            smelt_permissions::store::PersistenceScope::Workspace,
                             &option.grants,
                         );
                         if let Err(error) = result {
@@ -2116,7 +2114,7 @@ impl TuiApp {
                         let result = add_persisted_grants(
                             &self.core.permission_store,
                             &key,
-                            smelt_core::permissions::store::PersistenceScope::Repository,
+                            smelt_permissions::store::PersistenceScope::Repository,
                             &option.grants,
                         );
                         if let Err(error) = result {
@@ -2163,7 +2161,7 @@ impl TuiApp {
         self.active_permissions()
             .evaluate_tool_with_paths_and_approvals(
                 self.conversation.applied_mode().clone(),
-                smelt_core::permissions::ToolOrigin::Lua,
+                smelt_permissions::ToolOrigin::Lua,
                 &req.tool_name,
                 &req.args,
                 &req.tool_paths,
@@ -2245,7 +2243,7 @@ impl TuiApp {
     pub(crate) fn dispatch_scoped_control(
         &mut self,
         ctrl: SessionControl,
-        permissions: &smelt_core::permissions::Permissions,
+        permissions: &smelt_permissions::Permissions,
         pending: &mut Vec<PendingTool>,
     ) -> SessionControl {
         let should_queue = self
@@ -2273,7 +2271,7 @@ impl TuiApp {
 
                 let outcome = permissions.evaluate_tool_with_paths_and_approvals(
                     self.conversation.applied_mode().clone(),
-                    smelt_core::permissions::ToolOrigin::Lua,
+                    smelt_permissions::ToolOrigin::Lua,
                     &req.tool_name,
                     &req.args,
                     &req.tool_paths,
@@ -2347,14 +2345,14 @@ impl TuiApp {
 }
 
 fn confirm_grant_options(
-    grant_sets: Vec<Vec<smelt_core::permissions::PermissionGrant>>,
+    grant_sets: Vec<Vec<smelt_permissions::PermissionGrant>>,
     cwd: &str,
     repository: Option<(&std::path::Path, &std::path::Path)>,
     home: &std::path::Path,
 ) -> Vec<smelt_core::transcript_model::ConfirmApprovalOption> {
     let mut out = Vec::new();
     for (idx, grants) in grant_sets.into_iter().enumerate() {
-        let subject = smelt_core::permissions::PermissionGrant::display_subjects(&grants, home);
+        let subject = smelt_permissions::PermissionGrant::display_subjects(&grants, home);
         out.push(smelt_core::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_session"),
             label: format!("allow {subject} for this session"),
@@ -2405,10 +2403,10 @@ fn pretty_path(path: &std::path::Path, home: &std::path::Path) -> String {
 }
 
 fn add_persisted_grants(
-    store: &smelt_core::permissions::store::PermissionStore,
+    store: &smelt_permissions::store::PermissionStore,
     root: &std::path::Path,
-    scope: smelt_core::permissions::store::PersistenceScope,
-    grants: &[smelt_core::permissions::PermissionGrant],
+    scope: smelt_permissions::store::PersistenceScope,
+    grants: &[smelt_permissions::PermissionGrant],
 ) -> Result<(), String> {
     store
         .add_grants(&root.to_string_lossy(), scope, grants)

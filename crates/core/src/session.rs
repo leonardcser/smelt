@@ -991,7 +991,7 @@ fn new_session_id(now_ms: u64, pid: u32) -> String {
     hasher.update(now_ms.to_le_bytes());
     hasher.update(pid.to_le_bytes());
     hasher.update(counter.to_le_bytes());
-    crate::utils::hex_lower(&hasher.finalize())
+    smelt_text::hex_lower(&hasher.finalize())
 }
 
 #[cfg(test)]

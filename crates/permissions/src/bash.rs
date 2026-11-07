@@ -24,7 +24,7 @@ const MAX_GLOB_ENTRIES: usize = 4096;
 const MAX_BRACE_EXPANSIONS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ShellAnalysis {
+pub(crate) struct ShellAnalysis {
     pub risk: ShellRisk,
     pub paths: Vec<PathEffect>,
     pub commands: Vec<String>,
@@ -204,7 +204,7 @@ fn expand_word_pieces(
     out: &mut WordExpansion,
 ) {
     for piece in pieces {
-        let source_piece = smelt_buffer::text::slice(source, piece.start_index..piece.end_index);
+        let source_piece = smelt_text::slice(source, piece.start_index..piece.end_index);
         match &piece.piece {
             WordPiece::Text(value) => {
                 out.raw.push_str(value);
@@ -283,11 +283,11 @@ const MAX_SHELL_STATES: usize = 32;
 const MAX_SHELL_NESTING: usize = 32;
 const LOOP_UNROLL_LIMIT: usize = 4;
 
-pub(super) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnalysis {
+pub(crate) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnalysis {
     analyze_shell_command_in(command, base_dir, &smelt_paths::home_dir())
 }
 
-pub(super) fn analyze_shell_command_in(
+pub(crate) fn analyze_shell_command_in(
     command: &str,
     base_dir: &Path,
     home: &Path,
@@ -2687,11 +2687,11 @@ fn is_variable_name(name: &str) -> bool {
 }
 
 /// `cd` is always allowed at the command level; workspace path restriction handles the target.
-pub(super) fn is_cd_command(command: &str) -> bool {
+pub(crate) fn is_cd_command(command: &str) -> bool {
     shell_parse::is_single_cd(command)
 }
 
 /// Returns true if a Bash program redirects output to a real file.
-pub(super) fn has_output_redirection(command: &str) -> bool {
+pub(crate) fn has_output_redirection(command: &str) -> bool {
     shell_parse::has_output_redirection(command)
 }

@@ -44,8 +44,8 @@ fn exercise(text: &str, width: u8) {
     assert_eq!(boundaries.last().copied(), Some(plain.len()));
     for &(start, end) in &ranges {
         assert!(start <= end && end <= plain.len());
-        assert_eq!(smelt_buffer::text::snap(&plain, start), start);
-        assert_eq!(smelt_buffer::text::snap(&plain, end), end);
+        assert_eq!(smelt_text::snap(&plain, start), start);
+        assert_eq!(smelt_text::snap(&plain, end), end);
     }
 
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());

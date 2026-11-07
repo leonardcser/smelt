@@ -12,7 +12,7 @@ const INTERACTIVE_BINS: &[&str] = &[
 const GIT_INTERACTIVE_SUBCMDS: &[&str] = &["rebase", "add", "checkout", "clean", "stash"];
 
 fn check_interactive(command: &str) -> Option<&'static str> {
-    let cmds = crate::permissions::split_shell_commands(command);
+    let cmds = smelt_permissions::split_shell_commands(command);
     for subcmd in &cmds {
         let parts: Vec<&str> = subcmd.split_whitespace().collect();
         let bin = match parts.first() {
@@ -38,7 +38,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
 }
 
 fn check_shell_background_operator(command: &str) -> Option<String> {
-    let has = crate::permissions::split_shell_commands_with_ops(command)
+    let has = smelt_permissions::split_shell_commands_with_ops(command)
         .iter()
         .any(|(_, op)| op.as_deref() == Some("&"));
     if has {
@@ -63,14 +63,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "split",
         "Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`). Operators themselves are dropped.",
         &["command"],
-        |_, command: String| Ok(crate::permissions::split_shell_commands(&command)),
+        |_, command: String| Ok(smelt_permissions::split_shell_commands(&command)),
     )?;
     m.fn_(
         "split_with_ops",
         "Split `command` into subcommands and pair each with the operator that followed it. Returns rows of `{ command = string, op = string? }`.",
         &["command"],
         |lua, command: String| -> LuaResult<mlua::Table> {
-            let parts = crate::permissions::split_shell_commands_with_ops(&command);
+            let parts = smelt_permissions::split_shell_commands_with_ops(&command);
             let out = lua.create_table()?;
             for (i, (cmd, op)) in parts.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -100,7 +100,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Extract filesystem paths referenced by `command` for workspace permission checks.",
         &["command"],
         |_, command: String| -> LuaResult<Vec<String>> {
-            Ok(crate::permissions::workspace::extract_paths_from_command(
+            Ok(smelt_permissions::workspace::extract_paths_from_command(
                 &command,
             ))
         },
@@ -109,7 +109,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "has_output_redirection",
         "Return true when `command` contains shell output redirection such as `>` or `>>`.",
         &["command"],
-        |_, command: String| Ok(crate::permissions::shell_has_output_redirection(&command)),
+        |_, command: String| Ok(smelt_permissions::shell_has_output_redirection(&command)),
     )?;
     Ok(())
 }

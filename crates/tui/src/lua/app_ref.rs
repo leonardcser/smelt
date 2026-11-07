@@ -963,9 +963,9 @@ impl PlatformLuaHost<'_> {
     pub(crate) fn sync_permissions(
         &mut self,
         session_entries: Option<Vec<smelt_core::PermissionEntry>>,
-        path_grants: Option<Vec<smelt_core::permissions::SessionPathGrant>>,
-        workspace: Option<smelt_core::permissions::store::Replacement>,
-        repository: Option<smelt_core::permissions::store::Replacement>,
+        path_grants: Option<Vec<smelt_permissions::SessionPathGrant>>,
+        workspace: Option<smelt_permissions::store::Replacement>,
+        repository: Option<smelt_permissions::store::Replacement>,
     ) -> Result<(), String> {
         self.app
             .sync_permissions(session_entries, path_grants, workspace, repository)
@@ -980,7 +980,7 @@ impl PlatformLuaHost<'_> {
         self.app.revoke_permission(scope, tool, pattern)
     }
 
-    pub(crate) fn grant_session_path(&mut self, grant: smelt_core::permissions::SessionPathGrant) {
+    pub(crate) fn grant_session_path(&mut self, grant: smelt_permissions::SessionPathGrant) {
         self.app
             .grant_session_path(grant.mode, grant.tool, grant.access, grant.dir);
     }

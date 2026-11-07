@@ -8,18 +8,18 @@ const MAX_SYMLINKS: usize = 40;
 /// Extract local path effects from a shell command, returning the path strings
 /// used for approval matching.
 pub fn extract_paths_from_command(cmd: &str) -> Vec<String> {
-    crate::permissions::bash::analyze_shell_command(cmd, Path::new(""))
+    crate::bash::analyze_shell_command(cmd, Path::new(""))
         .paths
         .into_iter()
         .map(|p| p.raw_path)
         .collect()
 }
 
-pub(super) fn resolve_tool_path(path: &str, base_dir: &Path) -> PathResolution {
+pub(crate) fn resolve_tool_path(path: &str, base_dir: &Path) -> PathResolution {
     resolve_expanded_path(Path::new(path), base_dir)
 }
 
-pub(super) fn resolve_expanded_path(path: &Path, base_dir: &Path) -> PathResolution {
+pub(crate) fn resolve_expanded_path(path: &Path, base_dir: &Path) -> PathResolution {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -28,7 +28,7 @@ pub(super) fn resolve_expanded_path(path: &Path, base_dir: &Path) -> PathResolut
     resolve_filesystem_path(&path)
 }
 
-pub(super) fn resolve_shell_path(
+pub(crate) fn resolve_shell_path(
     raw_path: &str,
     expanded_path: Option<&str>,
     cwd: &PathResolution,
@@ -56,7 +56,7 @@ fn unresolved_path(path: &str, base_dir: &Path) -> PathResolution {
     PathResolution::Unresolved(smelt_paths::path::normalize(path))
 }
 
-pub(super) fn normalize_approval_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_approval_path(path: &Path) -> PathBuf {
     resolve_approval_path(path).path().to_path_buf()
 }
 
@@ -64,7 +64,7 @@ fn resolve_approval_path(path: &Path) -> PathResolution {
     resolve_approval_path_from(path, &smelt_paths::home_dir())
 }
 
-pub(super) fn resolve_approval_path_from(path: &Path, home: &Path) -> PathResolution {
+pub(crate) fn resolve_approval_path_from(path: &Path, home: &Path) -> PathResolution {
     let expanded = path
         .strip_prefix("~")
         .map(|rest| home.join(rest))
@@ -78,13 +78,13 @@ fn comparable_path(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-pub(super) fn paths_equivalent(a: &Path, b: &Path) -> bool {
+pub(crate) fn paths_equivalent(a: &Path, b: &Path) -> bool {
     comparable_path(a)
         .zip(comparable_path(b))
         .is_some_and(|(a, b)| a == b)
 }
 
-pub(super) fn path_prefix_matches(prefix: &Path, path: &Path) -> bool {
+pub(crate) fn path_prefix_matches(prefix: &Path, path: &Path) -> bool {
     comparable_path(path)
         .zip(comparable_path(prefix))
         .is_some_and(|(path, prefix)| path.starts_with(prefix))
@@ -93,7 +93,7 @@ pub(super) fn path_prefix_matches(prefix: &Path, path: &Path) -> bool {
 /// Resolve symlinks through the longest existing prefix and normalize a
 /// missing suffix. Only `NotFound` permits ancestor walking; every other I/O
 /// failure remains unresolved so permission checks fail closed.
-pub(super) fn resolve_filesystem_path(path: &Path) -> PathResolution {
+pub(crate) fn resolve_filesystem_path(path: &Path) -> PathResolution {
     resolve_filesystem_path_inner(path, 0)
 }
 
@@ -157,7 +157,7 @@ fn resolve_filesystem_path_inner(path: &Path, followed_symlinks: usize) -> PathR
 }
 
 #[cfg(test)]
-pub(super) fn is_in_workspace(path: &str, workspace: &Path) -> bool {
+pub(crate) fn is_in_workspace(path: &str, workspace: &Path) -> bool {
     let resolution = resolve_tool_path(path, workspace);
     resolution.is_resolved() && path_prefix_matches(workspace, resolution.path())
 }

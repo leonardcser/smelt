@@ -457,12 +457,12 @@ impl TuiApp {
         let runtime_failure =
             match self.resolve_lua_runtime_config_with(self.lua.desired(), &selections, None) {
                 Ok((mut next_runtime, next_managed_models)) => {
-                    let next_permissions = match smelt_core::permissions::resolve_permissions(
+                    let next_permissions = match smelt_permissions::resolve_permissions(
                         &self.lua.desired().permissions.rules,
                         &self.lua.desired().permissions.tool_defaults,
                         self.lua.desired().modes.behaviors.clone(),
-                        &next_runtime.settings,
-                        smelt_core::permissions::PermissionRuntimePaths {
+                        next_runtime.settings.workspace_policy(),
+                        smelt_permissions::PermissionRuntimePaths {
                             cwd: &target_cwd,
                             home: self.core.env.home(),
                         },
@@ -638,7 +638,7 @@ impl TuiApp {
             &candidate.desired().permissions.rules,
             &candidate.desired().permissions.tool_defaults,
             candidate.desired().modes.behaviors.clone(),
-            &next_runtime.settings,
+            next_runtime.settings.restrict_to_workspace,
             self.core.env.home(),
             self.core.permissions.paths_fn(),
         );
@@ -809,7 +809,7 @@ impl TuiApp {
         let (next, managed_models) = self.resolve_lua_runtime_config(&desired)?;
         let mut project = self.workspace.project_context();
         project.set_worktree_root(Some(std::path::Path::new(&next.settings.worktree_root)));
-        let permissions = smelt_core::permissions::PermissionContext::load(
+        let permissions = smelt_permissions::PermissionContext::load(
             &self.core.env.cwd(),
             project.clone(),
             &self.core.permission_store,
@@ -819,7 +819,7 @@ impl TuiApp {
             &desired.permissions.rules,
             &desired.permissions.tool_defaults,
             desired.modes.behaviors,
-            &next.settings,
+            next.settings.restrict_to_workspace,
             self.core.env.home(),
             self.core.permissions.paths_fn(),
         );
@@ -880,7 +880,7 @@ impl TuiApp {
     fn commit_lua_runtime_config(
         &mut self,
         mut next: smelt_core::RuntimeState,
-        permissions: smelt_core::permissions::PermissionResolution,
+        permissions: smelt_permissions::PermissionResolution,
     ) {
         let old_settings = self.core.config.settings.clone();
         let old_mode = self.core.config.mode.clone();

@@ -1,0 +1,18 @@
+[package]
+name = "smelt-worktree"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "Project and git worktree discovery, plus file-stamp change detection."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[dependencies]
+smelt-paths = { workspace = true }
+smelt-text = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+smelt-test-support = { workspace = true }
+tempfile = { workspace = true }

@@ -26,7 +26,7 @@ struct Analyzer<'a> {
     exec_mode: bool,
 }
 
-pub(super) fn analyze(words: &[ShellWord], state: &ShellState) -> CommandEffects {
+pub(crate) fn analyze(words: &[ShellWord], state: &ShellState) -> CommandEffects {
     let Some(command) = words.first().map(command_name) else {
         return CommandEffects::default();
     };

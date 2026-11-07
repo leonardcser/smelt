@@ -4,8 +4,8 @@
 
 use crate::content::tool_draft::{ToolArguments, ToolDraft, ToolDraftAppend};
 use crate::paused_timer::PausedTimer;
-use crate::permissions::PermissionGrant;
 use crate::transcript_content::{ContentId, ContentStore, SharedContentSlice, TranscriptContent};
+use smelt_permissions::PermissionGrant;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,7 +52,7 @@ pub struct ConfirmRequest {
     /// The provider that runs this tool natively, when it is not smelt's.
     pub provider: Option<String>,
     pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub tool_paths: Vec<crate::permissions::ToolPath>,
+    pub tool_paths: Vec<smelt_permissions::ToolPath>,
     /// A path callback failure carried to confirmation dispatch so a stale or
     /// synthetic permission request is denied instead of becoming pathless.
     pub tool_paths_error: Option<String>,

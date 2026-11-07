@@ -418,9 +418,9 @@ pub(super) fn register(
                 .clone()
                 .spawn_blocking_resolve(
                     task_id,
-                    move || match smelt_core::worktree::enter_or_create(
+                    move || match smelt_worktree::enter_or_create(
                         &cwd,
-                        smelt_core::worktree::WorktreeSpec {
+                        smelt_worktree::WorktreeSpec {
                             name: Some(&name),
                             base: base.as_deref(),
                             root: Some(&root),
@@ -443,7 +443,7 @@ pub(super) fn register(
         move |_, task_id: u64| -> LuaResult<()> {
             let (cwd, root) = crate::lua::with_session_host(|host| host.worktree_paths());
             worktrees_sink.clone().spawn_blocking_resolve(task_id, move || {
-                match smelt_core::worktree::list_managed(&cwd, Some(&root)) {
+                match smelt_worktree::list_managed(&cwd, Some(&root)) {
                     Ok(worktrees) => serde_json::json!({ "worktrees": worktrees.into_iter().map(|info| {
                         serde_json::json!({ "name": info.name, "branch": info.branch, "path": info.path.display().to_string(),
                             "base": info.base, "current": info.current })

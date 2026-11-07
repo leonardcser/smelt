@@ -2,11 +2,11 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use smelt_core::permissions::rules::{
+use smelt_permissions::rules::{
     ModeBehavior, RawModePerms, RawPerms, RawRuleSet, ToolDefaults, ToolEffectKind,
     ToolPermDefaults,
 };
-use smelt_core::permissions::{
+use smelt_permissions::{
     builtin_subpattern_parser, split_shell_commands, split_shell_commands_with_ops, Decision,
     PermissionRequirement, Permissions, ToolOrigin, ToolPath,
 };
@@ -149,7 +149,7 @@ fn origin(raw: u8) -> ToolOrigin {
     }
 }
 
-fn path_resolver() -> Arc<smelt_core::permissions::PathsFn> {
+fn path_resolver() -> Arc<smelt_permissions::PathsFn> {
     Arc::new(|name, args| match name {
         "read" | "edit" => args
             .get("path")
@@ -171,7 +171,7 @@ fn approval_candidates(input: &Input) -> Vec<String> {
     out
 }
 
-fn assert_outcome_shape(outcome: &smelt_core::permissions::PermissionOutcome) {
+fn assert_outcome_shape(outcome: &smelt_permissions::PermissionOutcome) {
     match outcome.decision {
         Decision::Allow | Decision::Deny | Decision::Error(_) => {
             assert!(outcome.missing_requirements.is_empty())

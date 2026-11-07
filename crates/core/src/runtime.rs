@@ -51,8 +51,8 @@ pub struct Core {
     pub workspace_files: crate::workspace_files::WorkspaceFiles,
     pub jobs: JobSupervisor,
     pub session_control: crate::session_control::SessionControl,
-    pub permissions: crate::permissions::PermissionsHandle,
-    pub permission_store: crate::permissions::store::PermissionStore,
+    pub permissions: smelt_permissions::PermissionsHandle,
+    pub permission_store: smelt_permissions::store::PermissionStore,
     /// MCP server registry. Shared `Arc` with the engine's
     /// `McpDispatcher`; `None` when the user declared no MCP servers.
     /// Lua introspection reads through this handle without locking out
@@ -80,7 +80,7 @@ impl Core {
         startup_overrides: StartupOverrides,
         engine: EngineHandle,
         frontend: FrontendKind,
-        permissions: crate::permissions::PermissionsHandle,
+        permissions: smelt_permissions::PermissionsHandle,
         clock: Arc<dyn engine::clock::Clock>,
         env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {
@@ -99,7 +99,7 @@ impl Core {
         let confirms_flag = confirms.is_clear_flag();
         let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.state_dir().clone());
         let permission_store =
-            crate::permissions::store::PermissionStore::new(env.state_dir().clone());
+            smelt_permissions::store::PermissionStore::new(env.state_dir().clone());
         let recent = crate::state::RecentStore::from_env(&env);
         let sessions = crate::session::SessionStorage::from_env(&env);
         // Read before the struct literal moves `config` into the field below.
@@ -145,9 +145,9 @@ impl Core {
 
     /// Read live session approvals and both persisted scopes as one coherent
     /// permission view for frontends and headless callers.
-    pub fn permission_snapshot(&self) -> Result<crate::permissions::PermissionSnapshot, String> {
+    pub fn permission_snapshot(&self) -> Result<smelt_permissions::PermissionSnapshot, String> {
         let cwd = self.env.cwd();
-        crate::permissions::read_snapshot(
+        smelt_permissions::read_snapshot(
             &self.permissions,
             &self.permission_store,
             &cwd,

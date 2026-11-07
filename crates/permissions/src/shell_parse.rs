@@ -7,7 +7,7 @@ use brush_parser::ast::{
 };
 use brush_parser::word::{self, WordPiece, WordPieceWithSource};
 use brush_parser::{tokenize_str, Parser, ParserOptions, SourceSpan, Token};
-use smelt_buffer::text::{byte_of_char, slice, trim_whitespace};
+use smelt_text::{byte_of_char, slice, trim_whitespace};
 
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
 const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
@@ -16,7 +16,7 @@ const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
 const MAX_BRACE_EXPANSION_DEPTH: usize = 8;
 const MIN_OVERFLOWING_DIGITS: usize = 19;
 
-pub(super) fn parse(command: &str) -> Option<ast::Program> {
+pub(crate) fn parse(command: &str) -> Option<ast::Program> {
     if has_untokenizable_heredoc(command) {
         return None;
     }
@@ -132,7 +132,7 @@ fn tokenize(command: &str) -> Option<Vec<Token>> {
 /// - An unterminated heredoc after an expansion opener, which makes it panic.
 ///
 /// Callers must not tokenize such text or allow it on the strength of rules.
-pub(super) fn has_untokenizable_heredoc(text: &str) -> bool {
+pub(crate) fn has_untokenizable_heredoc(text: &str) -> bool {
     let first_expansion = ["$(", "${", "$["]
         .iter()
         .filter_map(|opener| text.find(opener))
@@ -315,7 +315,7 @@ fn has_deep_brace_expansion(word: &str) -> bool {
     false
 }
 
-pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
+pub(crate) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
     if has_deep_arithmetic_parentheses(word)
         || has_deep_brace_expansion(word)
         || has_unrepresentable_expansion_number(word)
@@ -329,7 +329,7 @@ pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
     .ok()
 }
 
-pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
+pub(crate) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
     if has_deep_arithmetic_parentheses(word)
         || has_deep_brace_expansion(word)
         || has_unrepresentable_expansion_number(word)
@@ -343,13 +343,13 @@ pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>>
     .ok()
 }
 
-pub(super) enum BraceExpansion {
+pub(crate) enum BraceExpansion {
     Absent,
     Expanded(Vec<String>),
     Unresolved,
 }
 
-pub(super) fn brace_expansion(word: &str, limit: usize) -> BraceExpansion {
+pub(crate) fn brace_expansion(word: &str, limit: usize) -> BraceExpansion {
     if has_deep_brace_expansion(word) || has_unrepresentable_expansion_number(word) {
         return BraceExpansion::Unresolved;
     }
@@ -413,7 +413,7 @@ fn expand_brace_parts(parts: &[word::BraceExpressionOrText], limit: usize) -> Op
     Some(expanded)
 }
 
-pub(super) fn embedded_commands(pieces: &[WordPieceWithSource]) -> Vec<&str> {
+pub(crate) fn embedded_commands(pieces: &[WordPieceWithSource]) -> Vec<&str> {
     fn collect<'a>(pieces: &'a [WordPieceWithSource], out: &mut Vec<&'a str>) {
         for piece in pieces {
             match &piece.piece {
@@ -431,14 +431,14 @@ pub(super) fn embedded_commands(pieces: &[WordPieceWithSource]) -> Vec<&str> {
     out
 }
 
-pub(super) fn split_with_ops(command: &str) -> Vec<(String, Option<String>)> {
+pub(crate) fn split_with_ops(command: &str) -> Vec<(String, Option<String>)> {
     let Some(program) = parse(command) else {
         return tokenized_split(command);
     };
     split_program_with_ops(&program, command)
 }
 
-pub(super) fn split(command: &str) -> Vec<String> {
+pub(crate) fn split(command: &str) -> Vec<String> {
     let Some(program) = parse(command) else {
         return tokenized_split(command)
             .into_iter()
@@ -621,7 +621,7 @@ fn combine_spans(first: Option<SourceSpan>, second: Option<SourceSpan>) -> Optio
 }
 
 fn source_span_text<'a>(source: &'a str, span: &SourceSpan) -> &'a str {
-    let range = smelt_buffer::text::covering_grapheme_range(
+    let range = smelt_text::covering_grapheme_range(
         source,
         byte_of_char(source, span.start.index)..byte_of_char(source, span.end.index),
     );
@@ -851,12 +851,12 @@ fn tokenized_split(command: &str) -> Vec<(String, Option<String>)> {
             continue;
         };
         let operator_start =
-            smelt_buffer::text::snap_grapheme(command, byte_of_char(command, span.start.index));
+            smelt_text::snap_grapheme(command, byte_of_char(command, span.start.index));
         let text = trim_whitespace(slice(command, start..operator_start));
         if !text.is_empty() {
             out.push((text.to_string(), Some(separator)));
         }
-        start = smelt_buffer::text::ceil_grapheme(command, byte_of_char(command, span.end.index));
+        start = smelt_text::ceil_grapheme(command, byte_of_char(command, span.end.index));
     }
     let trailing = trim_whitespace(slice(command, start..command.len()));
     if !trailing.is_empty() {
@@ -865,7 +865,7 @@ fn tokenized_split(command: &str) -> Vec<(String, Option<String>)> {
     out
 }
 
-pub(super) fn has_output_redirection(command: &str) -> bool {
+pub(crate) fn has_output_redirection(command: &str) -> bool {
     parse(command).map_or_else(
         || tokenized_has_output_redirection(command),
         |program| program_has_output_redirection(&program),
@@ -1027,7 +1027,7 @@ fn tokenized_has_output_redirection(command: &str) -> bool {
     false
 }
 
-pub(super) fn is_single_cd(command: &str) -> bool {
+pub(crate) fn is_single_cd(command: &str) -> bool {
     let Some(program) = parse(command) else {
         return false;
     };

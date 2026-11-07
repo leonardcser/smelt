@@ -120,6 +120,15 @@ macro_rules! settings {
             )*
         }
 
+        impl ResolvedSettings {
+            pub fn workspace_policy(&self) -> smelt_permissions::WorkspacePolicy<'_> {
+                smelt_permissions::WorkspacePolicy {
+                    restrict_to_workspace: self.restrict_to_workspace,
+                    worktree_root: &self.worktree_root,
+                }
+            }
+        }
+
         impl Default for ResolvedSettings {
             fn default() -> Self {
                 Self {

@@ -1,4 +1,4 @@
-use crate::permissions::PermissionGrant;
+use crate::PermissionGrant;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
@@ -405,7 +405,7 @@ fn save_path(path: &Path, revision: u64, permissions: &PermissionSet) -> io::Res
         rules: permissions.rules.clone(),
     })
     .map_err(|error| io::Error::other(format!("serialize {}: {error}", path.display())))?;
-    crate::fs::write_atomic(path, &json).map_err(|error| path_error("write", path, error))
+    smelt_paths::write_atomic(path, &json).map_err(|error| path_error("write", path, error))
 }
 
 struct StoreLock {
@@ -919,9 +919,8 @@ mod tests {
         store
             .add_tool(&root, PersistenceScope::Workspace, "bash", vec![])
             .unwrap();
-        let project = crate::worktree::project_context(workspace.path(), None);
-        let prepared =
-            crate::permissions::PermissionContext::load(workspace.path(), project, &store).unwrap();
+        let project = smelt_worktree::project_context(workspace.path(), None);
+        let prepared = crate::PermissionContext::load(workspace.path(), project, &store).unwrap();
         assert!(prepared.is_current());
         assert!(store
             .clone()

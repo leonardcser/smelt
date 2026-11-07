@@ -233,7 +233,7 @@ impl HeadlessCompaction {
                 reply,
                 ..
             } => {
-                let evaluation = crate::permissions::claude_code::evaluate(
+                let evaluation = crate::claude_code_policy::evaluate(
                     &core.permissions.snapshot(),
                     Some(&cwd),
                     mode,

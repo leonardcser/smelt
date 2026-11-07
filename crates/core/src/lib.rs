@@ -9,6 +9,7 @@ static GLOBAL_ALLOCATOR: allocator::Allocator = allocator::ALLOCATOR;
 
 pub mod agents;
 pub mod allocator;
+pub mod claude_code_policy;
 pub mod commands;
 pub mod config;
 pub mod confirms;
@@ -19,7 +20,6 @@ pub mod custom_commands;
 pub mod diff;
 pub mod engine_client;
 pub mod file_ref;
-pub mod file_stamp;
 pub mod fs;
 pub mod fs_watch;
 pub mod fuzzy;
@@ -43,7 +43,6 @@ pub mod notebook;
 pub mod output_limit;
 pub mod path_display;
 pub(crate) mod paused_timer;
-pub mod permissions;
 pub mod process;
 pub mod processes;
 pub mod public_status;
@@ -65,7 +64,6 @@ pub mod trust;
 pub mod utils;
 pub mod working;
 pub mod workspace_files;
-pub mod worktree;
 
 #[cfg(test)]
 mod test_util;

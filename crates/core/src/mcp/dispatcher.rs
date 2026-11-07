@@ -1,16 +1,16 @@
 use crate::mcp::{args_summary, McpManager, McpToolDef};
-use crate::permissions::ToolOrigin;
 use engine::tools::{ToolContext, ToolDispatcher, ToolFuture, ToolResult};
 use protocol::{AgentMode, ToolEvaluation, ToolMetadata};
 use serde_json::Value;
+use smelt_permissions::ToolOrigin;
 use smelt_provider::{FunctionSchema, ToolDefinition};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub struct McpDispatcher {
     manager: Arc<McpManager>,
-    permissions: crate::permissions::PermissionsHandle,
-    turn_permissions: Mutex<HashMap<u64, Arc<crate::permissions::Permissions>>>,
+    permissions: smelt_permissions::PermissionsHandle,
+    turn_permissions: Mutex<HashMap<u64, Arc<smelt_permissions::Permissions>>>,
 }
 
 impl McpDispatcher {
@@ -23,7 +23,7 @@ impl McpDispatcher {
     /// immediately.
     pub fn new(
         manager: Arc<McpManager>,
-        permissions: crate::permissions::PermissionsHandle,
+        permissions: smelt_permissions::PermissionsHandle,
     ) -> Self {
         Self {
             manager,
@@ -39,7 +39,7 @@ impl McpDispatcher {
             .find(|d| d.qualified_name() == name)
     }
 
-    fn permissions_for_turn(&self, turn_id: u64) -> Arc<crate::permissions::Permissions> {
+    fn permissions_for_turn(&self, turn_id: u64) -> Arc<smelt_permissions::Permissions> {
         self.turn_permissions
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -149,8 +149,8 @@ impl ToolDispatcher for McpDispatcher {
 mod tests {
     use super::*;
     use crate::mcp::{McpServer, McpServerConfig, McpTransportConfig};
-    use crate::permissions::rules::{RawPerms, RawRuleSet, ToolDefaults};
     use protocol::Decision;
+    use smelt_permissions::rules::{RawPerms, RawRuleSet, ToolDefaults};
     use std::sync::{Mutex, RwLock};
     use std::time::Duration;
 
@@ -183,7 +183,7 @@ mod tests {
         })
     }
 
-    fn permissions_for_mcp(decision: Decision) -> crate::permissions::Permissions {
+    fn permissions_for_mcp(decision: Decision) -> smelt_permissions::Permissions {
         let mut raw = RawPerms::default();
         let rules = RawRuleSet {
             allow: (decision == Decision::Allow)
@@ -200,13 +200,13 @@ mod tests {
                 .collect(),
         };
         raw.default.patterns.insert("mcp".into(), rules);
-        crate::permissions::Permissions::from_raw(&raw, &ToolDefaults::default())
+        smelt_permissions::Permissions::from_raw(&raw, &ToolDefaults::default())
     }
 
     #[test]
     fn dispatcher_observes_replaced_runtime_permissions() {
         let permissions =
-            crate::permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Deny));
+            smelt_permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Deny));
         let dispatcher = McpDispatcher::new(manager_with_tool(), permissions.clone());
         let mode = AgentMode::normal();
         assert!(!dispatcher.is_visible(0, "demo_read", mode.clone()));
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn dispatcher_pins_static_permissions_for_each_turn() {
         let permissions =
-            crate::permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Allow));
+            smelt_permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Allow));
         let dispatcher = McpDispatcher::new(manager_with_tool(), permissions.clone());
         let mode = AgentMode::normal();
         dispatcher.begin_turn(7);

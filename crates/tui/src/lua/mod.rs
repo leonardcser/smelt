@@ -527,13 +527,13 @@ pub struct LuaLoadManifest {
 #[derive(Clone)]
 pub struct ModeDeclarations {
     pub cycle: Vec<protocol::AgentMode>,
-    pub behaviors: std::collections::HashMap<String, smelt_core::permissions::ModeBehavior>,
+    pub behaviors: std::collections::HashMap<String, smelt_permissions::ModeBehavior>,
 }
 
 #[derive(Clone)]
 pub struct PermissionDeclarations {
-    pub rules: smelt_core::permissions::rules::RawPerms,
-    pub tool_defaults: smelt_core::permissions::rules::ToolDefaults,
+    pub rules: smelt_permissions::rules::RawPerms,
+    pub tool_defaults: smelt_permissions::rules::ToolDefaults,
 }
 
 #[derive(Clone)]
@@ -846,7 +846,7 @@ impl LuaRuntime {
 
     pub fn mode_behaviors(
         &self,
-    ) -> std::collections::HashMap<String, smelt_core::permissions::ModeBehavior> {
+    ) -> std::collections::HashMap<String, smelt_permissions::ModeBehavior> {
         self.core.mode_behaviors()
     }
 }
@@ -1638,7 +1638,7 @@ mod tests {
 
     #[test]
     fn headless_lua_policy_paths_cover_registered_file_and_shell_tools() {
-        use smelt_core::permissions::{
+        use smelt_permissions::{
             resolve_permissions, store::PermissionStore, PermissionRuntimePaths, PermissionsHandle,
             ToolOrigin,
         };
@@ -1689,7 +1689,7 @@ mod tests {
                 &lua.permission_rules_snapshot().unwrap(),
                 &lua.tool_defaults(),
                 lua.mode_behaviors(),
-                &smelt_core::config::ResolvedSettings::default(),
+                smelt_permissions::WorkspacePolicy::default(),
                 PermissionRuntimePaths {
                     cwd: &cwd,
                     home: env.home(),
@@ -1822,9 +1822,7 @@ mod tests {
             smelt_core::StartupOverrides::default(),
             engine,
             smelt_core::FrontendKind::Headless,
-            smelt_core::permissions::PermissionsHandle::new(
-                smelt_core::permissions::Permissions::load(),
-            ),
+            smelt_permissions::PermissionsHandle::new(smelt_permissions::Permissions::load()),
             clock,
             env,
         );

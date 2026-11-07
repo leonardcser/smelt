@@ -932,7 +932,7 @@ pub enum AppFocus {
 pub(crate) struct TurnState {
     pub(crate) turn_id: u64,
     pub(crate) pending: Vec<PendingTool>,
-    pub(crate) permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+    pub(crate) permissions: std::sync::Arc<smelt_permissions::Permissions>,
     pub(crate) submitted_history_idx: usize,
     pub(crate) rewind_history_idx: Option<usize>,
     pub(crate) assistant_output_started: bool,
@@ -1905,7 +1905,7 @@ impl TuiApp {
         config: smelt_core::RuntimeState,
         startup_overrides: smelt_core::StartupOverrides,
         engine: EngineHandle,
-        permissions: smelt_core::permissions::PermissionsHandle,
+        permissions: smelt_permissions::PermissionsHandle,
         shared_session: Arc<Mutex<Option<SharedSessionState>>>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,

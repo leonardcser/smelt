@@ -9,8 +9,34 @@ use protocol::AgentMode;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Evaluate a smelt tool the way a native frontend does: file arguments
+/// become tool paths and the call is checked against the policy.
+fn native(
+    permissions: &Permissions,
+    cwd: Option<&Path>,
+    mode: AgentMode,
+    tool: &str,
+    args: &HashMap<String, serde_json::Value>,
+) -> Decision {
+    let key = if tool == "edit_notebook" {
+        "notebook_path"
+    } else {
+        "file_path"
+    };
+    let paths: Vec<ToolPath> = if tool == "bash" {
+        Vec::new()
+    } else {
+        args.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToolPath::file)
+            .into_iter()
+            .collect()
+    };
+    permissions.evaluate_in_directory(cwd, None, mode, tool, args, &paths)
+}
+
 #[test]
-fn claude_code_native_file_tools_honor_policy_and_workspace() {
+fn native_file_tools_honor_policy_and_workspace() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let inside_file = root.path().join("inside.txt");
@@ -29,65 +55,52 @@ fn claude_code_native_file_tools_honor_policy_and_workspace() {
     let permissions = permissions_from_mode(mode, true, root.path().into());
     let args = |path: &Path| HashMap::from([("file_path".into(), serde_json::json!(path))]);
     assert_eq!(
-        super::claude_code::evaluate(
+        native(
             &permissions,
             None,
             normal(),
-            "Read",
-            &args(&inside_file),
-            None
-        )
-        .decision,
+            "read_file",
+            &args(&inside_file)
+        ),
         Decision::Allow
     );
     assert_eq!(
-        super::claude_code::evaluate(
+        native(
             &permissions,
             None,
             normal(),
-            "Read",
-            &args(&outside_file),
-            None
-        )
-        .decision,
+            "read_file",
+            &args(&outside_file)
+        ),
         Decision::Ask
     );
-    for name in ["Write", "Edit", "MultiEdit"] {
+    for name in ["write_file", "edit_file"] {
         assert_eq!(
-            super::claude_code::evaluate(
-                &permissions,
-                None,
-                plan(),
-                name,
-                &args(&inside_file),
-                None
-            )
-            .decision,
+            native(&permissions, None, plan(), name, &args(&inside_file)),
             Decision::Deny
         );
     }
     let args = HashMap::from([("notebook_path".into(), serde_json::json!(inside_file))]);
     assert_eq!(
-        super::claude_code::evaluate(&permissions, None, plan(), "NotebookEdit", &args, None)
-            .decision,
+        native(&permissions, None, plan(), "edit_notebook", &args),
         Decision::Deny
     );
 }
 
 #[test]
-fn claude_code_plan_grants_do_not_allow_workspace_writes_or_path_escapes() {
+fn plan_directory_grants_do_not_allow_workspace_writes_or_path_escapes() {
     let root = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir().unwrap();
     let mut mode = mode_perms(HashMap::new(), &[]);
     mode.effects.write = Some(Decision::Deny);
     let permissions = PermissionsHandle::new(permissions_from_mode(mode, true, root.path().into()));
-    super::claude_code::grant_plan_artifacts(&permissions, artifacts.path());
-    let directory = engine::claude_code_plan_directory(artifacts.path());
+    let directory = artifacts.path().join("plans");
+    permissions.grant_plan_directory(&directory);
     std::fs::create_dir_all(&directory).unwrap();
     let artifact = directory.join("plan.md");
     let outside = root.path().join("workspace.txt");
     std::fs::write(&outside, "workspace").unwrap();
-    for tool in ["Write", "Edit", "MultiEdit"] {
+    for tool in ["write_file", "edit_file"] {
         for (path, mode, expected) in [
             (artifact.clone(), plan(), Decision::Allow),
             (artifact.clone(), normal(), Decision::Deny),
@@ -96,15 +109,7 @@ fn claude_code_plan_grants_do_not_allow_workspace_writes_or_path_escapes() {
         ] {
             let args = HashMap::from([("file_path".into(), serde_json::json!(path))]);
             assert_eq!(
-                super::claude_code::evaluate(
-                    &permissions.snapshot(),
-                    None,
-                    mode,
-                    tool,
-                    &args,
-                    None
-                )
-                .decision,
+                native(&permissions.snapshot(), None, mode, tool, &args),
                 expected
             );
         }
@@ -115,15 +120,7 @@ fn claude_code_plan_grants_do_not_allow_workspace_writes_or_path_escapes() {
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         let args = HashMap::from([("file_path".into(), serde_json::json!(link))]);
         assert_eq!(
-            super::claude_code::evaluate(
-                &permissions.snapshot(),
-                None,
-                plan(),
-                "Write",
-                &args,
-                None
-            )
-            .decision,
+            native(&permissions.snapshot(), None, plan(), "write_file", &args),
             Decision::Deny
         );
     }
@@ -197,7 +194,7 @@ fn scoped_write_grants_use_central_policy_and_preserve_explicit_denies() {
 }
 
 #[test]
-fn claude_code_native_bash_uses_smelt_command_rules() {
+fn native_bash_uses_command_rules() {
     let permissions = perms_with_bash(&["git status*"], &[], &["rm *"]);
     for (command, expected) in [
         ("git status --short", Decision::Allow),
@@ -206,8 +203,7 @@ fn claude_code_native_bash_uses_smelt_command_rules() {
     ] {
         let args = HashMap::from([("command".into(), serde_json::json!(command))]);
         assert_eq!(
-            super::claude_code::evaluate(&permissions, None, normal(), "Bash", &args, None)
-                .decision,
+            native(&permissions, None, normal(), "bash", &args),
             expected
         );
     }
@@ -316,9 +312,9 @@ fn mode_perms(tools: HashMap<String, Decision>, buckets: &[(&str, RuleSet)]) -> 
 }
 
 /// Mirrors the `subpattern_parser = "shell"` wiring from `tools/bash.lua`.
-fn bash_parser_map() -> HashMap<String, std::sync::Arc<crate::permissions::SubpatternParserFn>> {
+fn bash_parser_map() -> HashMap<String, std::sync::Arc<crate::SubpatternParserFn>> {
     let mut m = HashMap::new();
-    if let Some(p) = crate::permissions::builtin_subpattern_parser("shell") {
+    if let Some(p) = crate::builtin_subpattern_parser("shell") {
         m.insert("bash".to_string(), p);
     }
     m
@@ -388,7 +384,7 @@ fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
 
 /// Stub `paths_fn` mirroring production `paths_for_workspace` callbacks
 /// for structured file/path tools.
-fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
+fn stub_paths_fn() -> std::sync::Arc<crate::PathsFn> {
     std::sync::Arc::new(|name, args| match name {
         "read_file" | "write_file" | "edit_file" => {
             let p = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
@@ -4815,13 +4811,12 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
             vec!["git *".into()],
         )
         .unwrap();
-    let settings = crate::config::ResolvedSettings::default();
     let handle = PermissionsHandle::from_resolution(
         resolve_permissions(
             &RawPerms::default(),
             &ToolDefaults::default(),
             HashMap::new(),
-            &settings,
+            WorkspacePolicy::default(),
             PermissionRuntimePaths {
                 cwd: first.path(),
                 home: first.path(),
@@ -4847,7 +4842,7 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
             &RawPerms::default(),
             &ToolDefaults::default(),
             HashMap::new(),
-            &settings,
+            WorkspacePolicy::default(),
             PermissionRuntimePaths {
                 cwd: second.path(),
                 home: second.path(),
@@ -4884,7 +4879,7 @@ fn permission_snapshot_combines_session_workspace_and_repository_state() {
             vec!["cargo *".into()],
         )
         .unwrap();
-    let project = crate::worktree::project_context(repository.path(), None);
+    let project = smelt_worktree::project_context(repository.path(), None);
     let repository_key = project.repository_key.unwrap();
     store
         .add_tool(
@@ -4933,13 +4928,12 @@ fn active_permission_snapshot_refreshes_persisted_additions_and_removals() {
     let state = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let store = store::PermissionStore::new(state.path().to_path_buf());
-    let settings = crate::config::ResolvedSettings::default();
     let handle = PermissionsHandle::from_resolution(
         resolve_permissions(
             &RawPerms::default(),
             &ToolDefaults::default(),
             HashMap::new(),
-            &settings,
+            WorkspacePolicy::default(),
             PermissionRuntimePaths {
                 cwd: workspace.path(),
                 home: workspace.path(),
@@ -5011,7 +5005,7 @@ fn persisted_refresh_error_fails_closed_without_discarding_session_grants() {
             &RawPerms::default(),
             &ToolDefaults::default(),
             HashMap::new(),
-            &crate::config::ResolvedSettings::default(),
+            WorkspacePolicy::default(),
             PermissionRuntimePaths {
                 cwd: workspace.path(),
                 home: workspace.path(),
@@ -5194,7 +5188,7 @@ fn active_mcp_permission_snapshot_refreshes_persisted_grant() {
             &RawPerms::default(),
             &ToolDefaults::default(),
             HashMap::new(),
-            &crate::config::ResolvedSettings::default(),
+            WorkspacePolicy::default(),
             PermissionRuntimePaths {
                 cwd: workspace.path(),
                 home: workspace.path(),
@@ -5387,7 +5381,7 @@ fn approvals_is_approved_ignores_cd_prefix_for_bash_patterns() {
 
 #[test]
 fn merge_mode_combines_default_and_mode_tools_and_patterns() {
-    use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
+    use crate::rules::{merge_mode, RawModePerms, RawRuleSet};
     let default = RawModePerms {
         tools: RawRuleSet {
             allow: vec!["read".into()],
@@ -5433,7 +5427,7 @@ fn merge_mode_combines_default_and_mode_tools_and_patterns() {
 
 #[test]
 fn merge_mode_handles_subcommand_present_only_in_default() {
-    use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
+    use crate::rules::{merge_mode, RawModePerms, RawRuleSet};
     let default = RawModePerms {
         tools: RawRuleSet::default(),
         patterns: HashMap::from([(
@@ -5457,7 +5451,7 @@ fn merge_mode_handles_subcommand_present_only_in_default() {
 
 #[test]
 fn merge_mode_handles_subcommand_present_only_in_mode() {
-    use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
+    use crate::rules::{merge_mode, RawModePerms, RawRuleSet};
     let default = RawModePerms {
         tools: RawRuleSet::default(),
         patterns: HashMap::new(),
@@ -5506,7 +5500,7 @@ fn tool_perm_defaults_for_mode_falls_back_to_none_when_unset() {
 
 #[test]
 fn store_compile_rules_separates_directory_rules_from_tools() {
-    use crate::permissions::store::{compile_rules, Rule};
+    use crate::store::{compile_rules, Rule};
     let rules = vec![
         Rule {
             tool: "bash".into(),
@@ -5530,7 +5524,7 @@ fn store_compile_rules_separates_directory_rules_from_tools() {
 
 #[test]
 fn store_compile_rules_treats_wildcard_as_blanket() {
-    use crate::permissions::store::{compile_rules, Rule};
+    use crate::store::{compile_rules, Rule};
     let rules = vec![Rule {
         tool: "bash".into(),
         patterns: vec!["*".into(), "ls *".into()],
@@ -5541,7 +5535,7 @@ fn store_compile_rules_treats_wildcard_as_blanket() {
 
 #[test]
 fn store_compile_rules_rejects_invalid_glob_patterns() {
-    use crate::permissions::store::{compile_rules, Rule};
+    use crate::store::{compile_rules, Rule};
     let rules = vec![Rule {
         tool: "bash".into(),
         patterns: vec!["[unclosed".into(), "ls *".into()],
@@ -5552,7 +5546,7 @@ fn store_compile_rules_rejects_invalid_glob_patterns() {
 
 #[test]
 fn store_compile_rules_handles_empty_rules() {
-    use crate::permissions::store::{compile_rules, Rule};
+    use crate::store::{compile_rules, Rule};
     let rules: Vec<Rule> = vec![];
     let compiled = compile_rules(&rules).unwrap();
     assert!(compiled.tools.is_empty());

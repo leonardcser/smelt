@@ -3554,11 +3554,13 @@ dependencies = [
  "smelt-engine",
  "smelt-paths",
  "smelt-perf 0.3.0",
+ "smelt-permissions",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-test-support",
  "smelt-tui",
+ "smelt-worktree",
  "tempfile",
  "tokio",
  "vt100",
@@ -3637,11 +3639,14 @@ dependencies = [
  "smelt-lua-doc-derive",
  "smelt-paths",
  "smelt-perf 0.3.0",
+ "smelt-permissions",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-store 0.0.0-dev (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
  "smelt-test-support",
+ "smelt-text",
+ "smelt-worktree",
  "syntect",
  "tempfile",
  "term-maths",
@@ -3729,6 +3734,22 @@ version = "0.3.0"
 name = "smelt-perf"
 version = "0.3.0"
 source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
+
+[[package]]
+name = "smelt-permissions"
+version = "0.0.0-dev"
+dependencies = [
+ "brush-parser",
+ "glob",
+ "serde",
+ "serde_json",
+ "smelt-paths",
+ "smelt-protocol 0.0.0-dev",
+ "smelt-test-support",
+ "smelt-text",
+ "smelt-worktree",
+ "tempfile",
+]
 
 [[package]]
 name = "smelt-protocol"
@@ -3883,16 +3904,29 @@ dependencies = [
  "smelt-mermaid",
  "smelt-paths",
  "smelt-perf 0.3.0",
+ "smelt-permissions",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-term",
  "smelt-test-support",
+ "smelt-worktree",
  "tempfile",
  "tiny-skia",
  "tokio",
  "tokio-util",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "smelt-worktree"
+version = "0.0.0-dev"
+dependencies = [
+ "sha2",
+ "smelt-paths",
+ "smelt-test-support",
+ "smelt-text",
+ "tempfile",
 ]
 
 [[package]]

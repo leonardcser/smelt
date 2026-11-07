@@ -398,7 +398,7 @@ impl TuiApp {
                     && session_id == self.conversation.session().id
                     && !self.session_is_read_only()
                 {
-                    smelt_core::permissions::claude_code::evaluate(
+                    smelt_core::claude_code_policy::evaluate(
                         &self.active_permissions(),
                         Some(&cwd),
                         mode,

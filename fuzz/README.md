@@ -6,7 +6,7 @@ Eighteen targets covering distinct surfaces:
 | ------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `smelt_loop`              | TUI event loop (terminal + engine events)                                    | structured `Scenario` ops, swarm weighting, and macro workloads                                 |
 | `lua_loop`                | Lua FFI bindings (`smelt.*` API)                                             | structured `LuaScenario` ops + FFI ledger oracle                                                |
-| `text_ops`                | `smelt_buffer::text` UTF-8 helpers                                           | direct calls + reference-model differential                                                     |
+| `text_ops`                | `smelt_text` UTF-8 helpers                                           | direct calls + reference-model differential                                                     |
 | `attached_ops`            | `smelt_buffer::attached::AttachedTextMut`                                    | segment-based reference model + invariant check                                                 |
 | `cache_invariance`        | Anthropic prompt-cache prefix stability                                      | random history + `cache_control`-aware byte diff                                                |
 | `openai_cache_invariance` | OpenAI / aux-model prompt-cache stability                                    | random history + `prompt_cache_key`-aware byte diff                                             |

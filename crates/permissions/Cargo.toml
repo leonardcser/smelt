@@ -1,0 +1,23 @@
+[package]
+name = "smelt-permissions"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "Tool permission policy: rules, shell command analysis, approvals, and persisted grants."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[dependencies]
+smelt-protocol = { workspace = true }
+smelt-paths = { workspace = true }
+smelt-text = { workspace = true }
+smelt-worktree = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+glob = { workspace = true }
+brush-parser = "0.4.0"
+
+[dev-dependencies]
+smelt-test-support = { workspace = true }
+tempfile = { workspace = true }

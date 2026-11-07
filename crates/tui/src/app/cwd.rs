@@ -14,11 +14,11 @@ pub(crate) enum SessionCwdRestore {
 
 pub(super) struct PreparedLuaInputs {
     pub(super) cwd: std::path::PathBuf,
-    pub(super) project: smelt_core::worktree::ProjectContext,
+    pub(super) project: smelt_worktree::ProjectContext,
     pub(super) prompt_inputs: crate::prompt_inputs::PromptInputs,
     pub(super) skills: std::sync::Arc<engine::SkillLoader>,
     pub(super) system_prompt_read_error: Option<String>,
-    pub(super) permissions: smelt_core::permissions::PermissionContext,
+    pub(super) permissions: smelt_permissions::PermissionContext,
 }
 
 pub(super) type LuaPreparation = std::sync::mpsc::Receiver<Result<PreparedLuaInputs, String>>;
@@ -30,7 +30,7 @@ pub(super) enum PreparedWorkspace {
 }
 
 impl PreparedWorkspace {
-    pub(super) fn permissions(&self) -> &smelt_core::permissions::PermissionContext {
+    pub(super) fn permissions(&self) -> &smelt_permissions::PermissionContext {
         match self {
             Self::Context(prepared) => &prepared.permissions,
             Self::Cwd(prepared) => &prepared.permissions,
@@ -43,24 +43,24 @@ pub(super) struct PreparedProjectContext {
     target: std::path::PathBuf,
     root: std::path::PathBuf,
     pub(super) cwd: std::path::PathBuf,
-    pub(super) project: smelt_core::worktree::ProjectSnapshot,
-    pub(super) permissions: smelt_core::permissions::PermissionContext,
+    pub(super) project: smelt_worktree::ProjectSnapshot,
+    pub(super) permissions: smelt_permissions::PermissionContext,
 }
 
 impl PreparedProjectContext {
     fn load(
         target: std::path::PathBuf,
         root: std::path::PathBuf,
-        store: smelt_core::permissions::store::PermissionStore,
+        store: smelt_permissions::store::PermissionStore,
     ) -> Result<Self, String> {
         let cwd = std::fs::canonicalize(&target)
             .map_err(|error| format!("resolve cwd {}: {error}", target.display()))?;
         if !cwd.is_dir() {
             return Err(format!("cwd is not a directory: {}", cwd.display()));
         }
-        let project = smelt_core::worktree::ProjectSnapshot::discover(&cwd, Some(&root));
+        let project = smelt_worktree::ProjectSnapshot::discover(&cwd, Some(&root));
         let permissions =
-            smelt_core::permissions::PermissionContext::load(&cwd, project.context.clone(), &store)
+            smelt_permissions::PermissionContext::load(&cwd, project.context.clone(), &store)
                 .map_err(|error| format!("load persisted permissions: {error}"))?;
         Ok(Self {
             target,
@@ -180,7 +180,7 @@ pub(crate) struct WorkspaceState {
     #[cfg(unix)]
     cwd_directory: Option<std::fs::File>,
     home: std::path::PathBuf,
-    context: smelt_core::worktree::ProjectContext,
+    context: smelt_worktree::ProjectContext,
     /// The inputs the installed context was prepared from, reused for later
     /// requests while the files they were read from are unchanged.
     prepared: Option<PreparedProjectContext>,
@@ -195,7 +195,7 @@ impl WorkspaceState {
         worktree_root: &std::path::Path,
     ) -> Self {
         let context =
-            smelt_core::worktree::project_context(std::path::Path::new(&cwd), Some(worktree_root));
+            smelt_worktree::project_context(std::path::Path::new(&cwd), Some(worktree_root));
         let worktree_path = worktree_display_path(&context, &home);
         Self {
             #[cfg(unix)]
@@ -221,7 +221,7 @@ impl WorkspaceState {
         &self.context.project_name
     }
 
-    pub(super) fn project_context(&self) -> smelt_core::worktree::ProjectContext {
+    pub(super) fn project_context(&self) -> smelt_worktree::ProjectContext {
         self.context.clone()
     }
 
@@ -285,7 +285,7 @@ impl WorkspaceState {
     }
 
     pub(crate) fn refresh(&mut self, worktree_root: &std::path::Path) {
-        let context = smelt_core::worktree::project_context(self.cwd_path(), Some(worktree_root));
+        let context = smelt_worktree::project_context(self.cwd_path(), Some(worktree_root));
         self.install_context(context);
     }
 
@@ -293,7 +293,7 @@ impl WorkspaceState {
         smelt_core::context_notes::cwd_note_for_project(self.cwd_path(), &self.context)
     }
 
-    pub(super) fn install_context(&mut self, context: smelt_core::worktree::ProjectContext) {
+    pub(super) fn install_context(&mut self, context: smelt_worktree::ProjectContext) {
         self.prepared = None;
         self.worktree_path = worktree_display_path(&context, &self.home);
         self.context = context;
@@ -350,7 +350,7 @@ impl WorkspaceState {
 }
 
 fn worktree_display_path(
-    context: &smelt_core::worktree::ProjectContext,
+    context: &smelt_worktree::ProjectContext,
     home: &std::path::Path,
 ) -> String {
     if !context.managed_worktree {
@@ -452,7 +452,7 @@ impl TuiApp {
                     &desired.permissions.rules,
                     &desired.permissions.tool_defaults,
                     desired.modes.behaviors.clone(),
-                    &self.core.config.settings,
+                    self.core.config.settings.restrict_to_workspace,
                     self.core.env.home(),
                     self.core.permissions.paths_fn(),
                 );
@@ -1044,7 +1044,7 @@ mod tests {
                     .permission_store
                     .add_tool(
                         &target.to_string_lossy(),
-                        smelt_core::permissions::store::PersistenceScope::Workspace,
+                        smelt_permissions::store::PersistenceScope::Workspace,
                         "bash",
                         vec![],
                     )
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[test]
     fn worktree_display_path_is_relative_to_project_root() {
-        let context = smelt_core::worktree::ProjectContext {
+        let context = smelt_worktree::ProjectContext {
             project_name: "smelt".into(),
             active_root: std::path::PathBuf::from("/home/dev/dev/smelt/.worktrees/test"),
             branch: "test".into(),

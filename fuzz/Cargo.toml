@@ -23,6 +23,8 @@ arbitrary = { version = "1", features = ["derive"] }
 smelt-tui = { path = "../crates/tui", features = ["harness"] }
 smelt-edit = { path = "../crates/edit" }
 smelt-core = { path = "../crates/core" }
+smelt-permissions = { path = "../crates/permissions" }
+smelt-text = { path = "../crates/text" }
 smelt-buffer = { path = "../crates/buffer" }
 smelt-style = { path = "../crates/style" }
 smelt-ansi = { path = "../crates/ansi" }

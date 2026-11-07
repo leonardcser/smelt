@@ -13,7 +13,7 @@
 use smelt_core::lua::{
     LuaRuntime, LuaShared, TaskDriveOutput, ToolCallIds, ToolEnv, ToolExecResult, ToolVisibility,
 };
-use smelt_core::permissions::ToolEffectKind;
+use smelt_permissions::ToolEffectKind;
 use smelt_provider::{
     CacheConfig, CancellationToken, ChatOptions, ChatProvider, ChatRequest, FunctionSchema,
     ProviderClient, ProviderKind, ToolDefinition,

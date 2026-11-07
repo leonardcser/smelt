@@ -9,6 +9,17 @@ use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
 
 /// Byte offset → terminal column, snapped to the start of its grapheme.
+/// Lowercase hexadecimal encoding of `bytes`.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
 pub fn byte_to_cell(line: &str, byte: usize) -> usize {
     let byte = snap_grapheme(line, byte);
     cell_width::text_width(&line[..byte])

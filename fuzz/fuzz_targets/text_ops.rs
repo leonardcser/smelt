@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Direct fuzzing of `smelt_buffer::text` - the single canonical module
+//! Direct fuzzing of `smelt_text` - the single canonical module
 //! for UTF-8 boundary handling. Three of the bugs caught by the TUI
 //! fuzz target traced back to stale byte offsets feeding these helpers
 //! (motions `find_char`, vim visual_anchor swap, completer anchor across
@@ -23,7 +23,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use smelt_buffer::text::{
+use smelt_text::{
     byte_of_char, byte_to_cell, cell_to_byte, char_pos, insert, insert_str, line_start_offsets,
     next_char_boundary, prev_char_boundary, replace_range, slice, snap,
 };

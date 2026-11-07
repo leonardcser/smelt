@@ -270,7 +270,7 @@ pub struct LuaShared {
     /// Wakes the main loop when a coroutine resume payload is queued.
     pub wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
     pub providers: Mutex<Vec<crate::config::ProviderConfig>>,
-    pub permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
+    pub permission_rules: Mutex<Option<smelt_permissions::rules::RawPerms>>,
     pub mcp_configs: Mutex<HashMap<String, crate::mcp::McpServerConfig>>,
     /// Stable session service used by committed LSP calls.
     pub lsp: Arc<crate::lsp::LspManager>,
@@ -280,7 +280,7 @@ pub struct LuaShared {
     pub settings_overrides: Mutex<HashMap<String, crate::config::SettingValue>>,
     pub defaults: Mutex<crate::config::DefaultsConfig>,
     pub remember: Mutex<crate::config::RememberConfig>,
-    pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
+    pub tool_defaults: Mutex<smelt_permissions::rules::ToolDefaults>,
     pub messages: Arc<Mutex<crate::messages::Messages>>,
     /// Session-long clock used by transcript rendering without re-entering the
     /// scoped frontend host. Shared by replacement Lua generations.
@@ -469,7 +469,7 @@ impl Default for LuaShared {
             settings_overrides: Mutex::new(HashMap::new()),
             defaults: Mutex::new(crate::config::DefaultsConfig::default()),
             remember: Mutex::new(crate::config::RememberConfig::default()),
-            tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
+            tool_defaults: Mutex::new(smelt_permissions::rules::ToolDefaults::default()),
             messages: Arc::new(Mutex::new(crate::messages::Messages::new())),
             clock: Arc::new(Mutex::new(Arc::new(engine::clock::RealClock))),
             disabled_modules: Mutex::new(HashSet::new()),
@@ -853,7 +853,7 @@ impl LuaShared {
             *remember = crate::config::RememberConfig::default();
         }
         if let Ok(mut defaults) = self.tool_defaults.lock() {
-            *defaults = crate::permissions::rules::ToolDefaults::default();
+            *defaults = smelt_permissions::rules::ToolDefaults::default();
         }
         if let Ok(mut shell) = self.default_shell.lock() {
             *shell = None;

@@ -2,11 +2,10 @@
 
 pub(crate) mod approvals;
 pub(crate) mod bash;
-pub mod claude_code;
 pub mod rules;
 mod shell_parse;
 pub mod store;
-pub(crate) mod workspace;
+pub mod workspace;
 
 #[cfg(test)]
 mod tests;
@@ -113,7 +112,7 @@ pub struct PathEffect {
 }
 
 impl PathEffect {
-    pub(super) fn from_tool_path(
+    pub(crate) fn from_tool_path(
         tool_path: ToolPath,
         base_dir: &std::path::Path,
         access: PathAccess,
@@ -128,7 +127,7 @@ impl PathEffect {
         )
     }
 
-    pub(super) fn from_shell_path(
+    pub(crate) fn from_shell_path(
         raw_path: String,
         expanded_path: Option<&str>,
         cwd: &PathResolution,
@@ -278,13 +277,13 @@ impl PermissionGrant {
                                 .strip_prefix(head)
                                 .and_then(|rest| {
                                     let separator =
-                                        smelt_buffer::cell_width::graphemes(rest).next()?;
+                                        smelt_text::cell_width::graphemes(rest).next()?;
                                     (separator == " ").then(|| &rest[separator.len()..])
                                 })
                                 .unwrap_or(&subject)
                                 .to_string()
                         } else {
-                            let head_end = smelt_buffer::cell_width::grapheme_indices(&subject)
+                            let head_end = smelt_text::cell_width::grapheme_indices(&subject)
                                 .find(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
                                 .map(|(start, _)| start)
                                 .unwrap_or(subject.len());
@@ -396,11 +395,33 @@ impl PermissionsHandle {
         Arc::clone(&self.approvals)
     }
 
+    /// Allow reading and writing plan files under `directory` in plan mode.
+    /// Plan files are artifacts, not workspace edits, so the grants stay
+    /// narrow to mode, tool, and access.
+    pub fn grant_plan_directory(&self, directory: &Path) {
+        let mut approvals = self
+            .approvals
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        for (tool, access) in [
+            ("read_file", PathAccess::Read),
+            ("write_file", PathAccess::Write),
+            ("edit_file", PathAccess::Write),
+        ] {
+            approvals.add_session_path_grant(
+                AgentMode::parse("plan").expect("built-in mode"),
+                tool,
+                access,
+                directory.to_path_buf(),
+            );
+        }
+    }
+
     pub fn paths_fn(&self) -> Option<Arc<PathsFn>> {
         self.snapshot().paths_fn.clone()
     }
 
-    pub(crate) fn install_home(&self, home: PathBuf) {
+    pub fn install_home(&self, home: PathBuf) {
         let mut permissions = self.snapshot().as_ref().clone();
         permissions.set_home(home);
         self.replace(permissions);
@@ -523,7 +544,7 @@ impl PermissionsHandle {
     }
 }
 
-pub(crate) fn read_snapshot(
+pub fn read_snapshot(
     permissions: &PermissionsHandle,
     permission_store: &store::PermissionStore,
     cwd: &Path,
@@ -543,7 +564,7 @@ pub(crate) fn read_snapshot(
     let workspace = permission_store
         .load_snapshot(workspace_key.as_ref(), store::PersistenceScope::Workspace)
         .map_err(|error| format!("load workspace permissions: {error}"))?;
-    let project = crate::worktree::project_context(cwd, worktree_root);
+    let project = smelt_worktree::project_context(cwd, worktree_root);
     let repository = match project.repository_key.as_deref() {
         Some(key) => permission_store
             .load_snapshot(
@@ -581,26 +602,42 @@ pub struct PermissionRuntimePaths<'a> {
     pub home: &'a std::path::Path,
 }
 
+/// Setting-controlled workspace policy that permission resolution reads.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspacePolicy<'a> {
+    pub restrict_to_workspace: bool,
+    pub worktree_root: &'a str,
+}
+
+impl Default for WorkspacePolicy<'_> {
+    fn default() -> Self {
+        Self {
+            restrict_to_workspace: true,
+            worktree_root: ".worktrees",
+        }
+    }
+}
+
 /// Resolve permission declarations, setting-controlled workspace policy, cwd
 /// roots, and persisted workspace grants through one path.
 pub fn resolve_permissions(
     raw: &RawPerms,
     tool_defaults: &ToolDefaults,
     mode_behaviors: HashMap<String, ModeBehavior>,
-    settings: &crate::config::ResolvedSettings,
+    workspace: WorkspacePolicy<'_>,
     runtime_paths: PermissionRuntimePaths<'_>,
     permission_store: &store::PermissionStore,
     paths_fn: Option<Arc<PathsFn>>,
 ) -> std::io::Result<PermissionResolution> {
     let PermissionRuntimePaths { cwd, home } = runtime_paths;
     let context =
-        crate::worktree::project_context(cwd, Some(std::path::Path::new(&settings.worktree_root)));
+        smelt_worktree::project_context(cwd, Some(std::path::Path::new(workspace.worktree_root)));
     Ok(
         PermissionContext::load(cwd, context, permission_store)?.resolve(
             raw,
             tool_defaults,
             mode_behaviors,
-            settings,
+            workspace.restrict_to_workspace,
             home,
             paths_fn,
         ),
@@ -611,24 +648,24 @@ pub fn resolve_permissions(
 /// declarations without rediscovering Git or loading persisted grants.
 #[derive(Clone)]
 pub struct PermissionContext {
-    project: crate::worktree::ProjectContext,
+    project: smelt_worktree::ProjectContext,
     workspace_approvals: store::CompiledApprovals,
     repository_approvals: store::CompiledApprovals,
     permission_store: store::PermissionStore,
     store_generation: u64,
     /// The persisted grant files, which other smelt processes may rewrite.
-    approval_files: crate::file_stamp::FileStamps,
+    approval_files: smelt_worktree::file_stamp::FileStamps,
     workspace: PathBuf,
 }
 
 impl PermissionContext {
     pub fn load(
         cwd: &Path,
-        project: crate::worktree::ProjectContext,
+        project: smelt_worktree::ProjectContext,
         permission_store: &store::PermissionStore,
     ) -> std::io::Result<Self> {
         let store_generation = permission_store.generation();
-        let mut approval_files = crate::file_stamp::FileStamps::default();
+        let mut approval_files = smelt_worktree::file_stamp::FileStamps::default();
         let workspace_key = cwd.to_string_lossy();
         approval_files.track(
             permission_store.permissions_path(&workspace_key, store::PersistenceScope::Workspace),
@@ -679,7 +716,7 @@ impl PermissionContext {
         raw: &RawPerms,
         tool_defaults: &ToolDefaults,
         mode_behaviors: HashMap<String, ModeBehavior>,
-        settings: &crate::config::ResolvedSettings,
+        restrict_to_workspace: bool,
         home: &Path,
         paths_fn: Option<Arc<PathsFn>>,
     ) -> PermissionResolution {
@@ -687,7 +724,7 @@ impl PermissionContext {
             Permissions::from_raw_with_mode_behaviors(raw, tool_defaults, mode_behaviors);
         policy.set_allowed_roots(self.project.active_root, self.project.allowed_roots);
         policy.set_home(home.to_path_buf());
-        policy.set_restrict_to_workspace(settings.restrict_to_workspace);
+        policy.set_restrict_to_workspace(restrict_to_workspace);
         if let Some(paths_fn) = paths_fn {
             policy.set_paths_fn(paths_fn);
         }
@@ -768,6 +805,38 @@ impl Permissions {
         };
         permissions.set_home(permissions.home.clone());
         permissions
+    }
+
+    /// Evaluate `tool` as if run from `cwd`. Native shells may change
+    /// directory: paths resolve there without adding it to the trusted
+    /// workspace roots. A relative `cwd` is denied.
+    pub fn evaluate_in_directory(
+        &self,
+        cwd: Option<&Path>,
+        overrides: Option<&protocol::PermissionOverrides>,
+        mode: AgentMode,
+        tool: &str,
+        args: &HashMap<String, Value>,
+        paths: &[ToolPath],
+    ) -> Decision {
+        if cwd.is_some_and(|cwd| !cwd.is_absolute()) {
+            return Decision::Deny;
+        }
+        let mut resolved;
+        let policy = if overrides.is_some() || cwd.is_some_and(|cwd| cwd != self.active_root) {
+            resolved = overrides
+                .map(|overrides| self.with_overrides(overrides))
+                .unwrap_or_else(|| self.clone());
+            if let Some(cwd) = cwd {
+                resolved.active_root = cwd.into();
+            }
+            &resolved
+        } else {
+            self
+        };
+        policy
+            .evaluate_tool_with_paths_and_approvals(mode, ToolOrigin::Lua, tool, args, paths)
+            .decision
     }
 
     /// Create a clone with per-turn permission overrides layered on top.
@@ -1411,7 +1480,7 @@ fn grants_satisfy_requirements(
         .all(|requirement| grants.iter().any(|grant| grant.satisfies(requirement)))
 }
 
-pub(super) fn command_patterns_satisfy(
+pub(crate) fn command_patterns_satisfy(
     tool_name: &str,
     patterns: &[&glob::Pattern],
     command: &str,
@@ -1762,7 +1831,7 @@ fn shell_parser_decide_commands(
 
 fn shell_parser_decide_split(rs: &RuleSet, command: &str, commands: &[String]) -> Option<Decision> {
     if commands.len() <= 1 {
-        let command = smelt_buffer::text::trim_whitespace(command);
+        let command = smelt_text::trim_whitespace(command);
         if is_cd_command(command) {
             return Some(Decision::Allow);
         }

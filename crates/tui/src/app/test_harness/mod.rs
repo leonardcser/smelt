@@ -379,9 +379,8 @@ impl TestAppBuilder {
             }
         };
 
-        let permissions = smelt_core::permissions::PermissionsHandle::new(
-            smelt_core::permissions::Permissions::load(),
-        );
+        let permissions =
+            smelt_permissions::PermissionsHandle::new(smelt_permissions::Permissions::load());
         let settings = smelt_core::config::ResolvedSettings {
             vim: self.vim.unwrap_or_default(),
             ..Default::default()

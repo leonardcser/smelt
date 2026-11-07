@@ -50,12 +50,12 @@ where
 fn enter_startup_worktree(cwd: &mut std::path::PathBuf, requested: &str, root: Option<&str>) {
     let requested = requested.trim();
     let root = root.map(std::path::PathBuf::from);
-    let spec = smelt_core::worktree::WorktreeSpec {
+    let spec = smelt_worktree::WorktreeSpec {
         name: (!requested.is_empty()).then_some(requested),
         base: None,
         root: root.as_deref(),
     };
-    match smelt_core::worktree::enter_or_create(cwd, spec) {
+    match smelt_worktree::enter_or_create(cwd, spec) {
         Ok(info) => {
             if let Err(e) = std::env::set_current_dir(&info.path) {
                 eprintln!(

@@ -1,7 +1,7 @@
 //! Session- and workspace-scoped runtime auto-approvals, augmenting static config rules.
 
-use crate::permissions::rules::{check_ruleset, matches_rule, RuleSet};
-use crate::permissions::{
+use crate::rules::{check_ruleset, matches_rule, RuleSet};
+use crate::{
     store::PermissionStore, workspace, PathAccess, PermissionGrant, PermissionRequirement,
     Permissions,
 };
@@ -188,7 +188,7 @@ impl RuntimeApprovals {
     }
 
     /// Replace project-wide approvals without touching workspace or session grants.
-    pub(super) fn load_repository(
+    pub(crate) fn load_repository(
         &mut self,
         tools: HashMap<String, Vec<glob::Pattern>>,
         dirs: Vec<PathBuf>,
@@ -196,7 +196,7 @@ impl RuntimeApprovals {
         self.repository = ApprovalScope::from_compiled(tools, dirs);
     }
 
-    pub(super) fn configure_persisted_source(
+    pub(crate) fn configure_persisted_source(
         &mut self,
         store: PermissionStore,
         workspace: PathBuf,
@@ -220,13 +220,13 @@ impl RuntimeApprovals {
             let workspace = load_approval_scope(
                 &source.store,
                 &source.workspace,
-                crate::permissions::store::PersistenceScope::Workspace,
+                crate::store::PersistenceScope::Workspace,
             );
             let repository = source.repository_key.as_ref().map(|repository_key| {
                 load_approval_scope(
                     &source.store,
                     repository_key,
-                    crate::permissions::store::PersistenceScope::Repository,
+                    crate::store::PersistenceScope::Repository,
                 )
             });
             (workspace, repository)
@@ -315,12 +315,8 @@ impl RuntimeApprovals {
         tool_name: &str,
         args: &HashMap<String, Value>,
     ) -> bool {
-        let outcome = permissions.evaluate_tool(
-            mode.clone(),
-            crate::permissions::ToolOrigin::Lua,
-            tool_name,
-            args,
-        );
+        let outcome =
+            permissions.evaluate_tool(mode.clone(), crate::ToolOrigin::Lua, tool_name, args);
         let config_subpatterns = permissions.subcommand_ruleset(mode, tool_name);
         if outcome.decision != Decision::Ask {
             return self.is_approved(
@@ -538,7 +534,7 @@ fn normalize_approval_dir(dir: &Path) -> PathBuf {
 fn load_approval_scope(
     store: &PermissionStore,
     root: &Path,
-    scope: crate::permissions::store::PersistenceScope,
+    scope: crate::store::PersistenceScope,
 ) -> std::io::Result<ApprovalScope> {
     let compiled = store.load_approvals(&root.to_string_lossy(), scope)?;
     Ok(ApprovalScope::from_compiled(compiled.tools, compiled.dirs))

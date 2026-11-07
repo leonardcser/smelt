@@ -1,10 +1,12 @@
+pub mod file_stamp;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use smelt_buffer::text;
+use smelt_text as text;
 
 #[derive(Debug, Clone)]
 pub struct WorktreeSpec<'a> {
@@ -285,7 +287,7 @@ pub fn managed_context(cwd: &Path, root: Option<&Path>) -> Option<ManagedWorktre
 #[derive(Debug, Clone)]
 pub struct ProjectSnapshot {
     pub context: ProjectContext,
-    inputs: crate::file_stamp::FileStamps,
+    inputs: file_stamp::FileStamps,
 }
 
 /// What Git reports about the repository around a directory. It does not
@@ -299,7 +301,7 @@ struct GitFacts {
     branch: String,
     base: String,
     worktrees: Vec<GitWorktree>,
-    inputs: crate::file_stamp::FileStamps,
+    inputs: file_stamp::FileStamps,
 }
 
 /// The last Git facts, by the directory they describe.
@@ -358,7 +360,7 @@ fn cached_git_facts(cwd: &Path) -> GitFacts {
 }
 
 fn read_git_facts(cwd: &Path) -> GitFacts {
-    let mut inputs = crate::file_stamp::FileStamps::default();
+    let mut inputs = file_stamp::FileStamps::default();
     // A repository or worktree link appearing in any ancestor changes
     // which repository owns `cwd`.
     for dir in cwd.ancestors() {
@@ -398,7 +400,7 @@ fn read_git_facts(cwd: &Path) -> GitFacts {
 /// The repository files project discovery reads: checked-out branches, the
 /// default base refs, and the worktree list. Reftable repositories keep refs
 /// in table lists instead of ref files.
-fn track_git_metadata(inputs: &mut crate::file_stamp::FileStamps, common: &Path) {
+fn track_git_metadata(inputs: &mut file_stamp::FileStamps, common: &Path) {
     for file in ["HEAD", "config", "packed-refs", "reftable/tables.list"] {
         inputs.track(common.join(file));
     }
@@ -620,7 +622,7 @@ fn repo_bucket(repo_root: &Path) -> String {
         .unwrap_or_else(|| "repo".to_string());
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
-    let hash = crate::utils::hex_lower(&hasher.finalize());
+    let hash = smelt_text::hex_lower(&hasher.finalize());
     format!("{name}-{}", &hash[..12])
 }
 
@@ -1071,10 +1073,6 @@ mod tests {
         assert!(!ctx.managed_worktree);
         ctx.set_worktree_root(None);
         assert_eq!(ctx.default_base, "main");
-        assert_eq!(
-            crate::context_notes::cwd_note_for_project(&info.path, &ctx),
-            crate::context_notes::cwd_note(&info.path, Path::new(".worktrees"))
-        );
 
         assert_eq!(
             ctx.project_name,

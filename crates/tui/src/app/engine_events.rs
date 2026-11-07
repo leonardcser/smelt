@@ -1312,7 +1312,7 @@ impl TuiApp {
                     self.active_permissions()
                         .evaluate_tool_with_paths_and_approvals(
                             request.mode,
-                            smelt_core::permissions::ToolOrigin::Lua,
+                            smelt_permissions::ToolOrigin::Lua,
                             &request.tool_name,
                             &request.args,
                             paths.as_slice(),

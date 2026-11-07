@@ -108,7 +108,7 @@ pub fn project_content_hash(cwd: &Path) -> Option<String> {
         hasher.update(&bytes);
         hasher.update([0u8]);
     }
-    Some(crate::utils::hex_lower(&hasher.finalize()))
+    Some(smelt_text::hex_lower(&hasher.finalize()))
 }
 
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {

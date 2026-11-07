@@ -43,16 +43,16 @@ pub enum LuaToolEffect {
     Other,
 }
 
-impl From<LuaToolEffect> for crate::permissions::ToolEffectKind {
+impl From<LuaToolEffect> for smelt_permissions::ToolEffectKind {
     fn from(effect: LuaToolEffect) -> Self {
         match effect {
-            LuaToolEffect::Read => crate::permissions::ToolEffectKind::Read,
-            LuaToolEffect::Write => crate::permissions::ToolEffectKind::Write,
-            LuaToolEffect::Network => crate::permissions::ToolEffectKind::Network,
-            LuaToolEffect::User => crate::permissions::ToolEffectKind::User,
-            LuaToolEffect::Process => crate::permissions::ToolEffectKind::Process,
-            LuaToolEffect::Config => crate::permissions::ToolEffectKind::Config,
-            LuaToolEffect::Other => crate::permissions::ToolEffectKind::Other,
+            LuaToolEffect::Read => smelt_permissions::ToolEffectKind::Read,
+            LuaToolEffect::Write => smelt_permissions::ToolEffectKind::Write,
+            LuaToolEffect::Network => smelt_permissions::ToolEffectKind::Network,
+            LuaToolEffect::User => smelt_permissions::ToolEffectKind::User,
+            LuaToolEffect::Process => smelt_permissions::ToolEffectKind::Process,
+            LuaToolEffect::Config => smelt_permissions::ToolEffectKind::Config,
+            LuaToolEffect::Other => smelt_permissions::ToolEffectKind::Other,
         }
     }
 }
@@ -245,7 +245,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         .insert(name.clone(), def.default_allow);
                 }
                 if let Some(kind) = def.subpattern_parser {
-                    if let Some(parser) = crate::permissions::builtin_subpattern_parser(&kind) {
+                    if let Some(parser) = smelt_permissions::builtin_subpattern_parser(&kind) {
                         let mut defaults =
                             s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
                         defaults.subpattern_parsers.insert(name.clone(), parser);

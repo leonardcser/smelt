@@ -18,7 +18,6 @@ use crate::lua::{
     value, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent, ToolCallIds,
     ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
-use crate::permissions::{PathTargetKind, ToolPath};
 #[cfg(test)]
 use crate::tool_presentation::LUA_CONTENT_PREVIEW_BYTES;
 use crate::tool_presentation::{
@@ -29,6 +28,7 @@ use crate::tool_presentation::{
 use crate::transcript_model::{
     Block, BlockId, KeptHistoryItem, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
+use smelt_permissions::{PathTargetKind, ToolPath};
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
@@ -550,8 +550,8 @@ impl LuaRuntime {
 
     pub fn mode_behaviors(
         &self,
-    ) -> std::collections::HashMap<String, crate::permissions::ModeBehavior> {
-        let result: LuaResult<std::collections::HashMap<String, crate::permissions::ModeBehavior>> =
+    ) -> std::collections::HashMap<String, smelt_permissions::ModeBehavior> {
+        let result: LuaResult<std::collections::HashMap<String, smelt_permissions::ModeBehavior>> =
             (|| {
                 let smelt: mlua::Table = self.lua.globals().get("smelt")?;
                 let mode: mlua::Table = smelt.get("mode")?;
@@ -570,7 +570,7 @@ impl LuaRuntime {
                         };
                     out.insert(
                         name,
-                        crate::permissions::ModeBehavior {
+                        smelt_permissions::ModeBehavior {
                             default_decision,
                             allow_subcommands_by_default: spec
                                 .get("allow_subcommands_by_default")
@@ -1531,7 +1531,7 @@ impl LuaRuntime {
         }
     }
 
-    pub fn permission_rules_snapshot(&self) -> Option<crate::permissions::rules::RawPerms> {
+    pub fn permission_rules_snapshot(&self) -> Option<smelt_permissions::rules::RawPerms> {
         self.shared
             .permission_rules
             .lock()
@@ -1555,7 +1555,7 @@ impl LuaRuntime {
             .clone()
     }
 
-    pub fn tool_defaults(&self) -> crate::permissions::rules::ToolDefaults {
+    pub fn tool_defaults(&self) -> smelt_permissions::rules::ToolDefaults {
         self.shared
             .tool_defaults
             .lock()
@@ -4267,7 +4267,7 @@ fn embedded_builtins_cache_key() -> String {
     format!(
         "{}:{}",
         env!("CARGO_PKG_VERSION"),
-        crate::utils::hex_lower(&hasher.finalize())
+        smelt_text::hex_lower(&hasher.finalize())
     )
 }
 
@@ -5634,7 +5634,7 @@ mod tests {
             },
         );
         *rt.shared.permission_rules.lock().unwrap() =
-            Some(crate::permissions::rules::RawPerms::default());
+            Some(smelt_permissions::rules::RawPerms::default());
         rt.shared
             .settings_overrides
             .lock()
@@ -5644,7 +5644,7 @@ mod tests {
         rt.shared.remember.lock().unwrap().model = false;
         rt.shared.tool_defaults.lock().unwrap().tool_effects.insert(
             "bash".into(),
-            crate::permissions::rules::ToolEffectKind::Process,
+            smelt_permissions::rules::ToolEffectKind::Process,
         );
         *rt.shared.default_shell.lock().unwrap() = Some(crate::lua::DefaultShell {
             program: "zsh".into(),

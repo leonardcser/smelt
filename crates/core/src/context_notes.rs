@@ -1,12 +1,12 @@
 use std::path::Path;
 
 pub fn cwd_note(cwd: &Path, worktree_root: &Path) -> String {
-    let project = crate::worktree::project_context(cwd, Some(worktree_root));
+    let project = smelt_worktree::project_context(cwd, Some(worktree_root));
     cwd_note_for_project(cwd, &project)
 }
 
 /// Format the workspace note from already discovered Git data.
-pub fn cwd_note_for_project(cwd: &Path, project: &crate::worktree::ProjectContext) -> String {
+pub fn cwd_note_for_project(cwd: &Path, project: &smelt_worktree::ProjectContext) -> String {
     if project.managed_worktree {
         let base_path = project
             .default_base_path

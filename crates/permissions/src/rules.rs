@@ -73,7 +73,7 @@ fn merge_effect_rules(default: &RawEffectRules, mode: &RawEffectRules) -> RawEff
     }
 }
 
-pub(super) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawModePerms {
+pub(crate) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawModePerms {
     let mut patterns: HashMap<String, RawRuleSet> = HashMap::new();
     let keys: std::collections::HashSet<&String> = default
         .patterns
@@ -110,14 +110,14 @@ pub(super) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawMode
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub(crate) struct RawConfig {
-    pub(super) permissions: RawPerms,
+    pub(crate) permissions: RawPerms,
 }
 
 #[derive(Debug, Clone)]
 pub struct RuleSet {
-    pub(super) allow: Vec<glob::Pattern>,
-    pub(super) ask: Vec<glob::Pattern>,
-    pub(super) deny: Vec<glob::Pattern>,
+    pub(crate) allow: Vec<glob::Pattern>,
+    pub(crate) ask: Vec<glob::Pattern>,
+    pub(crate) deny: Vec<glob::Pattern>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,23 +138,23 @@ impl Default for ModeBehavior {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ModePerms {
-    pub(super) tools: HashMap<String, Decision>,
-    pub(super) effects: EffectPerms,
-    pub(super) allowed_paths: Vec<std::path::PathBuf>,
-    pub(super) resolved_paths: Vec<std::path::PathBuf>,
-    pub(super) patterns: HashMap<String, RuleSet>,
+pub(crate) struct ModePerms {
+    pub(crate) tools: HashMap<String, Decision>,
+    pub(crate) effects: EffectPerms,
+    pub(crate) allowed_paths: Vec<std::path::PathBuf>,
+    pub(crate) resolved_paths: Vec<std::path::PathBuf>,
+    pub(crate) patterns: HashMap<String, RuleSet>,
 }
 
 #[derive(Debug, Default, Clone)]
-pub(super) struct EffectPerms {
-    pub(super) read: Option<Decision>,
-    pub(super) write: Option<Decision>,
-    pub(super) network: Option<Decision>,
-    pub(super) process: Option<Decision>,
-    pub(super) config: Option<Decision>,
-    pub(super) user: Option<Decision>,
-    pub(super) other: Option<Decision>,
+pub(crate) struct EffectPerms {
+    pub(crate) read: Option<Decision>,
+    pub(crate) write: Option<Decision>,
+    pub(crate) network: Option<Decision>,
+    pub(crate) process: Option<Decision>,
+    pub(crate) config: Option<Decision>,
+    pub(crate) user: Option<Decision>,
+    pub(crate) other: Option<Decision>,
 }
 
 impl From<RawEffectRules> for EffectPerms {
@@ -171,7 +171,7 @@ impl From<RawEffectRules> for EffectPerms {
     }
 }
 
-pub(super) fn compile_patterns(raw: &[String]) -> Vec<glob::Pattern> {
+pub(crate) fn compile_patterns(raw: &[String]) -> Vec<glob::Pattern> {
     raw.iter()
         .filter_map(|s| glob::Pattern::new(s).ok())
         .collect()
@@ -263,7 +263,7 @@ fn build_subcommand_ruleset(
     }
 }
 
-pub(super) fn build_mode(
+pub(crate) fn build_mode(
     raw: &RawModePerms,
     _mode: &AgentMode,
     mode_behavior: ModeBehavior,
@@ -299,12 +299,12 @@ pub(super) fn build_mode(
     }
 }
 
-pub(super) fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
+pub(crate) fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
     // Also match with a trailing space so "ls *" matches bare "ls" (no arguments).
     pat.matches(value) || pat.matches(&format!("{value} "))
 }
 
-pub(super) fn check_ruleset_match(ruleset: &RuleSet, value: &str) -> Option<Decision> {
+pub(crate) fn check_ruleset_match(ruleset: &RuleSet, value: &str) -> Option<Decision> {
     // Deny wins unconditionally.
     for pat in &ruleset.deny {
         if matches_rule(pat, value) {
@@ -345,6 +345,6 @@ pub(super) fn check_ruleset_match(ruleset: &RuleSet, value: &str) -> Option<Deci
     }
 }
 
-pub(super) fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
+pub(crate) fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
     check_ruleset_match(ruleset, value).unwrap_or(Decision::Ask)
 }

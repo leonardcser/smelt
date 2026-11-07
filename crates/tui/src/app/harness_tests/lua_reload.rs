@@ -1464,7 +1464,7 @@ fn permission_policy_is_snapshotted_per_turn_while_session_approvals_stay_live()
     app.grant_session_path(
         None,
         "read_file".into(),
-        smelt_core::permissions::PathAccess::Read,
+        smelt_permissions::PathAccess::Read,
         trusted.clone(),
     );
     assert!(turn_permissions
@@ -1495,7 +1495,7 @@ fn relative_lua_session_path_grant_uses_runtime_cwd() {
 
     assert!(app.session_path_grants().iter().any(|grant| {
         grant.tool == "read_file"
-            && grant.access == smelt_core::permissions::PathAccess::Read
+            && grant.access == smelt_permissions::PathAccess::Read
             && grant.dir == expected
     }));
 }
@@ -1511,7 +1511,7 @@ fn lua_session_path_grant_survives_rewind_to_start() {
     app.grant_session_path(
         None,
         "read_file".into(),
-        smelt_core::permissions::PathAccess::Read,
+        smelt_permissions::PathAccess::Read,
         trusted.clone(),
     );
     app.cancel();
@@ -1519,7 +1519,7 @@ fn lua_session_path_grant_survives_rewind_to_start() {
 
     assert!(app.session_path_grants().iter().any(|grant| {
         grant.tool == "read_file"
-            && grant.access == smelt_core::permissions::PathAccess::Read
+            && grant.access == smelt_permissions::PathAccess::Read
             && grant.dir == trusted
     }));
 }
@@ -4686,14 +4686,14 @@ fn hot_reload_reconciles_new_mode_cycle_and_permissions() {
     assert!(app.core_probe().config.mode_cycle.contains(&review));
     let outcome = app.core_probe().permissions.evaluate_tool(
         review.clone(),
-        smelt_core::permissions::ToolOrigin::Lua,
+        smelt_permissions::ToolOrigin::Lua,
         "smelt_reload",
         &std::collections::HashMap::new(),
     );
     assert_eq!(outcome.decision, protocol::Decision::Deny);
     let outcome = app.core_probe().permissions.evaluate_tool(
         review,
-        smelt_core::permissions::ToolOrigin::Lua,
+        smelt_permissions::ToolOrigin::Lua,
         "review_result",
         &std::collections::HashMap::new(),
     );

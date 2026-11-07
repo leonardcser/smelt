@@ -857,7 +857,7 @@ async fn async_main() {
         }
     }
     // Git runs while Lua loads; the workspace reads the result when it is built.
-    smelt_core::worktree::ProjectSnapshot::prefetch(env.cwd().to_path_buf());
+    smelt_worktree::ProjectSnapshot::prefetch(env.cwd().to_path_buf());
 
     let resolution_startup = smelt_perf::perf::begin("startup:resolution");
     if let Some(ref path) = args.config {
@@ -1061,14 +1061,13 @@ async fn async_main() {
     };
 
     let permission_rules = lua_permission_rules.unwrap_or_default();
-    let permission_store =
-        smelt_core::permissions::store::PermissionStore::new(env.state_dir().clone());
-    let permission_resolution = smelt_core::permissions::resolve_permissions(
+    let permission_store = smelt_permissions::store::PermissionStore::new(env.state_dir().clone());
+    let permission_resolution = smelt_permissions::resolve_permissions(
         &permission_rules,
         &lua_tool_defaults,
         lua_mode_behaviors,
-        &runtime.settings,
-        smelt_core::permissions::PermissionRuntimePaths {
+        runtime.settings.workspace_policy(),
+        smelt_permissions::PermissionRuntimePaths {
             cwd: &cwd,
             home: env.home(),
         },
@@ -1079,8 +1078,7 @@ async fn async_main() {
         eprintln!("error: failed to load persisted permissions: {error}");
         std::process::exit(1);
     });
-    let permissions =
-        smelt_core::permissions::PermissionsHandle::from_resolution(permission_resolution);
+    let permissions = smelt_permissions::PermissionsHandle::from_resolution(permission_resolution);
 
     // Extra skill search roots (today the empty default; once a Lua API
     // for declaring them lands, plumb the resolved list through here).
