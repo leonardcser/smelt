@@ -358,10 +358,8 @@ impl TuiApp {
                         }
                     }
                 };
-                // Don't restore stash if a dialog opened - it restores on close.
-                if accepted && self.ui.active_modal().is_none() {
-                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    self.prompt.restore_stash(&mut pctx);
+                if accepted {
+                    self.restore_stash_after_submit();
                 }
                 false
             }
@@ -371,6 +369,18 @@ impl TuiApp {
     fn commit_prompt_submission(&mut self, edit: crate::input::SubmitEdit) {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.apply_submit_edit(&mut pctx, edit);
+    }
+
+    /// Brings the stashed draft back once a submission empties the prompt,
+    /// unless the submission opened a dialog that owns the prompt.
+    fn restore_stash_after_submit(&mut self) {
+        if self.ui.active_modal().is_some() {
+            return;
+        }
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        if pctx.buf.source().is_empty() && pctx.buf.attachment_ids.is_empty() {
+            self.prompt.restore_stash(&mut pctx);
+        }
     }
 
     fn handle_focused_search_key(&mut self, k: KeyEvent) -> bool {
@@ -859,11 +869,11 @@ impl TuiApp {
                     &submission.display,
                     sent_at_ms,
                 );
-                return if self.pending_quit {
-                    EventOutcome::Quit
-                } else {
-                    EventOutcome::Noop
-                };
+                if self.pending_quit {
+                    return EventOutcome::Quit;
+                }
+                self.restore_stash_after_submit();
+                return EventOutcome::Noop;
             }
         } else if submission.content.image_count() == 0 {
             if let Some(outcome) = self.try_command_while_running(
@@ -872,6 +882,7 @@ impl TuiApp {
                 sent_at_ms,
             ) {
                 self.commit_prompt_submission(edit);
+                self.restore_stash_after_submit();
                 return outcome;
             }
         }
@@ -881,6 +892,7 @@ impl TuiApp {
         if self.queue_explicit_submission(QueuedInput::from_prompt(submission, sent_at_ms), target)
         {
             self.commit_prompt_submission(edit);
+            self.restore_stash_after_submit();
         }
         EventOutcome::Noop
     }

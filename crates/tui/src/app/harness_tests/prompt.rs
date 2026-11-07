@@ -1794,6 +1794,34 @@ fn idle_submit_restores_stash_without_a_blank_row() {
 }
 
 #[test]
+fn submit_that_restores_the_stash_clears_its_marker() {
+    for (name, running, submit) in [
+        ("idle", false, "send this"),
+        ("idle command", false, "/fast on"),
+        ("queued during turn", true, "send this"),
+        ("command during turn", true, "/fast on"),
+    ] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        if running {
+            app.start_turn(1);
+        }
+        app.type_text("draft");
+        app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let stashed = app.render_to_frame().text();
+        assert!(stashed.contains("Stashed"), "{name}:\n{stashed}");
+
+        app.type_text(submit);
+        app.press(KeyCode::Enter);
+        app.wait_for_turn_dispatch();
+        app.feed_one(SourceEvent::Tick(0));
+
+        assert_eq!(app.state().prompt_text, "draft", "{name}");
+        let frame = app.render_to_frame().text();
+        assert!(!frame.contains("Stashed"), "{name}:\n{frame}");
+    }
+}
+
+#[test]
 fn multiline_stash_keeps_prompt_top_bar_visible() {
     for height in [8, 10, 12, 24] {
         let mut app = TestApp::builder().with_vim(false).build();

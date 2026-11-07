@@ -26,7 +26,7 @@ local OPTIONAL_PRIORITY = 4
 local COMMENT_DIM_STYLE = { fg = "Comment", dim = true }
 local subscriptions = {}
 local input_signals = { "input_epoch", "prompt_queue_revision" }
-local tip_signals = { "input_epoch", "notification_visible", "prompt_queue_revision", "work_state" }
+local tip_signals = { "input_epoch", "notification_visible", "prompt_queue_revision", "prompt_stashed", "work_state" }
 
 -- ── queue ───────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ smelt.prompt.queue = bar.new({
   min_rows = 0,
   -- The stash goes first so it keeps its row when the queue folds.
   sources = {
-    { "stash", { render = stash_source, signals = input_signals } },
+    { "stash", { render = stash_source, signals = { "prompt_stashed" } } },
     { "queued", { render = queued_source, signals = input_signals } },
   },
   win_opts = { pad_left = 2, pad_right = 2, focus_on_click = smelt.prompt.win },

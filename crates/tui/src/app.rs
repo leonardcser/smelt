@@ -2298,6 +2298,9 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("prompt_queue_revision", prompt_queue_revision);
+        self.core
+            .signals
+            .publish_if_changed("prompt_stashed", self.prompt.has_stash());
         let now_secs = self
             .core
             .clock
