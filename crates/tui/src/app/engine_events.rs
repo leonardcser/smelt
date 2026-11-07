@@ -531,6 +531,16 @@ impl TuiApp {
         }
     }
 
+    /// Whether the native session working between turns is all that holds
+    /// queued input back. Claude Code takes a prompt while it works on its
+    /// own, so the user can send one before that work ends.
+    pub(super) fn only_native_work_is_busy(&self) -> bool {
+        self.native_ui
+            .busy
+            .as_ref()
+            .is_some_and(|busy| self.busy_stack.holds_only(busy))
+    }
+
     /// Forgets the native session's work state. The session outlives a
     /// cancelled turn and reports its work again.
     pub(super) fn forget_native_work(&mut self) {

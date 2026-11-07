@@ -847,6 +847,11 @@ impl BusyStack {
         !self.state.borrow().entries.is_empty()
     }
 
+    /// Whether `token` is the only work the stack holds.
+    pub(crate) fn holds_only(&self, token: &BusyToken) -> bool {
+        matches!(self.state.borrow().entries.as_slice(), [entry] if entry.id == token.id)
+    }
+
     pub(crate) fn clear(&mut self) {
         let mut state = self.state.borrow_mut();
         state.entries.clear();
@@ -1791,10 +1796,15 @@ impl TuiApp {
     }
 
     pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {
-        if self.prompt_input_is_busy()
-            || self.conversation.turn_pause().is_some()
-            || self.prompt.queue_is_empty()
-        {
+        if self.prompt_input_is_busy() {
+            return false;
+        }
+        self.start_next_queued_input()
+    }
+
+    /// Starts the next queued input, even while background work is busy.
+    pub(crate) fn start_next_queued_input(&mut self) -> bool {
+        if self.conversation.turn_pause().is_some() || self.prompt.queue_is_empty() {
             return false;
         }
         let Some((stage, queued)) = self.prompt.pop_next_for_turn() else {

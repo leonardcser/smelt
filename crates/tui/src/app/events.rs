@@ -902,6 +902,9 @@ impl TuiApp {
             }
             PromptWorkState::BackgroundBusy => {
                 self.clear_prompt_prediction();
+                if self.only_native_work_is_busy() {
+                    self.start_next_queued_input();
+                }
                 return EventOutcome::Noop;
             }
             PromptWorkState::Paused => {

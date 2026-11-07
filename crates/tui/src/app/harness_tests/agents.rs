@@ -241,6 +241,40 @@ fn a_prompt_queues_until_the_native_session_finishes_its_own_work() {
 }
 
 #[test]
+fn enter_on_an_empty_prompt_sends_a_queued_prompt_while_the_native_session_works() {
+    let mut app = TestApp::builder().build();
+    native_background_session(&mut app);
+    app.type_text("next question");
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_dispatch();
+    app.feed_one(SourceEvent::Tick(0));
+    assert!(!started_turn(&app));
+
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_dispatch();
+    app.feed_one(SourceEvent::Tick(0));
+    assert!(app.tui.prompt.queued_texts().is_empty());
+    assert!(started_turn(&app));
+}
+
+#[test]
+fn enter_on_an_empty_prompt_keeps_a_queued_prompt_while_a_plugin_is_busy() {
+    let mut app = TestApp::builder().build();
+    native_background_session(&mut app);
+    app.tui.busy_stack.push("plugin".into());
+    app.type_text("next question");
+    app.press(KeyCode::Enter);
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_dispatch();
+    app.feed_one(SourceEvent::Tick(0));
+    assert_eq!(
+        app.tui.prompt.queued_texts(),
+        vec!["next question".to_owned()]
+    );
+    assert!(!started_turn(&app));
+}
+
+#[test]
 fn esc_esc_on_a_clean_turn_interrupts_and_spares_native_background_work() {
     let mut app = TestApp::builder().build();
     let session_id = native_background_session(&mut app);
