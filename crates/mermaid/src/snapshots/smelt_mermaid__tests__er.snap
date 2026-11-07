@@ -1,0 +1,25 @@
+---
+source: crates/mermaid/src/tests.rs
+expression: out
+---
+Shop
+
+ ┌─────────────────┐
+ │    CUSTOMER     │
+ ├─────────────────┤
+ │ int    id    PK │
+ │ string email UK │
+ └────────┬────────┘
+          │
+ places (1 to 0..*)
+      ┌───┴───┐                 ┌─────────┐
+      │ ORDER │                 │ PRODUCT │
+      └───┬───┘                 └────┬────┘
+          │                          ┆
+contains (1 to 1..*)      appears in (1 to 0..*)
+      ┌───┴──────────────────────────┴─┐
+      │           LINE_ITEM            │
+      ├────────────────────────────────┤
+      │ int order_id PK,FK "order key" │
+      │ int quantity                   │
+      └────────────────────────────────┘

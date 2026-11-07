@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support"]
+members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support", "crates/mermaid"]
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -24,6 +24,7 @@ smelt-store = { path = "crates/store" }
 smelt-tui = { path = "crates/tui", default-features = false }
 smelt-lua-doc-derive = { path = "crates/lua-doc-derive" }
 smelt-test-support = { path = "crates/test-support" }
+smelt-mermaid = { path = "crates/mermaid" }
 
 # Async / runtime
 tokio = { version = "1", default-features = false }

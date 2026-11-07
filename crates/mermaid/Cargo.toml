@@ -1,0 +1,20 @@
+[package]
+name = "smelt-mermaid"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "Mermaid diagram renderer that draws flowchart, sequence, state, class, ER, pie and mindmap diagrams as Unicode text."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[lib]
+name = "smelt_mermaid"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

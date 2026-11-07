@@ -1,0 +1,12 @@
+---
+source: crates/mermaid/src/tests.rs
+expression: out
+---
+Mermaid
+├── Origins
+│   ├── Long history
+│   └── Popularisation
+│       British author
+├── Research
+│   └── On effectiveness
+└── Tools

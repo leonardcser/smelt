@@ -1,0 +1,9 @@
+---
+source: crates/mermaid/src/tests.rs
+expression: out
+---
+Pets adopted
+
+Dogs ████████████████████████████████████████ 79.3%  (386)
+Cats ████████▉                                17.6% (85.5)
+Rats █▌                                        3.1%   (15)

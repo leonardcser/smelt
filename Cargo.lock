@@ -3701,6 +3701,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-mermaid"
+version = "0.0.0-dev"
+dependencies = [
+ "insta",
+ "unicode-width",
+]
+
+[[package]]
 name = "smelt-perf"
 version = "0.3.0"
 
@@ -3851,6 +3859,7 @@ dependencies = [
  "smelt-edit",
  "smelt-engine",
  "smelt-lua-doc-derive",
+ "smelt-mermaid",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",

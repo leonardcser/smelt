@@ -353,6 +353,84 @@ fn table_math_preparer(options: &InlineOptions) -> impl FnMut(&mut [InlineSpan],
     }
 }
 
+/// Builds the code block for a fence and reports whether it holds a drawn
+/// diagram. A closed `mermaid` fence that renders within the available width
+/// becomes a plain block holding the drawing. Anything else, including a
+/// fence still being streamed, keeps its source.
+fn markdown_code_block(
+    source: MarkdownSource<'_>,
+    fence: &Range<usize>,
+    lang: &str,
+    code_lines: &[&str],
+    width: usize,
+    bctx: Option<&smelt_core::content::BoxContext>,
+) -> (smelt_core::content::code_block::CodeBlock, bool) {
+    if lang.eq_ignore_ascii_case("mermaid") && fence_closed(&source.slice(fence.clone())) {
+        let inner = bctx.map_or(width, |b| b.inner_w);
+        if let Some(diagram) = mermaid_diagram(&code_lines.join("\n"), inner) {
+            let drawn: Vec<&str> = diagram.lines().collect();
+            return (parse_code_block(&drawn, ""), true);
+        }
+    }
+    (parse_code_block(code_lines, lang), false)
+}
+
+/// Whether a fenced block's source ends with its closing fence.
+fn fence_closed(block: &str) -> bool {
+    let strip = |line: &str| {
+        line.trim_start_matches(|c: char| c == '>' || c.is_whitespace())
+            .trim_end()
+            .to_string()
+    };
+    let mut lines = block.trim_end().lines();
+    let (Some(open), Some(close)) = (lines.next().map(strip), lines.last().map(strip)) else {
+        return false;
+    };
+    let Some(mark) = open.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+        return false;
+    };
+    let len = open.chars().take_while(|&c| c == mark).count();
+    close.len() >= len && close.chars().all(|c| c == mark)
+}
+
+const MERMAID_CACHE_CAP: usize = 32;
+
+struct MermaidCacheEntry {
+    width: usize,
+    source: String,
+    /// `None` records a source that does not render at this width.
+    diagram: Option<Rc<str>>,
+}
+
+thread_local! {
+    static MERMAID_CACHE: RefCell<VecDeque<MermaidCacheEntry>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+/// Draws a Mermaid diagram, reusing recent renders by source and width.
+fn mermaid_diagram(source: &str, width: usize) -> Option<Rc<str>> {
+    MERMAID_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(pos) = cache
+            .iter()
+            .position(|entry| entry.width == width && entry.source == source)
+        {
+            let entry = cache.remove(pos)?;
+            let diagram = entry.diagram.clone();
+            cache.push_front(entry);
+            return diagram;
+        }
+        let diagram = smelt_mermaid::render(source, width).ok().map(Rc::from);
+        cache.push_front(MermaidCacheEntry {
+            width,
+            source: source.to_string(),
+            diagram: diagram.clone(),
+        });
+        cache.truncate(MERMAID_CACHE_CAP);
+        diagram
+    })
+}
+
 fn markdown_math_rows(
     source: &str,
     width: usize,
@@ -1479,11 +1557,17 @@ fn render_markdown_docs_from_state<'a>(
                 MarkdownNode::Text { lines, kind, .. } => {
                     render_text_lines(out, block.source, lines, *kind, &ctx, state);
                 }
-                MarkdownNode::Code { lang, body, .. } => {
+                MarkdownNode::Code {
+                    range: fence,
+                    lang,
+                    body,
+                } => {
                     render_block_gap(out, state, clip);
                     let code_source = markdown_code_source(block.source, body);
                     let code_lines: Vec<&str> = code_source.lines().collect();
-                    let code_block = parse_code_block(&code_lines, lang);
+                    let (code_block, diagram) =
+                        markdown_code_block(block.source, fence, lang, &code_lines, width, bctx);
+                    let first = out.line_count();
                     if let Some(clip) = clip {
                         let rows = measure_code_block(&code_block, width);
                         if clip.intersects(state.rows, rows) {
@@ -1504,7 +1588,7 @@ fn render_markdown_docs_from_state<'a>(
                                     width,
                                     dim,
                                     bctx,
-                                    true,
+                                    !diagram,
                                     start..end,
                                 );
                                 col.finish()
@@ -1530,8 +1614,15 @@ fn render_markdown_docs_from_state<'a>(
                             width,
                             dim,
                             bctx,
-                            true,
+                            !diagram,
                         )));
+                    }
+                    if diagram {
+                        // Copying any part of a drawn diagram copies its source.
+                        out.stamp_atomic_copy_group(
+                            first,
+                            block.source.slice(fence.clone()).trim_end(),
+                        );
                     }
                     state.last_content_was_heading = false;
                     state.prev_was_block = true;
@@ -1727,11 +1818,16 @@ fn markdown_block_range_has_visible_text(
                     return true;
                 }
             }
-            MarkdownNode::Code { lang, body, .. } => {
+            MarkdownNode::Code {
+                range: fence,
+                lang,
+                body,
+            } => {
                 measure_block_gap(&mut state);
                 let code_source = markdown_code_source(block.source, body);
                 let code_lines: Vec<&str> = code_source.lines().collect();
-                let code_block = parse_code_block(&code_lines, lang);
+                let (code_block, _) =
+                    markdown_code_block(block.source, fence, lang, &code_lines, width, bctx);
                 let rows = measure_code_block(&code_block, width);
                 if clip.intersects(state.rows, rows)
                     && code_lines.iter().any(|line| !line.trim().is_empty())
@@ -1865,11 +1961,16 @@ fn measure_markdown_doc(
                     state,
                 );
             }
-            MarkdownNode::Code { lang, body, .. } => {
+            MarkdownNode::Code {
+                range: fence,
+                lang,
+                body,
+            } => {
                 measure_block_gap(state);
                 let code_source = markdown_code_source(block.source, body);
                 let code_lines: Vec<&str> = code_source.lines().collect();
-                let code_block = parse_code_block(&code_lines, lang);
+                let (code_block, _) =
+                    markdown_code_block(block.source, fence, lang, &code_lines, width, bctx);
                 state.rows = state
                     .rows
                     .saturating_add(measure_code_block(&code_block, width));
@@ -3652,6 +3753,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn markdown_mermaid_fence_renders_diagram() {
+        let md = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        assert!(
+            rows.iter().any(|row| row.contains("Start")),
+            "rows: {rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains('┌')), "rows: {rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("-->")),
+            "rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_mermaid_diagram_copies_its_source() {
+        let md = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+
+        assert!(!block.lines.is_empty());
+        for line in &block.lines {
+            assert_eq!(
+                line.atomic_source_text.as_deref(),
+                Some(md),
+                "{:?}",
+                line.text
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_mermaid_fence_keeps_source_when_unsupported() {
+        let md = "```mermaid\ngantt\n  title Plan\n```";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        assert!(
+            rows.iter().any(|row| row.contains("title Plan")),
+            "rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_mermaid_fence_keeps_source_while_unclosed() {
+        let md = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        assert!(rows.iter().any(|row| row.contains("-->")), "rows: {rows:?}");
+    }
+
+    #[test]
+    fn fence_closed_requires_matching_closing_fence() {
+        assert!(fence_closed("```mermaid\nA\n```\n"));
+        assert!(fence_closed("> ````mermaid\n> A\n> `````"));
+        assert!(!fence_closed("```mermaid\nA\n"));
+        assert!(!fence_closed("````mermaid\nA\n```"));
+        assert!(!fence_closed("```mermaid"));
+    }
+
+    #[test]
+    fn markdown_mermaid_fence_keeps_source_when_too_wide() {
+        let md = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+        let block = render_test(8, |sink| {
+            render_markdown_inner(sink, md, 8, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        assert!(rows.iter().any(|row| row.contains("-->")), "rows: {rows:?}");
+    }
+
+    #[test]
+    fn markdown_mermaid_fence_stacks_horizontal_diagram_when_narrow() {
+        let md = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+        let block = render_test(12, |sink| {
+            render_markdown_inner(sink, md, 12, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        let start = rows.iter().position(|row| row.contains("Start"));
+        let done = rows.iter().position(|row| row.contains("Done"));
+        assert!(start < done, "rows: {rows:?}");
     }
 
     #[test]
