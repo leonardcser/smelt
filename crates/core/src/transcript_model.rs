@@ -1119,24 +1119,52 @@ impl TryFrom<smelt_store::StoredTranscriptBlock> for TranscriptBlockRecordWithId
     }
 }
 
-pub fn compact_block_rows(
+/// The summary a save stores beside `record`, decoded by
+/// [`StoredBlockRef::from_summary`]. It is the serde form of [`StoredBlockRef`],
+/// so changing that shape needs a store schema version bump: saved summaries
+/// would stop decoding.
+pub fn encode_record_summary(
+    record: &TranscriptBlockRecord,
+    indexed_text: &str,
+    estimated_text_bytes: u64,
+) -> serde_json::Result<Vec<u8>> {
+    let (_, stored) = StoredBlockRef::from_record(
+        0,
+        BlockId::new(0),
+        record,
+        indexed_text,
+        estimated_text_bytes,
+    );
+    serde_json::to_vec(&*stored)
+}
+
+/// The summary [`encode_record_summary`] gives a stored row, for a schema
+/// upgrade that adds summaries to existing rows.
+pub fn stored_record_summary(
+    mut row: smelt_store::StoredTranscriptBlock,
+) -> serde_json::Result<Vec<u8>> {
+    let indexed_text = std::mem::take(&mut row.indexed_text);
+    let estimated_text_bytes = row.estimated_text_bytes;
+    let record = TranscriptBlockRecord::try_from(row)?;
+    encode_record_summary(&record, &indexed_text, estimated_text_bytes)
+}
+
+/// Compact records of a record window, decoded from their stored summaries.
+pub fn compact_record_summaries(
     start_record_index: usize,
-    rows: Vec<smelt_store::StoredTranscriptBlock>,
+    records: Vec<smelt_store::TranscriptRecordSummary>,
 ) -> Result<Vec<StoredBlockWithId>, serde_json::Error> {
-    rows.into_iter()
+    records
+        .into_iter()
         .enumerate()
-        .map(|(offset, mut row)| {
-            let indexed_text = std::mem::take(&mut row.indexed_text);
-            let estimated_text_bytes = row.estimated_text_bytes;
-            let record = TranscriptBlockRecordWithId::try_from(row)?;
-            let (block_id, stored) = StoredBlockRef::from_record(
-                start_record_index.saturating_add(offset),
-                record.block_id,
-                &record.record,
-                &indexed_text,
-                estimated_text_bytes,
-            );
-            Ok(StoredBlockWithId { block_id, stored })
+        .map(|(offset, record)| {
+            Ok(StoredBlockWithId {
+                block_id: BlockId::new(record.block_idx),
+                stored: StoredBlockRef::from_summary(
+                    start_record_index.saturating_add(offset),
+                    &record.summary,
+                )?,
+            })
         })
         .collect()
 }
@@ -1692,6 +1720,11 @@ pub fn transcript_block_row_with_block_idx(
         Some(BlockOrigin::History(idx)) => Some(idx as u64),
         _ => None,
     };
+    let summary = encode_record_summary(
+        record,
+        &indexed_text.indexed_text,
+        indexed_text.estimated_text_bytes,
+    )?;
     Ok(smelt_store::StoredTranscriptBlock {
         block_idx,
         history_idx,
@@ -1700,6 +1733,7 @@ pub fn transcript_block_row_with_block_idx(
         tool_name: record.block.tool_name().map(str::to_string),
         content_hash: record.content_hash.to_string(),
         estimated_text_bytes: indexed_text.estimated_text_bytes,
+        summary,
         indexed_text: indexed_text.indexed_text,
         block_json,
         origin_json,
@@ -1778,7 +1812,7 @@ fn group_child_args(block: &Block) -> Option<HashMap<String, serde_json::Value>>
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptGroupChildOutputMetadata {
     pub content_lines: Option<usize>,
     pub is_error: Option<bool>,
@@ -1809,7 +1843,7 @@ pub struct TranscriptGroupChildMetadata {
     pub event_data: TranscriptGroupChildProcessMetadata,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct StoredProcessMetadata {
     event: Option<String>,
     process_id: Option<String>,
@@ -1817,7 +1851,7 @@ struct StoredProcessMetadata {
     termination: Option<protocol::JobTermination>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StoredBlockKind {
     User,
     Mode,
@@ -1865,9 +1899,11 @@ impl StoredBlockKind {
 }
 
 /// Compact canonical locator and render-plan metadata for a durable block.
-/// Full block JSON, tool output, and block text remain in SQLite.
-#[derive(Clone, Debug)]
+/// Full block JSON, tool output, and block text remain in SQLite. Saves store
+/// it encoded beside each record, so record windows load without the payload.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StoredBlockRef {
+    #[serde(skip)]
     pub record_index: usize,
     pub kind: StoredBlockKind,
     pub estimated_text_bytes: u64,
@@ -1890,6 +1926,7 @@ pub struct StoredBlockRef {
     starts_with_thinking_title: bool,
     ends_with_heading: bool,
     selector_fields: HashMap<String, serde_json::Value>,
+    #[serde(skip)]
     retained_bytes: usize,
 }
 
@@ -1952,26 +1989,80 @@ impl StoredBlockRef {
             Block::Text { content } => content.ends_with_markdown_heading(),
             _ => false,
         };
-        let retained_bytes = std::mem::size_of::<Self>()
-            .saturating_add(first_line.len())
-            .saturating_add(tool_call_id.as_ref().map_or(0, String::capacity))
-            .saturating_add(tool_name.as_ref().map_or(0, String::capacity))
-            .saturating_add(group_summary_text.as_ref().map_or(0, String::capacity))
-            .saturating_add(group_process.event.as_ref().map_or(0, String::capacity))
+        let stored = Self {
+            record_index,
+            kind,
+            estimated_text_bytes,
+            first_line,
+            extent,
+            content_hash: if record.content_hash == 0 {
+                block.content_hash()
+            } else {
+                record.content_hash
+            },
+            tool_call_id,
+            tool_name,
+            tool_status: match block {
+                Block::ToolCall { .. } => {
+                    Some(tool_state.map_or(ToolStatus::Pending, |state| state.status))
+                }
+                _ => tool_state.map(|state| state.status),
+            },
+            tool_render_revision: record.tool_render_revision,
+            origin: record.origin,
+            stable_scroll_anchor: !matches!(
+                block,
+                Block::ToolDraft(ToolDraft {
+                    finished: false,
+                    ..
+                })
+            ),
+            tool_draft,
+            group_summary_text,
+            group_called_at_ms,
+            group_output,
+            group_process,
+            starts_with_thinking_title,
+            ends_with_heading,
+            selector_fields,
+            retained_bytes: 0,
+        };
+        (block_id, Arc::new(stored.with_retained_bytes()))
+    }
+
+    /// Decodes the summary a save stored beside record `record_index`.
+    pub fn from_summary(record_index: usize, summary: &[u8]) -> serde_json::Result<Arc<Self>> {
+        let mut stored: Self = serde_json::from_slice(summary)?;
+        stored.record_index = record_index;
+        Ok(Arc::new(stored.with_retained_bytes()))
+    }
+
+    fn with_retained_bytes(mut self) -> Self {
+        self.retained_bytes = std::mem::size_of::<Self>()
+            .saturating_add(self.first_line.len())
+            .saturating_add(self.tool_call_id.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.tool_name.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.group_summary_text.as_ref().map_or(0, String::capacity))
             .saturating_add(
-                group_process
+                self.group_process
+                    .event
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.group_process
                     .process_id
                     .as_ref()
                     .map_or(0, String::capacity),
             )
             .saturating_add(
-                selector_fields.capacity().saturating_mul(
+                self.selector_fields.capacity().saturating_mul(
                     std::mem::size_of::<(String, serde_json::Value)>()
                         .saturating_add(std::mem::size_of::<usize>()),
                 ),
             )
             .saturating_add(
-                selector_fields
+                self.selector_fields
                     .iter()
                     .map(|(key, value)| {
                         key.capacity()
@@ -1979,47 +2070,7 @@ impl StoredBlockRef {
                     })
                     .sum::<usize>(),
             );
-        (
-            block_id,
-            Arc::new(Self {
-                record_index,
-                kind,
-                estimated_text_bytes,
-                first_line,
-                extent,
-                content_hash: if record.content_hash == 0 {
-                    block.content_hash()
-                } else {
-                    record.content_hash
-                },
-                tool_call_id,
-                tool_name,
-                tool_status: match block {
-                    Block::ToolCall { .. } => {
-                        Some(tool_state.map_or(ToolStatus::Pending, |state| state.status))
-                    }
-                    _ => tool_state.map(|state| state.status),
-                },
-                tool_render_revision: record.tool_render_revision,
-                origin: record.origin,
-                stable_scroll_anchor: !matches!(
-                    block,
-                    Block::ToolDraft(ToolDraft {
-                        finished: false,
-                        ..
-                    })
-                ),
-                tool_draft,
-                group_summary_text,
-                group_called_at_ms,
-                group_output,
-                group_process,
-                starts_with_thinking_title,
-                ends_with_heading,
-                selector_fields,
-                retained_bytes,
-            }),
-        )
+        self
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -5158,6 +5209,53 @@ mod tests {
         assert_eq!(row.estimated_text_bytes, expected.len() as u64);
     }
 
+    /// Saved sessions keep these bytes. A change here needs a store schema
+    /// version bump, or existing summaries stop decoding.
+    #[test]
+    fn record_summary_encoding_is_stable_and_round_trips() {
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "command".to_string(),
+            serde_json::Value::String("cargo test".to_string()),
+        );
+        let block = Block::ToolCall {
+            call_id: "call-1".to_string(),
+            name: "bash".to_string(),
+            summary: protocol::StyledLines::from_plain("cargo test"),
+            args: args.into(),
+        };
+        let record = TranscriptBlockRecord {
+            content_hash: block.content_hash(),
+            block,
+            origin: Some(BlockOrigin::History(3)),
+            tool_state: Some(indexed_tool_state_with_content(
+                "ok\npassed\n",
+                serde_json::json!({}),
+            )),
+            tool_render_revision: 2,
+        };
+        let row = transcript_block_row_with_block_idx(7, 7, &record).unwrap();
+
+        assert_eq!(
+            String::from_utf8(row.summary.clone()).unwrap(),
+            concat!(
+                r#"{"kind":"Tool","estimated_text_bytes":49,"first_line":"bash","#,
+                r#""extent":{"rows":[2,2,2,2,2,2]},"content_hash":8918680911592222329,"#,
+                r#""tool_call_id":"call-1","tool_name":"bash","tool_status":"Ok","#,
+                r#""tool_render_revision":2,"origin":{"History":3},"#,
+                r#""stable_scroll_anchor":true,"tool_draft":false,"#,
+                r#""group_summary_text":"cargo test","group_called_at_ms":null,"#,
+                r#""group_output":{"content_lines":2,"is_error":false},"#,
+                r#""group_process":{"event":null,"process_id":null,"exit_code":null,"#,
+                r#""termination":null},"starts_with_thinking_title":false,"#,
+                r#""ends_with_heading":false,"selector_fields":{"command":"cargo test"}}"#,
+            )
+        );
+        let decoded = StoredBlockRef::from_summary(7, &row.summary).unwrap();
+        assert_eq!(decoded.record_index, 7);
+        assert_eq!(serde_json::to_vec(&*decoded).unwrap(), row.summary);
+    }
+
     #[test]
     fn hydration_rejects_block_json_that_does_not_match_content_hash() {
         let block = multi_arg_tool_block();
@@ -5169,10 +5267,16 @@ mod tests {
             tool_render_revision: 0,
         };
         let row = transcript_block_row(0, &record).unwrap();
-        let stored = compact_block_rows(0, vec![row.clone()])
-            .unwrap()
-            .pop()
-            .unwrap();
+        let stored = compact_record_summaries(
+            0,
+            vec![smelt_store::TranscriptRecordSummary {
+                block_idx: row.block_idx,
+                summary: row.summary.clone(),
+            }],
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
         let mut tampered_row = row;
         tampered_row.block_json = tampered_row
             .block_json

@@ -196,8 +196,10 @@ Every jump must land on an earlier record (on the generated session, the
 previous prompt), with no full-session reads, more than 4,096 materialized
 rows, or more than two record-slice reads. Reports p50, p95, and max per jump.
 Expected on the generated session: p95 under 5 ms and max under 20 ms at
-50 MiB. Real sessions with large tool output pay more per window seek, since
-the seek decodes every record in the new window.
+50 MiB. A window seek reads only each record's stored summary, so it stays
+about 1 ms per 128 records however large the tool output is. Real sessions with
+large tool output still pay to hydrate and lay out the blocks that land on
+screen; compare them on a copied fixture.
 
 Search setup waits for the derived search projection before timing. Rare,
 common, and absent queries are all measured because latency scales with posting

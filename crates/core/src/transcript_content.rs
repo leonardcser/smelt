@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 static NEXT_CONTENT_ID: AtomicU64 = AtomicU64::new(1);
 const CHECKPOINT_BYTES: usize = 4 * 1024;
@@ -237,7 +237,14 @@ pub struct TranscriptContent {
     inner: Arc<RwLock<ContentEntry>>,
 }
 
+/// Appends only store their chunk; line, display, ANSI and markdown indexes are
+/// built when the content is first read, so content nobody lays out (such as the
+/// output of a collapsed tool) never pays for them.
 struct ContentEntry {
+    /// Appended chunks whose indexes are not built yet; they follow `chunks`.
+    pending: Vec<SharedContentSlice>,
+    pending_bytes: usize,
+    pending_lines: usize,
     chunks: Vec<SharedContentSlice>,
     chunk_starts: Vec<usize>,
     byte_len: usize,
@@ -449,15 +456,39 @@ impl TranscriptContent {
 
     pub fn read(&self) -> ContentRead<'_> {
         ContentRead {
-            entry: self
-                .inner
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            entry: self.indexed_read(),
         }
     }
 
+    /// The entry without building pending indexes, for length, hash and size.
+    fn raw_read(&self) -> RwLockReadGuard<'_, ContentEntry> {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn indexed_read(&self) -> RwLockReadGuard<'_, ContentEntry> {
+        loop {
+            let entry = self.raw_read();
+            if entry.is_indexed() {
+                return entry;
+            }
+            drop(entry);
+            drop(self.indexed_write());
+        }
+    }
+
+    fn indexed_write(&self) -> RwLockWriteGuard<'_, ContentEntry> {
+        let mut entry = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entry.ensure_indexed();
+        entry
+    }
+
     pub fn len(&self) -> usize {
-        self.read().len()
+        self.raw_read().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -465,11 +496,11 @@ impl TranscriptContent {
     }
 
     pub fn revision(&self) -> u64 {
-        self.read().revision()
+        self.raw_read().revision
     }
 
     pub fn content_hash(&self) -> u64 {
-        self.read().content_hash()
+        self.raw_read().hash
     }
 
     pub fn push_owned(&mut self, chunk: String) -> Range<usize> {
@@ -634,10 +665,7 @@ impl TranscriptContent {
     }
 
     pub fn text_layout_rows(&self, width: u16, ansi: bool) -> usize {
-        let mut entry = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entry = self.indexed_write();
         let index = entry.ensure_text_layout(width, ansi);
         entry.text_layouts[index]
             .prefix_rows
@@ -652,20 +680,14 @@ impl TranscriptContent {
         ansi: bool,
         row_range: Range<usize>,
     ) -> Vec<ContentTextRange> {
-        let mut entry = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entry = self.indexed_write();
         let index = entry.ensure_text_layout(width, ansi);
         let layout = &entry.text_layouts[index];
         text_layout_ranges(&layout.prefix_rows, row_range)
     }
 
     pub fn file_layout_rows(&self, width: u16) -> usize {
-        let mut entry = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entry = self.indexed_write();
         let index = entry.ensure_file_layout(width);
         entry
             .logical_line_count()
@@ -673,10 +695,7 @@ impl TranscriptContent {
     }
 
     pub fn file_layout_ranges(&self, width: u16, row_range: Range<usize>) -> Vec<ContentTextRange> {
-        let mut entry = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entry = self.indexed_write();
         let index = entry.ensure_file_layout(width);
         file_layout_ranges(&entry, &entry.file_layouts[index], row_range)
     }
@@ -688,10 +707,7 @@ impl TranscriptContent {
         row_range: Range<usize>,
         mut visit: impl FnMut(ContentTextRow<'_>),
     ) -> usize {
-        let mut entry = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entry = self.indexed_write();
         let index = entry.ensure_file_layout(width);
         let layout = &entry.file_layouts[index];
         let Some((source_range, wraps)) = file_layout_line(&entry, layout, line) else {
@@ -750,10 +766,7 @@ impl TranscriptContent {
         row_range: Range<usize>,
         mut visit: impl FnMut(ContentTextRow<'_>),
     ) -> usize {
-        let mut entry = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entry = self.indexed_write();
         let index = entry.ensure_text_layout(width, ansi);
         let ranges = text_layout_ranges(&entry.text_layouts[index].prefix_rows, row_range);
         let mut visited = 0usize;
@@ -802,10 +815,7 @@ impl TranscriptContent {
         mut visit: impl FnMut(ContentTextRow<'_>),
     ) -> ContentTextWindow {
         debug_assert!(max_rows <= TEXT_LAYOUT_TAIL_CACHE_ROWS);
-        let mut entry = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entry = self.indexed_write();
         let line_count = entry.logical_line_count();
         if max_rows == 0 || line_count == 0 {
             return ContentTextWindow {
@@ -954,10 +964,7 @@ impl TranscriptContent {
             return self.visit_cached_text_layout_tail_rows(width, ansi, max_rows, visit);
         }
 
-        let entry = self
-            .inner
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = self.indexed_read();
         let line_count = entry.logical_line_count();
         if max_rows == 0 || line_count == 0 {
             return ContentTextWindow {
@@ -1028,64 +1035,68 @@ impl TranscriptContent {
     }
 
     pub fn dynamic_retained_bytes(&self) -> usize {
-        let read = self.read();
+        let entry = self.raw_read();
         ARC_HEADER_BYTES
+            .saturating_add(
+                entry
+                    .pending
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SharedContentSlice>()),
+            )
+            .saturating_add(retained_chunk_source_bytes(&entry.pending))
+            .saturating_add(entry.pending_index_bytes())
             .saturating_add(std::mem::size_of::<RwLock<ContentEntry>>())
             .saturating_add(
-                read.entry
+                entry
                     .chunks
                     .capacity()
                     .saturating_mul(std::mem::size_of::<SharedContentSlice>()),
             )
-            .saturating_add(retained_chunk_source_bytes(&read.entry.chunks))
+            .saturating_add(retained_chunk_source_bytes(&entry.chunks))
             .saturating_add(
-                read.entry
+                entry
                     .chunk_starts
                     .capacity()
                     .saturating_mul(std::mem::size_of::<usize>()),
             )
             .saturating_add(
-                read.entry
+                entry
                     .line_starts
                     .capacity()
                     .saturating_mul(std::mem::size_of::<usize>()),
             )
+            .saturating_add(vec_bool_allocation_bytes(entry.line_ascii_words.capacity()))
+            .saturating_add(vec_bool_allocation_bytes(entry.line_ascii_cells.capacity()))
             .saturating_add(vec_bool_allocation_bytes(
-                read.entry.line_ascii_words.capacity(),
+                entry.line_plain_markdown.capacity(),
             ))
-            .saturating_add(vec_bool_allocation_bytes(
-                read.entry.line_ascii_cells.capacity(),
-            ))
-            .saturating_add(vec_bool_allocation_bytes(
-                read.entry.line_plain_markdown.capacity(),
-            ))
-            .saturating_add(vec_bool_allocation_bytes(read.entry.line_blank.capacity()))
+            .saturating_add(vec_bool_allocation_bytes(entry.line_blank.capacity()))
             .saturating_add(
-                read.entry
+                entry
                     .ansi_checkpoints
                     .capacity()
                     .saturating_mul(std::mem::size_of::<ContentAnsiCheckpoint>()),
             )
             .saturating_add(
-                read.entry
+                entry
                     .markdown_stable_ends
                     .capacity()
                     .saturating_mul(std::mem::size_of::<usize>()),
             )
             .saturating_add(
-                read.entry
+                entry
                     .checkpoints
                     .capacity()
                     .saturating_mul(std::mem::size_of::<ContentCheckpoint>()),
             )
             .saturating_add(
-                read.entry
+                entry
                     .text_layouts
                     .capacity()
                     .saturating_mul(std::mem::size_of::<ContentTextLayout>()),
             )
             .saturating_add(
-                read.entry
+                entry
                     .text_layouts
                     .iter()
                     .map(|layout| {
@@ -1116,13 +1127,13 @@ impl TranscriptContent {
                     .sum::<usize>(),
             )
             .saturating_add(
-                read.entry
+                entry
                     .file_layouts
                     .capacity()
                     .saturating_mul(std::mem::size_of::<ContentFileLayout>()),
             )
             .saturating_add(
-                read.entry
+                entry
                     .file_layouts
                     .iter()
                     .map(|layout| {
@@ -1290,6 +1301,9 @@ impl MarkdownContainer {
 impl ContentEntry {
     fn empty() -> Self {
         Self {
+            pending: Vec::new(),
+            pending_bytes: 0,
+            pending_lines: 0,
             chunks: Vec::new(),
             chunk_starts: Vec::new(),
             byte_len: 0,
@@ -1337,12 +1351,65 @@ impl ContentEntry {
         }
     }
 
+    /// Length including chunks whose indexes are not built yet.
+    fn len(&self) -> usize {
+        self.byte_len.saturating_add(self.pending_bytes)
+    }
+
     fn append(&mut self, chunk: SharedContentSlice) -> Range<usize> {
-        let start = self.byte_len;
+        let start = self.len();
         let text = chunk.as_str();
         if text.is_empty() {
             return start..start;
         }
+        let hash_perf = smelt_perf::perf::begin("transcript:content:append_hash");
+        self.hasher.write(text.as_bytes());
+        self.hash = self.hasher.finish();
+        drop(hash_perf);
+        self.pending_bytes = self.pending_bytes.saturating_add(text.len());
+        self.pending_lines = self
+            .pending_lines
+            .saturating_add(text.bytes().filter(|byte| *byte == b'\n').count());
+        self.pending.push(chunk);
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("transcript content revision overflow");
+        start..self.len()
+    }
+
+    fn is_indexed(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    fn ensure_indexed(&mut self) {
+        if self.is_indexed() {
+            return;
+        }
+        let _perf = smelt_perf::perf::begin("transcript:content:build_index");
+        smelt_perf::perf::record_value(
+            "transcript:content:build_index:bytes",
+            self.pending_bytes as u64,
+        );
+        self.pending_bytes = 0;
+        self.pending_lines = 0;
+        for chunk in std::mem::take(&mut self.pending) {
+            self.index(chunk);
+        }
+    }
+
+    /// Estimated bytes the pending chunks' indexes take once built.
+    fn pending_index_bytes(&self) -> usize {
+        let per_line = std::mem::size_of::<usize>().saturating_add(4);
+        self.pending_lines.saturating_mul(per_line).saturating_add(
+            (self.pending_bytes / CHECKPOINT_BYTES)
+                .saturating_mul(std::mem::size_of::<ContentCheckpoint>()),
+        )
+    }
+
+    fn index(&mut self, chunk: SharedContentSlice) {
+        let start = self.byte_len;
+        let text = chunk.as_str();
 
         let dirty_line = self.line_starts.len().saturating_sub(1);
         let metadata_perf = smelt_perf::perf::begin("transcript:content:append_metadata");
@@ -1398,10 +1465,6 @@ impl ContentEntry {
         }
         drop(metadata_perf);
 
-        let hash_perf = smelt_perf::perf::begin("transcript:content:append_hash");
-        self.hasher.write(text.as_bytes());
-        self.hash = self.hasher.finish();
-        drop(hash_perf);
         self.byte_len = self.byte_len.saturating_add(text.len());
         self.char_len = metrics.char_offset;
         self.display_cells = metrics.display_cells();
@@ -1424,11 +1487,6 @@ impl ContentEntry {
             layout.dirty_from = layout.dirty_from.min(dirty_line);
             layout.tail_lines.retain(|cached| cached.line < dirty_line);
         }
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .expect("transcript content revision overflow");
-        start..self.byte_len
     }
 
     fn index_fragment_metrics(
@@ -1903,6 +1961,7 @@ impl ContentEntry {
     }
 
     fn truncate(&mut self, requested_len: usize) {
+        self.ensure_indexed();
         let requested_len = requested_len.min(self.byte_len);
         if requested_len == self.byte_len {
             return;
@@ -3110,6 +3169,30 @@ mod tests {
     }
 
     #[test]
+    fn appends_defer_indexing_until_the_content_is_read() {
+        let text = (0..20_000)
+            .map(|line| format!("{line:6}  let value = compute(argument);"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = TranscriptContent::from(text.clone());
+        assert_eq!(content.len(), text.len());
+        assert_eq!(
+            content.content_hash(),
+            TranscriptContent::from(text).content_hash()
+        );
+        assert!(!content.raw_read().is_indexed());
+
+        let estimated = content.retained_bytes();
+        assert_eq!(content.read().logical_line_count(), 20_000);
+        assert!(content.raw_read().is_indexed());
+        let built = content.retained_bytes();
+        assert!(
+            estimated.abs_diff(built) <= built / 10,
+            "{estimated} vs {built}"
+        );
+    }
+
+    #[test]
     fn bounded_text_windows_materialize_only_requested_edge_rows() {
         let content = TranscriptContent::from(
             (0..100_000)
@@ -3117,6 +3200,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
+        drop(content.read());
         let retained_before = content.retained_bytes();
         let mut tail = Vec::new();
         let window = content.visit_text_layout_tail_rows(80, true, 3, |row| {
@@ -3167,6 +3251,7 @@ mod tests {
         }
 
         content.append_owned(" extended\u{1b}[0m".to_string());
+        drop(content.read());
         {
             let entry = content
                 .inner

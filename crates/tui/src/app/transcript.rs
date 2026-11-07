@@ -9267,9 +9267,13 @@ mod document_tests {
                 )
                 .expect("record row")
             })
+            .map(|row| smelt_store::TranscriptRecordSummary {
+                block_idx: row.block_idx,
+                summary: row.summary,
+            })
             .collect();
-        smelt_core::transcript_model::compact_block_rows(block_id_start, rows)
-            .expect("compact record rows")
+        smelt_core::transcript_model::compact_record_summaries(block_id_start, rows)
+            .expect("compact record summaries")
     }
 
     fn loaded_transcript_with_window(
@@ -11792,27 +11796,31 @@ mod tests {
         assert!(app.transcript_win().is_following_tail());
     }
 
-    fn test_record_record(idx: u64) -> smelt_store::StoredTranscriptBlock {
-        let indexed_text = format!("block {idx}");
-        smelt_store::StoredTranscriptBlock {
-            block_idx: idx,
-            history_idx: None,
-            kind: "assistant".into(),
-            tool_call_id: None,
-            tool_name: None,
-            content_hash: format!("{idx}"),
-            estimated_text_bytes: 8,
-            indexed_text: indexed_text.clone(),
-            block_json: serde_json::to_string(&smelt_core::Block::Text {
-                content: indexed_text.into(),
-            })
-            .unwrap(),
-            origin_json: Some(
-                serde_json::to_string(&smelt_core::BlockOrigin::History(idx as usize)).unwrap(),
-            ),
-            tool_state_json: None,
-            tool_render_revision: 0,
+    fn test_record_summary(idx: u64) -> smelt_store::TranscriptRecordSummary {
+        let row = test_record_record(idx);
+        smelt_store::TranscriptRecordSummary {
+            block_idx: row.block_idx,
+            summary: row.summary,
         }
+    }
+
+    fn test_record_record(idx: u64) -> smelt_store::StoredTranscriptBlock {
+        let block = smelt_core::Block::Text {
+            content: format!("block {idx}").into(),
+        };
+        let record = smelt_core::TranscriptBlockRecord {
+            content_hash: block.content_hash(),
+            block,
+            origin: Some(smelt_core::BlockOrigin::History(idx as usize)),
+            tool_state: None,
+            tool_render_revision: 0,
+        };
+        smelt_core::transcript_model::transcript_block_row_with_block_idx(
+            idx as usize,
+            idx,
+            &record,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -11918,7 +11926,7 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(34),
             100,
-            (34..37).map(test_record_record).collect(),
+            (34..37).map(test_record_summary).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
@@ -11946,7 +11954,7 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(34),
             100,
-            (34..37).map(test_record_record).collect(),
+            (34..37).map(test_record_summary).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
@@ -11975,7 +11983,7 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(98),
             100,
-            (98..100).map(test_record_record).collect(),
+            (98..100).map(test_record_summary).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
@@ -12018,7 +12026,7 @@ mod tests {
         let tail = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(280),
             300,
-            (280..300).map(test_record_record).collect(),
+            (280..300).map(test_record_summary).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
@@ -12045,7 +12053,7 @@ mod tests {
         let earlier = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(100),
             300,
-            (100..120).map(test_record_record).collect(),
+            (100..120).map(test_record_summary).collect(),
         );
         assert!(document.merge_record_window(
             super::LoadedRecordWindow::from_slice(earlier).expect("earlier window")
@@ -12078,7 +12086,7 @@ mod tests {
         let tail = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(280),
             300,
-            (280..300).map(test_record_record).collect(),
+            (280..300).map(test_record_summary).collect(),
         );
         assert!(document.merge_record_window(
             super::LoadedRecordWindow::from_slice(tail).expect("tail window")
@@ -12101,7 +12109,7 @@ mod tests {
         let earlier = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(100),
             300,
-            (100..120).map(test_record_record).collect(),
+            (100..120).map(test_record_summary).collect(),
         );
         assert!(document.merge_record_window(
             super::LoadedRecordWindow::from_slice(earlier).expect("earlier window")
@@ -12118,7 +12126,7 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(98),
             100,
-            (98..100).map(test_record_record).collect(),
+            (98..100).map(test_record_summary).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let store_address =

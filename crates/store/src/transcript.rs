@@ -61,7 +61,7 @@ pub const TRANSCRIPT_EXTENT_PROFILE_WIDTHS: [u16; 6] = [20, 40, 80, 120, 160, 24
 const PROFILE_LEN: usize = TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len();
 
 /// Estimated rows of some records at each profile width.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct TranscriptExtentProfile {
     rows: [u64; PROFILE_LEN],
 }
@@ -139,6 +139,9 @@ pub struct StoredTranscriptBlock {
     pub tool_name: Option<String>,
     pub content_hash: String,
     pub estimated_text_bytes: u64,
+    /// Encoded compact record; see [`TranscriptRecordSummary`].
+    #[serde(default)]
+    pub summary: Vec<u8>,
     pub indexed_text: String,
     pub block_json: String,
     pub origin_json: Option<String>,
@@ -218,18 +221,26 @@ pub fn transcript_role(kind: &str) -> &'static str {
     }
 }
 
+/// The compact form of one record, read without its block, tool state or
+/// indexed text. The store keeps `summary` opaque; the transcript model encodes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscriptRecordSummary {
+    pub block_idx: u64,
+    pub summary: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptRecordSlice {
     pub start: TranscriptRecordOffset,
     pub total_count: usize,
-    pub records: Vec<StoredTranscriptBlock>,
+    pub records: Vec<TranscriptRecordSummary>,
 }
 
 impl TranscriptRecordSlice {
     pub fn new(
         start: TranscriptRecordOffset,
         total_count: usize,
-        records: Vec<StoredTranscriptBlock>,
+        records: Vec<TranscriptRecordSummary>,
     ) -> Self {
         Self {
             start,
@@ -250,7 +261,7 @@ impl TranscriptRecordSlice {
         TranscriptRecordOffset::new(self.start.get().saturating_add(self.records.len()))
     }
 
-    pub fn into_records(self) -> Vec<StoredTranscriptBlock> {
+    pub fn into_records(self) -> Vec<TranscriptRecordSummary> {
         self.records
     }
 }

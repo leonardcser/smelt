@@ -72,6 +72,8 @@ CREATE TABLE side_rows (
 
 -- Transcript records. `rows_*` hold the cumulative estimated row count through
 -- this record at each profile width, so any range's extent is one subtraction.
+-- `summary` is the compact record a sparse transcript keeps in memory. It comes
+-- before the large columns, so record windows read it without their overflow pages.
 -- `indexed_text` is the plain search text; its start is the record's preview.
 -- `payload` holds the block, origin and tool state, compressed together.
 CREATE TABLE transcript (
@@ -93,6 +95,7 @@ CREATE TABLE transcript (
     tool_name TEXT,
     content_hash TEXT NOT NULL,
     first_line TEXT NOT NULL,
+    summary BLOB NOT NULL,
     indexed_text TEXT NOT NULL,
     payload BLOB NOT NULL,
     PRIMARY KEY (sid, idx)

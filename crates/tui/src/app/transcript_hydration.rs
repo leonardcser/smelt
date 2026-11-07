@@ -13,9 +13,6 @@ use smelt_core::transcript_model::{
 use super::latest_worker::{LatestWorker, Mailbox};
 use super::transcript::TranscriptStoreAddress;
 
-type MaterializedBlockRecords =
-    BTreeMap<BlockId, (Arc<StoredBlockRef>, TranscriptBlockRecordWithId)>;
-
 pub(crate) struct LoadedRecordWindow {
     pub(crate) start: smelt_store::TranscriptRecordOffset,
     pub(crate) total_count: usize,
@@ -40,47 +37,23 @@ impl LoadedRecordWindow {
     }
 
     pub(super) fn from_slice(slice: smelt_store::TranscriptRecordSlice) -> Option<Self> {
-        Self::from_slice_materializing(slice, &HashSet::new()).map(|(window, _)| window)
-    }
-
-    fn from_slice_materializing(
-        slice: smelt_store::TranscriptRecordSlice,
-        materialize_block_ids: &HashSet<BlockId>,
-    ) -> Option<(Self, MaterializedBlockRecords)> {
         if slice.is_empty() {
             return None;
         }
         let start = slice.start;
         let total_count = slice.total_count;
-        let mut materialized = BTreeMap::new();
-        let records = {
-            let _perf = smelt_perf::perf::begin("transcript:record_window:compact_records");
-            smelt_perf::perf::record_value(
-                "transcript:record_window:decode_rows",
-                slice.len() as u64,
-            );
-            slice
-                .into_records()
-                .into_iter()
-                .enumerate()
-                .map(|(offset, row)| {
-                    let (block_id, stored, record) =
-                        stored_block_from_row(start.get().saturating_add(offset), row)?;
-                    if materialize_block_ids.contains(&block_id) {
-                        materialized.insert(block_id, (Arc::clone(&stored), record));
-                    }
-                    Some(StoredBlockWithId { block_id, stored })
-                })
-                .collect::<Option<Vec<_>>>()?
-        };
-        Some((
-            Self {
-                start,
-                total_count,
-                records,
-            },
-            materialized,
-        ))
+        let _perf = smelt_perf::perf::begin("transcript:record_window:compact_records");
+        smelt_perf::perf::record_value("transcript:record_window:decode_rows", slice.len() as u64);
+        let records = smelt_core::transcript_model::compact_record_summaries(
+            start.get(),
+            slice.into_records(),
+        )
+        .ok()?;
+        Some(Self {
+            start,
+            total_count,
+            records,
+        })
     }
 }
 
@@ -438,7 +411,6 @@ pub(super) fn execute_hydration_request(
         materialize_block_ids.extend(record.materialize_block_ids.iter().copied());
     }
 
-    let mut hydrated_by_id = BTreeMap::new();
     let mut record_windows = Vec::new();
     let mut record_complete = request.record.is_none();
     let mut hydration_ranges = 0_u64;
@@ -453,24 +425,18 @@ pub(super) fn execute_hydration_request(
                 smelt_store::TranscriptRecordRange::new(range.start, range.end),
                 request.total_count,
             );
-            let Some((window, materialized)) = slice.ok().and_then(|slice| {
-                LoadedRecordWindow::from_slice_materializing(slice, &materialize_block_ids)
-            }) else {
+            let Some(window) = slice.ok().and_then(LoadedRecordWindow::from_slice) else {
                 record_complete = false;
                 break;
             };
-            for (block_id, (stored, record)) in materialized {
-                let stored = request.blocks.get(&block_id).cloned().unwrap_or(stored);
-                hydrated_by_id.insert(block_id, (stored, record));
-            }
             record_windows.push(window);
         }
     }
 
     // Saves can move records, so blocks are read by id and their known index is only a hint.
+    let mut hydrated_by_id = BTreeMap::new();
     let lookups = materialize_block_ids
         .iter()
-        .filter(|block_id| !hydrated_by_id.contains_key(*block_id))
         .map(|block_id| smelt_store::TranscriptBlockLookup {
             block_idx: block_id.get(),
             record_index_hint: request
@@ -738,32 +704,23 @@ mod tests {
     }
 
     #[test]
-    fn record_window_read_materializes_an_overlapping_block_without_a_second_range() {
+    fn record_window_read_hydrates_a_requested_block_by_id() {
         let root = tempfile::tempdir().unwrap();
         let address = seed_store(root.path(), 'e');
         let reader = address.reader().unwrap();
-        let mut row = reader
-            .transcript_record_slice_with_total((5..6).into(), 32)
-            .unwrap()
-            .into_records()
-            .pop()
-            .unwrap();
-        let indexed_text = std::mem::take(&mut row.indexed_text);
-        let estimated_text_bytes = row.estimated_text_bytes;
-        let record = TranscriptBlockRecordWithId::try_from(row).unwrap();
-        let (block_id, stored) = StoredBlockRef::from_record(
-            5,
-            record.block_id,
-            &record.record,
-            &indexed_text,
-            estimated_text_bytes,
-        );
+        let window = LoadedRecordWindow::from_slice(
+            reader
+                .transcript_record_slice_with_total((5..6).into(), 32)
+                .unwrap(),
+        )
+        .unwrap();
+        let StoredBlockWithId { block_id, stored } = window.records[0].clone();
         let mut request = record_request(1, address, 0..10);
         request.blocks.insert(block_id, stored);
 
         let result = execute_hydration_request(&reader, request, || false).unwrap();
 
-        assert_eq!(result.hydration_ranges, 1);
+        assert_eq!(result.hydration_ranges, 2);
         assert_eq!(result.record_windows.len(), 1);
         assert_eq!(result.hydrated_blocks.len(), 1);
         assert_eq!(result.hydrated_blocks[0].0, block_id);

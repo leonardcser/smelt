@@ -22,7 +22,7 @@ mod writer;
 use std::path::{Path, PathBuf};
 
 pub use catalog::{CatalogCursor, CatalogPage, CatalogQuery, CatalogSession};
-pub use db::{create_private_dir_all, SCHEMA_VERSION};
+pub use db::{create_private_dir_all, RecordSummarizer, SCHEMA_VERSION};
 pub use error::{Result, StoreError};
 pub use history::is_user_turn;
 pub use reader::{SessionReader, StorageStats};
@@ -33,7 +33,7 @@ pub use requests::{
 pub use transcript::{
     transcript_role, transcript_text_extent_profile, StoredTranscriptBlock, TranscriptBlockLookup,
     TranscriptExtentProfile, TranscriptNavigationRecord, TranscriptRecordOffset,
-    TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice,
+    TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice, TranscriptRecordSummary,
     TranscriptSearchCandidate, TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 pub use types::{
@@ -82,9 +82,10 @@ impl Store {
         db::upgrade_pending(&self.database_path())
     }
 
-    /// Opens the database once, upgrading an older schema.
-    pub fn upgrade(&self) -> Result<()> {
-        self.connect().map(drop)
+    /// Upgrades an older schema; `summarize` encodes the transcript summaries
+    /// it adds.
+    pub fn upgrade(&self, summarize: RecordSummarizer<'_>) -> Result<()> {
+        db::upgrade_existing(self, summarize)
     }
 
     pub(crate) fn connect(&self) -> Result<rusqlite::Connection> {

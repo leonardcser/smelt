@@ -44,4 +44,15 @@ database moves origin and tool state into the compressed `payload` column, drops
 the old columns and returns the freed pages to the file system.
 
 Remove `upgrade_v1` and its test in `crates/store/src/db.rs` and the version 1
-case in `open` with the 0.8 release.
+case in `upgrade_existing` with the 0.8 release.
+
+## `store-schema-v2`
+
+Development builds of smelt 0.8 created `smelt.db` at schema version 2, which had
+no transcript `summary` column. Opening such a database encodes a summary for
+each transcript row and rebuilds the table so the summary comes before the large
+columns.
+
+Remove `upgrade_v2`, `upgrade_existing`, `RecordSummarizer`, `Store::upgrade`,
+`stored_record_summary` and the startup upgrade in `src/main.rs` with the 0.8
+release, together with `store-schema-v1`.

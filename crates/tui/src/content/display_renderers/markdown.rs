@@ -3527,6 +3527,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
+        drop(content.read());
         let retained_before = content.retained_bytes();
         let options = InlineOptions::default();
 

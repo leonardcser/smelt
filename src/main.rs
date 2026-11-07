@@ -776,11 +776,15 @@ async fn async_main() {
     lua_runtime.freeze_launch_inputs();
     drop(cli_parse_startup);
 
-    // COMPAT(store-schema-v1): the first open of an older database rewrites it.
+    // COMPAT(store-schema-v1) COMPAT(store-schema-v2): the first open of an older
+    // database rewrites it.
     let sessions = smelt_core::session::storage();
     if sessions.store().upgrade_pending().unwrap_or(false) {
         eprintln!("smelt: upgrading the session database; this can take a minute");
-        if let Err(err) = sessions.store().upgrade() {
+        if let Err(err) = sessions
+            .store()
+            .upgrade(&smelt_core::transcript_model::stored_record_summary)
+        {
             eprintln!("error: failed to upgrade the session database: {err}");
             std::process::exit(1);
         }

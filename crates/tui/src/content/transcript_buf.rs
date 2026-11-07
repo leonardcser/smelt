@@ -8558,7 +8558,7 @@ pub(crate) mod tests {
         };
         let content_hash = record.content_hash();
         let indexed_text = format!("resume benchmark block {block_idx}");
-        smelt_store::StoredTranscriptBlock {
+        let mut row = smelt_store::StoredTranscriptBlock {
             block_idx: block_idx as u64,
             history_idx: None,
             kind: record.kind().to_string(),
@@ -8566,12 +8566,22 @@ pub(crate) mod tests {
             tool_name: None,
             content_hash: content_hash.to_string(),
             estimated_text_bytes: content.len() as u64,
+            summary: Vec::new(),
             indexed_text,
             block_json: serde_json::to_string(&record).expect("serialize resume record"),
             origin_json: None,
             tool_state_json: None,
             tool_render_revision: 0,
-        }
+        };
+        let parsed = smelt_core::TranscriptBlockRecordWithId::try_from(row.clone())
+            .expect("parse resume record");
+        row.summary = smelt_core::transcript_model::encode_record_summary(
+            &parsed.record,
+            &row.indexed_text,
+            row.estimated_text_bytes,
+        )
+        .expect("encode resume summary");
+        row
     }
 
     fn write_record_backed_resume_fixture(

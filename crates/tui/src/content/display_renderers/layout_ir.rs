@@ -4694,6 +4694,7 @@ mod tests {
     #[test]
     fn retained_code_tail_cap_does_not_build_a_full_file_layout() {
         let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        drop(content.read());
         let retained_bytes = content.retained_bytes();
         let layout = BlockLayout::Cap {
             child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
@@ -4732,6 +4733,7 @@ mod tests {
     #[test]
     fn retained_file_tail_cap_does_not_build_a_full_file_layout() {
         let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        drop(content.read());
         let retained_bytes = content.retained_bytes();
         let layout = BlockLayout::Cap {
             child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
@@ -5225,6 +5227,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
+        drop(content.read());
         let retained_before = content.retained_bytes();
         let layout = BlockLayout::Cap {
             child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
@@ -5317,6 +5320,7 @@ mod tests {
             "{}x",
             "word ".repeat(14_000)
         ));
+        drop(content.read());
         let retained_before = content.retained_bytes();
         let thinking = BlockLayout::Style {
             child: Box::new(BlockLayout::Vbox(vec![
@@ -5383,6 +5387,7 @@ mod tests {
             "# {}",
             "word ".repeat(14_000)
         ));
+        drop(content.read());
         let retained_before = content.retained_bytes();
         let layout = BlockLayout::Cap {
             child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
@@ -5421,6 +5426,7 @@ mod tests {
     #[test]
     fn pathological_non_ascii_markdown_uses_bounded_omission() {
         let content = smelt_core::transcript_content::TranscriptContent::from("界".repeat(30_000));
+        drop(content.read());
         let retained_before = content.retained_bytes();
         let layout = BlockLayout::Cap {
             child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
@@ -5456,6 +5462,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+        drop(content.read());
         let retained_before = content.retained_bytes();
         let layout = BlockLayout::Cap {
             child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {

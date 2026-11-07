@@ -13,7 +13,7 @@ follows the new content, not the session size.
 | `session_values` | Small named values such as the first user message and the active checkpoint |
 | `history` | One row per model history item, with the cumulative user ordinal, mode and note columns that indexed queries need |
 | `side_rows` | Turn metadata, metadata snapshots, context snapshots and checkpoint events, keyed by history position |
-| `transcript` | One row per transcript block, with cumulative row estimates at six widths, its search text and one compressed payload of block, origin and tool state |
+| `transcript` | One row per transcript block, with cumulative row estimates at six widths, the compact summary a sparse transcript keeps in memory, its search text and one compressed payload of block, origin and tool state |
 | `requests` | Request audit entries with flat `body`, `response` and `error` payloads |
 | `prompts` | Submitted prompts for input history recall |
 | `usage` | Tokens and cost per model call; calls before yesterday fold into one row per day and model |

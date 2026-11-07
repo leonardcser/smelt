@@ -1395,26 +1395,22 @@ mod tests {
     }
 
     fn test_record_record(block_idx: u64, content: &str) -> smelt_store::StoredTranscriptBlock {
-        smelt_store::StoredTranscriptBlock {
-            block_idx,
-            history_idx: None,
-            kind: "assistant".to_string(),
-            tool_call_id: None,
-            tool_name: None,
-            content_hash: "0".to_string(),
-            estimated_text_bytes: content.len() as u64,
-            indexed_text: content.to_string(),
-            block_json: serde_json::to_string(&Block::Text {
-                content: content.to_string().into(),
-            })
-            .unwrap(),
-            origin_json: Some(
-                serde_json::to_string(&smelt_core::BlockOrigin::History(block_idx as usize))
-                    .unwrap(),
-            ),
-            tool_state_json: None,
+        let block = Block::Text {
+            content: content.to_string().into(),
+        };
+        let record = smelt_core::TranscriptBlockRecord {
+            content_hash: block.content_hash(),
+            block,
+            origin: Some(smelt_core::BlockOrigin::History(block_idx as usize)),
+            tool_state: None,
             tool_render_revision: 0,
-        }
+        };
+        smelt_core::transcript_model::transcript_block_row_with_block_idx(
+            block_idx as usize,
+            block_idx,
+            &record,
+        )
+        .unwrap()
     }
 
     #[test]

@@ -5,9 +5,9 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::error::{Result, StoreError};
-use crate::{lock, transcript, Store};
+use crate::{lock, transcript, Store, StoredTranscriptBlock};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 const SCHEMA: &str = include_str!("schema.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// SQLite keeps a checkpointed WAL at its largest size unless this caps it.
@@ -15,8 +15,48 @@ const WAL_SIZE_LIMIT: i64 = 1024 * 1024;
 /// Checkpoint before the WAL outgrows its size limit, in 4 KiB pages.
 const WAL_CHECKPOINT_PAGES: i64 = WAL_SIZE_LIMIT / 4096;
 
-/// Opens the shared database, creating it and its schema on first use.
+/// Encodes the `summary` column of a transcript row. The store keeps summaries
+/// opaque, so an upgrade that adds them asks the transcript model.
+pub type RecordSummarizer<'a> = &'a dyn Fn(StoredTranscriptBlock) -> serde_json::Result<Vec<u8>>;
+
+/// Opens the shared database, creating it and its schema on first use. An
+/// older schema needs [`upgrade_existing`] first.
 pub(crate) fn open(store: &Store) -> Result<Connection> {
+    let (conn, version) = connect(store)?;
+    match version {
+        SCHEMA_VERSION => Ok(conn),
+        0 => {
+            upgrade(store, &conn, 0, |conn| Ok(conn.execute_batch(SCHEMA)?))?;
+            Ok(conn)
+        }
+        found => Err(StoreError::UnsupportedSchema {
+            found,
+            expected: SCHEMA_VERSION,
+        }),
+    }
+}
+
+/// Brings an older schema up to [`SCHEMA_VERSION`]; other versions are left as
+/// they are.
+// COMPAT(store-schema-v1) COMPAT(store-schema-v2)
+pub(crate) fn upgrade_existing(store: &Store, summarize: RecordSummarizer<'_>) -> Result<()> {
+    let (conn, version) = connect(store)?;
+    let step = |conn: &Connection| {
+        if version == 1 {
+            upgrade_v1(conn)?;
+        }
+        upgrade_v2(conn, summarize)
+    };
+    if matches!(version, 1 | 2) {
+        upgrade(store, &conn, version, step)?;
+        // Give the pages of the dropped columns and table back to the file system.
+        incremental_vacuum(&conn, None)?;
+    }
+    Ok(())
+}
+
+/// A configured connection and the schema version it found.
+fn connect(store: &Store) -> Result<(Connection, i32)> {
     let path = &store.database_path();
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
@@ -43,23 +83,7 @@ pub(crate) fn open(store: &Store) -> Result<Connection> {
     )?;
     conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
     conn.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
-    match version {
-        SCHEMA_VERSION => Ok(conn),
-        0 => {
-            upgrade(store, &conn, 0, |conn| Ok(conn.execute_batch(SCHEMA)?))?;
-            Ok(conn)
-        }
-        1 => {
-            upgrade(store, &conn, 1, upgrade_v1)?;
-            // Give the pages of the dropped columns back to the file system.
-            incremental_vacuum(&conn, None)?;
-            Ok(conn)
-        }
-        found => Err(StoreError::UnsupportedSchema {
-            found,
-            expected: SCHEMA_VERSION,
-        }),
-    }
+    Ok((conn, version))
 }
 
 pub(crate) fn upgrade_pending(path: &Path) -> Result<bool> {
@@ -145,6 +169,60 @@ fn upgrade_v1(conn: &Connection) -> Result<()> {
          ALTER TABLE transcript DROP COLUMN tool_state;
          ALTER TABLE transcript DROP COLUMN block;",
     )?;
+    Ok(())
+}
+
+// COMPAT(store-schema-v2): databases from smelt 0.8 development builds have no
+// transcript `summary` column. The table is rebuilt so the summary comes before
+// the large columns, as in the current schema.
+fn upgrade_v2(conn: &Connection, summarize: RecordSummarizer<'_>) -> Result<()> {
+    let start = SCHEMA
+        .find("CREATE TABLE transcript (")
+        .expect("schema creates the transcript table");
+    let len = SCHEMA[start..]
+        .find("CREATE TABLE requests")
+        .expect("schema creates the requests table after the transcript");
+    let create = &SCHEMA[start..start + len];
+    conn.execute_batch(&format!(
+        "ALTER TABLE transcript RENAME TO transcript_v2;
+         ALTER TABLE transcript_v2 ADD COLUMN summary BLOB NOT NULL DEFAULT x'00';
+         DROP INDEX transcript_blocks;
+         DROP INDEX transcript_history;
+         DROP INDEX transcript_kinds;
+         DROP INDEX transcript_roles;
+         {create}"
+    ))?;
+    let columns = "sid, idx, block_idx, history_idx, kind, role, rows_20, rows_40, rows_80, \
+        rows_120, rows_160, rows_240, text_bytes, tool_render_revision, tool_call_id, tool_name, \
+        content_hash, first_line, summary, indexed_text, payload";
+    let mut select = conn.prepare(&format!(
+        "SELECT rowid, {} FROM transcript_v2 WHERE rowid > ?1 ORDER BY rowid LIMIT 256",
+        crate::reader::TRANSCRIPT_COLUMNS
+    ))?;
+    let mut insert = conn.prepare(&format!(
+        "INSERT INTO transcript ({columns}) SELECT {} FROM transcript_v2 WHERE rowid = ?1",
+        columns.replace("summary", "?2")
+    ))?;
+    let mut after = 0_i64;
+    loop {
+        let rows = select
+            .query_map([after], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    crate::reader::transcript_from_row_at(row, 1)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let Some(&(last, _)) = rows.last() else {
+            break;
+        };
+        after = last;
+        for (rowid, row) in rows {
+            let summary = encode_blob(&summarize(row)?);
+            insert.execute(rusqlite::params![rowid, summary])?;
+        }
+    }
+    conn.execute_batch("DROP TABLE transcript_v2")?;
     Ok(())
 }
 
@@ -326,9 +404,9 @@ mod tests {
         );
     }
 
-    // COMPAT(store-schema-v1)
+    // COMPAT(store-schema-v1) COMPAT(store-schema-v2)
     #[test]
-    fn version_1_transcript_rows_move_into_the_payload() {
+    fn version_1_transcript_rows_upgrade_to_the_current_schema() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
         let path = store.database_path();
@@ -394,14 +472,21 @@ mod tests {
         }
         drop(conn);
 
+        let summarize: RecordSummarizer<'_> =
+            &|row| Ok(format!("{} {}", row.block_idx, row.block_json).into_bytes());
         assert!(upgrade_pending(&path).unwrap());
-        let owner = lock::SessionLock::acquire(&store, "s").unwrap();
         assert!(matches!(
             open(&store),
+            Err(StoreError::UnsupportedSchema { found: 1, .. })
+        ));
+        let owner = lock::SessionLock::acquire(&store, "s").unwrap();
+        assert!(matches!(
+            upgrade_existing(&store, summarize),
             Err(StoreError::UpgradeBlocked { sessions: 1 })
         ));
         assert!(upgrade_pending(&path).unwrap());
         drop(owner);
+        upgrade_existing(&store, summarize).unwrap();
         let conn = open(&store).unwrap();
         assert!(!upgrade_pending(&path).unwrap());
         let version: i32 = conn
@@ -436,6 +521,26 @@ mod tests {
         for dropped in ["preview", "origin", "tool_state", "block"] {
             assert!(!columns.iter().any(|name| name == dropped), "{columns:?}");
         }
+        let position = |name: &str| columns.iter().position(|column| column == name);
+        assert!(
+            position("summary") < position("indexed_text"),
+            "{columns:?}"
+        );
+        let summaries = conn
+            .prepare("SELECT summary FROM transcript ORDER BY idx")
+            .unwrap()
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|summary| String::from_utf8(decode_blob(&summary.unwrap()).unwrap().into_owned()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            summaries,
+            rows.iter()
+                .enumerate()
+                .map(|(idx, (block, ..))| format!("{idx} {block}"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

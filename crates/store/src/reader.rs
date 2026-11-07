@@ -28,8 +28,8 @@ pub struct StorageStats {
     pub request_rows: u64,
 }
 
-const TRANSCRIPT_COLUMNS: &str = "block_idx, history_idx, kind, tool_call_id, tool_name,
-    content_hash, text_bytes, indexed_text, payload, tool_render_revision";
+pub(crate) const TRANSCRIPT_COLUMNS: &str = "block_idx, history_idx, kind, tool_call_id, tool_name,
+    content_hash, text_bytes, indexed_text, payload, tool_render_revision, summary";
 
 // Per-id lookups run once per block a frame needs, so each must seek
 // `transcript_blocks` or `transcript_history` rather than scan the session.
@@ -45,7 +45,10 @@ fn block_by_id_sql() -> String {
 }
 
 /// Decodes [`TRANSCRIPT_COLUMNS`] starting at column `first`.
-fn transcript_from_row_at(row: &Row<'_>, first: usize) -> rusqlite::Result<StoredTranscriptBlock> {
+pub(crate) fn transcript_from_row_at(
+    row: &Row<'_>,
+    first: usize,
+) -> rusqlite::Result<StoredTranscriptBlock> {
     let column = |i: usize| first + i;
     let payload: Vec<u8> = row.get(column(8))?;
     let (block_json, origin_json, tool_state_json) =
@@ -63,7 +66,15 @@ fn transcript_from_row_at(row: &Row<'_>, first: usize) -> rusqlite::Result<Store
         origin_json,
         tool_state_json,
         tool_render_revision: unsigned(row.get(column(9))?),
+        summary: decode_summary(row, column(10))?,
     })
+}
+
+fn decode_summary(row: &Row<'_>, column: usize) -> rusqlite::Result<Vec<u8>> {
+    let summary: Vec<u8> = row.get(column)?;
+    Ok(db::decode_blob(&summary)
+        .map_err(crate::error::to_sql_error)?
+        .into_owned())
 }
 
 fn transcript_from_row(row: &Row<'_>) -> rusqlite::Result<StoredTranscriptBlock> {
@@ -366,10 +377,25 @@ impl SessionReader {
         let _perf = smelt_perf::perf::begin("store:transcript:read_record_slice");
         let start = range.start().get().min(total_count);
         let end = range.end().get().min(total_count).max(start);
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT block_idx, summary FROM transcript
+             WHERE sid = ?1 AND idx >= ?2 AND idx < ?3 ORDER BY idx",
+        )?;
+        let records = stmt
+            .query_map(
+                params![self.sid, signed(start as u64), signed(end as u64)],
+                |row| {
+                    Ok(TranscriptRecordSummary {
+                        block_idx: unsigned(row.get(0)?),
+                        summary: decode_summary(row, 1)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(TranscriptRecordSlice::new(
             TranscriptRecordOffset::new(start),
             total_count,
-            self.transcript_range(start as u64, end as u64)?,
+            records,
         ))
     }
 

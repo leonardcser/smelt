@@ -115,11 +115,8 @@ fn enter_dispatches_and_repaints_while_the_writer_is_paused() {
     let reader = app.tui.core.sessions.reader(&id).unwrap();
     let head = reader.head().unwrap();
     let total = head.transcript_record_count.as_usize();
-    let records = reader
-        .transcript_record_slice_with_total((0..total).into(), total)
-        .unwrap();
+    let records = reader.transcript_range(0, total as u64).unwrap();
     assert!(records
-        .records
         .iter()
         .any(|row| row.indexed_text.contains("submitted request α")));
 }

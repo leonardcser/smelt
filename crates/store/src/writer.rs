@@ -367,9 +367,9 @@ fn write_transcript(
     let mut insert = tx.prepare_cached(
         "INSERT INTO transcript (sid, idx, block_idx, history_idx, kind, role, rows_20, rows_40,
              rows_80, rows_120, rows_160, rows_240, text_bytes, tool_render_revision,
-             tool_call_id, tool_name, content_hash, first_line, indexed_text, payload)
+             tool_call_id, tool_name, content_hash, first_line, summary, indexed_text, payload)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-             ?18, ?19, ?20)",
+             ?18, ?19, ?20, ?21)",
     )?;
     for (offset, record) in suffix.records.iter().enumerate() {
         cumulative = cumulative.add(record.extent_profile());
@@ -393,6 +393,7 @@ fn write_transcript(
             record.tool_name,
             record.content_hash,
             record.first_line(),
+            db::encode_blob(&record.summary),
             record.indexed_text,
             transcript::encode_payload(
                 &record.block_json,
@@ -440,10 +441,10 @@ pub(crate) fn fork(
          SELECT ?2, tbl, key, value FROM side_rows WHERE sid = ?1",
         "INSERT INTO transcript (sid, idx, block_idx, history_idx, kind, role, rows_20, rows_40,
              rows_80, rows_120, rows_160, rows_240, text_bytes, tool_render_revision,
-             tool_call_id, tool_name, content_hash, first_line, indexed_text, payload)
+             tool_call_id, tool_name, content_hash, first_line, summary, indexed_text, payload)
          SELECT ?2, idx, block_idx, history_idx, kind, role, rows_20, rows_40, rows_80,
              rows_120, rows_160, rows_240, text_bytes, tool_render_revision, tool_call_id,
-             tool_name, content_hash, first_line, indexed_text, payload
+             tool_name, content_hash, first_line, summary, indexed_text, payload
          FROM transcript WHERE sid = ?1",
     ] {
         tx.execute(sql, params![source, target])?;
