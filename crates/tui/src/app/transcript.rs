@@ -11802,7 +11802,6 @@ mod tests {
             tool_name: None,
             content_hash: format!("{idx}"),
             estimated_text_bytes: 8,
-            preview_text: indexed_text.clone(),
             indexed_text: indexed_text.clone(),
             block_json: serde_json::to_string(&smelt_core::Block::Text {
                 content: indexed_text.into(),

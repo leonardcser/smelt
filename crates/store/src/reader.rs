@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::db::{self, signed, unsigned};
 use crate::error::{Result, StoreError};
-use crate::transcript::*;
+use crate::transcript::{self, *};
 use crate::types::*;
 use crate::writer::{cumulative_profile, profile_from_row, read_head};
 use crate::Store;
@@ -29,8 +29,7 @@ pub struct StorageStats {
 }
 
 const TRANSCRIPT_COLUMNS: &str = "block_idx, history_idx, kind, tool_call_id, tool_name,
-    content_hash, text_bytes, preview, indexed_text, block, origin, tool_state,
-    tool_render_revision";
+    content_hash, text_bytes, indexed_text, payload, tool_render_revision";
 
 // Per-id lookups run once per block a frame needs, so each must seek
 // `transcript_blocks` or `transcript_history` rather than scan the session.
@@ -48,8 +47,9 @@ fn block_by_id_sql() -> String {
 /// Decodes [`TRANSCRIPT_COLUMNS`] starting at column `first`.
 fn transcript_from_row_at(row: &Row<'_>, first: usize) -> rusqlite::Result<StoredTranscriptBlock> {
     let column = |i: usize| first + i;
-    let block: Vec<u8> = row.get(column(9))?;
-    let block = db::decode_blob(&block).map_err(crate::error::to_sql_error)?;
+    let payload: Vec<u8> = row.get(column(8))?;
+    let (block_json, origin_json, tool_state_json) =
+        transcript::decode_payload(&payload).map_err(crate::error::to_sql_error)?;
     Ok(StoredTranscriptBlock {
         block_idx: unsigned(row.get(column(0))?),
         history_idx: row.get::<_, Option<i64>>(column(1))?.map(unsigned),
@@ -58,12 +58,11 @@ fn transcript_from_row_at(row: &Row<'_>, first: usize) -> rusqlite::Result<Store
         tool_name: row.get(column(4))?,
         content_hash: row.get(column(5))?,
         estimated_text_bytes: unsigned(row.get(column(6))?),
-        preview_text: row.get(column(7))?,
-        indexed_text: row.get(column(8))?,
-        block_json: String::from_utf8(block.into_owned()).map_err(crate::error::to_sql_error)?,
-        origin_json: row.get(column(10))?,
-        tool_state_json: row.get(column(11))?,
-        tool_render_revision: unsigned(row.get(column(12))?),
+        indexed_text: row.get(column(7))?,
+        block_json,
+        origin_json,
+        tool_state_json,
+        tool_render_revision: unsigned(row.get(column(9))?),
     })
 }
 

@@ -254,7 +254,6 @@ fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTransc
         tool_name: None,
         content_hash: "0".to_string(),
         estimated_text_bytes: content.len() as u64,
-        preview_text: content.to_string(),
         indexed_text: content.to_string(),
         block_json: serde_json::to_string(&smelt_core::Block::Text {
             content: content.to_string().into(),

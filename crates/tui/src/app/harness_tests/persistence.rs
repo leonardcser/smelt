@@ -1111,7 +1111,7 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
         .transcript_range(0, state.head.transcript_record_count.get())
         .unwrap()
         .into_iter()
-        .map(|record| record.preview_text)
+        .map(|record| record.preview_text().to_owned())
         .collect::<Vec<_>>();
     let mut expected_previews = (0..RECORD_COUNT)
         .map(|index| format!("record {index}"))
@@ -2077,7 +2077,7 @@ fn shutdown_flushes_record_only_transcript_blocks() {
         .unwrap();
     assert!(
         rows.iter().any(|row| row
-            .preview_text
+            .preview_text()
             .contains("record-only interrupted thinking")),
         "record-only transcript block should be durable: {rows:#?}"
     );
@@ -2160,7 +2160,7 @@ fn record_resume_interrupt_save_compacts_and_appends_again() {
         .unwrap();
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().any(|row| row
-        .preview_text
+        .preview_text()
         .contains("append after dense reconciliation")));
 }
 
@@ -3520,7 +3520,7 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
         .unwrap();
     assert!(record_rows
         .iter()
-        .any(|row| row.preview_text.contains("unsaved ownership-loss record")));
+        .any(|row| row.preview_text().contains("unsaved ownership-loss record")));
     assert!(state.turn_metas.iter().any(|(history_len, meta)| {
         *history_len == 2 && meta["interrupted"] == serde_json::Value::Bool(true)
     }));

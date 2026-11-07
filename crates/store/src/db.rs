@@ -5,8 +5,9 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::error::{Result, StoreError};
+use crate::transcript;
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 const SCHEMA: &str = include_str!("schema.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// SQLite keeps a checkpointed WAL at its largest size unless this caps it.
@@ -44,7 +45,13 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
     match version {
         SCHEMA_VERSION => Ok(conn),
         0 => {
-            create_schema(&conn)?;
+            upgrade(&conn, 0, |conn| Ok(conn.execute_batch(SCHEMA)?))?;
+            Ok(conn)
+        }
+        1 => {
+            upgrade(&conn, 1, upgrade_v1)?;
+            // Give the pages of the dropped columns back to the file system.
+            incremental_vacuum(&conn, None)?;
             Ok(conn)
         }
         found => Err(StoreError::UnsupportedSchema {
@@ -54,23 +61,72 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
     }
 }
 
-fn create_schema(conn: &Connection) -> Result<()> {
+/// Runs `step` and marks the schema current, in one write transaction, if the
+/// database is still at version `from`. Another process may have done it while
+/// this one waited for the lock.
+fn upgrade(
+    conn: &Connection,
+    from: i32,
+    step: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    // Another process may have created the schema while this one waited.
-    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let result = if version == 0 {
-        conn.execute_batch(SCHEMA)
-            .and_then(|()| conn.pragma_update(None, "user_version", SCHEMA_VERSION))
-    } else {
+    let result = (|| {
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == from {
+            step(conn)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(())
-    };
+    })();
     match result {
         Ok(()) => conn.execute_batch("COMMIT")?,
         Err(err) => {
             let _ = conn.execute_batch("ROLLBACK");
-            return Err(err.into());
+            return Err(err);
         }
     }
+    Ok(())
+}
+
+// COMPAT(store-schema-v1): databases from smelt 0.8 development builds keep the
+// transcript preview, origin and tool state as plain columns.
+fn upgrade_v1(conn: &Connection) -> Result<()> {
+    conn.execute_batch("ALTER TABLE transcript ADD COLUMN payload BLOB NOT NULL DEFAULT x''")?;
+    let mut select = conn.prepare(
+        "SELECT rowid, block, origin, tool_state FROM transcript
+         WHERE rowid > ?1 ORDER BY rowid LIMIT 256",
+    )?;
+    let mut update = conn.prepare("UPDATE transcript SET payload = ?2 WHERE rowid = ?1")?;
+    let mut after = 0_i64;
+    loop {
+        let rows = select
+            .query_map([after], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let Some(&(last, ..)) = rows.last() else {
+            break;
+        };
+        after = last;
+        for (rowid, block, origin, tool_state) in rows {
+            let block = String::from_utf8(decode_blob(&block)?.into_owned())
+                .map_err(|_| StoreError::Integrity("transcript block is not UTF-8".to_owned()))?;
+            let payload =
+                transcript::encode_payload(&block, origin.as_deref(), tool_state.as_deref())?;
+            update.execute(rusqlite::params![rowid, payload])?;
+        }
+    }
+    conn.execute_batch(
+        "ALTER TABLE transcript DROP COLUMN preview;
+         ALTER TABLE transcript DROP COLUMN origin;
+         ALTER TABLE transcript DROP COLUMN tool_state;
+         ALTER TABLE transcript DROP COLUMN block;",
+    )?;
     Ok(())
 }
 
@@ -250,6 +306,108 @@ mod tests {
             largest <= 2 * WAL_SIZE_LIMIT as u64,
             "WAL reached {largest} bytes"
         );
+    }
+
+    // COMPAT(store-schema-v1)
+    #[test]
+    fn version_1_transcript_rows_move_into_the_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("smelt.db");
+        let conn = open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE transcript;
+             CREATE TABLE transcript (
+                 sid INTEGER NOT NULL REFERENCES sessions (sid) ON DELETE CASCADE,
+                 idx INTEGER NOT NULL,
+                 block_idx INTEGER NOT NULL,
+                 history_idx INTEGER,
+                 kind TEXT NOT NULL,
+                 role TEXT NOT NULL,
+                 rows_20 INTEGER NOT NULL,
+                 rows_40 INTEGER NOT NULL,
+                 rows_80 INTEGER NOT NULL,
+                 rows_120 INTEGER NOT NULL,
+                 rows_160 INTEGER NOT NULL,
+                 rows_240 INTEGER NOT NULL,
+                 text_bytes INTEGER NOT NULL,
+                 tool_render_revision INTEGER NOT NULL,
+                 tool_call_id TEXT,
+                 tool_name TEXT,
+                 content_hash TEXT NOT NULL,
+                 first_line TEXT NOT NULL,
+                 preview TEXT NOT NULL,
+                 origin TEXT,
+                 tool_state TEXT,
+                 indexed_text TEXT NOT NULL,
+                 block BLOB NOT NULL,
+                 PRIMARY KEY (sid, idx)
+             );
+             CREATE INDEX transcript_blocks ON transcript (sid, block_idx, idx);
+             CREATE INDEX transcript_history ON transcript (sid, history_idx, idx)
+                 WHERE history_idx IS NOT NULL;
+             CREATE INDEX transcript_kinds ON transcript (sid, kind, idx);
+             CREATE INDEX transcript_roles ON transcript (sid, role, idx);
+             INSERT INTO sessions (id, created_at, updated_at) VALUES ('s', 0, 0);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        let output = "x".repeat(4096);
+        let rows = [
+            ("{\"Text\":{}}", None, None),
+            (
+                "{\"ToolCall\":{}}",
+                Some("{\"History\":3}"),
+                Some(format!("{{\"output\":\"{output}\"}}")),
+            ),
+        ];
+        for (idx, (block, origin, tool_state)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO transcript VALUES (1, ?1, ?1, NULL, 'tool', 'tool', 1, 1, 1, 1, 1,
+                     1, 0, 0, NULL, NULL, '', '', 'preview', ?2, ?3, 'text', ?4)",
+                rusqlite::params![
+                    idx as i64,
+                    origin,
+                    tool_state,
+                    encode_blob(block.as_bytes())
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let conn = open(&path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let payloads = conn
+            .prepare("SELECT payload FROM transcript ORDER BY idx")
+            .unwrap()
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|payload| transcript::decode_payload(&payload.unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        let expected = rows
+            .iter()
+            .map(|(block, origin, tool_state)| {
+                (
+                    block.to_string(),
+                    origin.map(str::to_owned),
+                    tool_state.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(payloads, expected);
+        let columns = conn
+            .prepare("SELECT name FROM pragma_table_info('transcript')")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        for dropped in ["preview", "origin", "tool_state", "block"] {
+            assert!(!columns.iter().any(|name| name == dropped), "{columns:?}");
+        }
     }
 
     #[test]

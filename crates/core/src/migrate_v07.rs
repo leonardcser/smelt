@@ -475,7 +475,9 @@ mod tests {
                 side_tables: v07::SideTableSuffixes::default(),
                 transcript_records: Some(v07::TranscriptRecordSuffix {
                     start: v07::TranscriptRecordIndex::new(0),
-                    records: vec![convert(&transcript_block_row(0, &record).unwrap()).unwrap()],
+                    records: vec![v07_transcript_row(
+                        &transcript_block_row(0, &record).unwrap(),
+                    )],
                 }),
             })
             .unwrap();
@@ -541,5 +543,12 @@ mod tests {
 
         let again = run(&state, &cache, &mut |_, _| {}).unwrap();
         assert_eq!((again.sessions, again.skipped, again.prompts), (0, 1, 0));
+    }
+
+    /// A smelt 0.7 row, which stores the preview as its own field.
+    fn v07_transcript_row(row: &smelt_store::StoredTranscriptBlock) -> v07::StoredTranscriptBlock {
+        let mut value = serde_json::to_value(row).unwrap();
+        value["preview_text"] = row.preview_text().into();
+        serde_json::from_value(value).unwrap()
     }
 }

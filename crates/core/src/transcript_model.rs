@@ -1700,7 +1700,6 @@ pub fn transcript_block_row_with_block_idx(
         tool_name: record.block.tool_name().map(str::to_string),
         content_hash: record.content_hash.to_string(),
         estimated_text_bytes: indexed_text.estimated_text_bytes,
-        preview_text: preview(&indexed_text.indexed_text, 512),
         indexed_text: indexed_text.indexed_text,
         block_json,
         origin_json,

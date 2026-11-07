@@ -8566,7 +8566,6 @@ pub(crate) mod tests {
             tool_name: None,
             content_hash: content_hash.to_string(),
             estimated_text_bytes: content.len() as u64,
-            preview_text: format!("resume benchmark response {block_idx}"),
             indexed_text,
             block_json: serde_json::to_string(&record).expect("serialize resume record"),
             origin_json: None,

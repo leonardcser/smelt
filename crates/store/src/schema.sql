@@ -72,6 +72,8 @@ CREATE TABLE side_rows (
 
 -- Transcript records. `rows_*` hold the cumulative estimated row count through
 -- this record at each profile width, so any range's extent is one subtraction.
+-- `indexed_text` is the plain search text; its start is the record's preview.
+-- `payload` holds the block, origin and tool state, compressed together.
 CREATE TABLE transcript (
     sid INTEGER NOT NULL REFERENCES sessions (sid) ON DELETE CASCADE,
     idx INTEGER NOT NULL,
@@ -91,11 +93,8 @@ CREATE TABLE transcript (
     tool_name TEXT,
     content_hash TEXT NOT NULL,
     first_line TEXT NOT NULL,
-    preview TEXT NOT NULL,
-    origin TEXT,
-    tool_state TEXT,
     indexed_text TEXT NOT NULL,
-    block BLOB NOT NULL,
+    payload BLOB NOT NULL,
     PRIMARY KEY (sid, idx)
 );
 CREATE INDEX transcript_blocks ON transcript (sid, block_idx, idx);

@@ -13,7 +13,7 @@ follows the new content, not the session size.
 | `session_values` | Small named values such as the first user message and the active checkpoint |
 | `history` | One row per model history item, with the cumulative user ordinal, mode and note columns that indexed queries need |
 | `side_rows` | Turn metadata, metadata snapshots, context snapshots and checkpoint events, keyed by history position |
-| `transcript` | One row per transcript block, with cumulative row estimates at six widths, a preview and search text |
+| `transcript` | One row per transcript block, with cumulative row estimates at six widths, its search text and one compressed payload of block, origin and tool state |
 | `requests` | Request audit entries with flat `body`, `response` and `error` payloads |
 | `prompts` | Submitted prompts for input history recall |
 | `usage` | Tokens and cost per model call; calls before yesterday fold into one row per day and model |
@@ -21,8 +21,10 @@ follows the new content, not the session size.
 Files a session owns, such as Claude Code plans and its native session link, live in
 `<state>/artifacts/<id>/`.
 
-Large bodies are stored with zstd when that saves at least an eighth. Readers query
-rows by position or by indexed columns and decode only the rows they return.
+Large bodies are stored with zstd when that saves at least an eighth. The search
+text stays plain so `instr` can scan it, and a record's preview is its first 512
+bytes. The WAL is checkpointed at 1 MiB and truncated back to that size. Readers
+query rows by position or by indexed columns and decode only the rows they return.
 
 Each session has an exclusive writer lock at `<state>/locks/<id>.lock`. A
 second process that opens the same session gets `StoreError::Owned` and opens it

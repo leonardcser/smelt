@@ -2164,7 +2164,7 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
     let db = rusqlite::Connection::open(sessions.store().database_path())
         .expect("open preview fixture database");
     db.execute(
-        "UPDATE transcript SET block = zeroblob(length(block))
+        "UPDATE transcript SET payload = zeroblob(length(payload))
          WHERE idx = (SELECT max(idx) FROM transcript)",
         [],
     )

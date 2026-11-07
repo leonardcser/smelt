@@ -1403,7 +1403,6 @@ mod tests {
             tool_name: None,
             content_hash: "0".to_string(),
             estimated_text_bytes: content.len() as u64,
-            preview_text: content.to_string(),
             indexed_text: content.to_string(),
             block_json: serde_json::to_string(&Block::Text {
                 content: content.to_string().into(),
@@ -3360,7 +3359,7 @@ mod checkpoint_tests {
         let source = stored_transcript(&session_reader(&app, &source_id));
         assert!(source
             .iter()
-            .any(|record| record.preview_text.contains("last source message")));
+            .any(|record| record.preview_text().contains("last source message")));
         app.assert_invariants();
     }
 
@@ -4249,7 +4248,7 @@ mod checkpoint_tests {
             Some(TARGET_HISTORY_INDEX as u64)
         );
         assert_eq!(
-            records[TARGET_HISTORY_INDEX].preview_text,
+            records[TARGET_HISTORY_INDEX].preview_text(),
             "replacement user"
         );
         assert_eq!(
@@ -4257,7 +4256,7 @@ mod checkpoint_tests {
             Some(TARGET_HISTORY_INDEX as u64 + 1)
         );
         assert_eq!(
-            records[TARGET_HISTORY_INDEX + 1].preview_text,
+            records[TARGET_HISTORY_INDEX + 1].preview_text(),
             "replacement assistant"
         );
 
@@ -5688,7 +5687,7 @@ mod checkpoint_tests {
         let tail = records.last().expect("new transcript tail");
         assert_eq!(tail.history_idx, None);
         assert!(
-            tail.preview_text
+            tail.preview_text()
                 .contains("newer generation while truncation is in flight"),
             "unexpected transcript tail: {tail:#?}"
         );

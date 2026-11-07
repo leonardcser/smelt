@@ -2,6 +2,9 @@ use std::ops::Range;
 
 use smelt_buffer::cell_width;
 
+use crate::db;
+use crate::error::{Result, StoreError};
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TranscriptRecordOffset(usize);
 
@@ -136,7 +139,6 @@ pub struct StoredTranscriptBlock {
     pub tool_name: Option<String>,
     pub content_hash: String,
     pub estimated_text_bytes: u64,
-    pub preview_text: String,
     pub indexed_text: String,
     pub block_json: String,
     pub origin_json: Option<String>,
@@ -149,14 +151,19 @@ impl StoredTranscriptBlock {
     pub fn extent_profile(&self) -> TranscriptExtentProfile {
         transcript_text_extent_profile(
             &self.kind,
-            &self.preview_text,
+            self.preview_text(),
             &self.indexed_text,
             self.estimated_text_bytes,
         )
     }
 
+    /// The start of the search text, at most [`PREVIEW_MAX_BYTES`].
+    pub fn preview_text(&self) -> &str {
+        smelt_buffer::text::grapheme_prefix(&self.indexed_text, PREVIEW_MAX_BYTES)
+    }
+
     pub(crate) fn first_line(&self) -> String {
-        self.preview_text
+        self.preview_text()
             .lines()
             .find(|line| !line.trim().is_empty())
             .unwrap_or_default()
@@ -164,6 +171,41 @@ impl StoredTranscriptBlock {
             .take(512)
             .collect()
     }
+}
+
+pub const PREVIEW_MAX_BYTES: usize = 512;
+
+/// The `payload` column: block, origin and tool state as one line of compact
+/// JSON each, an empty line for a missing value, compressed together.
+pub(crate) fn encode_payload(
+    block_json: &str,
+    origin_json: Option<&str>,
+    tool_state_json: Option<&str>,
+) -> Result<Vec<u8>> {
+    let lines = [Some(block_json), origin_json, tool_state_json];
+    if lines.iter().flatten().any(|line| line.contains('\n')) {
+        return Err(StoreError::Integrity(
+            "transcript payload JSON must be compact".to_owned(),
+        ));
+    }
+    let text = lines.map(Option::unwrap_or_default).join("\n");
+    Ok(db::encode_blob(text.as_bytes()))
+}
+
+/// Block, origin and tool state JSON from a `payload` column.
+pub(crate) fn decode_payload(blob: &[u8]) -> Result<(String, Option<String>, Option<String>)> {
+    let text = String::from_utf8(db::decode_blob(blob)?.into_owned())
+        .map_err(|_| StoreError::Integrity("transcript payload is not UTF-8".to_owned()))?;
+    let mut lines = text.split('\n').map(str::to_owned);
+    let (Some(block), Some(origin), Some(tool_state), None) =
+        (lines.next(), lines.next(), lines.next(), lines.next())
+    else {
+        return Err(StoreError::Integrity(
+            "transcript payload must have three lines".to_owned(),
+        ));
+    };
+    let optional = |line: String| (!line.is_empty()).then_some(line);
+    Ok((block, optional(origin), optional(tool_state)))
 }
 
 /// Navigation role of a transcript record kind.

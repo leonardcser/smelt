@@ -5,7 +5,7 @@ use crate::db::{self, signed, unsigned};
 use crate::error::{Result, StoreError};
 use crate::history::HistoryRow;
 use crate::lock::SessionLock;
-use crate::transcript::{transcript_role, TranscriptExtentProfile};
+use crate::transcript::{self, transcript_role, TranscriptExtentProfile};
 use crate::types::*;
 use crate::Store;
 
@@ -367,10 +367,9 @@ fn write_transcript(
     let mut insert = tx.prepare_cached(
         "INSERT INTO transcript (sid, idx, block_idx, history_idx, kind, role, rows_20, rows_40,
              rows_80, rows_120, rows_160, rows_240, text_bytes, tool_render_revision,
-             tool_call_id, tool_name, content_hash, first_line, preview, origin, tool_state,
-             indexed_text, block)
+             tool_call_id, tool_name, content_hash, first_line, indexed_text, payload)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-             ?18, ?19, ?20, ?21, ?22, ?23)",
+             ?18, ?19, ?20)",
     )?;
     for (offset, record) in suffix.records.iter().enumerate() {
         cumulative = cumulative.add(record.extent_profile());
@@ -394,11 +393,12 @@ fn write_transcript(
             record.tool_name,
             record.content_hash,
             record.first_line(),
-            record.preview_text,
-            record.origin_json,
-            record.tool_state_json,
             record.indexed_text,
-            db::encode_blob(record.block_json.as_bytes()),
+            transcript::encode_payload(
+                &record.block_json,
+                record.origin_json.as_deref(),
+                record.tool_state_json.as_deref(),
+            )?,
         ])?;
     }
     Ok(suffix.start + suffix.records.len() as u64)
@@ -436,8 +436,8 @@ pub(crate) fn fork(
         "INSERT INTO side_rows SELECT ?2, tbl, key, value FROM side_rows WHERE sid = ?1",
         "INSERT INTO transcript SELECT ?2, idx, block_idx, history_idx, kind, role, rows_20,
              rows_40, rows_80, rows_120, rows_160, rows_240, text_bytes, tool_render_revision,
-             tool_call_id, tool_name, content_hash, first_line, preview, origin, tool_state,
-             indexed_text, block FROM transcript WHERE sid = ?1",
+             tool_call_id, tool_name, content_hash, first_line, indexed_text, payload
+         FROM transcript WHERE sid = ?1",
     ] {
         tx.execute(sql, params![source, target])?;
     }
