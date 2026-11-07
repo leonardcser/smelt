@@ -311,7 +311,6 @@ fn transcript_record(block_idx: usize, entry: Entry) -> StoredTranscriptBlock {
         tool_name: None,
         content_hash: format!("{block_idx:016x}"),
         estimated_text_bytes: text.len() as u64,
-        preview_text: text.clone(),
         indexed_text: text.clone(),
         block_json: serde_json::json!({ "text": text }).to_string(),
         origin_json: None,

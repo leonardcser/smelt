@@ -608,7 +608,7 @@ impl Sim {
                 control_env: Default::default(),
                 history: ModelHistorySource::items(self.history.clone()),
                 session_id: "sim-session".into(),
-                sessions_root: std::env::temp_dir(),
+                artifact_dir: std::env::temp_dir(),
                 ephemeral: false,
                 permission_overrides: None,
                 native_prompt: None,
