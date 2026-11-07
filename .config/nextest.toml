@@ -12,6 +12,17 @@ leak-timeout = "500ms"
 filter = 'test(/^app::harness_tests::(persistence::current_compacted_read_only_session_forks_without_hydrating_or_cloning_history|persistence::large_response_keeps_history_append_and_follow_up_enter_responsive|persistence::large_sparse_fork_preserves_every_canonical_history_and_record_row|search::transcript_search_rapid_typing_cancels_stale_worker_generations)$/)'
 threads-required = "num-test-threads"
 
+# Start the longest tests first so they overlap the bulk of the suite instead
+# of finishing alone at its tail. The startup quota and fuzz CLI tests mostly
+# wait on real provider delays and watchdogs; the transcript sweeps are CPU-bound.
+[[profile.default.overrides]]
+filter = '''
+(binary(startup) & test(/quota/))
+| (package(xtask) & test(/^fuzz::cli_tests::(build_timeout|byte_triage_bounds)/))
+| (package(smelt-tui) & test(/^app::harness_tests::(misc::(long_upward_motions|block_jumps_from_any_row)|scroll_geometry::(thumb_drag_sweeps_underestimated|wheel_scrolling)|gallery::every_gallery_plugin)/))
+'''
+priority = 50
+
 # Tests and the smelt processes they spawn log and persist under the state dir;
 # keep them out of the developer's real one. Nextest has no teardown scripts, so
 # each run first removes the state dirs that runs left over a day ago.
@@ -25,3 +36,7 @@ echo "XDG_STATE_HOME=$(mktemp -d "$tmp/smelt-nextest-state.XXXXXX")" >> "$NEXTES
 [[profile.default.scripts]]
 filter = "all()"
 setup = "isolate-state"
+
+# Per-test durations for finding slow tests: target/nextest/default/junit.xml.
+[profile.default.junit]
+path = "junit.xml"
