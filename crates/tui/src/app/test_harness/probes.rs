@@ -167,6 +167,26 @@ impl TestApp {
             .collect()
     }
 
+    /// Drive background work until a prediction `EngineAsk` is issued. The
+    /// prediction plugin reads the conversation from storage on a worker, so
+    /// the ask follows `turn_end` by a variable delay.
+    fn wait_for_engine_ask_ids(&mut self) -> Vec<u64> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ids = self.drain_engine_ask_ids();
+            if !ids.is_empty() {
+                return ids;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "prediction probe should issue EngineAsk"
+            );
+            self.tui.drain_idle_work();
+            self.tui.drive_lua_tasks();
+            std::thread::sleep(super::POLL_INTERVAL);
+        }
+    }
+
     pub(crate) fn respond_ask_with_text(&mut self, id: u64, text: &str) {
         self.tui
             .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
@@ -234,7 +254,7 @@ impl TestApp {
     }
 
     fn probe_stale_prompt_prediction_response(&mut self, variant: u8) {
-        let seq = self.tui.conversation.session().history.len();
+        let seq = self.tui.conversation.history_len();
         self.tui
             .conversation
             .append_history_item(protocol::HistoryItem::user(protocol::Content::text(
@@ -245,11 +265,10 @@ impl TestApp {
             self.tui.pump_lua();
         }
         self.publish_turn_end_for_probe();
-        let prediction_id = self
-            .drain_engine_ask_ids()
+        let prediction_id = *self
+            .wait_for_engine_ask_ids()
             .last()
-            .copied()
-            .expect("prediction probe should issue EngineAsk");
+            .expect("wait returns at least one ask");
 
         self.bump_input_epoch_for_probe();
         self.respond_ask_with_text(prediction_id, "stale prompt placeholder");
