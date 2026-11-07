@@ -325,6 +325,25 @@ fn rewinding_ends_the_native_session() {
 }
 
 #[test]
+fn reports_from_a_rewound_native_session_do_not_show_work() {
+    let mut app = TestApp::builder().build();
+    native_background_session(&mut app);
+    app.rewind_to_history_index(None, false);
+    // Claude Code reports its interrupt before it reads the end.
+    native_session(&mut app, true, true);
+    assert!(app.tui.core.native_session.is_none());
+    assert_eq!(work_label(&mut app), "");
+
+    native_session(&mut app, false, false);
+    native_session(&mut app, true, true);
+    assert!(
+        app.tui.core.native_session.is_some(),
+        "the next session reports work again"
+    );
+    assert_eq!(work_label(&mut app), "working");
+}
+
+#[test]
 fn native_background_work_keeps_the_working_dot_breathing() {
     let mut app = TestApp::builder().build();
     app.animate_with_virtual_clock();

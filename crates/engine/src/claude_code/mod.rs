@@ -801,6 +801,8 @@ impl Runtime<'_> {
             });
         }
         self.native = Native::new(self.tx, &self.payload);
+        // Every announced process ends with this report. The host ignores the
+        // reports of a session it ended until this one arrives.
         let _ = self.tx.send(EngineEvent::NativeSessionState {
             session_id: self.payload.session_id.clone(),
             active: false,

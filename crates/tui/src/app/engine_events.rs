@@ -12,6 +12,9 @@ use super::conversation::StreamKind;
 pub(super) struct NativeSessionUi {
     pending: Vec<PendingTool>,
     busy: Option<super::BusyToken>,
+    /// A session the host ended. Its reports until the engine confirms the
+    /// end predate it.
+    ending: Option<String>,
 }
 
 struct EngineEventResult {
@@ -443,6 +446,9 @@ impl TuiApp {
                 working,
             } => {
                 if !active {
+                    self.native_ui
+                        .ending
+                        .take_if(|ending| *ending == session_id);
                     if self.core.native_session.as_deref() == Some(&session_id) {
                         self.end_native_session();
                         self.start_next_queued_input_if_idle();
@@ -451,6 +457,9 @@ impl TuiApp {
                 }
                 if session_id != self.conversation.session().id {
                     self.core.engine.send(protocol::UiCommand::EndNativeSession);
+                    return true;
+                }
+                if self.native_ui.ending.as_deref() == Some(&session_id) {
                     return true;
                 }
                 self.core.native_session = Some(session_id.clone());
@@ -562,6 +571,16 @@ impl TuiApp {
             }
         }
         self.start_next_queued_input_if_idle();
+    }
+
+    /// Ends the native session with everything it runs, for history it no
+    /// longer matches.
+    pub(crate) fn cancel_native_session(&mut self) {
+        if self.core.native_session.is_some() {
+            self.core.engine.send(protocol::UiCommand::EndNativeSession);
+            self.native_ui.ending = self.core.native_session.clone();
+            self.end_native_session();
+        }
     }
 
     /// Forgets the retained native session and releases everything scoped to it.

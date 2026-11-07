@@ -1475,15 +1475,6 @@ impl TuiApp {
         self.discard_model_tool_cwd_change();
     }
 
-    /// Ends the native session with everything it runs, for history it no
-    /// longer matches.
-    pub(crate) fn cancel_native_session(&mut self) {
-        if self.core.native_session.is_some() {
-            self.core.engine.send(UiCommand::EndNativeSession);
-            self.end_native_session();
-        }
-    }
-
     /// Cancel tasks and invalidate late callbacks without finalizing the turn again.
     pub(crate) fn cancel_turn_work(&mut self) {
         self.cancel_request_hook();
