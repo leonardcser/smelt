@@ -3817,6 +3817,7 @@ dependencies = [
  "smelt-ansi",
  "smelt-style 0.6.0",
  "unicode-width",
+ "vt100",
 ]
 
 [[package]]

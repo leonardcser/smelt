@@ -106,7 +106,7 @@ fn write_line(
     col.min(limit)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CellSymbol(CompactString);
 
 impl CellSymbol {
@@ -542,6 +542,39 @@ impl Grid {
             }
         }
         runs
+    }
+
+    /// The cells of row `y`.
+    pub fn row(&self, y: u16) -> &[Cell] {
+        let width = self.width as usize;
+        &self.cells[y as usize * width..(y as usize + 1) * width]
+    }
+
+    /// A hash of row `y`'s symbols and styles. Images are left out.
+    pub fn row_hash(&self, y: u16) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for cell in self.row(y) {
+            cell.symbol.hash(&mut hasher);
+            cell.style.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Moves rows `top..bottom` up by `dy` (down when negative) and blanks the
+    /// rows that move in, as a terminal scrolls its margins.
+    pub fn scroll_rows(&mut self, top: u16, bottom: u16, dy: i16) {
+        let width = self.width as usize;
+        let band = &mut self.cells[top as usize * width..bottom as usize * width];
+        let shift = dy.unsigned_abs() as usize * width;
+        let exposed = if dy > 0 {
+            band.rotate_left(shift);
+            band.len() - shift..band.len()
+        } else {
+            band.rotate_right(shift);
+            0..shift
+        };
+        band[exposed].fill(Cell::default());
     }
 
     pub fn swap_with(&mut self, other: &mut Grid) {

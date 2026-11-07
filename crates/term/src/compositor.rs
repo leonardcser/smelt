@@ -11,7 +11,8 @@ use std::sync::Arc;
 const MAX_SPARE_GRIDS: usize = 2;
 
 /// Double-buffered terminal renderer. Diffs each frame against `previous`
-/// and flushes only changed cells; `force_redraw` triggers a full repaint.
+/// and flushes only changed cells, scrolling the terminal first when whole
+/// rows moved; `force_redraw` triggers a full repaint.
 #[derive(Clone)]
 pub struct Compositor {
     /// Grids handed back after a frame, reused so frames do not allocate.
@@ -108,6 +109,16 @@ impl Compositor {
             if self.force_redraw || !uploads.is_empty() || !removed.is_empty() {
                 flush_full(&frame, w)?;
             } else {
+                // Images do not move with scrolled text in every terminal.
+                if let Some(scroll) = images
+                    .is_empty()
+                    .then(|| find_scroll(&frame, &self.previous))
+                    .flatten()
+                {
+                    scroll.queue(w)?;
+                    self.previous
+                        .scroll_rows(scroll.top, scroll.bottom, scroll.dy);
+                }
                 flush_diff(w, frame.diff(&self.previous))?;
             }
 
@@ -152,6 +163,97 @@ impl Compositor {
     pub fn previous(&self) -> &Grid {
         &self.previous
     }
+}
+
+/// Rows `top..bottom` whose content moved up by `dy` rows, down when negative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Scroll {
+    top: u16,
+    bottom: u16,
+    dy: i16,
+}
+
+impl Scroll {
+    /// Scrolls the terminal's copy of the rows. Rows that move in take the
+    /// current background, so the style is reset first. Resetting the margins
+    /// also homes the cursor, so the diff that follows positions it again.
+    fn queue<W: Write>(self, w: &mut W) -> std::io::Result<()> {
+        let rows = self.dy.unsigned_abs();
+        let direction = if self.dy > 0 { 'S' } else { 'T' };
+        write!(
+            w,
+            "\x1b[0m\x1b[{};{}r\x1b[{rows}{direction}\x1b[r",
+            self.top + 1,
+            self.bottom
+        )
+    }
+}
+
+/// The scroll that spares the diff the most changed cells, when that is at
+/// least a row's worth. A candidate is a run of rows that equal the rows `dy`
+/// away in `previous`, as when the transcript moves by whole lines. Rows are
+/// matched by hash: a collision costs cells, not correctness, because the diff
+/// that follows repairs every cell the scroll got wrong.
+fn find_scroll(frame: &Grid, previous: &Grid) -> Option<Scroll> {
+    let (width, height) = (frame.width(), frame.height());
+    if width != previous.width() || height != previous.height() {
+        return None;
+    }
+    let changed: Vec<usize> = (0..height)
+        .map(|y| {
+            frame
+                .row(y)
+                .iter()
+                .zip(previous.row(y))
+                .filter(|(a, b)| a != b)
+                .count()
+        })
+        .collect();
+    let mut best_saved = usize::from(width);
+    if changed.iter().sum::<usize>() <= best_saved {
+        return None;
+    }
+    let hashes = |grid: &Grid| (0..height).map(|y| grid.row_hash(y)).collect::<Vec<_>>();
+    let (now, before) = (hashes(frame), hashes(previous));
+    let mut best = None;
+    for distance in 1..height as i16 {
+        for dy in [distance, -distance] {
+            let mut y = 0;
+            while y < height {
+                let moved = |y: u16| {
+                    let source = y as i16 + dy;
+                    (0..height as i16).contains(&source)
+                        && now[y as usize] == before[source as usize]
+                };
+                if !moved(y) {
+                    y += 1;
+                    continue;
+                }
+                let start = y;
+                while y < height && moved(y) {
+                    y += 1;
+                }
+                let saved: usize = changed[start as usize..y as usize].iter().sum();
+                if saved > best_saved {
+                    best_saved = saved;
+                    best = Some(if dy > 0 {
+                        Scroll {
+                            top: start,
+                            bottom: y + dy as u16,
+                            dy,
+                        }
+                    } else {
+                        Scroll {
+                            top: start - dy.unsigned_abs(),
+                            bottom: y,
+                            dy,
+                        }
+                    });
+                }
+            }
+        }
+    }
+    best
 }
 
 fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
@@ -431,6 +533,135 @@ mod tests {
             output.ends_with(b"\x1b[2;3H\x1b[?2026l"),
             "cursor must be restored before the frame is displayed: {output:?}"
         );
+    }
+
+    /// Renders each frame of `rows` per line through a compositor into a
+    /// terminal emulator; returns what each frame wrote and the final screen.
+    fn present(frames: &[Vec<&str>]) -> (Vec<Vec<u8>>, Vec<String>) {
+        let (width, height) = (12, frames[0].len() as u16);
+        let mut compositor = Compositor::new(width, height);
+        let size = |n: u16| std::num::NonZeroU16::new(n).unwrap();
+        let mut terminal = vt100::Parser::new(size(height), size(width), 0);
+        let mut writes = Vec::new();
+        for rows in frames {
+            let mut output = Vec::new();
+            compositor
+                .render_with(&mut output, |grid| {
+                    for (y, text) in rows.iter().enumerate() {
+                        grid.as_mut_slice()
+                            .put_str(0, y as u16, text, Style::default());
+                    }
+                })
+                .unwrap();
+            terminal.process(&output);
+            writes.push(output);
+        }
+        let screen = terminal
+            .screen()
+            .rows(0, width)
+            .map(|row| row.trim_end().to_owned())
+            .collect();
+        (writes, screen)
+    }
+
+    #[test]
+    fn text_moving_by_whole_rows_scrolls_and_draws_only_new_rows() {
+        let _lock = registry_test_lock();
+        let before = vec!["first", "second", "third", "fourth", "fifth", "> prompt"];
+        let after = vec!["third", "fourth", "fifth", "sixth", "seventh", "> prompt"];
+        let (writes, screen) = present(&[before, after.clone()]);
+        assert_eq!(screen, after);
+        let scrolled = String::from_utf8_lossy(&writes[1]);
+        assert!(scrolled.contains("\x1b[1;5r\x1b[2S\x1b[r"), "{scrolled:?}");
+        assert!(!scrolled.contains("third") && !scrolled.contains("prompt"));
+    }
+
+    #[test]
+    fn text_moving_down_scrolls_back() {
+        let _lock = registry_test_lock();
+        let before = vec!["third", "fourth", "fifth", "sixth", "seventh", "> prompt"];
+        let after = vec!["first", "second", "third", "fourth", "fifth", "> prompt"];
+        let (writes, screen) = present(&[before, after.clone()]);
+        assert_eq!(screen, after);
+        assert!(String::from_utf8_lossy(&writes[1]).contains("\x1b[1;5r\x1b[2T\x1b[r"));
+    }
+
+    #[test]
+    fn unrelated_rows_do_not_scroll() {
+        let _lock = registry_test_lock();
+        let before = vec!["alpha", "beta", "gamma", "delta"];
+        let after = vec!["one", "two", "three", "four"];
+        let (writes, screen) = present(&[before, after.clone()]);
+        assert_eq!(screen, after);
+        assert!(!String::from_utf8_lossy(&writes[1]).contains("r\x1b["));
+    }
+
+    #[test]
+    fn scrolled_frames_show_what_a_full_redraw_shows() {
+        let _lock = registry_test_lock();
+        let (width, height) = (10u16, 8u16);
+        let size = |n: u16| std::num::NonZeroU16::new(n).unwrap();
+        let cells = |parser: &vt100::Parser| {
+            let screen = parser.screen();
+            (0..height)
+                .flat_map(|y| (0..width).map(move |x| (y, x)))
+                .map(|(y, x)| {
+                    let cell = screen.cell(y, x).unwrap();
+                    // A scrolled-in cell is empty; a redrawn one holds a space.
+                    let text = Some(cell.contents()).filter(|t| !t.is_empty());
+                    (text.unwrap_or(" ").to_owned(), cell.bgcolor(), cell.bold())
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut seed = 7u64;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let mut rows: Vec<u64> = (0..height as u64).collect();
+        let mut compositor = Compositor::new(width, height);
+        let mut terminal = vt100::Parser::new(size(height), size(width), 0);
+        let mut scrolled = 0;
+        for frame in 0..400 {
+            let top = next(height as u64 - 1) as usize;
+            let bottom = top + 1 + next((height as usize - top) as u64) as usize;
+            let dy = 1 + next((bottom - top) as u64) as usize;
+            match next(4) {
+                0 => rows[top..bottom].rotate_left(dy.min(bottom - top)),
+                1 => rows[top..bottom].rotate_right(dy.min(bottom - top)),
+                _ => {}
+            }
+            rows[next(height as u64) as usize] = 100 + frame;
+            let paint = |grid: &mut Grid| {
+                for (y, row) in rows.iter().enumerate() {
+                    let style = match row % 3 {
+                        0 => Style::new().bg(crate::Color::AnsiValue(4)),
+                        1 => Style::new().bold(),
+                        _ => Style::default(),
+                    };
+                    grid.as_mut_slice().put_str(
+                        0,
+                        y as u16,
+                        &format!("r{row} {}", row * 7919),
+                        style,
+                    );
+                }
+            };
+            let mut output = Vec::new();
+            compositor.render_with(&mut output, paint).unwrap();
+            terminal.process(&output);
+            scrolled += output.windows(3).any(|w| w == b"\x1b[r") as usize;
+            let mut redraw = vt100::Parser::new(size(height), size(width), 0);
+            let mut full = Vec::new();
+            Compositor::new(width, height)
+                .render_with(&mut full, paint)
+                .unwrap();
+            redraw.process(&full);
+            assert_eq!(cells(&terminal), cells(&redraw), "frame {frame}");
+        }
+        assert!(scrolled > 50, "only {scrolled} frames scrolled");
     }
 
     struct FailingWriter;

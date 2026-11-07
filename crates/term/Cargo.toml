@@ -24,3 +24,4 @@ compact_str = "0.10.0"
 
 [dev-dependencies]
 insta = { workspace = true }
+vt100 = "0.18.1"
