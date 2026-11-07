@@ -2894,7 +2894,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
         )),
         meta: None,
     }));
-    assert_eq!(app.session_snapshot().current_context_tokens(), Some(123));
+    assert_eq!(app.context_tokens(), Some(123));
     assert!(app.run_lua("assert(smelt.session.context_tokens() == 123)"));
 
     let mut in_flight_history = completed_history;
@@ -2905,7 +2905,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
         update: protocol::CanonicalHistoryDelta::new(0, in_flight_history),
     }));
 
-    assert_eq!(app.session_snapshot().current_context_tokens(), None);
+    assert_eq!(app.context_tokens(), None);
     assert_eq!(app.session_snapshot().display_context_tokens(), Some(123));
     assert!(app.run_lua("assert(smelt.session.context_tokens() == 123)"));
 }

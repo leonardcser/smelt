@@ -306,7 +306,10 @@ impl TestApp {
     /// Current authoritative context-token snapshot for the live history, when
     /// a non-background usage report has set one.
     pub fn context_tokens(&self) -> Option<u32> {
-        self.tui.conversation.session().current_context_tokens()
+        let conversation = &self.tui.conversation;
+        conversation
+            .session()
+            .current_context_tokens(conversation.history_len())
     }
 
     /// Active context checkpoint prefix length, if compaction installed one.

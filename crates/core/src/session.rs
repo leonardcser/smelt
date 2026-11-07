@@ -456,9 +456,11 @@ impl Session {
         self.display_context_token_identity = None;
     }
 
-    pub fn current_context_tokens(&self) -> Option<u32> {
+    /// Provider-reported context size, when it was taken at exactly
+    /// `history_len` live history items.
+    pub fn current_context_tokens(&self, history_len: usize) -> Option<u32> {
         self.context_token_reading()
-            .filter(|reading| reading.history_len == Some(self.history.len()))
+            .filter(|reading| reading.history_len == Some(history_len))
             .map(|reading| reading.tokens)
     }
 
@@ -1483,11 +1485,11 @@ mod tests {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
         s.record_context_tokens(100, 2, test_context_identity());
-        assert_eq!(s.current_context_tokens(), Some(100));
+        assert_eq!(s.current_context_tokens(s.history.len()), Some(100));
         assert_eq!(s.display_context_tokens, Some(100));
 
         s.history.push(user_item("c"));
-        assert_eq!(s.current_context_tokens(), None);
+        assert_eq!(s.current_context_tokens(s.history.len()), None);
         assert_eq!(s.display_context_tokens, Some(100));
     }
 

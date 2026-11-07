@@ -2087,7 +2087,7 @@ mod tests {
         assert!(session.history.is_empty());
         assert!(session.turn_metas.is_empty());
         assert!(session.context_snapshots.is_empty());
-        assert_eq!(session.current_context_tokens(), None);
+        assert_eq!(session.current_context_tokens(session.history.len()), None);
         assert_eq!(session.title, None);
         assert_eq!(session.slug, None);
     }

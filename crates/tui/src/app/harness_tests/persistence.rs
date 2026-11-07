@@ -2619,7 +2619,10 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     let loaded = loaded_session(&resumed, &session_id);
     assert_eq!(loaded.history.len(), 2);
-    assert_eq!(loaded.current_context_tokens(), Some(100));
+    assert_eq!(
+        loaded.current_context_tokens(loaded.history.len()),
+        Some(100)
+    );
     assert_eq!(loaded.display_context_tokens(), Some(100));
 
     resumed.load_session_by_id(&session_id);
