@@ -3477,15 +3477,15 @@ mod tests {
         let resume = app.pause_persistence();
         app.tui.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
-        let deadline = std::time::Instant::now()
-            + crate::persist::DEFAULT_PERSISTENCE_DEADLINE
-            + std::time::Duration::from_secs(5);
+        // The paused writer never settles, so the flush deadline expires on the
+        // app clock while each poll stays non-blocking.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.tui.session_load.is_pending() {
             let started = std::time::Instant::now();
             app.tui.drain_persist_reports();
             assert!(started.elapsed() < std::time::Duration::from_millis(100));
             assert!(std::time::Instant::now() < deadline);
-            std::thread::yield_now();
+            app.feed_one(crate::app::test_harness::SourceEvent::Tick(100));
         }
         assert_eq!(app.session_snapshot().id, source_id);
         assert!(app.tui.conversation.has_persistence());

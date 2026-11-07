@@ -2919,12 +2919,11 @@ impl ConversationRuntime {
 
     pub(crate) fn begin_persistence_close(
         &self,
+        deadline: std::time::Instant,
     ) -> Option<crate::persist::PendingPersistenceClose> {
-        self.persistence.as_ref().map(|actor| {
-            actor.begin_close(
-                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
-            )
-        })
+        self.persistence
+            .as_ref()
+            .map(|actor| actor.begin_close(deadline))
     }
 
     /// The close result once the writer stopped. A cancelled close keeps the
@@ -2934,12 +2933,13 @@ impl ConversationRuntime {
         &mut self,
         pending: &crate::persist::PendingPersistenceClose,
         cancelled: bool,
+        now: std::time::Instant,
     ) -> Option<Result<Option<String>, String>> {
         let persistence = self
             .persistence
             .as_mut()
             .expect("closing writer remains owned");
-        let outcome = persistence.poll_close(pending)?;
+        let outcome = persistence.poll_close(pending, now)?;
         if !cancelled {
             return Some(
                 self.finish_persistence_close(outcome, crate::persist::ClosePolicy::RequireDurable),

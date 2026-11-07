@@ -743,7 +743,7 @@ impl super::TuiApp {
                     self.save_session();
                     adoption.source_revision = self.conversation.document_revision();
                     adoption.stage = SessionAdoptionStage::Flushing {
-                        deadline: std::time::Instant::now()
+                        deadline: self.core.clock.instant_now()
                             + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
                     };
                     self.session_load.adoption = Some(adoption);
@@ -757,7 +757,10 @@ impl super::TuiApp {
                 } else {
                     match self.conversation.poll_persistence_settled() {
                         Some(Ok(())) => {
-                            let close = self.conversation.begin_persistence_close();
+                            let close = self.conversation.begin_persistence_close(
+                                self.core.clock.instant_now()
+                                    + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+                            );
                             adoption.stage = SessionAdoptionStage::Closing {
                                 close: close.map(Box::new),
                             };
@@ -766,7 +769,7 @@ impl super::TuiApp {
                             return;
                         }
                         Some(Err(reason)) => Err(reason),
-                        None if std::time::Instant::now() >= *deadline => {
+                        None if self.core.clock.instant_now() >= *deadline => {
                             Err("session save did not finish in time".into())
                         }
                         None => {
@@ -778,10 +781,11 @@ impl super::TuiApp {
             }
             SessionAdoptionStage::Closing { close, .. } => {
                 if let Some(close) = close {
-                    match self
-                        .conversation
-                        .poll_persistence_close(close.as_ref(), cancelled)
-                    {
+                    match self.conversation.poll_persistence_close(
+                        close.as_ref(),
+                        cancelled,
+                        self.core.clock.instant_now(),
+                    ) {
                         Some(outcome) => outcome,
                         None => {
                             self.session_load.adoption = Some(adoption);

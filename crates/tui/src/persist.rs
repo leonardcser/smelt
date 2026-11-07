@@ -347,10 +347,11 @@ impl SessionPersistence {
         }
     }
 
-    /// The close result once the writer finished or the deadline passed.
+    /// The close result once the writer finished or the deadline passed at `now`.
     pub(crate) fn poll_close(
         &mut self,
         pending: &PendingPersistenceClose,
+        now: Instant,
     ) -> Option<PersistenceFlushOutcome> {
         if self.is_finished() {
             self.join();
@@ -361,7 +362,7 @@ impl SessionPersistence {
                     .unwrap_or(PersistenceFlushOutcome::Deadline),
             );
         }
-        (Instant::now() >= pending.deadline).then_some(PersistenceFlushOutcome::Deadline)
+        (now >= pending.deadline).then_some(PersistenceFlushOutcome::Deadline)
     }
 
     /// Finishes the writer, waiting until `deadline` for pending saves.
