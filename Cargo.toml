@@ -134,21 +134,20 @@ debug = true
 # Faster dev/test builds: dependencies don't need debug info (we never
 # step into them), and line-tables-only on our own code keeps backtraces
 # usable while drastically cutting link time and dSYM generation on macOS.
+# Dependencies are optimized once and shared by dev and test builds, so
+# switching between `cargo build` and `cargo nextest` does not rebuild them.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+opt-level = 2
 
 # Tests are dominated by CPU-bound store, transcript and sqlite work, so a
 # light optimization level pays for itself many times over in runtime.
 [profile.test]
 inherits = "dev"
 opt-level = 1
-
-[profile.test.package."*"]
-debug = false
-opt-level = 2
 
 [dev-dependencies]
 insta = { workspace = true }
