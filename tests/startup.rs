@@ -3254,6 +3254,9 @@ fn isolated_smelt_command(home: &Path) -> Command {
         .env("XDG_CACHE_HOME", home.join("cache"))
         .env("SMELT_RETRY_BASE_DELAY_MS", "10")
         .current_dir(home);
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     command
 }
 
