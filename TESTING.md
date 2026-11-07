@@ -6,6 +6,21 @@ practical; keep the smallest regression. Do not duplicate contracts across layer
 
 ## Checks
 
+While iterating, run only the crate or tests you touched. Several agents often
+share one machine, and a full run keeps every core busy for over a minute,
+which slows every other run on the machine. Select tests with a filter on the
+workspace build: `-p <crate>` without `--features smelt-tui/harness` resolves
+other features and rebuilds the workspace crates a second time.
+
+```bash
+set -o pipefail
+cargo nextest run --workspace --features smelt-tui/harness -E 'package(<crate>)' 2>&1 | tail -120
+cargo nextest run --workspace --features smelt-tui/harness -E 'test(/<pattern>/)' 2>&1 | tail -120
+cargo nextest run --workspace --features smelt-tui/harness -E 'binary(storybook_main) & test(<story>)' 2>&1 | tail -120
+```
+
+Run the full checks once, before you commit:
+
 ```bash
 set -o pipefail
 cargo fmt --all --check
@@ -13,13 +28,10 @@ cargo nextest run --workspace --features smelt-tui/harness 2>&1 | tail -120
 cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings 2>&1 | tail -120
 ```
 
-Focused UI checks:
-
-```bash
-set -o pipefail
-cargo test -p smelt-tui --features harness <filter> 2>&1 | tail -120
-cargo test -p smelt-tui --test storybook_main --features harness <story> 2>&1 | tail -120
-```
+Each run writes per-test durations to `target/nextest/default/junit.xml`.
+`.config/nextest.toml` starts the slowest tests first; update its list when a
+test there gets fast or a new one takes seconds. To check that a suspected
+flaky test is fixed, repeat it under load with `--stress-count <n>`.
 
 ## Ownership
 

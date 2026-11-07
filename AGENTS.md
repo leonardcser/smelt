@@ -9,8 +9,9 @@ cargo build --profile release-fast --bin smelt   # performance checks only; ever
 cargo build --profile dist --bin smelt           # distribution build
 
 # test (needs cargo-nextest; the harness feature enables storybook/test helpers)
-cargo nextest run --workspace --features smelt-tui/harness
-cargo test -p smelt-tui --features harness <filter>   # targeted fallback
+cargo nextest run --workspace --features smelt-tui/harness -E 'package(<crate>)'   # while iterating
+cargo nextest run --workspace --features smelt-tui/harness -E 'test(/<pattern>/)'
+cargo nextest run --workspace --features smelt-tui/harness                         # once, before commit
 
 # format and lint (CI runs both, fmt first)
 cargo fmt
@@ -29,7 +30,9 @@ cargo test -p smelt-tui --test storybook_main --features harness app_dialog_perm
 cd docs/shots && bun install && bun run all
 ```
 
-Choosing a test layer: see `TESTING.md`. Releases: see `RELEASE.md`.
+While iterating, run only the crate or tests you touched. Other agents often
+share this machine, and a full workspace run slows them all. Choosing a test
+layer and the full pre-commit checks: see `TESTING.md`. Releases: see `RELEASE.md`.
 
 ## Conventions
 
