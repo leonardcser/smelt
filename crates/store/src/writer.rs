@@ -430,13 +430,20 @@ pub(crate) fn fork(
     )?;
     let target = tx.last_insert_rowid();
     for sql in [
-        "INSERT INTO session_values SELECT ?2, name, value FROM session_values WHERE sid = ?1",
-        "INSERT INTO history SELECT ?2, idx, users, user_turn, visible, note_kind, context, mode,
-             base_mode, text_bytes, body FROM history WHERE sid = ?1",
-        "INSERT INTO side_rows SELECT ?2, tbl, key, value FROM side_rows WHERE sid = ?1",
-        "INSERT INTO transcript SELECT ?2, idx, block_idx, history_idx, kind, role, rows_20,
-             rows_40, rows_80, rows_120, rows_160, rows_240, text_bytes, tool_render_revision,
-             tool_call_id, tool_name, content_hash, first_line, indexed_text, payload
+        "INSERT INTO session_values (sid, name, value)
+         SELECT ?2, name, value FROM session_values WHERE sid = ?1",
+        "INSERT INTO history (sid, idx, users, user_turn, visible, note_kind, context, mode,
+             base_mode, text_bytes, body)
+         SELECT ?2, idx, users, user_turn, visible, note_kind, context, mode, base_mode,
+             text_bytes, body FROM history WHERE sid = ?1",
+        "INSERT INTO side_rows (sid, tbl, key, value)
+         SELECT ?2, tbl, key, value FROM side_rows WHERE sid = ?1",
+        "INSERT INTO transcript (sid, idx, block_idx, history_idx, kind, role, rows_20, rows_40,
+             rows_80, rows_120, rows_160, rows_240, text_bytes, tool_render_revision,
+             tool_call_id, tool_name, content_hash, first_line, indexed_text, payload)
+         SELECT ?2, idx, block_idx, history_idx, kind, role, rows_20, rows_40, rows_80,
+             rows_120, rows_160, rows_240, text_bytes, tool_render_revision, tool_call_id,
+             tool_name, content_hash, first_line, indexed_text, payload
          FROM transcript WHERE sid = ?1",
     ] {
         tx.execute(sql, params![source, target])?;
