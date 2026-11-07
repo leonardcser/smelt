@@ -149,8 +149,39 @@ impl TestApp {
         self.tui.apply_lua_command(command);
     }
 
+    /// Pump and drive Lua until nothing is runnable: no queued signals,
+    /// callbacks or resumes, no ready task, and no blocking host work such as
+    /// a history read in flight. Production spreads this work over budgeted
+    /// wakeups, so a single pass leaves it unfinished on a loaded machine.
+    /// Tasks parked on engine replies, dialogs or future timers stay parked.
     pub(crate) fn drive_lua_tasks(&mut self) {
-        self.tui.drive_lua_tasks();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            self.tui.pump_lua();
+            self.tui.drive_lua_tasks();
+            if !self.lua_work_runnable() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Lua work did not settle"
+            );
+            if self.tui.lua.shared().has_blocking_work_in_flight() {
+                std::thread::sleep(super::POLL_INTERVAL);
+            }
+        }
+    }
+
+    fn lua_work_runnable(&self) -> bool {
+        let shared = self.tui.lua.shared();
+        let now = self.tui.core.clock.instant_now();
+        self.tui.has_queued_lua_work()
+            || shared.has_blocking_work_in_flight()
+            || shared
+                .tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .has_runnable(now)
     }
 
     pub(crate) fn drive_lua_tasks_once(&mut self) -> usize {

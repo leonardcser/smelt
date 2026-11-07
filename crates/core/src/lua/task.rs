@@ -320,6 +320,11 @@ impl LuaTaskRuntime {
         self.tasks.len()
     }
 
+    /// Whether a task is ready or its timer is due at `now`.
+    pub fn has_runnable(&self, now: Instant) -> bool {
+        self.next_wakeup(now).is_some_and(|at| at <= now)
+    }
+
     pub(crate) fn next_wakeup(&self, now: Instant) -> Option<Instant> {
         if self.ready.is_empty() {
             self.wakeups.first().map(|(at, _)| (*at).max(now))

@@ -1031,7 +1031,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        app.drive_lua_tasks();
+        app.drive_lua_tasks_once();
         let runs: Vec<i64> = app.eval_lua("return _G.task_runs").unwrap();
         assert!(runs.iter().all(|runs| *runs > 0 && *runs < 300), "{runs:?}");
         let started = std::time::Instant::now();

@@ -1200,7 +1200,7 @@ impl TestApp {
             .signals
             .emit_dyn("input_submit", std::rc::Rc::new(text.to_string()));
         self.tui.pump_lua();
-        self.tui.drive_lua_tasks();
+        self.drive_lua_tasks();
     }
 
     pub(crate) fn configure_active_model_fast_mode(

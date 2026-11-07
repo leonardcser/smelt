@@ -113,14 +113,17 @@ impl TuiApp {
     }
 
     pub(super) fn finish_lua_work(&self, work: &crate::lua::LuaWorkGuard) {
-        if work.root
-            && (self.core.signals.has_pending()
-                || self.lua.shared().has_pending_callbacks()
-                || self.lua.shared().has_pending_commands()
-                || self.lua.core_shared().has_pending_task_events())
-        {
+        if work.root && self.has_queued_lua_work() {
             let _ = self.lua.wakeup_sender().send(());
         }
+    }
+
+    /// Whether a budgeted pump left signals, callbacks, commands or task resumes queued.
+    pub(crate) fn has_queued_lua_work(&self) -> bool {
+        self.core.signals.has_pending()
+            || self.lua.shared().has_pending_callbacks()
+            || self.lua.shared().has_pending_commands()
+            || self.lua.core_shared().has_pending_task_events()
     }
 
     fn drain_lua_commands(&mut self) {

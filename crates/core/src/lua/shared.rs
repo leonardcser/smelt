@@ -4,7 +4,7 @@ use super::hooks::HookRegistry;
 use super::{LuaHandle, LuaHandleLedger, LuaTaskRuntime, TaskEvent};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Lua-allocated `BufId`s start here so they can never collide with the
@@ -263,6 +263,8 @@ pub struct LuaShared {
     pub task_inbox: Mutex<VecDeque<TaskEvent>>,
     /// Cross-thread inbox: tokio tasks push `(external_id, json)`; main loop drains to `task_inbox`.
     pub json_inbox: Arc<Mutex<VecDeque<(u64, serde_json::Value)>>>,
+    /// `spawn_blocking_resolve` jobs whose payload is not yet in `json_inbox`.
+    blocking_in_flight: Arc<AtomicUsize>,
     /// Session-long HTTP transport shared by replacement Lua generations.
     pub(crate) http_client: Arc<crate::http::Client>,
     /// Wakes the main loop when a coroutine resume payload is queued.
@@ -454,6 +456,7 @@ impl Default for LuaShared {
             work_quota: Mutex::new(None),
             task_inbox: Mutex::new(VecDeque::new()),
             json_inbox: Arc::new(Mutex::new(VecDeque::new())),
+            blocking_in_flight: Arc::new(AtomicUsize::new(0)),
             http_client: Arc::new(crate::http::Client::default()),
             wakeup_tx: std::sync::OnceLock::new(),
             providers: Mutex::new(Vec::new()),
@@ -880,12 +883,19 @@ impl LuaShared {
                 .is_empty()
     }
 
+    /// Whether a `spawn_blocking_resolve` job is still running. Once this is
+    /// false, every finished job's payload is visible to `has_pending_task_events`.
+    pub fn has_blocking_work_in_flight(&self) -> bool {
+        self.blocking_in_flight.load(Ordering::Acquire) > 0
+    }
+
     /// `Send`-safe handle for pushing JSON resume payloads from tokio tasks.
     /// `Arc<LuaShared>` is `!Send` (owns `mlua::Thread`s); this is the narrowest cross-thread surface.
     pub fn resume_sink(&self) -> LuaResumeSink {
         LuaResumeSink {
             inbox: Arc::clone(&self.json_inbox),
             wakeup: self.wakeup_tx.get().cloned(),
+            blocking_in_flight: Arc::clone(&self.blocking_in_flight),
         }
     }
 }
@@ -895,6 +905,23 @@ impl LuaShared {
 pub struct LuaResumeSink {
     inbox: Arc<Mutex<VecDeque<(u64, serde_json::Value)>>>,
     wakeup: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    blocking_in_flight: Arc<AtomicUsize>,
+}
+
+/// Counts one blocking job until its payload is queued or its work panics.
+struct BlockingJob(Arc<AtomicUsize>);
+
+impl BlockingJob {
+    fn start(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for BlockingJob {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl LuaResumeSink {
@@ -915,9 +942,11 @@ impl LuaResumeSink {
     where
         F: FnOnce() -> serde_json::Value + Send + 'static,
     {
+        let job = BlockingJob::start(&self.blocking_in_flight);
         tokio::task::spawn_blocking(move || {
             let payload = work();
             self.resolve_json(task_id, payload);
+            drop(job);
         });
     }
 }

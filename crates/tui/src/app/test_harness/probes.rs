@@ -178,7 +178,7 @@ impl TestApp {
                 )),
                 error: None,
             });
-        self.tui.drive_lua_tasks();
+        self.drive_lua_tasks();
     }
 
     pub(crate) fn respond_ask_with_error(&mut self, id: u64, kind: protocol::EngineAskErrorKind) {
@@ -191,7 +191,7 @@ impl TestApp {
                     message: kind.as_str().to_string(),
                 }),
             });
-        self.tui.drive_lua_tasks();
+        self.drive_lua_tasks();
     }
 
     pub(crate) fn respond_ask_with_tool_call(&mut self, id: u64, call_id: &str, name: &str) {
@@ -211,7 +211,7 @@ impl TestApp {
                 )),
                 error: None,
             });
-        self.tui.drive_lua_tasks();
+        self.drive_lua_tasks();
     }
 
     pub(crate) fn publish_turn_end_for_probe(&mut self) {
@@ -225,7 +225,7 @@ impl TestApp {
             }),
         );
         self.tui.pump_lua();
-        self.tui.drive_lua_tasks();
+        self.drive_lua_tasks();
     }
 
     fn bump_input_epoch_for_probe(&mut self) {
