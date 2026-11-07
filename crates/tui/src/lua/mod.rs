@@ -3675,7 +3675,8 @@ mod tests {
 
     /// Load the upgrade plugin against a fake `smelt upgrade`. `_G.cli.status`
     /// and `_G.cli.install` are what `smelt.process.run` returns for each
-    /// subcommand; `_G.cli_calls` records every call after loading. Spawned
+    /// subcommand; `_G.cli_calls` records every call after loading, and
+    /// `_G.upgrade_lock` whether the installation lock exists. Spawned
     /// work runs inline unless `_G.after_load` swaps `smelt.spawn` once the
     /// startup status read is done. The armed check timer is `_G.upgrade_check`
     /// (`_G.check_armed`), the progress poll `_G.upgrade_progress_tick`
@@ -3719,6 +3720,11 @@ mod tests {
                     smelt.fs.watch = function(path, fn, opts)
                       assert(path == "/opt/smelt/bin" and opts.recursive == false, path)
                       _G.upgrade_watch = fn
+                    end
+                    _G.upgrade_lock = true
+                    smelt.fs.exists = function(path)
+                      assert(path == "/opt/smelt/bin/.smelt-upgrade.lock", path)
+                      return _G.upgrade_lock
                     end
                     smelt.spawn = function(fn) fn() end
                     _G.cli_calls = {{}}
@@ -3966,6 +3972,20 @@ mod tests {
             Some("upgrade failed  →  /upgrade status")
         );
         assert!(!lua_eval::<bool>(&rt, "return _G.progress_armed or false"));
+    }
+
+    #[test]
+    fn upgrade_startup_skips_the_status_read_where_no_upgrade_ran() {
+        let rt = LuaRuntime::new();
+        load_upgrade_plugin(
+            &rt,
+            r#"
+                _G.upgrade_lock = false
+                _G.after_load = function() _G.startup_calls = #_G.cli_calls end
+            "#,
+        );
+        assert_eq!(lua_eval::<i64>(&rt, "return _G.startup_calls"), 0);
+        assert_eq!(upgrade_banner(&rt), None);
     }
 
     #[test]

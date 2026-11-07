@@ -338,7 +338,14 @@ if session.exe then
   if not ok then smelt.log.warn("upgrade.watch_failed", { exe = session.exe, error = tostring(err) }) end
 end
 
-if session.snapshot == nil then request("status", false) end
+-- Without the installation lock no upgrade has run here, and the CLI would
+-- report no status, so the startup read is skipped.
+local function upgrade_recorded()
+  local dir = session.exe and session.exe:match("^(.*)[/\\]")
+  return dir ~= nil and smelt.fs.exists(dir .. "/.smelt-upgrade.lock")
+end
+
+if session.snapshot == nil and upgrade_recorded() then request("status", false) end
 follow_progress()
 schedule_check()
 
