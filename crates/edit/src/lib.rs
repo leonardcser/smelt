@@ -2094,8 +2094,8 @@ impl Ui {
     }
 
     #[must_use]
-    pub fn win_clear_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
-        self.callbacks.clear_keymap(win, key)
+    pub fn win_clear_keymap(&mut self, win: WinId, key: KeyBind, id: u64) -> Option<Callback> {
+        self.callbacks.clear_keymap(win, key, id)
     }
 
     /// Catch-all key handler; runs after specific keymaps miss. Returns the displaced callback.
@@ -2119,9 +2119,14 @@ impl Ui {
     }
 
     #[must_use]
-    pub fn overlay_clear_keymap(&mut self, overlay: OverlayId, key: KeyBind) -> Option<Callback> {
+    pub fn overlay_clear_keymap(
+        &mut self,
+        overlay: OverlayId,
+        key: KeyBind,
+        id: u64,
+    ) -> Option<Callback> {
         self.callbacks
-            .clear_scoped_keymap(KeymapScope::Overlay(overlay), key)
+            .clear_scoped_keymap(KeymapScope::Overlay(overlay), key, id)
     }
 
     /// Remove every overlay-scoped binding. Returns Lua handle ids for caller cleanup.
@@ -2143,9 +2148,14 @@ impl Ui {
     }
 
     #[must_use]
-    pub fn modal_clear_keymap(&mut self, modal: ModalId, key: KeyBind) -> Option<Callback> {
+    pub fn modal_clear_keymap(
+        &mut self,
+        modal: ModalId,
+        key: KeyBind,
+        id: u64,
+    ) -> Option<Callback> {
         self.callbacks
-            .clear_scoped_keymap(KeymapScope::Modal(modal), key)
+            .clear_scoped_keymap(KeymapScope::Modal(modal), key, id)
     }
 
     /// Register an event callback. Multiple callbacks per (win, event) fire in registration order.

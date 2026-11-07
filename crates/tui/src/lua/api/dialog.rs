@@ -97,7 +97,11 @@ fn install_modal_key(
         crate::lua::app_ref::defer_registered_lua_operation(
             &shared,
             callback,
-            crate::lua::app_ref::DeferredLuaOperation::ModalKeymap { modal, key },
+            crate::lua::app_ref::DeferredLuaOperation::ModalKeymap {
+                modal,
+                key,
+                callback_id: callback,
+            },
         )
     }))
 }

@@ -224,8 +224,13 @@ impl Callbacks {
         self.keymaps.entry(win).or_default().insert(key, cb)
     }
 
-    pub(crate) fn clear_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
-        self.keymaps.get_mut(&win).and_then(|t| t.remove(&key))
+    /// Remove the (win, key) keymap only while it is still Lua callback `id`.
+    pub(crate) fn clear_keymap(&mut self, win: WinId, key: KeyBind, id: u64) -> Option<Callback> {
+        let table = self.keymaps.get_mut(&win)?;
+        if table.get(&key)?.lua_id() != Some(id) {
+            return None;
+        }
+        table.remove(&key)
     }
 
     /// Remove a specific event callback by Lua handle id.
@@ -388,14 +393,18 @@ impl Callbacks {
             .insert(key, cb)
     }
 
+    /// Remove a scoped keymap only while it is still Lua callback `id`.
     pub(crate) fn clear_scoped_keymap(
         &mut self,
         scope: KeymapScope,
         key: KeyBind,
+        id: u64,
     ) -> Option<Callback> {
-        self.scoped_keymaps
-            .get_mut(&scope)
-            .and_then(|table| table.remove(&key))
+        let table = self.scoped_keymaps.get_mut(&scope)?;
+        if table.get(&key)?.lua_id() != Some(id) {
+            return None;
+        }
+        table.remove(&key)
     }
 
     pub(crate) fn take_scoped_keymap(
@@ -450,6 +459,28 @@ mod tests {
         let taken = cbs.take_keymap(wid(1), key);
         assert!(matches!(taken, Some(Callback::Lua(LuaHandle(42)))));
         assert!(cbs.take_keymap(wid(1), key).is_none());
+    }
+
+    #[test]
+    fn clearing_a_replaced_keymap_keeps_the_newer_binding() {
+        let mut cbs = Callbacks::new();
+        let key = KeyBind::char('q');
+        let scope = KeymapScope::Modal(ModalId(1));
+        let _ = cbs.set_keymap(wid(1), key, Callback::Lua(LuaHandle(1)));
+        let _ = cbs.set_keymap(wid(1), key, Callback::Lua(LuaHandle(2)));
+        let _ = cbs.set_scoped_keymap(scope, key, Callback::Lua(LuaHandle(3)));
+        let _ = cbs.set_scoped_keymap(scope, key, Callback::Lua(LuaHandle(4)));
+
+        assert!(cbs.clear_keymap(wid(1), key, 1).is_none());
+        assert!(cbs.clear_scoped_keymap(scope, key, 3).is_none());
+        assert!(matches!(
+            cbs.clear_keymap(wid(1), key, 2),
+            Some(Callback::Lua(LuaHandle(2)))
+        ));
+        assert!(matches!(
+            cbs.clear_scoped_keymap(scope, key, 4),
+            Some(Callback::Lua(LuaHandle(4)))
+        ));
     }
 
     #[test]

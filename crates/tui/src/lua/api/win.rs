@@ -450,6 +450,7 @@ impl mlua::UserData for LuaWin {
                         crate::lua::app_ref::DeferredLuaOperation::WindowKeymap {
                             window: win,
                             key,
+                            callback_id: id,
                         },
                     )
                 }))

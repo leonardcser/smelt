@@ -163,7 +163,11 @@ pub(crate) fn install_overlay_key(
         crate::lua::app_ref::defer_registered_lua_operation(
             &shared,
             id,
-            crate::lua::app_ref::DeferredLuaOperation::OverlayKeymap { overlay, key },
+            crate::lua::app_ref::DeferredLuaOperation::OverlayKeymap {
+                overlay,
+                key,
+                callback_id: id,
+            },
         )
     }))
 }

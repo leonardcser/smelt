@@ -57,6 +57,7 @@ pub(crate) enum DeferredLuaOperation {
     WindowKeymap {
         window: crate::smelt_edit::WinId,
         key: crate::smelt_edit::KeyBind,
+        callback_id: u64,
     },
     WindowEvent {
         window: crate::smelt_edit::WinId,
@@ -71,10 +72,12 @@ pub(crate) enum DeferredLuaOperation {
     ModalKeymap {
         modal: crate::smelt_edit::ModalId,
         key: crate::smelt_edit::KeyBind,
+        callback_id: u64,
     },
     OverlayKeymap {
         overlay: crate::smelt_edit::OverlayId,
         key: crate::smelt_edit::KeyBind,
+        callback_id: u64,
     },
 }
 
@@ -1204,8 +1207,9 @@ impl UiLuaHost<'_> {
         &mut self,
         window: crate::smelt_edit::WinId,
         key: crate::smelt_edit::KeyBind,
+        callback_id: u64,
     ) -> bool {
-        let previous = self.app.ui.win_clear_keymap(window, key);
+        let previous = self.app.ui.win_clear_keymap(window, key, callback_id);
         let removed = previous.is_some();
         crate::lua::drop_displaced_lua_handle(self.app, previous);
         removed
@@ -1349,8 +1353,9 @@ impl UiLuaHost<'_> {
         &mut self,
         modal: crate::smelt_edit::ModalId,
         key: crate::smelt_edit::KeyBind,
+        callback_id: u64,
     ) -> bool {
-        let previous = self.app.ui.modal_clear_keymap(modal, key);
+        let previous = self.app.ui.modal_clear_keymap(modal, key, callback_id);
         let removed = previous.is_some();
         crate::lua::drop_displaced_lua_handle(self.app, previous);
         removed
@@ -1393,8 +1398,9 @@ impl UiLuaHost<'_> {
         &mut self,
         overlay: crate::smelt_edit::OverlayId,
         key: crate::smelt_edit::KeyBind,
+        callback_id: u64,
     ) -> bool {
-        let previous = self.app.ui.overlay_clear_keymap(overlay, key);
+        let previous = self.app.ui.overlay_clear_keymap(overlay, key, callback_id);
         let removed = previous.is_some();
         crate::lua::drop_displaced_lua_handle(self.app, previous);
         removed
@@ -1959,8 +1965,12 @@ fn drain_deferred_lua_operations(app: &mut TuiApp) {
     let mut host = UiLuaHost { app };
     for operation in operations {
         match operation {
-            DeferredLuaOperation::WindowKeymap { window, key } => {
-                host.clear_window_keymap(window, key);
+            DeferredLuaOperation::WindowKeymap {
+                window,
+                key,
+                callback_id,
+            } => {
+                host.clear_window_keymap(window, key, callback_id);
             }
             DeferredLuaOperation::WindowEvent {
                 window,
@@ -1976,11 +1986,19 @@ fn drain_deferred_lua_operations(app: &mut TuiApp) {
             } => {
                 host.clear_paint_event(paint, event, callback_id);
             }
-            DeferredLuaOperation::ModalKeymap { modal, key } => {
-                host.clear_modal_keymap(modal, key);
+            DeferredLuaOperation::ModalKeymap {
+                modal,
+                key,
+                callback_id,
+            } => {
+                host.clear_modal_keymap(modal, key, callback_id);
             }
-            DeferredLuaOperation::OverlayKeymap { overlay, key } => {
-                host.clear_overlay_keymap(overlay, key);
+            DeferredLuaOperation::OverlayKeymap {
+                overlay,
+                key,
+                callback_id,
+            } => {
+                host.clear_overlay_keymap(overlay, key, callback_id);
             }
         }
     }

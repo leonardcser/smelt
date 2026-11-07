@@ -140,6 +140,7 @@ impl mlua::UserData for LuaInput {
                         crate::lua::app_ref::DeferredLuaOperation::WindowKeymap {
                             window: win,
                             key,
+                            callback_id: id,
                         },
                     )
                 }))
