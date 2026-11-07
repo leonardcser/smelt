@@ -456,6 +456,6 @@ pub(crate) fn delete(conn: &Connection, session_id: &str) -> Result<()> {
         });
     }
     // Give the deleted pages back in bounded steps instead of growing the file forever.
-    conn.execute_batch("PRAGMA incremental_vacuum(4096)")?;
+    db::incremental_vacuum(conn, Some(4096))?;
     Ok(())
 }

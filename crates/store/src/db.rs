@@ -71,6 +71,19 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Returns up to `pages` free pages, or all of them, to the file system. The
+/// pragma frees one page per step, so it must run to completion.
+pub(crate) fn incremental_vacuum(conn: &Connection, pages: Option<u32>) -> Result<()> {
+    let sql = match pages {
+        Some(pages) => format!("PRAGMA incremental_vacuum({pages})"),
+        None => "PRAGMA incremental_vacuum".to_owned(),
+    };
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.raw_query();
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
 pub(crate) fn session_key(conn: &Connection, session_id: &str) -> Result<Option<i64>> {
     Ok(conn
         .prepare_cached("SELECT sid FROM sessions WHERE id = ?1")?
@@ -193,6 +206,27 @@ mod tests {
             .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
             .unwrap();
         assert_eq!(mode, 2);
+    }
+
+    #[test]
+    fn incremental_vacuum_returns_every_requested_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("smelt.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE filler (body BLOB);
+             INSERT INTO filler VALUES (zeroblob(4 * 1024 * 1024));
+             DROP TABLE filler;",
+        )
+        .unwrap();
+        let free = || -> i64 {
+            conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))
+                .unwrap()
+        };
+        let before = free();
+        incremental_vacuum(&conn, Some(100)).unwrap();
+        assert_eq!(free(), before - 100);
+        incremental_vacuum(&conn, None).unwrap();
+        assert_eq!(free(), 0);
     }
 
     #[test]
