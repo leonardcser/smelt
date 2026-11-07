@@ -8937,6 +8937,259 @@ fn resumed_user_message_jumps_land_on_every_message_text_below_the_pill() {
     assert_user_message_walk(&mut app, "]u", &forward, "resumed");
 }
 
+/// A session resumed from the store with `turns` user turns, each followed
+/// by an answer tall enough that only the newest turns load with the tail.
+/// Every display row of turn `t` names it: `u{t:03}` or `a{t:03}`. Prompts
+/// carry a send time, so each opens with a header row above its text.
+fn store_backed_tall_chat_app(turns: usize) -> TestApp {
+    use smelt_core::transcript_model::Block;
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 20);
+    let session_id = app.session_snapshot().id.clone();
+    let mut session =
+        smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
+    session.id = session_id.clone();
+    let mut source = smelt_core::content::transcript::Transcript::new();
+    for t in 0..turns {
+        source.push(Block::User {
+            text: format!("u{t:03} question"),
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: Some(1_792_088_518_793),
+        });
+        source.push(Block::Text {
+            content: (0..30)
+                .map(|_| format!("{}\n", format!("a{t:03} ").repeat(40)))
+                .collect::<String>()
+                .into(),
+        });
+    }
+    let records = source.history.block_records();
+    session.history = (0..records.len())
+        .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
+        .collect();
+    let sessions = app.core_probe().sessions.clone();
+    sessions
+        .store()
+        .writer(&session_id)
+        .unwrap()
+        .commit(
+            &smelt_core::session::store_identity(&session),
+            &smelt_core::session::full_commit(&session).unwrap(),
+        )
+        .unwrap();
+    let store_address = sessions.address(session_id.clone());
+    crate::persist::write_transcript_record_suffix(&store_address, 0, &records).unwrap();
+    let loaded =
+        crate::app::transcript::LoadedTranscript::tail_from_sqlite(store_address.clone(), 80, 20)
+            .unwrap();
+    let resume = sessions.load_resume(&session_id, 80, 20).unwrap();
+    app.load_store_backed_session(
+        crate::app::session_document::StoreBackedSessionDocument::new(
+            resume.session,
+            loaded,
+            crate::app::history::store_backed_live_session_for_test(store_address, records.len()),
+            resume.head,
+        ),
+    );
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.render_silent();
+    app
+}
+
+#[test]
+fn user_message_jumps_pressed_during_hydration_each_move_one_message_back() {
+    const TURNS: usize = 300;
+    let mut app = store_backed_tall_chat_app(TURNS);
+    block_nav(&mut app, "G");
+    let mut expected = TURNS;
+    let mut waited_on_hydration = false;
+    while expected > 3 {
+        for _ in 0..3 {
+            app.type_unsettled("[u");
+            waited_on_hydration |= app.tui.conversation.transcript_hydration_is_pending();
+        }
+        expected -= 3;
+        app.settle_hydration();
+        let line = transcript_cursor_line(&app);
+        assert!(
+            line.starts_with(&format!("u{expected:03} ")),
+            "three presses should land on u{expected:03}, cursor line {line:?}"
+        );
+    }
+    assert!(waited_on_hydration, "the walk never waited on hydration");
+}
+
+/// The turn the transcript cursor is on, from the marker its row shows. A
+/// blank row belongs to the nearest turn above it, or below it at the top.
+fn cursor_turn(app: &TestApp) -> usize {
+    let rows = app
+        .transcript_window()
+        .viewport
+        .map_or(0, |viewport| viewport.rect.height);
+    let row = usize::from(
+        app.transcript_cursor_screen_row(rows)
+            .expect("cursor on screen"),
+    );
+    let lines = transcript_viewport_lines(app);
+    let turn = |line: &String| {
+        line.split_whitespace().find_map(|word| {
+            let digits = word.strip_prefix(['u', 'a'])?;
+            (digits.len() == 3).then(|| digits.parse().ok())?
+        })
+    };
+    lines[..=row]
+        .iter()
+        .rev()
+        .find_map(turn)
+        .or_else(|| lines[row..].iter().find_map(turn))
+        .unwrap_or_else(|| panic!("no turn marker near cursor row {row}: {lines:#?}"))
+}
+
+#[test]
+fn user_message_jumps_after_layout_invalidation_move_one_message_back() {
+    const TURNS: usize = 300;
+    let mut app = store_backed_tall_chat_app(TURNS);
+    block_nav(&mut app, "G");
+    for expected in (TURNS - 12..TURNS).rev() {
+        // A record-window switch between frames drops the exact layout the
+        // cursor row was presented with.
+        app.tui.conversation.invalidate_transcript_layout_for_test();
+        app.type_text("[u");
+        app.render_silent();
+        let line = transcript_cursor_line(&app);
+        assert!(
+            line.starts_with(&format!("u{expected:03} ")),
+            "the jump should land on u{expected:03}, cursor line {line:?}"
+        );
+    }
+}
+
+#[test]
+fn user_message_jumps_forward_during_hydration_each_move_one_message_on() {
+    const TURNS: usize = 300;
+    let mut app = store_backed_tall_chat_app(TURNS);
+    block_nav(&mut app, "gg");
+    assert_eq!(cursor_turn(&app), 0);
+    let mut expected = 0;
+    let mut waited_on_hydration = false;
+    while expected + 3 < TURNS {
+        for _ in 0..3 {
+            app.type_unsettled("]u");
+            waited_on_hydration |= app.tui.conversation.transcript_hydration_is_pending();
+        }
+        expected += 3;
+        app.settle_hydration();
+        let line = transcript_cursor_line(&app);
+        assert!(
+            line.starts_with(&format!("u{expected:03} ")),
+            "three presses should land on u{expected:03}, cursor line {line:?}"
+        );
+    }
+    assert!(waited_on_hydration, "the walk never waited on hydration");
+}
+
+#[test]
+fn user_message_jumps_stay_exact_when_hydration_lands_between_presses() {
+    const TURNS: usize = 300;
+    let mut app = store_backed_tall_chat_app(TURNS);
+    block_nav(&mut app, "G");
+    let mut expected = TURNS;
+    for step in 0..120 {
+        app.type_unsettled("[u");
+        expected -= 1;
+        if step % 3 != 0 {
+            app.deliver_hydration_step();
+        }
+        if !app.tui.conversation.transcript_hydration_is_pending() {
+            assert_eq!(
+                cursor_turn(&app),
+                expected,
+                "press {step} landed off target"
+            );
+        }
+    }
+    app.settle_hydration();
+    assert_eq!(cursor_turn(&app), expected);
+}
+
+#[test]
+fn counted_user_message_jumps_cross_unloaded_turns() {
+    const TURNS: usize = 300;
+    let mut app = store_backed_tall_chat_app(TURNS);
+    block_nav(&mut app, "G");
+    for (keys, expected) in [("50[u", 250), ("100[u", 150), ("120]u", 270), ("3[u", 267)] {
+        app.type_unsettled(keys);
+        app.settle_hydration();
+        let line = transcript_cursor_line(&app);
+        assert!(
+            line.starts_with(&format!("u{expected:03} ")),
+            "{keys} should land on u{expected:03}, cursor line {line:?}"
+        );
+    }
+}
+
+#[test]
+fn edge_motions_pressed_during_hydration_land_on_the_last_one() {
+    const TURNS: usize = 300;
+    let mut app = store_backed_tall_chat_app(TURNS);
+    for (keys, expected) in [
+        ("ggG", TURNS - 1),
+        ("Ggg", 0),
+        ("gg50[uG", TURNS - 1),
+        ("G]ugg", 0),
+        ("gg]u", 1),
+        ("gg]u]u", 2),
+        ("G[u[u", TURNS - 2),
+    ] {
+        block_nav(&mut app, "G");
+        app.type_unsettled(keys);
+        app.settle_hydration();
+        assert_eq!(cursor_turn(&app), expected, "{keys}");
+        let screen = app.presented_frame().rows;
+        let near_head = expected < 3;
+        assert!(
+            near_head || !screen.iter().any(|row| row.contains("u000")),
+            "{keys} drew the first turn at the tail: {screen:#?}"
+        );
+    }
+}
+
+#[test]
+fn long_upward_motions_during_hydration_never_move_the_cursor_back_down() {
+    const TURNS: usize = 300;
+    fn press_unsettled(app: &mut TestApp, key: char, times: usize) {
+        for _ in 0..times {
+            app.press_mod(KeyCode::Char(key), KeyModifiers::CONTROL);
+            app.render_unsettled_silent();
+        }
+    }
+    // Each batch moves further than one turn, about 95 rows.
+    type Motion = (&'static str, fn(&mut TestApp));
+    let motions: [Motion; 3] = [
+        ("300k", |app| app.type_unsettled("300k")),
+        ("12 Ctrl-U", |app| press_unsettled(app, 'u', 12)),
+        ("6 Ctrl-B", |app| press_unsettled(app, 'b', 6)),
+    ];
+    let mut app = store_backed_tall_chat_app(TURNS);
+    for (name, motion) in motions {
+        block_nav(&mut app, "G");
+        let mut turn = cursor_turn(&app);
+        while turn > 0 {
+            motion(&mut app);
+            app.deliver_hydration_step();
+            motion(&mut app);
+            app.settle_hydration();
+            let next = cursor_turn(&app);
+            assert!(next < turn, "{name} moved from turn {turn} to {next}");
+            app.render_silent();
+            assert_eq!(cursor_turn(&app), next, "{name} drifted after it settled");
+            turn = next;
+        }
+    }
+}
+
 /// From each row of `rows`, every block motion either lands on the text start
 /// of a block of its kind past the cursor, below the pill, or stays put
 /// because no such block lies that way.

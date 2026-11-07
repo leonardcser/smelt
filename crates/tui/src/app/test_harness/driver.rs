@@ -16,7 +16,9 @@ impl TestApp {
         {
             match ev {
                 SourceEvent::Term(ev) => {
-                    let quit = self.tui.dispatch_terminal_event(ev);
+                    let quit = self
+                        .tui
+                        .dispatch_batched_terminal_event(ev, &mut std::io::sink());
                     if quit {
                         self.quit = true;
                         self.actions.push(Action::Quit);
@@ -118,6 +120,22 @@ impl TestApp {
         self.assert_render_layout_invariants();
         self.assert_prompt_cursor_projection();
         self.tui.ui.flushed_snapshot()
+    }
+
+    /// Type each char of `keys` with one production frame after it, without
+    /// waiting for asynchronous transcript hydration, as keys reach the app
+    /// while background loads are still in flight.
+    pub fn type_unsettled(&mut self, keys: &str) {
+        for key in keys.chars() {
+            self.type_char(key);
+            self.render_unsettled_silent();
+        }
+    }
+
+    /// Deliver background transcript hydration until none is in flight, then
+    /// render the settled frame.
+    pub fn settle_hydration(&mut self) {
+        self.render_silent();
     }
 
     /// Render one frame and return the resulting `SnapshotFrame`. Used
@@ -246,32 +264,49 @@ impl TestApp {
     }
 
     fn settle_transcript_hydration(&mut self, out: &mut impl std::io::Write) {
-        const HYDRATION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
         const HYDRATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
         let settle_deadline = std::time::Instant::now() + HYDRATION_SETTLE_TIMEOUT;
-        while self.tui.conversation.transcript_hydration_is_pending()
-            || self.tui.session_preview_is_pending()
-        {
+        while self.background_load_is_pending() {
             assert!(
                 std::time::Instant::now() < settle_deadline,
                 "background transcript hydration did not settle within {HYDRATION_SETTLE_TIMEOUT:?}"
             );
-            let idle_deadline = std::time::Instant::now() + HYDRATION_IDLE_TIMEOUT;
-            let event = loop {
-                if let Some(event) = self.tui.platform.try_recv_app_event() {
-                    break event;
-                }
-                assert!(
-                    std::time::Instant::now() < idle_deadline,
-                    "background transcript hydration did not make progress within {HYDRATION_IDLE_TIMEOUT:?}"
-                );
-                std::thread::sleep(super::POLL_INTERVAL);
-            };
-            self.tui.handle_app_event(event);
-            if self.tui.frame_scheduler.has_pending() {
-                self.tui.render_normal_to(out);
+            self.deliver_app_event(out);
+        }
+    }
+
+    /// Deliver one background result, if a load is in flight, and render the
+    /// frame it schedules, as the event loop does when a load lands between
+    /// keys.
+    pub fn deliver_hydration_step(&mut self) {
+        if self.background_load_is_pending() {
+            self.deliver_app_event(&mut std::io::sink());
+        }
+    }
+
+    fn background_load_is_pending(&self) -> bool {
+        self.tui.conversation.transcript_hydration_is_pending()
+            || self.tui.session_preview_is_pending()
+    }
+
+    fn deliver_app_event(&mut self, out: &mut impl std::io::Write) {
+        const HYDRATION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let idle_deadline = std::time::Instant::now() + HYDRATION_IDLE_TIMEOUT;
+        let event = loop {
+            if let Some(event) = self.tui.platform.try_recv_app_event() {
+                break event;
             }
+            assert!(
+                std::time::Instant::now() < idle_deadline,
+                "background transcript hydration did not make progress within {HYDRATION_IDLE_TIMEOUT:?}"
+            );
+            std::thread::sleep(super::POLL_INTERVAL);
+        };
+        self.tui.handle_app_event(event);
+        if self.tui.frame_scheduler.has_pending() {
+            self.tui.render_normal_to(out);
         }
     }
 

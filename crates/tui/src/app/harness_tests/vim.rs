@@ -260,7 +260,7 @@ fn vim_insert_double_esc_rewinds_active_command_by_history_index() {
     let after_second = app.state();
     assert!(!after_second.agent_running);
     assert_eq!(after_second.prompt_text, "/review");
-    let history = &app.tui.conversation.session().history;
+    let history = app.model_history();
     assert_eq!(history.first(), Some(&context));
     assert!(history
         .iter()
@@ -1077,23 +1077,8 @@ fn transcript_zt_and_zb_place_the_cursor_row_at_the_viewport_edges() {
         app.transcript_window().scroll_top() as usize,
         row + 1 - height
     );
-    eprintln!(
-        "DBG before zz cursor {:?} scroll {}",
-        transcript_cursor(&app),
-        app.transcript_window().scroll_top()
-    );
     app.type_text("zz");
-    eprintln!(
-        "DBG after zz cursor {:?} scroll {}",
-        transcript_cursor(&app),
-        app.transcript_window().scroll_top()
-    );
     app.render_silent();
-    eprintln!(
-        "DBG rendered zz cursor {:?} scroll {}",
-        transcript_cursor(&app),
-        app.transcript_window().scroll_top()
-    );
     assert_eq!(
         app.transcript_window().scroll_top() as usize,
         row - height / 2

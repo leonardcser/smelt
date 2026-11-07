@@ -60,6 +60,12 @@ const VALUES: &[(&str, &str)] = &[
     ("tall-write-lines", "SMELT_TRANSCRIPT_TALL_WRITE_LINES"),
     ("tall-diff-lines", "SMELT_TRANSCRIPT_TALL_DIFF_LINES"),
     ("scaling-blocks", "SMELT_TRANSCRIPT_SCALING_BLOCKS"),
+    ("user-jump-count", "SMELT_TRANSCRIPT_USER_JUMP_COUNT"),
+    ("user-jump-fixture", "SMELT_TRANSCRIPT_USER_JUMP_FIXTURE"),
+    (
+        "user-jump-session-id",
+        "SMELT_TRANSCRIPT_USER_JUMP_SESSION_ID",
+    ),
 ];
 const SWITCHES: &[(&str, &str)] = &[
     (
@@ -106,6 +112,7 @@ const SUITES: &[(&str, &str)] = &[
     ("scaling", "transcript_scaling_benchmark_suite"),
     ("resume", "transcript_true_resume_benchmark_suite"),
     ("wheel", "transcript_resumed_wheel_scroll_benchmark_suite"),
+    ("user-jumps", "transcript_resumed_user_jump_benchmark_suite"),
     ("memory", "transcript_active_memory_benchmark_suite"),
     ("keys", "transcript_keys_benchmark_suite"),
     ("ui", "default_ui_frame_benchmark_suite"),
@@ -179,7 +186,10 @@ impl Plan {
                         };
                         named_list(&value, allowed).map_err(|error| format!("--{key}: {error}"))?;
                     }
-                    "save-request-fixture" | "save-request-session-id" => {
+                    "save-request-fixture"
+                    | "save-request-session-id"
+                    | "user-jump-fixture"
+                    | "user-jump-session-id" => {
                         if value.is_empty() || value.starts_with("--") {
                             return Err(format!("--{key} requires a value"));
                         }
@@ -209,6 +219,12 @@ impl Plan {
             return Err(
                 "--save-request-fixture and --save-request-session-id must be provided together"
                     .into(),
+            );
+        }
+        if options.contains_key("user-jump-fixture") != options.contains_key("user-jump-session-id")
+        {
+            return Err(
+                "--user-jump-fixture and --user-jump-session-id must be provided together".into(),
             );
         }
         if options.contains_key("scale-500mb") {

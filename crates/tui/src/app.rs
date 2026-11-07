@@ -3907,7 +3907,7 @@ impl TuiApp {
                             &mut scroll_row,
                             &mut scroll_col,
                         ) {
-                            if self.dispatch_terminal_event(ev) {
+                            if self.dispatch_batched_terminal_event(ev, &mut std::io::stdout()) {
                                 break 'main;
                             }
                         }

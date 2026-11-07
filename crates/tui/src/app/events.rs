@@ -30,6 +30,28 @@ enum StatefulViewerKeyDispatch {
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
 
+    /// Dispatch `ev`, one of a batch of terminal events handled before the
+    /// next frame. An earlier event of the batch may have left a transcript
+    /// projection to a target pending, such as the cursor move of `G`; it is
+    /// resolved first, so `ev` reads the cursor and view it produced.
+    /// A projection that waits on hydration stays pending, and navigation
+    /// continues from its target instead. Returns `true` if the app should quit.
+    pub(crate) fn dispatch_batched_terminal_event<W: std::io::Write>(
+        &mut self,
+        ev: Event,
+        out: &mut W,
+    ) -> bool {
+        if self
+            .conversation
+            .transcript()
+            .has_pending_target_projection()
+        {
+            self.dispatch_ui_window_events(false);
+            self.render_normal_to(out);
+        }
+        self.dispatch_terminal_event(ev)
+    }
+
     /// Returns `true` if the app should quit.
     pub(crate) fn dispatch_terminal_event(&mut self, ev: Event) -> bool {
         if matches!(&ev, Event::Key(key) if key.kind == KeyEventKind::Release) {

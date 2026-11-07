@@ -9,24 +9,27 @@ fn searchable_transcript_app() -> TestApp {
 }
 
 fn sparse_display_only_search_app() -> TestApp {
+    sparse_search_app(200, |idx| match idx {
+        20 => "early needle".to_string(),
+        199 => "tail needle".to_string(),
+        _ => format!("block {idx}"),
+    })
+}
+
+/// A resumed session of `count` stored blocks with `content(idx)` text, of
+/// which only the newest load with the tail.
+fn sparse_search_app(count: u64, content: impl Fn(u64) -> String) -> TestApp {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     let session_id = app.session_snapshot().id.clone();
     let mut session =
         smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     session.id = session_id.clone();
-    session.history = (0..200)
+    session.history = (0..count)
         .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
         .collect();
-    let records = (0..200)
-        .map(|idx| {
-            let content = match idx {
-                20 => "early needle".to_string(),
-                199 => "tail needle".to_string(),
-                _ => format!("block {idx}"),
-            };
-            test_block_record(idx, &content)
-        })
+    let records = (0..count)
+        .map(|idx| test_block_record(idx, &content(idx)))
         .collect::<Vec<_>>();
     let mut commit = smelt_core::session::full_commit(&session).unwrap();
     commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
@@ -50,7 +53,7 @@ fn sparse_display_only_search_app() -> TestApp {
         crate::app::session_document::StoreBackedSessionDocument::new(
             resume.session,
             loaded,
-            crate::app::history::store_backed_live_session_for_test(store_address, 200),
+            crate::app::history::store_backed_live_session_for_test(store_address, count as usize),
             head,
         ),
     );
@@ -1400,4 +1403,71 @@ fn transcript_search_keeps_top_pill_on_the_viewport_top_message() {
         top_scroll_pill_label(&app).as_deref(),
         Some("user target 019")
     );
+}
+
+/// Index of the needle block on the current search match's row.
+fn current_needle(app: &mut TestApp) -> u64 {
+    let range = app
+        .overlays_probe()
+        .search_session()
+        .and_then(|session| session.current_range())
+        .and_then(|range| range.rows())
+        .expect("a current match");
+    let row = app
+        .transcript_rows_and_breaks_range(range.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    row.split("needle ")
+        .nth(1)
+        .and_then(|rest| rest.get(..3))
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or_else(|| panic!("match row without a needle: {row:?}"))
+}
+
+/// A sparse session whose every block holds one numbered needle, searched
+/// from the tail so the search starts at the newest block.
+fn every_block_matches_app(count: u64) -> TestApp {
+    let mut app = sparse_search_app(count, |idx| format!("needle {idx:03}"));
+    app.type_char('G');
+    app.type_char('?');
+    app.type_text("needle");
+    app.press(KeyCode::Enter);
+    wait_for_live_search(&mut app);
+    settle_search(&mut app);
+    app
+}
+
+#[test]
+fn transcript_search_repeats_visit_every_sparse_match_in_order_and_wrap() {
+    const COUNT: u64 = 200;
+    for (key, step) in [('N', 1), ('n', COUNT - 1)] {
+        let mut app = every_block_matches_app(COUNT);
+        let mut expected = current_needle(&mut app);
+        assert_eq!(expected, COUNT - 1, "? starts at the newest match");
+        for press in 0..COUNT + 3 {
+            app.type_char(key);
+            settle_search(&mut app);
+            expected = (expected + step) % COUNT;
+            assert_eq!(current_needle(&mut app), expected, "{key} press {press}");
+        }
+    }
+}
+
+#[test]
+fn transcript_search_repeats_pressed_during_hydration_each_move_one_match() {
+    const COUNT: u64 = 200;
+    let mut app = every_block_matches_app(COUNT);
+    let mut expected = COUNT - 1;
+    let mut waited_on_hydration = false;
+    while expected >= 5 {
+        for _ in 0..5 {
+            app.type_unsettled("n");
+            waited_on_hydration |= app.tui.conversation.transcript_hydration_is_pending();
+        }
+        expected -= 5;
+        settle_search(&mut app);
+        assert_eq!(current_needle(&mut app), expected);
+    }
+    assert!(waited_on_hydration, "the walk never waited on hydration");
 }

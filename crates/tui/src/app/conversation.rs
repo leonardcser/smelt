@@ -249,6 +249,18 @@ impl ConversationRuntime {
         self.document.transcript.set_search_hydration_pin(block_id);
     }
 
+    pub(crate) fn transcript_row_for_search_position(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        anchor: super::transcript::TranscriptSearchAnchor,
+    ) -> Option<crate::smelt_edit::RowIndex> {
+        self.document
+            .transcript
+            .row_for_search_position(lua, width, viewport_rows, anchor)
+    }
+
     pub(crate) fn activate_transcript_search_record_window(
         &mut self,
         width: u16,
@@ -455,7 +467,7 @@ impl ConversationRuntime {
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
-        from: crate::smelt_edit::DocPosition,
+        from: super::transcript::TranscriptNavigationOrigin,
         roles: &[&str],
         direction: super::transcript::TranscriptNavigationDirection,
         count: usize,
@@ -547,6 +559,11 @@ impl ConversationRuntime {
 
     pub(super) fn transcript_hydration_context_id(&self) -> u64 {
         self.document.transcript.hydration_context_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_transcript_layout_for_test(&mut self) {
+        self.document.transcript.invalidate_layout_for_test();
     }
 
     pub(super) fn transcript_hydration_is_pending(&self) -> bool {

@@ -5,7 +5,8 @@ use crate::app::transcript::{
 use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::smelt_edit::{DocPosition, RowIndex, SearchPattern};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::latest_worker::{LatestWorker, Mailbox};
@@ -51,13 +52,139 @@ pub(crate) struct TranscriptSearchSession {
     pub(super) key: TranscriptSearchKey,
     pub(super) total_rows: RowIndex,
     pub(super) candidate_backed: bool,
+    /// The block a candidate walk starts from before any match is current.
     origin_block_idx: Option<u64>,
-    pub(super) candidate_blocks: Vec<u64>,
+    /// Matches at or past where the search started, fixed when it began.
+    start_bound: TranscriptSearchBound,
+    candidate_blocks: TranscriptCandidateBlocks,
+    /// Matches of each scanned candidate block, in document order.
+    block_matches: HashMap<u64, Vec<TranscriptSearchMatch>>,
     pub(super) candidates: Vec<usize>,
     pub(super) scanned: Vec<bool>,
     pub(super) scanned_blocks: HashSet<u64>,
     pub(super) matches: Vec<TranscriptSearchMatch>,
     pub(super) current: Option<usize>,
+}
+
+/// Blocks the session store reports holding a query, with the block ranges
+/// over which that list is complete. A walk that leaves the covered ranges
+/// loads the next page from the store.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TranscriptCandidateBlocks {
+    blocks: BTreeSet<u64>,
+    /// Sorted, disjoint, non-adjacent block ranges. An end of `u64::MAX`
+    /// covers every block from the start on.
+    covered: Vec<Range<u64>>,
+}
+
+/// Where a walk over candidate blocks goes next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateStep {
+    Block(u64),
+    /// The candidates from this block on are unknown until a page loads.
+    Load(u64),
+    /// No candidate lies further that way.
+    End,
+}
+
+impl TranscriptCandidateBlocks {
+    /// Candidates known for every block.
+    pub(crate) fn complete(blocks: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            blocks: blocks.into_iter().collect(),
+            covered: std::iter::once(0..u64::MAX).collect(),
+        }
+    }
+
+    /// Adds a store page of at most `limit` candidates found from `origin`
+    /// toward `direction`. A short page covers every block that way.
+    pub(crate) fn insert_page(
+        &mut self,
+        origin: u64,
+        direction: SearchDirection,
+        page: &[u64],
+        limit: usize,
+    ) {
+        self.blocks.extend(page.iter().copied());
+        let full = page.len() >= limit;
+        let range = match direction {
+            SearchDirection::Forward => {
+                let end = match page.iter().max() {
+                    Some(last) if full => last.saturating_add(1),
+                    _ => u64::MAX,
+                };
+                origin..end
+            }
+            SearchDirection::Backward => {
+                let start = match page.iter().min() {
+                    Some(first) if full => *first,
+                    _ => 0,
+                };
+                start..origin.saturating_add(1)
+            }
+        };
+        self.cover(range);
+    }
+
+    /// Adds blocks known to hold the query, such as unsaved ones the store
+    /// cannot report.
+    pub(crate) fn insert_blocks(&mut self, blocks: impl IntoIterator<Item = u64>) {
+        self.blocks.extend(blocks);
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
+        self.blocks.iter().copied()
+    }
+
+    fn cover(&mut self, range: Range<u64>) {
+        if range.start >= range.end {
+            return;
+        }
+        let mut merged = range;
+        self.covered.retain(|covered| {
+            let touches = covered.start <= merged.end && merged.start <= covered.end;
+            if touches {
+                merged = merged.start.min(covered.start)..merged.end.max(covered.end);
+            }
+            !touches
+        });
+        let at = self
+            .covered
+            .partition_point(|covered| covered.start < merged.start);
+        self.covered.insert(at, merged);
+    }
+
+    fn covering(&self, block: u64) -> Option<Range<u64>> {
+        self.covered
+            .iter()
+            .find(|range| range.start <= block && (block < range.end || range.end == u64::MAX))
+            .cloned()
+    }
+
+    /// The first candidate at `from` or past it toward `direction`.
+    fn step(&self, from: u64, direction: SearchDirection) -> CandidateStep {
+        let Some(range) = self.covering(from) else {
+            return CandidateStep::Load(from);
+        };
+        match direction {
+            SearchDirection::Forward => match self.blocks.range(from..).next() {
+                Some(block) if range.end == u64::MAX || *block < range.end => {
+                    CandidateStep::Block(*block)
+                }
+                _ if range.end == u64::MAX => CandidateStep::End,
+                _ => CandidateStep::Load(range.end),
+            },
+            SearchDirection::Backward => match self.blocks.range(range.start..=from).next_back() {
+                Some(block) => CandidateStep::Block(*block),
+                None if range.start == 0 => CandidateStep::End,
+                None => CandidateStep::Load(range.start - 1),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -153,38 +280,15 @@ fn persistent_transcript_candidate_blocks(
     store: &TranscriptSearchStore,
     request: &TranscriptSearchWorkerRequest,
 ) -> smelt_store::Result<SqliteTranscriptCandidateBlocks> {
-    let store_direction = match request.direction {
-        SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
-        SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
-    };
-    let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES;
-    let mut page = store.search_candidate_page(
-        &request.query,
+    let mut candidates = TranscriptCandidateBlocks::default();
+    store.load_candidate_page(
+        &mut candidates,
+        SearchPattern::parse(&request.query).needle,
         request.origin_block_idx,
-        store_direction,
-        limit,
+        request.direction,
     )?;
-    if request.origin_block_idx.is_some() && page.len() < limit {
-        let wrapped = store.search_candidate_page(
-            &request.query,
-            None,
-            store_direction,
-            limit - page.len(),
-        )?;
-        for candidate in wrapped {
-            if !page
-                .iter()
-                .any(|seen| seen.block_idx == candidate.block_idx)
-            {
-                page.push(candidate);
-            }
-        }
-    }
     Ok(SqliteTranscriptCandidateBlocks {
-        block_indices: page
-            .into_iter()
-            .map(|candidate| candidate.block_idx)
-            .collect(),
+        candidates,
         available: true,
     })
 }
@@ -198,15 +302,32 @@ impl TranscriptSearchStore {
         })
     }
 
-    fn search_candidate_page(
+    /// Loads the page of candidates for `needle` from `origin` toward
+    /// `direction`, from the transcript edge without an origin.
+    fn load_candidate_page(
         &self,
-        query: &str,
-        origin_block_idx: Option<u64>,
-        direction: smelt_store::TranscriptSearchDirection,
-        limit: usize,
-    ) -> smelt_store::Result<Vec<smelt_store::TranscriptSearchCandidate>> {
-        self.reader
-            .search_transcript_candidate_page(query, origin_block_idx, direction, limit)
+        candidates: &mut TranscriptCandidateBlocks,
+        needle: &str,
+        origin: Option<u64>,
+        direction: SearchDirection,
+    ) -> smelt_store::Result<()> {
+        let store_direction = match direction {
+            SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
+            SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
+        };
+        let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES;
+        let page = self
+            .reader
+            .search_transcript_candidate_page(needle, origin, store_direction, limit)?
+            .into_iter()
+            .map(|candidate| candidate.block_idx)
+            .collect::<Vec<_>>();
+        let origin = origin.unwrap_or(match direction {
+            SearchDirection::Forward => 0,
+            SearchDirection::Backward => u64::MAX,
+        });
+        candidates.insert_page(origin, direction, &page, limit);
+        Ok(())
     }
 
     fn record_count(&self) -> smelt_store::Result<usize> {
@@ -228,9 +349,17 @@ pub(super) struct TranscriptSearchKey {
     candidates_hash: u64,
 }
 
+/// Where a search started in the transcript, captured before any match
+/// preview moved the loaded window.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TranscriptSearchOrigin {
+    pub(crate) anchor: crate::app::transcript::TranscriptSearchAnchor,
+    pub(crate) block_idx: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SqliteTranscriptCandidateBlocks {
-    pub(crate) block_indices: Vec<u64>,
+    pub(crate) candidates: TranscriptCandidateBlocks,
     pub(crate) available: bool,
 }
 
@@ -389,7 +518,7 @@ impl TuiApp {
 
     fn activate_transcript_search_candidate_window(
         &mut self,
-        candidate_blocks: &[u64],
+        candidate_blocks: &TranscriptCandidateBlocks,
         origin: DocPosition,
         direction: SearchDirection,
         preferred_origin_block: Option<u64>,
@@ -474,57 +603,38 @@ impl TuiApp {
                 matches!(direction, SearchDirection::Forward),
             )
             .map(|id| id.get());
-        let store_direction = match direction {
-            SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
-            SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
-        };
-        let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES;
         let records_persisted = self.conversation.transcript_records_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
-            let mut page = db
-                .search_candidate_page(needle, origin_block, store_direction, limit)
+            let mut candidates = TranscriptCandidateBlocks::default();
+            db.load_candidate_page(&mut candidates, needle, origin_block, direction)
                 .ok()?;
-            if origin_block.is_some() && page.len() < limit {
-                let wrapped = db
-                    .search_candidate_page(needle, None, store_direction, limit - page.len())
-                    .ok()?;
-                for candidate in wrapped {
-                    if !page
-                        .iter()
-                        .any(|seen| seen.block_idx == candidate.block_idx)
-                    {
-                        page.push(candidate);
-                    }
-                }
-            }
-            if page.is_empty() && !records_persisted && db.record_count().ok() == Some(0) {
+            if candidates.is_empty() && !records_persisted && db.record_count().ok() == Some(0) {
                 return None;
             }
-            Some(page)
+            Some(candidates)
         });
-        let mut block_indices = Vec::new();
         let sqlite_available = sqlite_candidates.is_some();
-        if let Some(candidates) = sqlite_candidates {
-            smelt_perf::perf::record_value("search:transcript:sqlite_available", 1);
-            smelt_perf::perf::record_value(
-                "search:transcript:sqlite_candidate_blocks",
-                candidates.len() as u64,
-            );
-            block_indices.extend(candidates.into_iter().map(|candidate| candidate.block_idx));
-        } else {
-            smelt_perf::perf::record_value("search:transcript:sqlite_available", 0);
-        }
-        for block_idx in dirty_blocks {
-            if !block_indices.contains(&block_idx) {
-                block_indices.push(block_idx);
+        let mut candidates = match sqlite_candidates {
+            Some(candidates) => {
+                smelt_perf::perf::record_value("search:transcript:sqlite_available", 1);
+                smelt_perf::perf::record_value(
+                    "search:transcript:sqlite_candidate_blocks",
+                    candidates.blocks.len() as u64,
+                );
+                candidates
             }
-        }
-        let available = sqlite_available || !block_indices.is_empty();
+            None => {
+                smelt_perf::perf::record_value("search:transcript:sqlite_available", 0);
+                TranscriptCandidateBlocks::complete([])
+            }
+        };
+        candidates.insert_blocks(dirty_blocks);
+        let available = sqlite_available || !candidates.is_empty();
         if !available {
             return SqliteTranscriptCandidateBlocks::default();
         }
         SqliteTranscriptCandidateBlocks {
-            block_indices,
+            candidates,
             available,
         }
     }
@@ -589,11 +699,25 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
         sqlite_candidates: SqliteTranscriptCandidateBlocks,
-        preferred_origin_block: Option<u64>,
+        origin_anchor: Option<TranscriptSearchOrigin>,
     ) -> Option<TranscriptSearchSession> {
         let candidate_backed = sqlite_candidates.available;
-        let candidate_blocks = sqlite_candidates.block_indices;
-        let origin_block_idx = preferred_origin_block
+        let candidate_blocks = sqlite_candidates.candidates;
+        let width = self.transcript_width() as u16;
+        self.sync_transcript_renderer_generation();
+        let start_bound = match origin_anchor.map(|origin| origin.anchor) {
+            Some(anchor @ crate::app::transcript::TranscriptSearchAnchor::Content(_)) => {
+                TranscriptSearchBound::inclusive(anchor.position_key(origin.byte_col))
+            }
+            _ => {
+                let total_rows = self
+                    .conversation
+                    .transcript_search_total_rows(&self.lua, width);
+                self.transcript_search_bound_for_origin(total_rows, origin, direction)
+            }
+        };
+        let origin_block_idx = origin_anchor
+            .and_then(|origin| origin.block_idx)
             .or_else(|| self.transcript_candidate_origin_block(origin, direction));
         if candidate_backed {
             self.activate_transcript_search_candidate_window(
@@ -602,11 +726,30 @@ impl TuiApp {
                 direction,
                 origin_block_idx,
             );
+            let total_rows = self
+                .conversation
+                .transcript_search_total_rows(&self.lua, width);
+            smelt_perf::perf::record_value(
+                "search:transcript:candidates",
+                candidate_blocks.blocks.len() as u64,
+            );
+            return Some(TranscriptSearchSession {
+                key: self.transcript_search_key(0, &[]),
+                total_rows,
+                candidate_backed,
+                origin_block_idx,
+                start_bound,
+                candidate_blocks,
+                block_matches: HashMap::new(),
+                candidates: Vec::new(),
+                scanned: Vec::new(),
+                scanned_blocks: HashSet::new(),
+                matches: Vec::new(),
+                current: None,
+            });
         }
         let (key, candidates, scanned_len, indexed_total_rows) = {
-            let candidate_blocks_slice = candidate_backed.then_some(candidate_blocks.as_slice());
-            let index = self.ensure_transcript_candidate_index(candidate_blocks_slice)?;
-            let preferred = candidate_backed.then_some(candidate_blocks.as_slice());
+            let index = self.ensure_transcript_candidate_index(None)?;
             let indexed_total_rows = index
                 .entries
                 .iter()
@@ -615,13 +758,12 @@ impl TuiApp {
                 .unwrap_or(0);
             (
                 index.key,
-                index.candidate_entries(query, preferred),
+                index.candidate_entries(query, None),
                 index.entries.len(),
                 indexed_total_rows,
             )
         };
         smelt_perf::perf::record_value("search:transcript:candidates", candidates.len() as u64);
-        let width = self.transcript_width() as u16;
         let total_rows = self
             .conversation
             .transcript_search_total_rows(&self.lua, width)
@@ -631,7 +773,9 @@ impl TuiApp {
             total_rows,
             candidate_backed,
             origin_block_idx,
+            start_bound,
             candidate_blocks,
+            block_matches: HashMap::new(),
             candidates,
             scanned: vec![false; scanned_len],
             scanned_blocks: HashSet::new(),
@@ -650,17 +794,17 @@ impl TuiApp {
         if session.key.width != self.transcript_width() as u16 {
             return false;
         }
-        let origin_bound = self.transcript_search_bound_for_origin(session, origin, direction);
+        // A candidate walk loads store pages and blocks as it goes.
+        if session.candidate_backed {
+            return true;
+        }
+        let origin_bound =
+            self.transcript_search_bound_for_origin(session.total_rows, origin, direction);
         if self
             .cached_transcript_match(session, origin_bound, direction)
             .is_some()
         {
             return true;
-        }
-        if session.candidate_backed {
-            return self
-                .next_unscanned_transcript_candidate_block(session, origin, direction)
-                .is_some();
         }
         let current_key = self
             .overlays
@@ -679,26 +823,25 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
     ) -> bool {
+        if session.candidate_backed && session.key.width == self.transcript_width() as u16 {
+            let dirty = self.dirty_transcript_candidate_blocks(query);
+            session.candidate_blocks.insert_blocks(dirty);
+        }
         if self.transcript_search_session_can_advance(session, origin, direction) {
             return true;
         }
         if session.candidate_backed {
             return false;
         }
-        let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
-        if sqlite_candidates.available {
-            self.activate_transcript_search_candidate_window(
-                &sqlite_candidates.block_indices,
-                origin,
-                direction,
-                None,
-            );
-        }
-        let candidate_blocks = sqlite_candidates
+        // A store that can now answer replaces the loaded-window index.
+        if self
+            .sqlite_transcript_candidate_blocks(query, origin, direction)
             .available
-            .then_some(sqlite_candidates.block_indices.as_slice());
+        {
+            return false;
+        }
         let Some(key) = self
-            .ensure_transcript_candidate_index(candidate_blocks)
+            .ensure_transcript_candidate_index(None)
             .map(|index| index.key)
         else {
             return false;
@@ -726,23 +869,32 @@ impl TuiApp {
             },
         };
 
-        let origin_bound = origin_bound
-            .unwrap_or_else(|| self.transcript_search_bound_for_origin(session, origin, direction));
+        let origin_bound = match (origin_bound, session.current) {
+            (Some(bound), _) => bound,
+            (None, None) => session.start_bound,
+            (None, Some(_)) => {
+                self.transcript_search_bound_for_origin(session.total_rows, origin, direction)
+            }
+        };
+        if session.candidate_backed {
+            return self.advance_transcript_candidate_walk(session, query, origin_bound, direction);
+        }
 
-        let current = self
-            .cached_transcript_match(session, origin_bound, direction)
-            .or_else(|| {
-                self.scan_transcript_candidates_until_match(
-                    session,
-                    query,
-                    origin,
-                    origin_bound,
-                    direction,
-                )
-            });
+        let current = match self.cached_transcript_match(session, origin_bound, direction) {
+            Some(index) => MatchScan::Found(index),
+            None => self.scan_transcript_candidates_until_match(
+                session,
+                query,
+                origin,
+                origin_bound,
+                direction,
+            ),
+        };
         let current = match current {
-            Some(index) => Some(index),
-            None => {
+            MatchScan::Found(index) => Some(index),
+            // The next candidate is loading; wrapping now would skip it.
+            MatchScan::Pending => None,
+            MatchScan::Exhausted => {
                 let wrap_origin = match direction {
                     SearchDirection::Forward if (origin.row, origin.byte_col) != (0, 0) => {
                         Some(DocPosition::default())
@@ -758,16 +910,24 @@ impl TuiApp {
                     }
                     _ => None,
                 }?;
-                let wrap_bound =
-                    self.transcript_search_bound_for_origin(session, wrap_origin, direction);
-                self.scan_transcript_candidates_until_match(
+                let wrap_bound = self.transcript_search_bound_for_origin(
+                    session.total_rows,
+                    wrap_origin,
+                    direction,
+                );
+                match self.scan_transcript_candidates_until_match(
                     session,
                     query,
                     wrap_origin,
                     wrap_bound,
                     direction,
-                )
-                .or_else(|| self.cached_transcript_match(session, wrap_bound, direction))
+                ) {
+                    MatchScan::Found(index) => Some(index),
+                    MatchScan::Pending => None,
+                    MatchScan::Exhausted => {
+                        self.cached_transcript_match(session, wrap_bound, direction)
+                    }
+                }
             }
         }?;
         session.current = Some(current);
@@ -781,16 +941,19 @@ impl TuiApp {
         Some(matched)
     }
 
+    /// The bound of matches at or past display position `origin`. Positions
+    /// shift as hydration replaces estimated rows, so a search computes this
+    /// once, before it loads anything.
     pub(super) fn transcript_search_bound_for_origin(
         &mut self,
-        session: &TranscriptSearchSession,
+        total_rows: RowIndex,
         origin: DocPosition,
         direction: SearchDirection,
     ) -> TranscriptSearchBound {
         if matches!(direction, SearchDirection::Backward) && origin.row == RowIndex::MAX {
             return TranscriptSearchBound::inclusive(TranscriptSearchPositionKey::max());
         }
-        let row = origin.row.min(session.total_rows.saturating_sub(1));
+        let row = origin.row.min(total_rows.saturating_sub(1));
         let width = self.transcript_width() as u16;
         let anchor = self
             .conversation
@@ -834,41 +997,144 @@ impl TuiApp {
         origin: DocPosition,
         origin_bound: TranscriptSearchBound,
         direction: SearchDirection,
-    ) -> Option<usize> {
-        if session.candidate_backed {
-            return self.scan_transcript_candidate_blocks_until_match(
-                session,
-                query,
-                origin,
-                origin_bound,
-                direction,
-            );
-        }
+    ) -> MatchScan {
         loop {
-            let entry_index =
-                self.next_unscanned_transcript_candidate(session, origin, direction)?;
+            let Some(entry_index) =
+                self.next_unscanned_transcript_candidate(session, origin, direction)
+            else {
+                return MatchScan::Exhausted;
+            };
             self.scan_transcript_candidate(session, query, entry_index);
             if let Some(index) = self.cached_transcript_match(session, origin_bound, direction) {
-                return Some(index);
+                return MatchScan::Found(index);
             }
         }
     }
 
-    fn scan_transcript_candidate_blocks_until_match(
+    /// Moves to the next match from `origin_bound` toward `direction` in a
+    /// candidate-backed session, visiting candidate blocks in document order
+    /// from the current match's block and wrapping at the transcript edge.
+    /// `None` without a match, or while the next candidate is still loading.
+    fn advance_transcript_candidate_walk(
         &mut self,
         session: &mut TranscriptSearchSession,
         query: &str,
-        origin: DocPosition,
         origin_bound: TranscriptSearchBound,
         direction: SearchDirection,
-    ) -> Option<usize> {
+    ) -> Option<TranscriptSearchMatch> {
+        let origin_block = session
+            .current
+            .and_then(|index| session.matches.get(index))
+            .and_then(|matched| matched.anchor.block_id())
+            .map(|id| id.get())
+            .or(session.origin_block_idx);
+        let found = match self.walk_transcript_candidates(
+            session,
+            query,
+            origin_block,
+            None,
+            Some(origin_bound),
+            direction,
+        ) {
+            MatchScan::Found(found) => Some(found),
+            MatchScan::Pending => None,
+            MatchScan::Exhausted => match self.walk_transcript_candidates(
+                session,
+                query,
+                None,
+                origin_block,
+                None,
+                direction,
+            ) {
+                MatchScan::Found(found) => Some(found),
+                MatchScan::Pending | MatchScan::Exhausted => None,
+            },
+        }?;
+        let matched = session.matches.get(found).copied()?;
+        session.current = Some(found);
+        Some(matched)
+    }
+
+    /// Walks candidate blocks from `from` (the transcript edge when `None`)
+    /// through `until` (the opposite edge when `None`) toward `direction`,
+    /// scanning each, until one holds a match within `bound`.
+    fn walk_transcript_candidates(
+        &mut self,
+        session: &mut TranscriptSearchSession,
+        query: &str,
+        from: Option<u64>,
+        until: Option<u64>,
+        bound: Option<TranscriptSearchBound>,
+        direction: SearchDirection,
+    ) -> MatchScan {
+        let needle = SearchPattern::parse(query).needle;
+        let mut at = from.unwrap_or(match direction {
+            SearchDirection::Forward => 0,
+            SearchDirection::Backward => u64::MAX,
+        });
         loop {
-            let block_idx =
-                self.next_unscanned_transcript_candidate_block(session, origin, direction)?;
-            self.scan_transcript_candidate_block(session, query, block_idx);
-            if let Some(index) = self.cached_transcript_match(session, origin_bound, direction) {
-                return Some(index);
+            let block_idx = match session.candidate_blocks.step(at, direction) {
+                CandidateStep::Block(block_idx) => block_idx,
+                CandidateStep::End => return MatchScan::Exhausted,
+                CandidateStep::Load(origin) => {
+                    let loaded = self.transcript_search_store().is_some_and(|store| {
+                        store
+                            .load_candidate_page(
+                                &mut session.candidate_blocks,
+                                needle,
+                                Some(origin),
+                                direction,
+                            )
+                            .is_ok()
+                    });
+                    if !loaded {
+                        return MatchScan::Exhausted;
+                    }
+                    continue;
+                }
+            };
+            let past_until = until.is_some_and(|until| match direction {
+                SearchDirection::Forward => block_idx > until,
+                SearchDirection::Backward => block_idx < until,
+            });
+            if past_until {
+                return MatchScan::Exhausted;
             }
+            if !session.block_matches.contains_key(&block_idx)
+                && self.scan_transcript_candidate_block(session, query, block_idx)
+                    == CandidateScan::Pending
+            {
+                return MatchScan::Pending;
+            }
+            let block_matches = session
+                .block_matches
+                .get(&block_idx)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let within = |matched: &&TranscriptSearchMatch| {
+                bound.is_none_or(|bound| match direction {
+                    SearchDirection::Forward => bound.contains_forward(matched.start_key()),
+                    SearchDirection::Backward => bound.contains_backward(matched.start_key()),
+                })
+            };
+            let found = match direction {
+                SearchDirection::Forward => block_matches.iter().find(within),
+                SearchDirection::Backward => block_matches.iter().rev().find(within),
+            };
+            if let Some(found) = found.copied() {
+                let index = session
+                    .matches
+                    .iter()
+                    .position(|matched| matched.same_position(&found));
+                if let Some(index) = index {
+                    return MatchScan::Found(index);
+                }
+            }
+            at = match direction {
+                SearchDirection::Forward if block_idx < u64::MAX - 1 => block_idx + 1,
+                SearchDirection::Backward if block_idx > 0 => block_idx - 1,
+                _ => return MatchScan::Exhausted,
+            };
         }
     }
 
@@ -938,59 +1204,6 @@ impl TuiApp {
         }
     }
 
-    fn next_unscanned_transcript_candidate_block(
-        &mut self,
-        session: &TranscriptSearchSession,
-        origin: DocPosition,
-        direction: SearchDirection,
-    ) -> Option<u64> {
-        let origin_block = session
-            .origin_block_idx
-            .or_else(|| self.transcript_candidate_origin_block(origin, direction));
-        match direction {
-            SearchDirection::Forward => {
-                if let Some(origin_block) = origin_block {
-                    if let Some(block_idx) =
-                        session.candidate_blocks.iter().copied().find(|block_idx| {
-                            *block_idx >= origin_block
-                                && !session.scanned_blocks.contains(block_idx)
-                        })
-                    {
-                        return Some(block_idx);
-                    }
-                }
-                session
-                    .candidate_blocks
-                    .iter()
-                    .copied()
-                    .find(|block_idx| !session.scanned_blocks.contains(block_idx))
-            }
-            SearchDirection::Backward => {
-                if let Some(origin_block) = origin_block {
-                    if let Some(block_idx) =
-                        session
-                            .candidate_blocks
-                            .iter()
-                            .rev()
-                            .copied()
-                            .find(|block_idx| {
-                                *block_idx <= origin_block
-                                    && !session.scanned_blocks.contains(block_idx)
-                            })
-                    {
-                        return Some(block_idx);
-                    }
-                }
-                session
-                    .candidate_blocks
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|block_idx| !session.scanned_blocks.contains(block_idx))
-            }
-        }
-    }
-
     fn transcript_candidate_origin_block(
         &mut self,
         origin: DocPosition,
@@ -1007,16 +1220,15 @@ impl TuiApp {
             .map(|id| id.get())
     }
 
+    /// Scans candidate `block_idx` for matches. A block whose records are
+    /// still loading stays unscanned and reports [`CandidateScan::Pending`].
     fn scan_transcript_candidate_block(
         &mut self,
         session: &mut TranscriptSearchSession,
         query: &str,
         block_idx: u64,
-    ) {
+    ) -> CandidateScan {
         let _perf = smelt_perf::perf::begin("search:transcript:scan_candidate_block");
-        if !session.scanned_blocks.insert(block_idx) {
-            return;
-        }
         self.sync_transcript_renderer_generation();
         self.conversation.set_transcript_search_hydration_pin(Some(
             smelt_core::transcript_model::BlockId::new(block_idx),
@@ -1033,32 +1245,41 @@ impl TuiApp {
             width,
             Some(&[block_idx]),
         );
+        let laid_out = layout
+            .entries
+            .iter()
+            .any(|entry| entry.block_ids.iter().any(|id| id.get() == block_idx));
+        if !laid_out && self.conversation.transcript_hydration_is_pending() {
+            return CandidateScan::Pending;
+        }
         let theme = self.ui.theme().clone();
         let mut scanned_rows = 0;
+        let mut block_matches = Vec::new();
         for entry in layout.entries {
-            for id in &entry.block_ids {
-                session.scanned_blocks.insert(id.get());
-            }
             scanned_rows += entry.rows;
             if entry.rows == 0 {
                 continue;
             }
-            let found = self.conversation.transcript_search_matches_for_row_range(
+            block_matches.extend(self.conversation.transcript_search_matches_for_row_range(
                 &self.lua,
                 width,
                 &theme,
                 entry.first_row,
                 entry.rows,
                 query,
-            );
-            merge_transcript_matches(&mut session.matches, found);
+            ));
         }
+        block_matches.sort_by_key(TranscriptSearchMatch::sort_key);
+        block_matches.dedup_by(|a, b| a.same_position(b));
+        merge_transcript_matches(&mut session.matches, block_matches.iter().copied());
+        session.block_matches.insert(block_idx, block_matches);
         smelt_perf::perf::record_value("search:transcript:scanned_entries", 1);
         smelt_perf::perf::record_value("search:transcript:scanned_rows", scanned_rows);
         smelt_perf::perf::record_value(
             "search:transcript:cached_matches",
             session.matches.len() as u64,
         );
+        CandidateScan::Scanned
     }
 
     fn scan_transcript_candidate(
@@ -1099,6 +1320,25 @@ impl TuiApp {
     }
 }
 
+/// How scanning one candidate block ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateScan {
+    Scanned,
+    /// The block's records are still loading.
+    Pending,
+}
+
+/// How a scan for the next match ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchScan {
+    /// The index of the match in the session's cached matches.
+    Found(usize),
+    /// No candidate that way holds a match.
+    Exhausted,
+    /// The next candidate is still loading.
+    Pending,
+}
+
 fn transcript_entry_scanned(
     session: &TranscriptSearchSession,
     entry: &TranscriptSearchEntry,
@@ -1111,7 +1351,7 @@ fn transcript_entry_scanned(
 }
 
 fn transcript_search_activation_block(
-    candidate_blocks: &[u64],
+    candidate_blocks: &TranscriptCandidateBlocks,
     origin_block: Option<u64>,
     direction: SearchDirection,
 ) -> Option<u64> {
@@ -1120,19 +1360,17 @@ fn transcript_search_activation_block(
             .and_then(|origin_block| {
                 candidate_blocks
                     .iter()
-                    .copied()
                     .find(|block_idx| *block_idx >= origin_block)
             })
-            .or_else(|| candidate_blocks.first().copied()),
+            .or_else(|| candidate_blocks.iter().next()),
         SearchDirection::Backward => origin_block
             .and_then(|origin_block| {
                 candidate_blocks
                     .iter()
                     .rev()
-                    .copied()
                     .find(|block_idx| *block_idx <= origin_block)
             })
-            .or_else(|| candidate_blocks.last().copied()),
+            .or_else(|| candidate_blocks.iter().next_back()),
     }
 }
 

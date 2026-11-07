@@ -1176,6 +1176,177 @@ fn transcript_resumed_wheel_scroll_benchmark_suite() {
     );
 }
 
+fn resumed_user_jump_bench_count() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_USER_JUMP_COUNT", 200)
+}
+
+/// A copied sessions root and session to walk instead of the generated one.
+fn user_jump_bench_fixture() -> Option<(std::path::PathBuf, String)> {
+    let fixture =
+        std::env::var_os("SMELT_TRANSCRIPT_USER_JUMP_FIXTURE").filter(|value| !value.is_empty())?;
+    let session_id = std::env::var("SMELT_TRANSCRIPT_USER_JUMP_SESSION_ID")
+        .expect("SMELT_TRANSCRIPT_USER_JUMP_SESSION_ID is required with a fixture");
+    smelt_core::session_id::SessionId::parse(&session_id)
+        .expect("SMELT_TRANSCRIPT_USER_JUMP_SESSION_ID must be a session ID");
+    Some((fixture.into(), session_id))
+}
+
+/// The record the transcript cursor is on.
+fn cursor_record(app: &mut TestApp) -> Option<usize> {
+    let row = app.tui.transcript_win().row_cursor()?.row;
+    let width = app
+        .tui
+        .transcript_win()
+        .viewport
+        .map_or(1, |viewport| viewport.content_width.max(1));
+    match app
+        .tui
+        .conversation
+        .transcript_trace_anchor_at_row(&app.tui.lua, width, row)
+    {
+        crate::app::transcript_scroll_trace::TranscriptTraceAnchor::Content {
+            record_index,
+            ..
+        } => Some(record_index),
+        _ => None,
+    }
+}
+
+/// The bench prompt number on the transcript cursor row.
+fn cursor_bench_prompt(app: &TestApp) -> Option<usize> {
+    let rows = app
+        .tui
+        .transcript_win()
+        .viewport
+        .map_or(0, |viewport| viewport.rect.height);
+    let row = app.transcript_cursor_screen_row(rows)?;
+    let line = app
+        .transcript_viewport_lines()
+        .into_iter()
+        .nth(usize::from(row))?;
+    let rest = line.split("search bench prompt ").nth(1)?;
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn assert_resumed_user_jump_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+    assert_no_full_session_reads(snapshot, label);
+    let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
+    assert!(
+        materialized_rows <= 4096,
+        "{label} materialized {materialized_rows} rows, expected bounded viewport work"
+    );
+    let record_loads = perf_duration_count(snapshot, "store:transcript:read_record_slice");
+    assert!(
+        record_loads <= 2,
+        "{label} read {record_loads} record slices, expected at most one window seek"
+    );
+}
+
+/// Walks `[u` from the tail of a resumed store-backed session. Each sample is
+/// one press until its landing settles, including any record-window seek.
+/// Every landing must be on an earlier record; the generated session also
+/// checks it is the previous prompt.
+fn run_resumed_user_jump_bench_sample(target_bytes: usize, jumps: usize) {
+    let (mut app, bytes, generated) = match user_jump_bench_fixture() {
+        Some((fixture, session_id)) => (copied_fixture_app(&fixture, &session_id), 0, false),
+        None => {
+            let mut app = TestApp::builder().with_vim(true).build();
+            app.tui.handle_resize(100, 32);
+            let bytes = push_search_bench_transcript(&mut app, target_bytes);
+            app.render_silent();
+            save_bench_fixture(&mut app, "resumed user jumps");
+            install_sparse_resume_bench_transcript(&mut app);
+            (app, bytes, true)
+        }
+    };
+    app.tui.handle_resize(100, 32);
+    app.tui.app_focus = AppFocus::Content;
+    app.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.tui.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+    app.type_char('G');
+    app.render_silent();
+    app.type_text("[u");
+    app.render_silent();
+    let mut prompt =
+        generated.then(|| cursor_bench_prompt(&app).expect("first jump lands on a prompt"));
+    let mut record = cursor_record(&mut app).expect("first jump lands on content");
+
+    let mut samples = Vec::with_capacity(jumps);
+    let mut seeks = 0;
+    let mut slowest = 0.0_f64;
+    let mut slowest_snapshot = None;
+    for jump in 0..jumps {
+        if record == 0 || prompt == Some(0) {
+            break;
+        }
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let start = std::time::Instant::now();
+        app.type_text("[u");
+        app.render_silent();
+        let ms = elapsed_ms(start.elapsed());
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        let landed = cursor_record(&mut app).expect("jump lands on content");
+        if landed == record && !generated {
+            // No earlier prompt: the walk reached the first user message.
+            break;
+        }
+        assert!(
+            landed < record,
+            "jump {jump} moved from record {record} to {landed}"
+        );
+        record = landed;
+        if let Some(expected) = prompt.as_mut() {
+            *expected -= 1;
+            assert_eq!(
+                cursor_bench_prompt(&app),
+                Some(*expected),
+                "jump {jump} landed off the previous prompt"
+            );
+        }
+        let label = format!("user_jump_{jump}");
+        assert_resumed_user_jump_gates(&snapshot, &label);
+        seeks +=
+            usize::from(perf_duration_count(&snapshot, "store:transcript:read_record_slice") > 0);
+        if ms > slowest {
+            slowest = ms;
+            slowest_snapshot = Some(snapshot);
+        }
+        samples.push(ms);
+    }
+    if let Some(snapshot) = slowest_snapshot.as_ref() {
+        search_perf_snapshot("resumed_user_jump_slowest", snapshot);
+    }
+    let jumps = samples.len();
+    let stats = Stats::from(&samples);
+    eprintln!(
+        "TRANSCRIPT_USER_JUMP_SAMPLE bytes={bytes} jumps={jumps} seeks={seeks} p50_ms={:.3} p95_ms={:.3} max_ms={:.3} mean_ms={}",
+        stats.p50,
+        stats.p95,
+        stats.max,
+        stats.display(),
+    );
+    eprintln!(
+        "TRANSCRIPT_USER_JUMP_JSON {{\"type\":\"resumed_user_jump_summary\",\"bytes\":{bytes},\"jumps\":{jumps},\"seeks\":{seeks},\"p50_ms\":{:.3},\"p95_ms\":{:.3},\"max_ms\":{:.3}}}",
+        stats.p50, stats.p95, stats.max,
+    );
+}
+
+#[test]
+#[ignore = "run with cargo xtask bench-transcript-layout --suite user-jumps"]
+fn transcript_resumed_user_jump_benchmark_suite() {
+    run_resumed_user_jump_bench_sample(
+        resumed_wheel_bench_bytes(),
+        resumed_user_jump_bench_count(),
+    );
+}
+
 fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenchSample {
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
@@ -4277,28 +4448,29 @@ fn saved_hot_path_app(
     app
 }
 
-fn copied_hot_path_fixture_app(fixture: &std::path::Path) -> TestApp {
+/// Resumes `session_id` from a copy of the sessions root at `fixture`, with
+/// the isolated harness provider.
+fn copied_fixture_app(fixture: &std::path::Path, session_id: &str) -> TestApp {
     assert!(
         fixture.is_dir(),
-        "hot-path fixture sessions root does not exist: {}",
+        "fixture sessions root does not exist: {}",
         fixture.display()
     );
-    let session_id = hot_path_fixture_session_id();
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().with_vim(true).build();
     let destination_root = app.tui.core.sessions.state_root().to_path_buf();
     let started = std::time::Instant::now();
     let copied_bytes = copy_fixture_tree(fixture, &destination_root);
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_FIXTURE_COPY session_id={} bytes={} ms={:.3}",
+        "TRANSCRIPT_FIXTURE_COPY session_id={} bytes={} ms={:.3}",
         session_id,
         copied_bytes,
         elapsed_ms(started.elapsed())
     );
-    app.resume_session(&session_id);
+    app.resume_session(session_id);
     assert_eq!(app.tui.conversation.session().id, session_id);
     assert!(
         !app.tui.conversation.is_read_only(),
-        "copied hot-path fixture opened read-only"
+        "copied fixture opened read-only"
     );
     // Fixture providers need not exist in the isolated harness configuration.
     app.apply_model("test/test-model", false);
@@ -4646,7 +4818,7 @@ fn run_submit_hot_paths(
 ) -> Vec<(HotPathSample, smelt_perf::perf::Snapshot)> {
     let mut app = fixture.map_or_else(
         || saved_hot_path_app("submit", configured_history_len, None),
-        copied_hot_path_fixture_app,
+        |fixture| copied_fixture_app(fixture, &hot_path_fixture_session_id()),
     );
     let history_len = app.session_message_count();
     app.tui.handle_resize(100, 32);

@@ -478,6 +478,8 @@ impl AppStoryCtx {
         self.app.focus_transcript();
         self.app
             .configure_transcript_vim(true, tui::smelt_edit::VimMode::Normal);
+        // The search starts from the view the user sees.
+        self.app.render_silent();
         self.app.type_char('/');
         self.app.type_text(query);
         self.app.render_silent();

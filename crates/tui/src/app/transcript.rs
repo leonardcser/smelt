@@ -448,6 +448,15 @@ pub(crate) struct TranscriptNodeAnchor {
     row_anchor: TranscriptRowAnchor,
 }
 
+/// Where a block motion starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranscriptNavigationOrigin {
+    /// The display position of the cursor.
+    Position(DocPosition),
+    /// The text start of a block, where a pending reveal puts the cursor.
+    BlockText(TranscriptSemanticAnchor),
+}
+
 // Durable origin for semantic transcript navigation. Search/reveal intents set this
 // to the target block; normal viewport projection falls back to the top visible
 // content anchor; far-seek gaps clear it.
@@ -578,6 +587,22 @@ struct TranscriptResolvedViewportAnchor {
     scroll_top: RowIndex,
 }
 
+/// Node anchors of the rows the last frame presented, by their row in that
+/// frame. Window scroll and cursor rows keep that frame's numbering until the
+/// next one, even after the layout behind it is invalidated or re-estimated.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TranscriptPresentedRows {
+    first_row: RowIndex,
+    anchors: Vec<Option<TranscriptRowAnchor>>,
+}
+
+impl TranscriptPresentedRows {
+    fn anchor_at(&self, row: RowIndex) -> Option<TranscriptRowAnchor> {
+        let index = usize::try_from(row.checked_sub(self.first_row)?).ok()?;
+        self.anchors.get(index).copied().flatten()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TranscriptViewportState {
     resolved_anchor: Option<TranscriptResolvedViewportAnchor>,
@@ -586,6 +611,7 @@ struct TranscriptViewportState {
     mode: TranscriptViewportMode,
     pending_projection: Option<PendingTranscriptProjection>,
     exact_viewport: Option<TranscriptExactViewport>,
+    presented_rows: TranscriptPresentedRows,
     needs_tail_repin: bool,
 }
 
@@ -597,6 +623,7 @@ impl Default for TranscriptViewportState {
             mode: TranscriptViewportMode::Tail,
             pending_projection: None,
             exact_viewport: None,
+            presented_rows: TranscriptPresentedRows::default(),
             needs_tail_repin: false,
         }
     }
@@ -1027,6 +1054,7 @@ impl TranscriptDocument {
         self.pending_hydration = TranscriptHydrationQueue::default();
         self.hydration.record_failed = false;
         self.hydration.failed_blocks.clear();
+        self.hydration.detached.clear();
     }
 
     pub(crate) fn set_store_address(&mut self, store_address: Option<TranscriptStoreAddress>) {
@@ -1126,6 +1154,11 @@ impl TranscriptDocument {
         self.hydration_context_id
     }
 
+    #[cfg(test)]
+    pub(crate) fn invalidate_layout_for_test(&mut self) {
+        self.content.projection.invalidate_source_sequence();
+    }
+
     pub(super) fn hydration_is_pending(&self) -> bool {
         !self.pending_hydration.is_empty()
     }
@@ -1219,6 +1252,17 @@ impl TranscriptDocument {
         let mut hydrated_bytes = 0_u64;
         let mut hydrated_projection = false;
         for (block_id, stored, record) in result.hydrated_blocks {
+            // A newer seek may have moved the active window off this read's
+            // records; installing one outside it would append it to the end.
+            if !self.content.transcript.history.contains(block_id) {
+                self.hydration.detached.insert(
+                    block_id,
+                    stored,
+                    record.record,
+                    self.memory_budget.hydrated_blocks / 4,
+                );
+                continue;
+            }
             if self.content.transcript.history.install_hydrated_record(
                 block_id,
                 stored,
@@ -2293,6 +2337,41 @@ impl TranscriptDocument {
         }
     }
 
+    /// Whether a pending projection moves the view or cursor to a target
+    /// that later input cannot build on until it resolves. Row deltas are
+    /// not: further deltas add to them, so key-repeat bursts project once.
+    pub(crate) fn has_pending_target_projection(&self) -> bool {
+        self.viewport
+            .state
+            .pending_projection
+            .as_ref()
+            .is_some_and(|pending| {
+                !matches!(
+                    pending.intent,
+                    TranscriptScrollIntent::UserDelta { .. }
+                        | TranscriptScrollIntent::PageDelta { .. }
+                )
+            })
+    }
+
+    /// The block a pending reveal moves the cursor to, for navigation that
+    /// starts before the reveal lands.
+    pub(crate) fn pending_cursor_block(&self) -> Option<TranscriptSemanticAnchor> {
+        match &self.viewport.state.pending_projection.as_ref()?.intent {
+            TranscriptScrollIntent::RevealBlock {
+                record_index,
+                block_id,
+                cursor: Some(_),
+                ..
+            } => Some(TranscriptSemanticAnchor {
+                record_index: *record_index,
+                block_id: *block_id,
+                row_offset: 0,
+            }),
+            _ => None,
+        }
+    }
+
     pub(crate) fn has_pending_search_projection(&self) -> bool {
         self.viewport
             .state
@@ -2848,7 +2927,33 @@ impl TranscriptDocument {
             .transcript
             .history
             .install_stored_projection(projected);
+        self.install_detached_hydrated_records();
         self.content.projection.invalidate_source_sequence();
+    }
+
+    /// Installs the reads that landed while their block's window was inactive.
+    fn install_detached_hydrated_records(&mut self) {
+        if self.hydration.detached.is_empty() {
+            return;
+        }
+        let history = &self.content.transcript.history;
+        let returning = self
+            .hydration
+            .detached
+            .ids()
+            .filter(|id| history.contains(*id))
+            .collect::<Vec<_>>();
+        for id in returning {
+            let Some((stored, record)) = self.hydration.detached.remove(id) else {
+                continue;
+            };
+            if !self.content.transcript.history.is_materialized(id) {
+                self.content
+                    .transcript
+                    .history
+                    .install_hydrated_record(id, stored, record);
+            }
+        }
     }
 
     fn approximate_average_record_rows(&self, width: u16) -> RowIndex {
@@ -3478,6 +3583,23 @@ impl TranscriptDocument {
         self.row_for_anchor_with_offset(lua, width, row_anchor, row_offset)
     }
 
+    /// The current display row of search position `anchor`, resolved
+    /// without loading a record window.
+    pub(crate) fn row_for_search_position(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        anchor: TranscriptSearchAnchor,
+    ) -> Option<RowIndex> {
+        match anchor {
+            TranscriptSearchAnchor::Content(anchor) => {
+                self.row_for_node_anchor(lua, width, viewport_rows, anchor)
+            }
+            TranscriptSearchAnchor::EstimatedRow(row) => Some(row),
+        }
+    }
+
     fn row_for_node_anchor(
         &mut self,
         lua: &LuaRuntime,
@@ -3804,27 +3926,30 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        from: DocPosition,
+        from: TranscriptNavigationOrigin,
         roles: &[&str],
         direction: TranscriptNavigationDirection,
         count: usize,
     ) -> Option<TranscriptNavigationBlock> {
-        let (mut anchor, within) = self.block_position_at(lua, width, from)?;
-        let past_text = match within {
-            Some(within) => {
-                let text_start = self
-                    .block_text_start(lua, width, anchor.block_id)
-                    .unwrap_or_default();
-                within > text_start
+        let (mut anchor, past_text, in_gap) = match from {
+            TranscriptNavigationOrigin::Position(from) => {
+                let (anchor, within) = self.block_position_at(lua, width, from)?;
+                let past_text = within.is_some_and(|within| {
+                    let text_start = self
+                        .block_text_start(lua, width, anchor.block_id)
+                        .unwrap_or_default();
+                    within > text_start
+                });
+                (anchor, past_text, within.is_none())
             }
-            None => false,
+            TranscriptNavigationOrigin::BlockText(anchor) => (anchor, false, false),
         };
         // `navigation_block` counts the holding block as previous exactly when
         // the anchor is inside it.
         anchor.row_offset = RowIndex::from(past_text);
         let mut count = count.max(1);
         let mut target = None;
-        if direction == TranscriptNavigationDirection::Next && within.is_none() {
+        if direction == TranscriptNavigationDirection::Next && in_gap {
             if let Some(block) = self.containing_navigation_block(anchor, roles) {
                 target = Some(block);
                 count -= 1;
@@ -3850,8 +3975,21 @@ impl TranscriptDocument {
         width: u16,
         from: DocPosition,
     ) -> Option<(TranscriptSemanticAnchor, Option<DocPosition>)> {
-        let row_offset = self.row_offset(width);
-        let row_anchor = self.row_anchor_at_row_with_offset(lua, width, from.row, row_offset)?;
+        // `from` is a window row, numbered by the last presented frame.
+        let row_anchor = match self.viewport.state.presented_rows.anchor_at(from.row) {
+            Some(anchor) => {
+                self.content.projection.prepare_row_index(
+                    lua,
+                    &mut self.content.transcript.history,
+                    width,
+                );
+                anchor
+            }
+            None => {
+                let row_offset = self.row_offset(width);
+                self.row_anchor_at_row_with_offset(lua, width, from.row, row_offset)?
+            }
+        };
         if let Some(anchor) =
             self.content_anchor_for_row_anchor(row_anchor, from.row, TranscriptAnchorBias::Top)
         {
@@ -3882,7 +4020,14 @@ impl TranscriptDocument {
         direction: TranscriptNavigationDirection,
         count: usize,
     ) -> Option<DocPosition> {
-        let block = self.block_jump(lua, width, from, roles, direction, count)?;
+        let block = self.block_jump(
+            lua,
+            width,
+            TranscriptNavigationOrigin::Position(from),
+            roles,
+            direction,
+            count,
+        )?;
         let Some((start, _)) = self.block_target_row(lua, width, block.block_id, 0) else {
             return Some(DocPosition {
                 row: self.rows_before_record(width, block.record_index),
@@ -6203,6 +6348,11 @@ impl TranscriptDocument {
             global_total_rows: rows.total_rows,
             active_record_range,
         });
+        let (first_row, anchors) = self.content.projection.materialized_row_anchors();
+        self.viewport.state.presented_rows = TranscriptPresentedRows {
+            first_row: first_row.saturating_add(row_offset),
+            anchors,
+        };
         self.clear_pending_projection();
         let reached_semantic_tail = repin_at_semantic_tail
             && self.projected_viewport_reached_semantic_tail(
@@ -11114,6 +11264,12 @@ impl TuiApp {
         };
         let direction = TranscriptNavigationDirection::from_forward(motion.forward);
         let width = self.transcript_width() as u16;
+        // A reveal still waiting on hydration has not moved the row cursor
+        // yet; the next motion continues from the block it is moving to.
+        let from = match self.conversation.transcript().pending_cursor_block() {
+            Some(anchor) => TranscriptNavigationOrigin::BlockText(anchor),
+            None => TranscriptNavigationOrigin::Position(from),
+        };
         let Some(block) = self
             .conversation
             .transcript_block_jump(&self.lua, width, from, &roles, direction, count)

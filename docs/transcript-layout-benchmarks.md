@@ -178,6 +178,27 @@ TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 1 --skip-nav \
   --workloads tiny_blocks_1mib --scale-500mb
 ```
 
+```bash
+# Previous-user jumps (`[u`) from the tail of a resumed session.
+cargo xtask bench-transcript-layout --suite user-jumps
+TMPDIR=~/tmp cargo xtask bench-transcript-layout --suite user-jumps \
+  --resume-bytes 52428800 --user-jump-count 100000
+
+# Walk every prompt of a copied real session.
+TMPDIR=~/tmp cargo xtask bench-transcript-layout --suite user-jumps \
+  --user-jump-count 100000 --user-jump-fixture ~/tmp/session-fixtures/state \
+  --user-jump-session-id <session-id>
+```
+
+`user-jumps` saves the fixture, resumes its sparse tail, and times each `[u`
+from the key press until the landing settles, including record-window seeks.
+Every jump must land on an earlier record (on the generated session, the
+previous prompt), with no full-session reads, more than 4,096 materialized
+rows, or more than two record-slice reads. Reports p50, p95, and max per jump.
+Expected on the generated session: p95 under 5 ms and max under 20 ms at
+50 MiB. Real sessions with large tool output pay more per window seek, since
+the seek decodes every record in the new window.
+
 Search setup waits for the derived search projection before timing. Rare,
 common, and absent queries are all measured because latency scales with posting
 and candidate cardinality. A measured search fails unless it used the persisted

@@ -1536,7 +1536,7 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
 fn custom_command_rejects_unsupported_reasoning_before_staging_turn() {
     let mut app = TestApp::builder().with_vim(false).build();
     add_restricted_reasoning_model(&mut app);
-    let history_len = app.conversation_probe().session().history.len();
+    let history_len = app.model_history().len();
     let transcript_len = app.conversation_probe().transcript().history().order.len();
     let _ = app.drain_engine_sends();
 
@@ -1551,10 +1551,7 @@ fn custom_command_rejects_unsupported_reasoning_before_staging_turn() {
         crate::app::CommandTurnStart::Fresh,
     ));
 
-    assert_eq!(
-        app.conversation_probe().session().history.len(),
-        history_len
-    );
+    assert_eq!(app.model_history().len(), history_len);
     assert_eq!(
         app.conversation_probe().transcript().history().order.len(),
         transcript_len

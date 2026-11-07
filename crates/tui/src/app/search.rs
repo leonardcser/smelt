@@ -2,8 +2,9 @@ use crate::app::transcript::{
     TranscriptProjectionHint, TranscriptSearchAnchor, TranscriptSearchBound,
 };
 use crate::app::transcript_search::{
-    previous_search_position, SqliteTranscriptCandidateBlocks, TranscriptSearchContext,
-    TranscriptSearchIndex, TranscriptSearchSession, TranscriptSearchStore, TranscriptSearchWorker,
+    previous_search_position, SqliteTranscriptCandidateBlocks, TranscriptCandidateBlocks,
+    TranscriptSearchContext, TranscriptSearchIndex, TranscriptSearchOrigin,
+    TranscriptSearchSession, TranscriptSearchStore, TranscriptSearchWorker,
     TranscriptSearchWorkerRequest, TranscriptSearchWorkerResult,
 };
 use crate::app::TuiApp;
@@ -43,9 +44,12 @@ pub(super) enum PendingTranscriptSearch {
         direction: SearchDirection,
         query: String,
     },
+    /// `count` repeats of `n` (`N` when `reverse`) pressed while the next
+    /// match was loading.
     Repeat {
         target: WinId,
         reverse: bool,
+        count: usize,
     },
 }
 
@@ -70,7 +74,7 @@ pub(crate) enum SearchBackend {
         current: Option<usize>,
         changedtick: u64,
     },
-    Transcript(TranscriptSearchSession),
+    Transcript(Box<TranscriptSearchSession>),
 }
 
 pub(crate) struct SearchRenderSession {
@@ -276,6 +280,32 @@ impl TuiApp {
         })
     }
 
+    /// The top row of the view a live search started from, in the current
+    /// row coordinates, so each preview scrolls from that view rather than
+    /// from where the previous keystroke's preview left it.
+    fn search_preview_view_top(&mut self, original: SearchPreviewAnchor) -> RowIndex {
+        let Some(transcript) = original.transcript else {
+            return original.scroll_top;
+        };
+        let viewport_rows = self
+            .ui
+            .win(original.target)
+            .and_then(|win| win.viewport)
+            .map_or(1, |viewport| viewport.rect.height.max(1));
+        self.conversation
+            .transcript_row_for_search_position(
+                &self.lua,
+                transcript.width,
+                viewport_rows,
+                transcript.anchor,
+            )
+            .map_or(original.scroll_top, |row| {
+                // Hydration since the search began shifts rows by as much as
+                // it shifted the origin's.
+                (original.scroll_top.saturating_add(row)).saturating_sub(original.origin.row)
+            })
+    }
+
     fn restore_search_preview_anchor(&mut self, original: SearchPreviewAnchor) {
         if self
             .ui
@@ -389,7 +419,11 @@ impl TuiApp {
                 direction,
                 SqliteTranscriptCandidateBlocks {
                     available: complete,
-                    block_indices: Vec::new(),
+                    candidates: if complete {
+                        TranscriptCandidateBlocks::complete([])
+                    } else {
+                        TranscriptCandidateBlocks::default()
+                    },
                 },
             );
             return;
@@ -442,11 +476,9 @@ impl TuiApp {
         }
 
         candidates
-            .block_indices
-            .extend(self.dirty_transcript_candidate_blocks(&query));
-        candidates.block_indices.sort_unstable();
-        candidates.block_indices.dedup();
-        candidates.available |= !candidates.block_indices.is_empty();
+            .candidates
+            .insert_blocks(self.dirty_transcript_candidate_blocks(&query));
+        candidates.available |= !candidates.candidates.is_empty();
         let retry = candidates.clone();
         let mut deferred = false;
         if let Some(mut transcript_session) = self.new_transcript_search_session_with_candidates(
@@ -456,7 +488,10 @@ impl TuiApp {
             candidates,
             live.original
                 .transcript
-                .and_then(|anchor| anchor.origin_block_idx),
+                .map(|anchor| TranscriptSearchOrigin {
+                    anchor: anchor.anchor,
+                    block_idx: anchor.origin_block_idx,
+                }),
         ) {
             let current = self.advance_transcript_search(
                 &mut transcript_session,
@@ -471,10 +506,11 @@ impl TuiApp {
                 target_buf: live.target_buf,
                 query,
                 direction,
-                backend: SearchBackend::Transcript(transcript_session),
+                backend: SearchBackend::Transcript(Box::new(transcript_session)),
             });
             if let Some(matched) = current {
-                self.jump_to_transcript_search_match(matched);
+                let view_top = self.search_preview_view_top(live.original);
+                self.jump_to_transcript_search_match(matched, Some(view_top));
             } else if !deferred {
                 self.restore_search_preview_anchor(live.original);
             }
@@ -633,7 +669,11 @@ impl TuiApp {
     fn defer_transcript_search_repeat(&mut self, target: WinId, reverse: bool) {
         self.conversation
             .defer_transcript_projection_until_hydrated();
-        self.pending_transcript_search = Some(PendingTranscriptSearch::Repeat { target, reverse });
+        self.pending_transcript_search = Some(PendingTranscriptSearch::Repeat {
+            target,
+            reverse,
+            count: 1,
+        });
         self.request_urgent_render();
     }
 
@@ -666,15 +706,20 @@ impl TuiApp {
                 direction,
                 query,
             } => self.submit_search(target, direction, query),
-            PendingTranscriptSearch::Repeat { target, reverse } => {
-                if let Some(mut session) = self.overlays.take_search_session() {
-                    if let SearchBackend::Transcript(transcript) = &mut session.backend {
-                        transcript.scanned.fill(false);
-                        transcript.scanned_blocks.clear();
+            PendingTranscriptSearch::Repeat {
+                target,
+                reverse,
+                count,
+            } => {
+                for remaining in (0..count).rev() {
+                    let _ = self.repeat_search(target, reverse);
+                    if let Some(PendingTranscriptSearch::Repeat { count, .. }) =
+                        self.pending_transcript_search.as_mut()
+                    {
+                        *count += remaining;
+                        break;
                     }
-                    self.overlays.install_search_session(session);
                 }
-                let _ = self.repeat_search(target, reverse);
             }
         }
         self.request_urgent_render();
@@ -785,10 +830,10 @@ impl TuiApp {
                 target_buf,
                 query,
                 direction,
-                backend: SearchBackend::Transcript(transcript_session),
+                backend: SearchBackend::Transcript(Box::new(transcript_session)),
             });
             if let Some(matched) = current {
-                self.jump_to_transcript_search_match(matched);
+                self.jump_to_transcript_search_match(matched, None);
             } else if let Some(query) = deferred_query {
                 self.defer_transcript_search(target, direction, query);
             }
@@ -828,6 +873,25 @@ impl TuiApp {
     }
 
     fn repeat_search(&mut self, target: WinId, reverse: bool) -> bool {
+        // A repeat still waiting on its match counts this press too, so each
+        // press moves one match once the transcript loads.
+        if let Some(PendingTranscriptSearch::Repeat {
+            target: pending_target,
+            reverse: pending_reverse,
+            count,
+        }) = self.pending_transcript_search.as_mut()
+        {
+            if *pending_target == target {
+                if *pending_reverse == reverse {
+                    *count += 1;
+                } else if *count > 1 {
+                    *count -= 1;
+                } else {
+                    self.pending_transcript_search = None;
+                }
+                return true;
+            }
+        }
         let Some(session) = self.overlays.search_session() else {
             return false;
         };
@@ -881,7 +945,7 @@ impl TuiApp {
                             }
                             return false;
                         };
-                        *transcript = new_session;
+                        **transcript = new_session;
                         origin_bound = None;
                     }
                     self.advance_transcript_search(
@@ -910,7 +974,7 @@ impl TuiApp {
                 return true;
             }
             self.overlays.install_search_session(session);
-            self.jump_to_transcript_search_match(matched);
+            self.jump_to_transcript_search_match(matched, None);
             return true;
         }
 
@@ -1084,9 +1148,12 @@ impl TuiApp {
             .update_current_transcript_search_range(target, range);
     }
 
+    /// Reveal `matched`, scrolling as little as needed from the view whose
+    /// top is `view_top`, or the current view without one.
     fn jump_to_transcript_search_match(
         &mut self,
         matched: crate::app::transcript::TranscriptSearchMatch,
+        view_top: Option<RowIndex>,
     ) {
         let Some(target) = self.overlays.search_session().map(|session| session.target) else {
             return;
@@ -1109,10 +1176,11 @@ impl TuiApp {
                 matched,
             )
             .unwrap_or(matched.range.start.row);
-        let logical_scroll_top = self
-            .conversation
-            .transcript()
-            .local_command_scroll_top(window_scroll_before);
+        let logical_scroll_top = view_top.unwrap_or_else(|| {
+            self.conversation
+                .transcript()
+                .local_command_scroll_top(window_scroll_before)
+        });
         let target_screen_row = self
             .ui
             .win(target)

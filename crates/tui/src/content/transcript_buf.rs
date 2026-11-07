@@ -84,6 +84,18 @@ struct ProjectedRowIdentity {
     content: Option<ProjectionAnchor>,
 }
 
+impl ProjectedRowIdentity {
+    fn node_anchor(&self) -> Option<TranscriptRowAnchor> {
+        match self.exact {
+            ProjectionAnchor::Node { id, row_offset } => {
+                Some(TranscriptRowAnchor { id, row_offset })
+            }
+            ProjectionAnchor::RenderedBlockRow { .. }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { .. } => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct VisibleProjectionState {
     materialized: Option<MaterializedProjection>,
@@ -1975,6 +1987,18 @@ impl TranscriptProjection {
         hydrated
     }
 
+    /// Brings the scene and estimated row index up to date at `width`,
+    /// without measuring nodes.
+    pub(crate) fn prepare_row_index(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+    ) {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env, history, width);
+    }
+
     pub(crate) fn rebuild_row_index(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -2697,13 +2721,20 @@ impl TranscriptProjection {
             .checked_sub(self.visible.row_base)
             .and_then(|local| usize::try_from(local).ok())
             .and_then(|local| self.visible.row_identities.get(local))?;
-        match identity.exact {
-            ProjectionAnchor::Node { id, row_offset } => {
-                Some(TranscriptRowAnchor { id, row_offset })
-            }
-            ProjectionAnchor::RenderedBlockRow { .. }
-            | ProjectionAnchor::RenderedBlockDisplayOffset { .. } => None,
-        }
+        identity.node_anchor()
+    }
+
+    /// The first materialized row and the node anchor of each materialized
+    /// row, `None` for rows inside a partially rendered block.
+    pub(crate) fn materialized_row_anchors(&self) -> (RowIndex, Vec<Option<TranscriptRowAnchor>>) {
+        (
+            self.visible.row_base,
+            self.visible
+                .row_identities
+                .iter()
+                .map(ProjectedRowIdentity::node_anchor)
+                .collect(),
+        )
     }
 
     fn stable_materialized_row_anchor(&self, row: RowIndex) -> Option<StableRowAnchor> {
@@ -2792,20 +2823,14 @@ impl TranscriptProjection {
         let Some(index) = self.measurements.active.node_index(anchor.id) else {
             return Some(anchor.row_offset);
         };
-        let Some(exact_height) = self
-            .measurements
-            .active
-            .nodes
-            .get(index)
-            .and_then(|node| node.exact_height)
-        else {
+        let Some(node) = self.measurements.active.nodes.get(index) else {
             return Some(anchor.row_offset);
         };
+        let height = node.measured_or_estimated_height();
         let gap = (self
             .transcript_scene
-            .rendered_node_gap(history, index, exact_height as usize)
-            as RowIndex)
-            .min(exact_height);
+            .rendered_node_gap(history, index, height as usize) as RowIndex)
+            .min(height);
         anchor.row_offset.checked_sub(gap)
     }
 

@@ -1585,7 +1585,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_search_candidate_resize_retains_exact_viewport_during_hydration() {
+    fn sparse_search_candidate_resize_keeps_viewport_on_exact_rows_during_hydration() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(150, 40, 10);
         for _ in 0..8 {
@@ -1597,7 +1597,7 @@ mod tests {
             app.transcript_scroll_probe_render();
         }
 
-        let retained_height = app
+        let settled_height = app
             .transcript_window()
             .viewport
             .expect("settled transcript viewport")
@@ -1605,14 +1605,12 @@ mod tests {
             .height;
         app.transcript_scroll_probe_resize(57, 23);
         app.render_unsettled_silent();
-        assert_eq!(
-            app.transcript_window()
-                .viewport
-                .expect("retained transcript viewport")
-                .rect
-                .height,
-            retained_height
-        );
+        let win = app.tui.transcript_win();
+        let height = win.viewport.expect("transcript viewport").rect.height;
+        let materialized = win
+            .materialized_rows()
+            .expect("exact rows behind the transcript viewport");
+        assert!(materialized.covers_viewport(win.scroll_top(), height));
 
         app.render_silent();
         assert!(
@@ -1621,7 +1619,7 @@ mod tests {
                 .expect("expanded transcript viewport")
                 .rect
                 .height
-                > retained_height
+                > settled_height
         );
     }
 

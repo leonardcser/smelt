@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
-use smelt_core::transcript_model::BlockId;
+use smelt_core::transcript_model::{
+    block_retained_bytes, tool_state_retained_bytes, BlockId, StoredBlockRef, TranscriptBlockRecord,
+};
 
 const MAX_HYDRATED_BLOCK_BUDGET: usize = 32 * 1024 * 1024;
 const MAX_RECORD_WINDOW_BUDGET: usize = 16 * 1024 * 1024;
@@ -98,6 +101,7 @@ pub(super) struct TranscriptHydrationState {
     pub(super) record_failed: bool,
     pub(super) failed_blocks: HashSet<BlockId>,
     pub(super) operation_pins: HashMap<BlockId, usize>,
+    pub(super) detached: DetachedHydratedRecords,
     pub(super) hydration_reads: u64,
     pub(super) hydration_ranges: u64,
     pub(super) hydration_bytes: u64,
@@ -152,6 +156,66 @@ impl TranscriptHydrationState {
                 self.operation_pins.remove(id);
             }
         }
+    }
+}
+
+/// Reads that landed after their block left the active window. The window's
+/// next activation installs them, so work that moves between windows does not
+/// read the same blocks again on every visit.
+#[derive(Default)]
+pub(super) struct DetachedHydratedRecords {
+    records: HashMap<BlockId, (Arc<StoredBlockRef>, TranscriptBlockRecord, usize)>,
+    order: VecDeque<BlockId>,
+    bytes: usize,
+}
+
+impl DetachedHydratedRecords {
+    /// Keeps `record`, dropping the oldest reads once they pass `budget` bytes.
+    pub(super) fn insert(
+        &mut self,
+        id: BlockId,
+        stored: Arc<StoredBlockRef>,
+        record: TranscriptBlockRecord,
+        budget: usize,
+    ) {
+        let weight = block_retained_bytes(&record.block).saturating_add(
+            record
+                .tool_state
+                .as_ref()
+                .map_or(0, tool_state_retained_bytes),
+        );
+        self.remove(id);
+        self.records.insert(id, (stored, record, weight));
+        self.order.push_back(id);
+        self.bytes = self.bytes.saturating_add(weight);
+        while self.bytes > budget {
+            let Some(oldest) = self.order.front().copied() else {
+                break;
+            };
+            self.remove(oldest);
+        }
+    }
+
+    pub(super) fn remove(
+        &mut self,
+        id: BlockId,
+    ) -> Option<(Arc<StoredBlockRef>, TranscriptBlockRecord)> {
+        let (stored, record, weight) = self.records.remove(&id)?;
+        self.order.retain(|candidate| *candidate != id);
+        self.bytes = self.bytes.saturating_sub(weight);
+        Some((stored, record))
+    }
+
+    pub(super) fn ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.order.iter().copied()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub(super) fn clear(&mut self) {
+        *self = Self::default();
     }
 }
 

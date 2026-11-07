@@ -3051,6 +3051,11 @@ impl BlockHistory {
         self.entries.get(&id).and_then(BlockEntry::block)
     }
 
+    /// Whether `id` is in this history's block order.
+    pub fn contains(&self, id: BlockId) -> bool {
+        self.entries.contains_key(&id)
+    }
+
     pub fn is_materialized(&self, id: BlockId) -> bool {
         self.block(id).is_some()
     }
