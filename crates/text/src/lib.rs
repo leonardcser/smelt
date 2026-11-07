@@ -1,11 +1,17 @@
-//! Pure text helpers for byte↔cell mapping.
+//! Pure text helpers: UTF-8 boundary snapping, grapheme navigation, and
+//! byte↔cell mapping.
+
+pub use smelt_style::cell_width;
 
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+
+/// The character used as a placeholder for attachments in source text.
+pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
 
 /// Byte offset → terminal column, snapped to the start of its grapheme.
 pub fn byte_to_cell(line: &str, byte: usize) -> usize {
     let byte = snap_grapheme(line, byte);
-    crate::cell_width::text_width(&line[..byte])
+    cell_width::text_width(&line[..byte])
 }
 
 /// [`byte_to_cell`] for many offsets into one line. Each lookup resumes where
@@ -14,7 +20,7 @@ pub fn byte_to_cell(line: &str, byte: usize) -> usize {
 /// the previous one restarts from the beginning of the line.
 pub struct CellCursor<'a> {
     line: &'a str,
-    graphemes: std::iter::Peekable<crate::cell_width::GraphemeIndices<'a>>,
+    graphemes: std::iter::Peekable<cell_width::GraphemeIndices<'a>>,
     byte: usize,
     cell: usize,
 }
@@ -23,7 +29,7 @@ impl<'a> CellCursor<'a> {
     pub fn new(line: &'a str) -> Self {
         Self {
             line,
-            graphemes: crate::cell_width::grapheme_indices(line).peekable(),
+            graphemes: cell_width::grapheme_indices(line).peekable(),
             byte: 0,
             cell: 0,
         }
@@ -40,7 +46,7 @@ impl<'a> CellCursor<'a> {
             if end > byte {
                 break;
             }
-            self.cell += crate::cell_width::text_width(grapheme);
+            self.cell += cell_width::text_width(grapheme);
             self.byte = end;
             self.graphemes.next();
         }
@@ -60,9 +66,9 @@ pub fn cell_to_byte(line: &str, cell: usize) -> usize {
 
     let mut boundary = 0usize;
     let mut width = 0usize;
-    for (byte, grapheme) in crate::cell_width::grapheme_indices(line) {
+    for (byte, grapheme) in cell_width::grapheme_indices(line) {
         let end = byte + grapheme.len();
-        width = width.saturating_add(crate::cell_width::text_width(grapheme));
+        width = width.saturating_add(cell_width::text_width(grapheme));
         if width > cell {
             return boundary;
         }
@@ -168,7 +174,7 @@ pub fn ceil_grapheme(s: &str, pos: usize) -> usize {
     if pos == s.len() {
         return pos;
     }
-    for (start, grapheme) in crate::cell_width::grapheme_indices(s) {
+    for (start, grapheme) in cell_width::grapheme_indices(s) {
         if pos == start {
             return start;
         }
@@ -188,7 +194,7 @@ pub fn prev_grapheme_boundary(s: &str, pos: usize) -> usize {
     }
 
     let mut previous = 0;
-    for (start, _) in crate::cell_width::grapheme_indices(s) {
+    for (start, _) in cell_width::grapheme_indices(s) {
         if start >= pos {
             return previous;
         }
@@ -203,7 +209,7 @@ pub fn next_grapheme_boundary(s: &str, pos: usize) -> usize {
         return s.len();
     }
     let pos = snap(s, pos);
-    crate::cell_width::grapheme_indices(s)
+    cell_width::grapheme_indices(s)
         .map(|(start, grapheme)| start + grapheme.len())
         .find(|end| *end > pos)
         .unwrap_or(s.len())
@@ -212,7 +218,7 @@ pub fn next_grapheme_boundary(s: &str, pos: usize) -> usize {
 /// Bytes at the start of `next` that join the final grapheme in `previous`.
 pub fn joining_grapheme_prefix_len(previous: &str, next: &str) -> usize {
     let Some((previous_start, previous_grapheme)) =
-        crate::cell_width::grapheme_indices(previous).next_back()
+        cell_width::grapheme_indices(previous).next_back()
     else {
         return 0;
     };
@@ -248,7 +254,7 @@ fn joining_grapheme_prefix_len_contiguous(previous: &str, next: &str) -> usize {
     let mut joined = String::with_capacity(previous.len() + next.len());
     joined.push_str(previous);
     joined.push_str(next);
-    let consumed = crate::cell_width::grapheme_indices(&joined)
+    let consumed = cell_width::grapheme_indices(&joined)
         .find_map(|(start, grapheme)| {
             let end = start + grapheme.len();
             (start < previous.len() && end > previous.len()).then_some(end - previous.len())
@@ -264,7 +270,7 @@ pub fn grapheme_prefix(s: &str, max_bytes: usize) -> &str {
 
 /// Longest suffix whose complete grapheme clusters fit within `max_bytes`.
 pub fn grapheme_suffix(s: &str, max_bytes: usize) -> &str {
-    let start = crate::cell_width::grapheme_indices(s)
+    let start = cell_width::grapheme_indices(s)
         .rev()
         .take_while(|(start, _)| s.len() - start <= max_bytes)
         .map(|(start, _)| start)
@@ -278,7 +284,7 @@ pub fn grapheme_suffix(s: &str, max_bytes: usize) -> &str {
 /// A cluster is removed only when every scalar in it is whitespace. This
 /// preserves unusual but valid clusters such as a space plus a combining mark.
 pub fn trim_start_whitespace(s: &str) -> &str {
-    let start = crate::cell_width::grapheme_indices(s)
+    let start = cell_width::grapheme_indices(s)
         .take_while(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
         .map(|(start, grapheme)| start + grapheme.len())
         .last()
@@ -288,7 +294,7 @@ pub fn trim_start_whitespace(s: &str) -> &str {
 
 /// Trim trailing whitespace without splitting a grapheme cluster.
 pub fn trim_end_whitespace(s: &str) -> &str {
-    let end = crate::cell_width::grapheme_indices(s)
+    let end = cell_width::grapheme_indices(s)
         .rev()
         .take_while(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
         .map(|(start, _)| start)
@@ -595,7 +601,7 @@ mod tests {
                 .map(|(offset, _)| offset)
                 .chain(core::iter::once(text.len()))
             {
-                let expected = crate::cell_width::grapheme_indices(text)
+                let expected = cell_width::grapheme_indices(text)
                     .find_map(|(start, grapheme)| {
                         let end = start + grapheme.len();
                         (start < split && split < end).then(|| end - split)
@@ -708,7 +714,7 @@ mod tests {
     #[test]
     fn cell_and_byte_coordinates_never_split_graphemes() {
         for grapheme in ["9\u{fe0f}", "👩\u{200d}💻", "🇨🇦"] {
-            assert_eq!(crate::cell_width::text_width(grapheme), 2);
+            assert_eq!(cell_width::text_width(grapheme), 2);
             assert_eq!(cell_to_byte(grapheme, 1), 0, "{grapheme:?}");
             assert_eq!(cell_to_byte(grapheme, 2), grapheme.len(), "{grapheme:?}");
         }
@@ -739,7 +745,7 @@ mod tests {
     fn snap_grapheme_matches_forward_segmentation_at_every_offset() {
         let s = "a\r\nb🇨🇦🇺🇸🇫e\u{301}\u{302}👩\u{200d}💻9\u{fe0f}\r\r\n日x";
         for pos in 0..=s.len() + 1 {
-            let expected = crate::cell_width::grapheme_indices(s)
+            let expected = cell_width::grapheme_indices(s)
                 .map(|(start, _)| start)
                 .chain([s.len()])
                 .take_while(|start| *start <= pos)

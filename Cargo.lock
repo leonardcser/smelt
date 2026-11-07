@@ -3580,8 +3580,8 @@ dependencies = [
  "sha2",
  "smelt-perf 0.3.0",
  "smelt-style 0.6.0",
+ "smelt-text",
  "tempfile",
- "unicode-segmentation",
 ]
 
 [[package]]
@@ -3676,12 +3676,12 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2",
- "smelt-buffer 0.0.0-dev",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-provider",
  "smelt-store 0.0.0-dev",
  "smelt-test-support",
+ "smelt-text",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3723,7 +3723,7 @@ version = "0.0.0-dev"
 dependencies = [
  "serde",
  "serde_json",
- "smelt-buffer 0.0.0-dev",
+ "smelt-text",
 ]
 
 [[package]]
@@ -3752,9 +3752,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "smelt-buffer 0.0.0-dev",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
+ "smelt-text",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3772,9 +3772,9 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "smelt-buffer 0.0.0-dev",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
+ "smelt-text",
  "tempfile",
  "zstd",
 ]
@@ -3831,6 +3831,14 @@ dependencies = [
 [[package]]
 name = "smelt-test-support"
 version = "0.0.0-dev"
+
+[[package]]
+name = "smelt-text"
+version = "0.0.0-dev"
+dependencies = [
+ "smelt-style 0.6.0",
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "smelt-tui"

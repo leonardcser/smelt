@@ -6,8 +6,8 @@ pub struct ApiBaseNormalizationHint {
 }
 
 pub(crate) fn trim_api_base(api_base: &str) -> &str {
-    let base = smelt_buffer::text::trim_start_whitespace(api_base);
-    let end = smelt_buffer::cell_width::grapheme_indices(base)
+    let base = smelt_text::trim_start_whitespace(api_base);
+    let end = smelt_text::cell_width::grapheme_indices(base)
         .rev()
         .take_while(|(_, grapheme)| *grapheme == "/" || grapheme.chars().all(char::is_whitespace))
         .map(|(start, _)| start)

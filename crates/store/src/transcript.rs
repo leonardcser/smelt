@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use smelt_buffer::cell_width;
+use smelt_text::cell_width;
 
 use crate::db;
 use crate::error::{Result, StoreError};
@@ -162,7 +162,7 @@ impl StoredTranscriptBlock {
 
     /// The start of the search text, at most [`PREVIEW_MAX_BYTES`].
     pub fn preview_text(&self) -> &str {
-        smelt_buffer::text::grapheme_prefix(&self.indexed_text, PREVIEW_MAX_BYTES)
+        smelt_text::grapheme_prefix(&self.indexed_text, PREVIEW_MAX_BYTES)
     }
 
     pub(crate) fn first_line(&self) -> String {

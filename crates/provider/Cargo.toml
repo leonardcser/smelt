@@ -23,7 +23,7 @@ rand = "0.10"
 sha2.workspace = true
 smelt-perf = { version = "0.3.0", path = "../perf" }
 atomic-write-file = "0.3.1"
-smelt-buffer = { version = "0.0.0-dev", path = "../buffer" }
+smelt-text = { workspace = true }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 chrono = "0.4.45"
 zstd = "0.14.3"

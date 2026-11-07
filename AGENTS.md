@@ -59,7 +59,7 @@ Byte offsets often outlive the text mutations around them (kill-ring range, vim
 visual anchor, attachment offsets, undo snapshots, yank flash) and can land
 mid-char. Raw `&s[a..b]` and `s.drain(a..b)` panic on non-boundaries.
 
-All boundary handling lives in `smelt_buffer::text` (re-exported by
+All boundary handling lives in `smelt_text` (re-exported as `smelt_buffer::text` and
 `smelt_edit::text`). Don't duplicate it elsewhere, and don't call
 `str::is_char_boundary` in feature code; `snap` first.
 

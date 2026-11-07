@@ -5,7 +5,7 @@
 use super::transport::control;
 use protocol::{HistoryNote, JobTermination, NativeProcess, ProcessStatusEvent};
 use serde_json::{json, Value};
-use smelt_buffer::text;
+use smelt_text as text;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 const OUTPUT_REQUEST: &str = "smelt-output-";

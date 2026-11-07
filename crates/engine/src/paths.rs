@@ -130,9 +130,7 @@ pub fn git_root(cwd: &std::path::Path) -> Option<PathBuf> {
         return None;
     }
     let root_text = String::from_utf8_lossy(&output.stdout);
-    workspace_boundary(PathBuf::from(smelt_buffer::text::trim_whitespace(
-        &root_text,
-    )))
+    workspace_boundary(PathBuf::from(smelt_text::trim_whitespace(&root_text)))
 }
 
 /// `root` as a workspace boundary, or `None` when it is `~` or `/`.
@@ -155,7 +153,7 @@ pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
         return None;
     }
     let branch = String::from_utf8_lossy(&output.stdout);
-    let branch = smelt_buffer::text::trim_whitespace(&branch).to_owned();
+    let branch = smelt_text::trim_whitespace(&branch).to_owned();
     if branch.is_empty() || branch == "HEAD" {
         return None;
     }

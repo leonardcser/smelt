@@ -182,7 +182,7 @@ fn collapse_blank_lines(text: &str) -> String {
             result.push('\n');
         }
     }
-    smelt_buffer::text::trim_whitespace(&result).to_string()
+    smelt_text::trim_whitespace(&result).to_string()
 }
 
 #[cfg(test)]

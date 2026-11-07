@@ -325,7 +325,7 @@ fn parse_command_skill(path: &Path) -> Option<SkillEntry> {
         .or_else(|| first_nonempty_line(body).map(trim_description))
         .unwrap_or_default();
     let location = path.display().to_string();
-    let body = smelt_buffer::text::trim_start_whitespace(body);
+    let body = smelt_text::trim_start_whitespace(body);
     let name_attr = xml_escape_attr(&name);
     let formatted = format!(
         "<skill name=\"{name_attr}\" included_by=\"smelt\" source=\"custom_command\">\n{body}\n\n## Slash command\n\nThis skill is also available to users as `/{name}`. When loaded as a skill, it is static, receives no slash-command arguments, and does not evaluate shell output markers.\n</skill>"
@@ -390,14 +390,14 @@ fn parse_skill_text(
 }
 
 fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
-    let text = smelt_buffer::text::trim_start_whitespace(text);
+    let text = smelt_text::trim_start_whitespace(text);
     if !text.starts_with("---") {
         return None;
     }
     let after_first = &text[3..];
     let end = after_first.find("\n---")?;
-    let yaml = smelt_buffer::text::trim_whitespace(&after_first[..end]);
-    let body = smelt_buffer::text::trim_start_whitespace(&after_first[end + 4..]);
+    let yaml = smelt_text::trim_whitespace(&after_first[..end]);
+    let body = smelt_text::trim_start_whitespace(&after_first[end + 4..]);
     Some((yaml, body))
 }
 
@@ -408,19 +408,19 @@ fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
     let mut reading_description = false;
 
     for raw_line in yaml.lines() {
-        let line = smelt_buffer::text::trim_whitespace(raw_line);
+        let line = smelt_text::trim_whitespace(raw_line);
         if line.is_empty() {
             continue;
         }
 
         if let Some(rest) = line.strip_prefix("name:") {
-            name = Some(unquote_yaml(smelt_buffer::text::trim_whitespace(rest)));
+            name = Some(unquote_yaml(smelt_text::trim_whitespace(rest)));
             reading_description = false;
             continue;
         }
 
         if let Some(rest) = line.strip_prefix("description:") {
-            description = unquote_yaml(smelt_buffer::text::trim_whitespace(rest));
+            description = unquote_yaml(smelt_text::trim_whitespace(rest));
             reading_description = true;
             continue;
         }
@@ -445,11 +445,8 @@ fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
 fn frontmatter_string(yaml: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     yaml.lines()
-        .map(smelt_buffer::text::trim_whitespace)
-        .find_map(|line| {
-            line.strip_prefix(&prefix)
-                .map(smelt_buffer::text::trim_whitespace)
-        })
+        .map(smelt_text::trim_whitespace)
+        .find_map(|line| line.strip_prefix(&prefix).map(smelt_text::trim_whitespace))
         .map(unquote_yaml)
         .filter(|s| !s.is_empty())
 }
@@ -458,7 +455,7 @@ fn frontmatter_bool(yaml: &str, keys: &[&str]) -> bool {
     keys.iter().any(|key| {
         frontmatter_string(yaml, key).is_some_and(|value| {
             matches!(
-                smelt_buffer::text::trim_whitespace(&value)
+                smelt_text::trim_whitespace(&value)
                     .to_ascii_lowercase()
                     .as_str(),
                 "true" | "yes" | "1"
@@ -469,13 +466,13 @@ fn frontmatter_bool(yaml: &str, keys: &[&str]) -> bool {
 
 fn first_nonempty_line(body: &str) -> Option<&str> {
     body.lines()
-        .map(smelt_buffer::text::trim_whitespace)
+        .map(smelt_text::trim_whitespace)
         .find(|line| !line.is_empty())
 }
 
 fn trim_description(s: &str) -> String {
     const MAX_GRAPHEMES: usize = 80;
-    let mut graphemes = smelt_buffer::cell_width::graphemes(s);
+    let mut graphemes = smelt_text::cell_width::graphemes(s);
     let out: String = graphemes.by_ref().take(MAX_GRAPHEMES).collect();
     if graphemes.next().is_some() {
         format!("{out}…")

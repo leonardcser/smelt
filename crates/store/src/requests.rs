@@ -189,7 +189,7 @@ fn response_summary(response: &RequestResponse) -> Option<String> {
         .content
         .as_deref()
         .or(response.reasoning.as_deref())
-        .map(|text| smelt_buffer::text::grapheme_prefix(text, 512).to_string())
+        .map(|text| smelt_text::grapheme_prefix(text, 512).to_string())
 }
 
 fn cost_micros(cost_usd: Option<f64>) -> Option<i64> {

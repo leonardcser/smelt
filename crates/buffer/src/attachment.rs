@@ -12,8 +12,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 pub type AttachmentId = u64;
 
-/// The character used as a placeholder for attachments in source text.
-pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
+pub use smelt_text::ATTACHMENT_MARKER;
 
 /// A single attachment (currently images only).
 #[derive(Clone, Debug)]

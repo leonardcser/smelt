@@ -1,4 +1,4 @@
-use smelt_buffer::text;
+use smelt_text as text;
 
 /// Marker prefix on synthetic user messages that announce a mode change.
 /// The TUI's set_mode handler emits these; the transcript renderer keys

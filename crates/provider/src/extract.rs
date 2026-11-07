@@ -1,5 +1,5 @@
 use protocol::{FunctionCall, ToolCall};
-use smelt_buffer::text;
+use smelt_text as text;
 
 /// Extract `<tool_call>` blocks from text. Some backends (vLLM) embed tool call
 /// markup in `content` or `reasoning_content` instead of the `tool_calls` field.

@@ -189,7 +189,7 @@ impl ProviderKind {
 }
 
 fn api_base_host(api_base: &str) -> Option<String> {
-    let trimmed = smelt_buffer::text::trim_whitespace(api_base);
+    let trimmed = smelt_text::trim_whitespace(api_base);
     let parsed = url::Url::parse(trimmed)
         .or_else(|_| url::Url::parse(&format!("https://{trimmed}")))
         .ok()?;
@@ -204,7 +204,7 @@ fn host_matches(host: &str, expected: &str) -> bool {
 }
 
 pub fn is_kimi_code_api_base(api_base: &str) -> bool {
-    let trimmed = smelt_buffer::text::trim_whitespace(api_base);
+    let trimmed = smelt_text::trim_whitespace(api_base);
     let Ok(parsed) =
         url::Url::parse(trimmed).or_else(|_| url::Url::parse(&format!("https://{trimmed}")))
     else {

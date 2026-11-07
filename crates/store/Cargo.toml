@@ -10,7 +10,7 @@ libc.workspace = true
 rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "cache"] }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
-smelt-buffer = { workspace = true }
+smelt-text = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-protocol = { workspace = true }
 zstd = "0.14.3"

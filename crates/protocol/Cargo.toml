@@ -11,4 +11,4 @@ name = "protocol"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-smelt-buffer = { version = "0.0.0-dev", path = "../buffer" }
+smelt-text = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "smelt-text"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "UTF-8 and grapheme-safe text helpers shared by every layer."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[dependencies]
+smelt-style = { workspace = true }
+unicode-segmentation = "1.13.3"

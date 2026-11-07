@@ -115,11 +115,11 @@ fn truncate_middle_to_bytes(content: &str, max_bytes: usize) -> String {
 }
 
 fn prefix_with_byte_budget(content: &str, max_bytes: usize) -> String {
-    smelt_buffer::text::grapheme_prefix(content, max_bytes).to_string()
+    smelt_text::grapheme_prefix(content, max_bytes).to_string()
 }
 
 fn suffix_with_byte_budget(content: &str, max_bytes: usize) -> String {
-    smelt_buffer::text::grapheme_suffix(content, max_bytes).to_string()
+    smelt_text::grapheme_suffix(content, max_bytes).to_string()
 }
 
 #[cfg(test)]

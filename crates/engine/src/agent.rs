@@ -591,7 +591,7 @@ pub(crate) fn is_empty_answer(message: &protocol::Message) -> bool {
         && message
             .content
             .as_ref()
-            .is_none_or(|content| smelt_buffer::text::trim_whitespace(content.as_text()).is_empty())
+            .is_none_or(|content| smelt_text::trim_whitespace(content.as_text()).is_empty())
 }
 
 /// The error an auxiliary request reports when the model gave no answer.
@@ -1051,7 +1051,7 @@ impl<'a> Turn<'a> {
     fn emit_response(&mut self, message: &Message, reasoning_parts: &[CompletedReasoningPart]) {
         if reasoning_parts.is_empty() {
             if let Some(reasoning) = &message.reasoning_content {
-                let trimmed = smelt_buffer::text::trim_whitespace(reasoning);
+                let trimmed = smelt_text::trim_whitespace(reasoning);
                 if !trimmed.is_empty() {
                     self.emit(EngineEvent::Reasoning {
                         kind: ReasoningKind::Raw,
@@ -1071,7 +1071,7 @@ impl<'a> Turn<'a> {
             }
         }
         if let Some(content) = &message.content {
-            let trimmed = smelt_buffer::text::trim_whitespace(content.as_text());
+            let trimmed = smelt_text::trim_whitespace(content.as_text());
             if !trimmed.is_empty() {
                 self.emit(EngineEvent::Text {
                     content: trimmed.to_string(),
@@ -1825,9 +1825,10 @@ impl<'a> Turn<'a> {
 
             if terminal_response
                 && !output_limited
-                && hooked.content.as_ref().is_none_or(|content| {
-                    smelt_buffer::text::trim_whitespace(content.as_text()).is_empty()
-                })
+                && hooked
+                    .content
+                    .as_ref()
+                    .is_none_or(|content| smelt_text::trim_whitespace(content.as_text()).is_empty())
             {
                 let history_len = self.public_history_len();
                 self.apply_deferred_turn_cmds(std::mem::take(&mut provider_turn_cmds));
@@ -2646,7 +2647,7 @@ impl<'a> Turn<'a> {
             } = result;
 
             if log::Level::Debug.enabled() {
-                let preview = smelt_buffer::text::slice(&content, 0..500).to_owned();
+                let preview = smelt_text::slice(&content, 0..500).to_owned();
                 log::entry(
                     log::Level::Debug,
                     "tool_result",
@@ -3123,9 +3124,9 @@ fn reasoning_part_id(item_id: &str, part_index: u32, kind: ReasoningKind) -> Str
 }
 
 fn leading_bold_title(source: &str) -> Option<(&str, &str)> {
-    let after_open = smelt_buffer::text::trim_start_whitespace(source).strip_prefix("**")?;
+    let after_open = smelt_text::trim_start_whitespace(source).strip_prefix("**")?;
     let close = after_open.find("**")?;
-    let title = smelt_buffer::text::trim_whitespace(&after_open[..close]);
+    let title = smelt_text::trim_whitespace(&after_open[..close]);
     Some((title, &after_open[close + 2..]))
 }
 
@@ -3144,10 +3145,7 @@ pub enum ReasoningSummaryPhase {
 
 fn normalize_reasoning_part(kind: ReasoningKind, source: &str) -> (Option<String>, String) {
     if kind == ReasoningKind::Raw {
-        return (
-            None,
-            smelt_buffer::text::trim_whitespace(source).to_string(),
-        );
+        return (None, smelt_text::trim_whitespace(source).to_string());
     }
     normalize_reasoning_summary(source, ReasoningSummaryPhase::Finished)
 }
@@ -3157,7 +3155,7 @@ pub fn normalize_reasoning_summary(
     source: &str,
     phase: ReasoningSummaryPhase,
 ) -> (Option<String>, String) {
-    let source = smelt_buffer::text::trim_whitespace(source);
+    let source = smelt_text::trim_whitespace(source);
     let heading = leading_bold_title(source);
     if phase == ReasoningSummaryPhase::Streaming
         && (source == "*"
@@ -3179,7 +3177,7 @@ pub fn normalize_reasoning_summary(
         .join("\n");
     (
         Some(title.to_string()),
-        smelt_buffer::text::trim_whitespace(&content).to_string(),
+        smelt_text::trim_whitespace(&content).to_string(),
     )
 }
 

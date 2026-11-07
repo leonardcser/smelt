@@ -239,7 +239,7 @@ fn provider_error_to_log_error(
 }
 
 fn bounded_text(text: &str, max_bytes: usize) -> String {
-    smelt_buffer::text::grapheme_prefix(text, max_bytes).to_string()
+    smelt_text::grapheme_prefix(text, max_bytes).to_string()
 }
 
 fn truncate_error_body(body: &str) -> String {
@@ -247,7 +247,7 @@ fn truncate_error_body(body: &str) -> String {
     if body.len() <= LIMIT {
         return body.to_string();
     }
-    let mut out = smelt_buffer::text::grapheme_prefix(body, LIMIT).to_string();
+    let mut out = smelt_text::grapheme_prefix(body, LIMIT).to_string();
     out.push_str("\n… truncated …");
     out
 }

@@ -930,7 +930,7 @@ pub fn effective_mode_at<'a>(
 // orphan tool_use blocks by synthesizing an "interrupted" result.
 
 use crate::message::{Message, Role};
-use smelt_buffer::text;
+use smelt_text as text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserHistoryContent {
@@ -1212,8 +1212,8 @@ mod tests {
         let placement = ImagePlacement {
             source: format!(
                 "look {} then {}",
-                smelt_buffer::ATTACHMENT_MARKER,
-                smelt_buffer::ATTACHMENT_MARKER
+                smelt_text::ATTACHMENT_MARKER,
+                smelt_text::ATTACHMENT_MARKER
             ),
             image_indices: vec![0, 0],
         };
