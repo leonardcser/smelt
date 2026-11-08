@@ -345,7 +345,7 @@ impl TuiApp {
                                         &submission.display,
                                         sent_at_ms,
                                     );
-                                    true
+                                    false
                                 }
                             };
                             if self.pending_quit {
@@ -396,7 +396,7 @@ impl TuiApp {
         let _ = self.queue_prompt_text_changed_if_dirty();
     }
 
-    /// Brings the stashed draft back once a submission empties the prompt,
+    /// Brings the stashed draft back once a sent message empties the prompt,
     /// unless the submission opened a dialog that owns the prompt.
     fn restore_stash_after_submit(&mut self) {
         if self.ui.active_modal().is_some() {
@@ -897,7 +897,6 @@ impl TuiApp {
                 if self.pending_quit {
                     return EventOutcome::Quit;
                 }
-                self.restore_stash_after_submit();
                 return EventOutcome::Noop;
             }
         } else if submission.content.image_count() == 0 {
@@ -907,7 +906,6 @@ impl TuiApp {
                 sent_at_ms,
             ) {
                 self.commit_prompt_submission(edit);
-                self.restore_stash_after_submit();
                 return outcome;
             }
         }
