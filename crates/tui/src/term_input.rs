@@ -272,17 +272,13 @@ impl KittyProbe {
     }
 
     /// Records a [`TerminalReply::KittyGraphics`] answer.
+    #[cfg(unix)]
     pub(crate) fn answered(&mut self, supported: bool, mut write: impl FnMut(&[u8]) -> bool) {
         self.pending = false;
-        #[cfg(unix)]
-        {
-            self.supported = supported;
-            if supported && !self.in_tmux {
-                write(CELL_PIXEL_QUERY);
-            }
+        self.supported = supported;
+        if supported && !self.in_tmux {
+            write(CELL_PIXEL_QUERY);
         }
-        #[cfg(not(unix))]
-        let _ = (supported, &mut write);
     }
 
     /// A font change can alter cell pixels without changing rows or columns.
