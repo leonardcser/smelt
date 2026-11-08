@@ -592,7 +592,7 @@ fn vim_visual_ctrl_q_steers_selection_only() {
 
     app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
 
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_request_count(), 1);
     assert_eq!(app.state().prompt_text, "alpha  gamma");
     assert!(app.actions().iter().any(|action| matches!(
         action,
@@ -616,7 +616,7 @@ fn vim_visual_ctrl_q_with_image_steers_and_restores_selection() {
 
     app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
 
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_request_count(), 1);
     assert_eq!(
         app.state().prompt_text,
         format!("keep {}", crate::input::ATTACHMENT_MARKER)
@@ -630,7 +630,7 @@ fn vim_visual_ctrl_q_with_image_steers_and_restores_selection() {
 
     app.press(KeyCode::Esc);
     app.press(KeyCode::Esc);
-    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.queued_request_count(), 0);
     assert_eq!(
         app.state().prompt_text,
         format!("send {0}\nkeep {0}", crate::input::ATTACHMENT_MARKER)

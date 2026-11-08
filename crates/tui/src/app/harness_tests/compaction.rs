@@ -1937,7 +1937,7 @@ fn non_compaction_request_hook_does_not_defer_force_pop() {
     app.press(KeyCode::Enter);
     app.press(KeyCode::Enter);
     assert_ne!(app.current_turn_id(), Some(42));
-    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.queued_request_count(), 0);
     assert_eq!(app.working_probe().phase_label(), Some("working"));
 }
 
@@ -2226,7 +2226,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
                         } else if action == "withdraw" {
                             app.press(KeyCode::Esc);
                             app.press(KeyCode::Esc);
-                            assert_eq!(app.queued_message_count(), 0);
+                            assert_eq!(app.queued_request_count(), 0);
                         }
                         assert_eq!(
                             app.current_turn_id(),
@@ -2269,7 +2269,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
                 }
             }
             assert!(!app.agent_running());
-            assert_eq!(app.queued_message_count(), 0);
+            assert_eq!(app.queued_request_count(), 0);
             app.save_session_and_flush();
             let session_id = app.session_snapshot().id;
             let history =

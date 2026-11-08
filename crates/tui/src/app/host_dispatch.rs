@@ -974,7 +974,7 @@ mod tests {
                     .any(|cmd| matches!(cmd, UiCommand::StartTurn(payload)
                     if payload.input.provider_content().text_content() == "override body"
                         && payload.reasoning_effort == protocol::ReasoningEffort::High)));
-                assert_eq!(app.queued_message_count(), 0);
+                assert_eq!(app.queued_request_count(), 0);
             }
         }
     }
@@ -1068,7 +1068,7 @@ mod tests {
                             kind: None,
                             retry_at_ms: None,
                         });
-                        assert_eq!(app.queued_message_count(), usize::from(handoff));
+                        assert_eq!(app.queued_request_count(), usize::from(handoff));
                         assert!(!app
                             .drain_engine_sends()
                             .iter()
@@ -1088,7 +1088,7 @@ mod tests {
                         .iter()
                         .any(|command| matches!(command, UiCommand::StartTurn(payload)
                         if payload.input.provider_content().text_content() == "NEXT_TASK")));
-                    assert_eq!(app.queued_message_count(), 0);
+                    assert_eq!(app.queued_request_count(), 0);
                 }
             }
         }

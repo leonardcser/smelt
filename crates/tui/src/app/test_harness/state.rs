@@ -196,7 +196,7 @@ impl TestApp {
 
     /// Number of messages already promoted into the active turn's request
     /// queue. Used by `Steered` invariants that assert ack drain semantics.
-    pub fn queued_message_count(&self) -> usize {
+    pub fn queued_request_count(&self) -> usize {
         self.tui.prompt.queued_request_len()
     }
 

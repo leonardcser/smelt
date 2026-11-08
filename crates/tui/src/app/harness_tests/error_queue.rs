@@ -29,7 +29,7 @@ fn turn_error_preserves_request_queue() {
 
     assert!(!app.agent_running(), "error should end the active turn");
     assert_eq!(
-        app.queued_message_count(),
+        app.queued_request_count(),
         1,
         "request-stage queued input should be preserved on error"
     );
@@ -1748,7 +1748,7 @@ fn turn_complete_still_chains_queued_turn() {
         app.agent_running(),
         "queued turn should start on clean completion"
     );
-    assert!(app.queued_message_count() == 0 || app.state().queued_inputs.is_empty());
+    assert!(app.queued_request_count() == 0 || app.state().queued_inputs.is_empty());
 }
 
 /// Summaries of the transcript's compaction markers and whether a preview
