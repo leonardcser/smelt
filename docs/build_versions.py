@@ -2,7 +2,8 @@
 """Build the docs for main and every release tag into one versioned site.
 
 Each version lands in `site/<tag>/` and main in `site/main/`; `site/latest/`
-holds the newest release. Every version shows the landing page from main.
+holds the newest release. Every version shows the landing page and the
+benchmarks and design pages from main.
 `versions.json` feeds the theme's version selector in
 the format mike writes. The root, and any link from before the site had
 versions, redirects to `latest/`.
@@ -40,9 +41,22 @@ FIRST = (0, 6, 0)
 # What a docs build reads from a checkout.
 TREES = ("docs", "runtime")
 SELECTOR_CSS = "stylesheets/versions.css"
-# The landing page, relative to `docs/`. It belongs to the site, not to any one
-# version, so every build takes it from main, with the replays it embeds.
-HOME = ("overrides/home.html", "docs/index.md", "docs/javascripts/home.js", "docs/assets/social-card.png")
+# Guide pages that describe smelt today, not one release, with their nav titles.
+# Every build takes them from main, so an old version never shows stale numbers.
+SITE_PAGES = {
+    "docs/guide/benchmarks.md": "Benchmarks",
+    "docs/guide/design.md": "Design decisions",
+}
+# The landing page and the site pages, relative to `docs/`. They belong to the
+# site, not to any one version, so every build takes them from main, with the
+# replays the landing page embeds.
+HOME = (
+    "overrides/home.html",
+    "docs/index.md",
+    "docs/javascripts/home.js",
+    "docs/assets/social-card.png",
+    *SITE_PAGES,
+)
 # Files fetched at the site root by tools that don't run the 404 redirect,
 # like `curl | sh` and LLM crawlers, taken from main.
 ROOT = ("install.sh", "llms.txt")
@@ -67,6 +81,23 @@ def home_files() -> list[str]:
     """`HOME` and the replays the landing page embeds."""
     replays = re.findall(r'data-replay="(assets/replays/[^"]+)"', (DOCS / HOME[0]).read_text())
     return [*HOME, *(f"docs/{replay}" for replay in replays)]
+
+
+def add_site_pages(config: str) -> str:
+    """Add the nav entry of each site page that this version's config lacks,
+    after its last guide page."""
+    for page, title in SITE_PAGES.items():
+        nav = page.removeprefix("docs/")
+        if f'"{nav}"' in config:
+            continue
+        entries = list(re.finditer(r'^( *)\{ "[^"]+" = "guide/[^"]+\.md" \},?\n', config, flags=re.MULTILINE))
+        if not entries:
+            continue
+        last = entries[-1]
+        line = last[0].rstrip("\n").removesuffix(",") + ",\n"
+        entry = f'{last[1]}{{ "{title}" = "{nav}" }},\n'
+        config = config[: last.start()] + line + entry + config[last.end() :]
+    return config
 
 
 def normalize_replay_paths(site: Path) -> None:
@@ -96,6 +127,7 @@ def build(source: Path, name: str, strict: bool) -> bool:
     # every build gets it here and `zensical serve` goes without.
     text += '\n[project.extra.version]\nprovider = "mike"\n'
     text = re.sub(r"^extra_css = \[", f'extra_css = ["{SELECTOR_CSS}", ', text, count=1, flags=re.MULTILINE)
+    text = add_site_pages(text)
     shutil.copy(DOCS / "versions.css", source / "docs" / SELECTOR_CSS)
     for path in home_files():
         (source / path).parent.mkdir(parents=True, exist_ok=True)
