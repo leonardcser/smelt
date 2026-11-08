@@ -3823,6 +3823,43 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
 }
 
 #[test]
+fn chained_dialog_opens_before_the_frame_that_follows_the_closing_key() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        local function page(title)
+          local buf = smelt.buf.new({ readonly = true })
+          buf:lines({ title })
+          local leaf = smelt.dialog.content({ buf = buf, interactive = true })
+          return smelt.dialog.open({
+            title = title,
+            height = 4,
+            panels = { { leaf = leaf, height = "fill" } },
+            focus = leaf,
+            keymaps = { { key = "<Esc>", on_press = function(ctx) ctx.close() end } },
+          })
+        end
+        smelt.spawn(function()
+          page("first")
+          page("second")
+        end)
+        "#
+    ));
+    app.feed_one(SourceEvent::LuaWakeup);
+    let first = app.state().active_modal.expect("first dialog opens");
+
+    app.press(KeyCode::Esc);
+    let frame = app.render_to_frame();
+
+    let second = app
+        .state()
+        .active_modal
+        .expect("the next dialog is open in the first frame after the closing key");
+    assert_ne!(first, second);
+    assert!(frame.text().contains("second"));
+}
+
+#[test]
 fn colon_in_non_vim_mode_does_not_open_cmdline() {
     let mut app = TestApp::builder().build();
     app.type_char(':');

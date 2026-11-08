@@ -49,13 +49,13 @@ impl LuaRuntimeController {
         self.wakeup_rx.recv().await
     }
 
-    pub(super) fn drain_wakeups(&mut self) {
-        while self.wakeup_rx.try_recv().is_ok() {}
-    }
-
-    #[cfg(test)]
-    pub(super) fn try_receive_wakeup(&mut self) -> bool {
-        self.wakeup_rx.try_recv().is_ok()
+    /// Consume every pending wakeup; returns whether there was one.
+    pub(super) fn take_wakeups(&mut self) -> bool {
+        let mut woken = false;
+        while self.wakeup_rx.try_recv().is_ok() {
+            woken = true;
+        }
+        woken
     }
 
     fn schedule_reload(&mut self, kind: LuaReloadKind) -> bool {
@@ -339,7 +339,7 @@ impl TuiApp {
 
     #[cfg(test)]
     pub(crate) fn try_receive_lua_wakeup(&mut self) -> bool {
-        self.lua.try_receive_wakeup()
+        self.lua.take_wakeups()
     }
 
     pub(crate) fn drain_idle_work(&mut self) -> bool {
@@ -1232,7 +1232,7 @@ mod controller_tests {
         assert!(!controller.take_runtime_reconcile());
 
         controller.wakeup_sender().send(()).unwrap();
-        assert!(controller.try_receive_wakeup());
-        assert!(!controller.try_receive_wakeup());
+        assert!(controller.take_wakeups());
+        assert!(!controller.take_wakeups());
     }
 }

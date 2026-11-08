@@ -3946,7 +3946,7 @@ impl TuiApp {
                 }
 
                 Some(_) = self.lua.receive_wakeup() => {
-                    self.lua.drain_wakeups();
+                    self.lua.take_wakeups();
                     self.flush_lua_callbacks();
                     self.drive_lua_tasks();
                     self.request_continuation_render();

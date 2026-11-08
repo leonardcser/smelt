@@ -2541,10 +2541,6 @@ fn diff_reopen_shows_previous_snapshot_while_refreshing() {
     assert!(app.run_lua("smelt.cmd.run('diff')"));
     let frame = app.render_to_frame().text();
     assert!(frame.contains("first.rs"), "{frame}");
-    assert!(frame.contains("refreshing"), "{frame}");
-    drive_lua_tasks(&mut app);
-    let frame = app.render_to_frame().text();
-    assert!(frame.contains("first.rs"), "{frame}");
     assert!(!frame.contains("refreshing"), "{frame}");
 }
 

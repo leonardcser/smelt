@@ -204,6 +204,15 @@ impl TuiApp {
         self.finish_lua_work(&work);
     }
 
+    /// Resume Lua tasks that are waiting on a wakeup. A frame painted first
+    /// would show the state between two steps of a task, such as no dialog
+    /// between a closed dialog and the one the task opens next.
+    pub(crate) fn drive_woken_lua_tasks(&mut self) {
+        if self.lua.take_wakeups() {
+            self.drive_lua_tasks();
+        }
+    }
+
     pub(crate) fn drive_lua_tasks(&mut self) {
         let work = self.lua.shared().begin_work();
         self.flush_lua_callbacks();

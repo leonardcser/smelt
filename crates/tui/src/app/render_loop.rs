@@ -1085,6 +1085,7 @@ impl TuiApp {
     }
 
     fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W, compose: bool) {
+        self.drive_woken_lua_tasks();
         smelt_view::display_layout::update_kitty_geometry();
         let frame_trace = self
             .frame_scheduler
