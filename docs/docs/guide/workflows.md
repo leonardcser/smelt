@@ -63,6 +63,8 @@ ignored. Use `/files git` for Git-tracked files only. Press `Enter` to open the
 selection in `$VISUAL`, then `$EDITOR`, then `vi`. Quit the editor to return to
 smelt.
 
+<figure class="term" data-replay="../../assets/replays/files.json" aria-label="Finding src/pricing.rs with /files, opening it in Neovim, then returning to smelt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
 Run `/search` to search the contents of the same files, or `/search git` for
 Git-tracked files only. Results list each matching line as
 `path:line:column: text` and stream in as files are searched. The query is
@@ -70,13 +72,13 @@ literal, and case-insensitive unless it has an uppercase letter. The preview
 shows the file at the selected line with every match highlighted. `Enter` opens
 the editor at that line.
 
-<figure class="term" data-replay="../../assets/replays/files.json" aria-label="Finding src/pricing.rs with /files, opening it in Neovim, then returning to smelt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+<figure class="term" data-replay="../../assets/replays/contents.json" aria-label="Searching file contents for discount with /search, previewing each match, then opening one in Neovim" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 ## See images and math
 
 The agent can show you an image file, such as a screenshot or a chart:
 
-<figure class="term" data-replay="../../assets/replays/image.json" aria-label="The agent shows a screenshot of a shopping cart page inline in the transcript" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+<figure class="term" data-replay="../../assets/replays/image.json" aria-label="The agent shows a plot of the lamp discount inline in the transcript" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 LaTeX math in answers renders as images too:
 
@@ -256,6 +258,10 @@ smelt compacts automatically. When a request would use more than 80% of the
 model's context window, it summarizes older messages and keeps recent turns. The
 transcript stays intact, and the prompt bar shows how full the window is (a `?`
 means the number is from another model and refreshes after the next response).
+Run `/context` to see how the window is used, split into system prompt, tools,
+skills and history:
+
+<figure class="term" data-replay="../../assets/replays/context.json" aria-label="/context showing the context window as a colored grid" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 Use `/compact` only for manual control, such as choosing what the summary keeps:
 
