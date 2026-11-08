@@ -3657,7 +3657,7 @@ dependencies = [
 name = "smelt-ansi"
 version = "0.5.0"
 dependencies = [
- "smelt-style 0.6.0",
+ "smelt-style 0.6.1",
 ]
 
 [[package]]
@@ -3668,7 +3668,7 @@ dependencies = [
  "serde",
  "sha2",
  "smelt-perf 0.3.0",
- "smelt-style 0.6.0",
+ "smelt-style 0.6.1",
  "smelt-text",
  "tempfile",
 ]
@@ -3682,7 +3682,7 @@ dependencies = [
  "serde",
  "sha2",
  "smelt-perf 0.3.0 (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
- "smelt-style 0.6.0 (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
+ "smelt-style 0.6.0",
  "unicode-segmentation",
 ]
 
@@ -3916,14 +3916,6 @@ dependencies = [
 [[package]]
 name = "smelt-style"
 version = "0.6.0"
-dependencies = [
- "unicode-segmentation",
- "unicode-width",
-]
-
-[[package]]
-name = "smelt-style"
-version = "0.6.0"
 source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
 dependencies = [
  "unicode-segmentation",
@@ -3931,14 +3923,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-style"
+version = "0.6.1"
+dependencies = [
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
 name = "smelt-term"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "compact_str",
  "crossterm",
  "insta",
  "smelt-ansi",
- "smelt-style 0.6.0",
+ "smelt-style 0.6.1",
  "unicode-width",
  "vt100",
 ]
@@ -3951,7 +3951,7 @@ version = "0.0.0-dev"
 name = "smelt-text"
 version = "0.0.0-dev"
 dependencies = [
- "smelt-style 0.6.0",
+ "smelt-style 0.6.1",
  "unicode-segmentation",
 ]
 
