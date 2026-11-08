@@ -127,6 +127,9 @@ struct Window {
     parser: SyntaxParser,
     /// Parser states before every `CHECKPOINT_LINES`th line in the window.
     checkpoints: Vec<(usize, SyntaxParser)>,
+    /// Parser state before the source's last line, the one line that can
+    /// change as the source grows.
+    before_last: Option<(usize, SyntaxParser)>,
 }
 
 impl Window {
@@ -136,6 +139,7 @@ impl Window {
             lines: Vec::new(),
             parser: SyntaxParser::new(syntax),
             checkpoints: Vec::new(),
+            before_last: None,
         }
     }
 
@@ -143,13 +147,19 @@ impl Window {
         self.start + self.lines.len()
     }
 
-    /// Forgets lines from `line` on, resuming from the last checkpoint.
+    /// Forgets lines from `line` on, resuming from the parser state before
+    /// `line` when the window kept it, else from the last checkpoint.
     fn truncate(&mut self, syntax: Syntax, line: usize) {
         if line >= self.end() {
             return;
         }
         let kept = self.checkpoints.partition_point(|(at, _)| *at <= line);
         self.checkpoints.truncate(kept);
+        if let Some((_, parser)) = self.before_last.take_if(|(at, _)| *at == line) {
+            self.lines.truncate(line - self.start);
+            self.parser = parser;
+            return;
+        }
         match self.checkpoints.pop() {
             Some((at, parser)) => {
                 self.lines.truncate(at - self.start);
@@ -165,6 +175,7 @@ impl Window {
         self.lines.drain(..drop);
         self.start += drop;
         self.checkpoints.retain(|(at, _)| *at >= self.start);
+        self.before_last.take_if(|(at, _)| *at < self.start);
     }
 }
 
@@ -334,6 +345,9 @@ impl SourceHighlighter {
             }
             if index.is_multiple_of(CHECKPOINT_LINES) {
                 window.checkpoints.push((index, window.parser.clone()));
+            }
+            if index + 1 == count {
+                window.before_last = Some((index, window.parser.clone()));
             }
             let Some(line) = source.line(index) else {
                 window.parser = SyntaxParser::new(self.syntax);
@@ -597,7 +611,21 @@ mod tests {
         lines.push("let tail = 1;");
         assert_eq!(parsed(9_990..10_001, &lines), 10_001 - 7_942);
         lines.push("let more = 2;");
-        assert!(parsed(9_990..10_002, &lines) <= 2 + CHECKPOINT_LINES);
+        assert_eq!(parsed(9_990..10_002, &lines), 2);
+    }
+
+    #[test]
+    fn streaming_lines_parse_only_the_changed_tail() {
+        let owned: Vec<String> = (0..300).map(|i| format!("let x{i} = \"{i}\";")).collect();
+        let highlighter = SourceHighlighter::new(Syntax::for_ext("rs"));
+        let mut lines: Vec<&str> = vec![];
+        for (i, line) in owned.iter().enumerate() {
+            lines.push(line);
+            PARSED_LINES.with(|count| count.set(0));
+            let spans = highlighter.spans(&lines[..], i.saturating_sub(40)..i + 1, &theme());
+            assert!(PARSED_LINES.with(std::cell::Cell::get) <= 2, "line {i}");
+            assert_eq!(spans.last(), full(Syntax::for_ext("rs"), &lines).last());
+        }
     }
 
     #[test]
