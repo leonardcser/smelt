@@ -939,14 +939,19 @@ mod tests {
     }
 
     /// Backdate every file under `dir`, as if the repository had been idle.
+    /// Files git removes mid-walk, such as lock files, are skipped.
     fn settle(dir: &Path) {
         let old = SystemTime::now() - std::time::Duration::from_secs(60);
         let mut pending = vec![dir.to_path_buf()];
         while let Some(path) = pending.pop() {
             if path.is_dir() {
-                pending.extend(fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+                if let Ok(entries) = fs::read_dir(&path) {
+                    pending.extend(entries.flatten().map(|e| e.path()));
+                }
             }
-            fs::File::open(&path).unwrap().set_modified(old).unwrap();
+            if let Ok(file) = fs::File::open(&path) {
+                let _ = file.set_modified(old);
+            }
         }
     }
 
