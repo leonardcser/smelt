@@ -1829,3 +1829,28 @@ fn failed_native_compaction_returns_to_working() {
     assert_eq!(compaction_blocks(&app), (Vec::new(), false));
     assert!(app.state().notification.is_some(), "the failure is shown");
 }
+
+#[test]
+fn quota_error_between_turns_pauses_and_resumes() {
+    let mut app = isolated_app();
+    let turn_id = start_canonical_turn(&mut app);
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id,
+        history: None,
+        meta: None,
+    }));
+    app.wait_for_turn_dispatch();
+    assert!(!app.agent_running());
+
+    quota_error(&mut app, Some(0));
+    app.drain_signals_pending();
+
+    let status: Option<String> = app
+        .eval_lua(r#"local s = smelt.signal.get("auto_continue_status"); return s and (s.kind .. "/" .. s.phase)"#)
+        .unwrap();
+    assert!(
+        status.as_deref().is_some_and(|s| s.starts_with("quota/")),
+        "{status:?}"
+    );
+    assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
+}

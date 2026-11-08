@@ -583,6 +583,22 @@ impl TuiApp {
         self.start_next_queued_input_if_idle();
     }
 
+    /// A limit error that the turn can resume from goes to the message log; the
+    /// pause line already tells the user. Other errors raise a sticky notice.
+    fn report_turn_error(&mut self, message: String, kind: Option<protocol::EngineAskErrorKind>) {
+        if crate::app::agent::is_resumable_turn_error(kind) {
+            if let Ok(mut messages) = self.lua.core_shared().messages.lock() {
+                messages.append(
+                    smelt_core::messages::MessageKind::Error,
+                    "smelt".into(),
+                    message,
+                );
+            }
+        } else {
+            self.notify_turn_error_sticky(message);
+        }
+    }
+
     /// Ends the native session with everything it runs, for history it no
     /// longer matches.
     pub(crate) fn cancel_native_session(&mut self) {
@@ -1190,23 +1206,7 @@ impl TuiApp {
                         message: message.clone(),
                     }),
                 );
-                if matches!(
-                    kind,
-                    Some(
-                        protocol::EngineAskErrorKind::Quota
-                            | protocol::EngineAskErrorKind::RateLimited
-                    )
-                ) {
-                    if let Ok(mut messages) = self.lua.core_shared().messages.lock() {
-                        messages.append(
-                            smelt_core::messages::MessageKind::Error,
-                            "smelt".into(),
-                            message,
-                        );
-                    }
-                } else {
-                    self.notify_turn_error_sticky(message);
-                }
+                self.report_turn_error(message, kind);
                 SessionControl::Error { kind, retry_at_ms }
             }
             EngineEvent::Shutdown { .. } => SessionControl::Error {
@@ -1352,9 +1352,17 @@ impl TuiApp {
             | EngineEvent::EngineAskResponse { .. }) => {
                 self.dispatch_engine_ask_event(&event, arrived_at);
             }
-            EngineEvent::TurnError { message, .. } => {
+            EngineEvent::TurnError {
+                message,
+                kind,
+                retry_at_ms,
+            } => {
                 self.working.finish(TurnOutcome::Errored);
-                self.notify_turn_error_sticky(message);
+                if crate::app::agent::is_resumable_turn_error(kind) {
+                    self.record_turn_end(crate::app::TurnEnd::Errored { kind, retry_at_ms });
+                    self.save_session();
+                }
+                self.report_turn_error(message, kind);
             }
             EngineEvent::RequestAuditError { message } => {
                 self.notify_warn(message);

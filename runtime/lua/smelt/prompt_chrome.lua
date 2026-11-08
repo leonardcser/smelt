@@ -273,6 +273,21 @@ local function banked_coal()
 end
 
 local done_at
+local paused_at
+
+-- How far a coal that began cooling at `since` has gone toward gray, from 0 to
+-- 1; `unset` when it never began.
+local function cooled(since, now, unset)
+  if not since then return unset end
+  return math.min((now - since) / COOL_MS, 1)
+end
+smelt.signal.subscribe("auto_continue_status", function(status)
+  if status and status.phase ~= "resuming" then
+    paused_at = paused_at or smelt.time.now_ms()
+  else
+    paused_at = nil
+  end
+end)
 smelt.signal.subscribe("work_state", function(state)
   if state == "done" or state == "interrupted" or state == "idle" then
     settle(smelt.time.now_ms())
@@ -329,8 +344,8 @@ local function typed_label(label, ctx)
   }
 end
 
--- A turn paused by a limit keeps its dim coal. The text says why it waits and
--- when it resumes.
+-- A turn paused by a limit cools its coal to gray like a finished turn, since
+-- nothing is running. The text says why it waits and when it resumes.
 define("pause", { "auto_continue_status" }, function()
   local pause = smelt.signal.get("auto_continue_status")
   if not pause then return nil end
@@ -349,7 +364,9 @@ define("pause", { "auto_continue_status" }, function()
     if time then action = "resuming at " .. time end
   end
   return {
-    coal_item(function() return mix(ground(), heat(), PAUSED_LEVEL) end),
+    coal_item(function(now)
+      return mix(heat(), ash(), cooled(paused_at, now, 0))
+    end, function(now) return cooled(paused_at, now, 1) < 1 end),
     { text = reason, style = COMMENT_DIM_STYLE, priority = INDICATOR_PRIORITY, separated = true },
     { text = action, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY, separated = true },
   }
@@ -385,8 +402,8 @@ define("indicator", { "auto_continue_status", "work_state", "work_label" }, func
   if state == "paused" then
     mark = coal_item(function() return mix(ground(), heat(), PAUSED_LEVEL) end)
   elseif state == "done" then
-    local function cool(now) return done_at and math.min((now - done_at) / COOL_MS, 1) or 1 end
-    mark = coal_item(function(now) return mix(heat(), ash(), cool(now)) end, function(now) return cool(now) < 1 end)
+    mark = coal_item(function(now) return mix(heat(), ash(), cooled(done_at, now, 1)) end,
+      function(now) return cooled(done_at, now, 1) < 1 end)
   else
     mark = coal_item(ash)
   end

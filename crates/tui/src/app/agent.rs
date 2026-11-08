@@ -469,7 +469,7 @@ struct PreparedTurnDispatch {
     tools: Vec<protocol::ToolDef>,
 }
 
-fn is_resumable_turn_error(kind: Option<protocol::EngineAskErrorKind>) -> bool {
+pub(crate) fn is_resumable_turn_error(kind: Option<protocol::EngineAskErrorKind>) -> bool {
     matches!(
         kind,
         Some(protocol::EngineAskErrorKind::Quota | protocol::EngineAskErrorKind::RateLimited)
@@ -1572,20 +1572,10 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn finish_turn(&mut self, end: crate::app::TurnEnd) -> bool {
-        self.cancel_request_hook();
-        let _perf = smelt_perf::perf::begin("tui:finish_turn");
+    /// Records how a turn ended: the pause that a limit error leaves, the
+    /// continuation token that lets it resume, and the `turn_end` signal.
+    pub(crate) fn record_turn_end(&mut self, end: crate::app::TurnEnd) {
         use crate::app::TurnEnd;
-
-        let turn_id = self.conversation.active().map(|turn| turn.turn_id);
-
-        match end {
-            TurnEnd::Cancelled => self.cancel_turn_work(),
-            TurnEnd::Complete | TurnEnd::Errored { .. } => {
-                self.platform.set_sleep_inhibited(false);
-            }
-        }
-
         let interrupted = !matches!(end, TurnEnd::Complete);
         let (error_kind, retry_at_ms) = match &end {
             TurnEnd::Errored { kind, retry_at_ms } => (*kind, *retry_at_ms),
@@ -1615,6 +1605,23 @@ impl TuiApp {
                 retry_at_ms,
             }),
         );
+    }
+
+    pub(crate) fn finish_turn(&mut self, end: crate::app::TurnEnd) -> bool {
+        self.cancel_request_hook();
+        let _perf = smelt_perf::perf::begin("tui:finish_turn");
+        use crate::app::TurnEnd;
+
+        let turn_id = self.conversation.active().map(|turn| turn.turn_id);
+
+        match end {
+            TurnEnd::Cancelled => self.cancel_turn_work(),
+            TurnEnd::Complete | TurnEnd::Errored { .. } => {
+                self.platform.set_sleep_inhibited(false);
+            }
+        }
+
+        self.record_turn_end(end);
         {
             let _perf = smelt_perf::perf::begin("tui:finish_turn:pump_lua");
             self.pump_lua();
