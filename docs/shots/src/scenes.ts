@@ -168,6 +168,8 @@ export const scenes: Record<string, Scene> = {
   files: {
     mock: true,
     realtime: true,
+    cols: 130,
+    rows: 28,
     files: {
       "plugins/editor.lua": `smelt.os.setenv("VISUAL", "nvim --clean -n -i NONE -c 'set number background=dark'")\n`,
     },
@@ -189,12 +191,51 @@ export const scenes: Record<string, Scene> = {
     ],
   },
 
+  /** Search file contents with a live preview of each match, then open the match in Neovim. */
+  contents: {
+    mock: true,
+    realtime: true,
+    cols: 130,
+    rows: 28,
+    files: {
+      "plugins/editor.lua": `smelt.os.setenv("VISUAL", "nvim --clean -n -i NONE -c 'set number background=dark'")\n`,
+    },
+    steps: [
+      { type: "/search" },
+      { key: "Enter" },
+      { pause: 1500 },
+      { type: "discount" },
+      { pause: 1800 },
+      { press: ["Up", "Up", "Up", "Up"], gap: 800 },
+      { pause: 1800 },
+      { key: "Enter" },
+      { wait: /All/ },
+      { pause: 2000 },
+      { type: ":q" },
+      { key: "Enter" },
+      { wait: /○ normal/ },
+      { pause: 1200 },
+    ],
+  },
+
+  /** See how the context window is used. */
+  context: {
+    mock: true,
+    realtime: true,
+    steps: [
+      { pause: 1000 },
+      { type: "/context" },
+      { key: "Enter" },
+      { pause: 3500 },
+    ],
+  },
+
   /** The agent calls a tool a plugin gave it. */
   tool: {
     fromSubmit: true,
     realtime: true,
     cols: 80,
-    rows: 24,
+    rows: 28,
     files: { "plugins/crates.lua": plugin("crates") },
     steps: [
       { pause: 1200 },
@@ -212,7 +253,7 @@ export const scenes: Record<string, Scene> = {
     realtime: true,
     kitty: true,
     cols: 80,
-    rows: 24,
+    rows: 28,
     steps: [
       { pause: 1200 },
       { type: "what are the equations for gradient descent and adam? keep it brief" },
@@ -232,10 +273,10 @@ export const scenes: Record<string, Scene> = {
     photos: true,
     cols: 90,
     rows: 34,
-    projectFiles: { "screenshots/cart.png": "cart.png" },
+    projectFiles: { "plots/lamp.png": "lamp.png" },
     steps: [
       { pause: 1200 },
-      { type: "show me the screenshot of the cart page" },
+      { type: "show me the plot of the lamp discount" },
       { pause: 400 },
       { key: "Enter" },
       { until: /─ ● done/ },
@@ -274,7 +315,7 @@ export const scenes: Record<string, Scene> = {
   snake: {
     fromSubmit: true,
     realtime: true,
-    rows: 24,
+    rows: 28,
     steps: [
       { pause: 1200 },
       { type: "which edge cases does apply_discount miss?" },
@@ -384,7 +425,7 @@ export const scenes: Record<string, Scene> = {
   /** Interrupt a turn, then press Enter on the empty prompt to carry on. */
   continue: {
     realtime: true,
-    rows: 24,
+    rows: 28,
     steps: [
       { speed: 4 },
       { pause: 1200 },
@@ -407,7 +448,7 @@ export const scenes: Record<string, Scene> = {
     vim: true,
     mock: true,
     cols: 110,
-    rows: 24,
+    rows: 28,
     from: /─ ● done/,
     steps: [
       { pause: 1200 },
