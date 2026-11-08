@@ -275,7 +275,6 @@ fn remove_abandoned_endpoints(directory: &std::path::Path) {
     }
 }
 
-#[cfg(unix)]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompleteRequest {
