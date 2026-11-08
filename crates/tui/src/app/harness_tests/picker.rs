@@ -95,6 +95,24 @@ fn prompt_picker_esc_fires_on_dismiss() {
 }
 
 #[test]
+fn command_picker_ignores_leftover_prompt_text() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+            smelt.cmd.register_picker("pick_test", {
+                items = { { label = "alpha" }, { label = "beta" } },
+                on_enter = function() end,
+            })
+            smelt.prompt.set_text("zzzz")
+            smelt.spawn(function() smelt.cmd.run("/pick_test") end)
+        "#,
+    ));
+    drive_lua_tasks(&mut app);
+    assert!(app.overlays_probe().has_pickers());
+    assert!(app.run_lua(r#"assert(smelt.prompt.text() == "")"#));
+}
+
+#[test]
 fn floating_picker_ctrl_c_dismisses_before_idle_quit() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(

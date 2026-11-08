@@ -31,6 +31,8 @@ end
 local function run_picker(opts)
   local selected = opts.selected
   if type(selected) == "function" then selected = selected() end
+  -- A command picker starts unfiltered; leftover draft text must not narrow it.
+  smelt.prompt.set_text("")
   if opts.stay_open then
     -- The picker owns repeated actions and keeps the cursor on the acted row.
     smelt.picker.open({
