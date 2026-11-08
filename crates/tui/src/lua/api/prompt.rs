@@ -59,8 +59,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Submit the prompt as Enter does: send it, queue it while the agent works, or run the command it holds. With `text`, the prompt holds `text` first. The app submits after the current Lua callback returns.",
         &["text"],
         |_, text: Option<String>| -> LuaResult<()> {
-            crate::lua::with_conversation_host(|host| host.queue_prompt_submit(text))
-                .map_err(LuaError::RuntimeError)
+            crate::lua::with_conversation_host(|host| {
+                host.queue_prompt_submit(text, crate::app::QueueStage::Turn)
+            })
+            .map_err(LuaError::RuntimeError)
+        },
+    )?;
+    m.live_only_fn(
+        "steer",
+        "Steer the current response with the prompt as Ctrl+Enter does: the agent reads it at its next request instead of waiting for the turn to end. Starts a turn when the agent is idle; does nothing when the prompt is empty. With `text`, the prompt holds `text` first. The app submits after the current Lua callback returns.",
+        &["text"],
+        |_, text: Option<String>| -> LuaResult<()> {
+            crate::lua::with_conversation_host(|host| {
+                host.queue_prompt_submit(text, crate::app::QueueStage::Request)
+            })
+            .map_err(LuaError::RuntimeError)
         },
     )?;
     m.live_only_fn(

@@ -199,6 +199,18 @@ smelt.keymap.set("n", "<C-y>", function()
 end)
 ```
 
+Lua keymaps run before the built-in prompt keys, so binding a built-in chord
+replaces it. To move queue and steer, bind keys to `smelt.prompt.submit()`
+(send, or queue for the next turn while the agent works) and
+`smelt.prompt.steer()` (steer the current response). Use mode `""` unless
+the user has vim enabled:
+
+```lua
+-- In ~/.config/smelt/init.lua
+smelt.keymap.set("", "<C-q>", function() smelt.prompt.submit() end)
+smelt.keymap.set("", "<M-CR>", function() smelt.prompt.steer() end)
+```
+
 To remove a binding programmatically use `smelt.keymap.unset(mode, chord)`. For
 permanent removal, just delete the registration line.
 

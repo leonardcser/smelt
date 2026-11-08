@@ -420,8 +420,12 @@ pub(crate) const MAX_PENDING_LUA_COMMANDS: usize = 256;
 pub(crate) enum DeferredCommand {
     /// A command line, run as `smelt.cmd.run` describes.
     Line(String),
-    /// Submit the prompt as Enter does, after replacing its text when given.
-    SubmitPrompt(Option<String>),
+    /// Submit the prompt as Enter (`Turn`) or steer (`Request`) does, after
+    /// replacing its text when given.
+    SubmitPrompt {
+        text: Option<String>,
+        stage: crate::app::QueueStage,
+    },
 }
 
 impl LuaShared {
@@ -443,8 +447,12 @@ impl LuaShared {
         self.queue_deferred(DeferredCommand::Line(line))
     }
 
-    pub(crate) fn queue_prompt_submit(&self, text: Option<String>) -> Result<(), String> {
-        self.queue_deferred(DeferredCommand::SubmitPrompt(text))
+    pub(crate) fn queue_prompt_submit(
+        &self,
+        text: Option<String>,
+        stage: crate::app::QueueStage,
+    ) -> Result<(), String> {
+        self.queue_deferred(DeferredCommand::SubmitPrompt { text, stage })
     }
 
     fn queue_deferred(&self, command: DeferredCommand) -> Result<(), String> {

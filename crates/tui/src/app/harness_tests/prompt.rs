@@ -616,7 +616,7 @@ fn queued_turn_preserves_work_elapsed() {
         app.agent_running(),
         "queued turn should start after its receipt"
     );
-    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.queued_request_count(), 0);
     assert_eq!(app.state().prompt_text, "");
     assert!(
         saved_elapsed_ms >= 3_000,
@@ -771,7 +771,7 @@ fn request_queue_bindings_steer_running_turn() {
         app.clear_actions();
         app.press_mod(code, KeyModifiers::CONTROL);
 
-        assert_eq!(app.queued_message_count(), 1);
+        assert_eq!(app.queued_request_count(), 1);
         assert_eq!(app.state().prompt_text, "");
         let steered = app.actions().iter().any(|action| match action {
             Action::EngineSend(cmd) => matches!(
@@ -827,7 +827,7 @@ fn queued_submit_cancelling_web_search_does_not_report_an_error() {
     start_stalled_web_search(&mut app);
     app.type_text("start this next");
     app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_request_count(), 1);
 
     app.press(KeyCode::Enter);
     drive_lua_tasks(&mut app);
@@ -853,7 +853,7 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
     app.type_text("queued follow-up");
     app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
 
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_request_count(), 1);
     assert!(app.render_to_frame().text().contains("queued follow-up"));
     assert!(!app.transcript_buffer_text().contains("queued follow-up"));
 
@@ -861,14 +861,14 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
     app.tool_finished(tool_a, "tool-a", finished(), Some(10));
 
     assert_eq!(app.pending_tool_invocation_ids(), [tool_b]);
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_request_count(), 1);
     assert!(app.render_to_frame().text().contains("queued follow-up"));
     assert!(!app.transcript_buffer_text().contains("queued follow-up"));
 
     app.tool_finished(tool_b, "tool-b", finished(), Some(20));
 
     assert!(app.pending_tool_invocation_ids().is_empty());
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_request_count(), 1);
     assert!(app.render_to_frame().text().contains("queued follow-up"));
     assert!(!app.transcript_buffer_text().contains("queued follow-up"));
 
@@ -884,7 +884,7 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
         ),
     }));
 
-    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.queued_request_count(), 0);
     assert_eq!(app.state().prompt_text, "");
     assert_eq!(
         app.transcript_block_count(),
@@ -2461,4 +2461,70 @@ fn vim_gg_reveals_top_of_prompt_scrolled_to_bottom() {
     assert_eq!(app.tui.prompt_win().scroll_top(), 0);
     assert!(app.screen_position("line 00").is_some());
     assert!(app.screen_position("line 59").is_none());
+}
+
+fn steered_text(app: &TestApp) -> Option<String> {
+    app.actions().iter().find_map(|action| match action {
+        Action::EngineSend(cmd) => match cmd.as_ref() {
+            protocol::UiCommand::Steer { input } => {
+                Some(input.provider_content().text_content().into_owned())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[test]
+fn lua_keymaps_can_swap_queue_and_steer_keys() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        smelt.keymap.set("", "<C-q>", function() smelt.prompt.submit() end)
+        smelt.keymap.set("", "<M-CR>", function() smelt.prompt.steer() end)
+        "#
+    ));
+    app.start_turn(1);
+    app.drain_engine_sends();
+
+    app.type_text("for next turn");
+    app.clear_actions();
+    app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
+    assert_eq!(steered_text(&app), None);
+    assert_eq!(app.queued_request_count(), 0);
+    assert_eq!(app.state().prompt_text, "");
+
+    app.type_text("change course");
+    app.clear_actions();
+    app.press_mod(KeyCode::Enter, KeyModifiers::ALT);
+    assert_eq!(steered_text(&app).as_deref(), Some("change course"));
+    assert_eq!(app.queued_request_count(), 1);
+    assert_eq!(app.state().prompt_text, "");
+}
+
+#[test]
+fn lua_steer_on_empty_prompt_leaves_queue_alone() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.drain_engine_sends();
+    app.push_queued_message("follow up".to_string());
+    app.clear_actions();
+
+    assert!(app.run_lua("smelt.prompt.steer()"));
+
+    assert_eq!(steered_text(&app), None);
+    assert_eq!(app.queued_request_count(), 0);
+    assert!(!app.queue_is_empty());
+    assert!(app.agent_running());
+}
+
+#[test]
+fn lua_steer_while_idle_starts_turn() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(r#"smelt.prompt.steer("start here")"#));
+    app.wait_for_turn_dispatch();
+
+    assert!(app.agent_running());
+    assert_eq!(app.state().prompt_text, "");
 }

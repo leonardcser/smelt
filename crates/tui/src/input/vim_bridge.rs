@@ -53,7 +53,9 @@ impl PromptState {
                 self.clear_selection(ctx.win);
                 VimBridgeResult::Handled(Action::Redraw)
             }
-            vim::Action::Submit => VimBridgeResult::Handled(self.submit_action(ctx, false)),
+            vim::Action::Submit => {
+                VimBridgeResult::Handled(self.submit_action(ctx, crate::app::QueueStage::Turn))
+            }
             vim::Action::HistoryPrev => {
                 if let Some(entry) = history
                     .as_deref_mut()

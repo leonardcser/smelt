@@ -5,6 +5,7 @@ mod vim_bridge;
 
 pub(crate) use smelt_core::history::History;
 
+use crate::app::QueueStage;
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::smelt_edit::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -97,10 +98,7 @@ pub(crate) enum Action {
     Submit {
         submission: PromptSubmission,
         edit: SubmitEdit,
-    },
-    SubmitToRequestQueue {
-        submission: PromptSubmission,
-        edit: SubmitEdit,
+        stage: QueueStage,
     },
     SubmitEmpty,
     EditInEditor,
@@ -629,7 +627,7 @@ impl PromptState {
     fn visual_submit_action(
         &mut self,
         ctx: &mut PromptCtx<'_>,
-        to_request_queue: bool,
+        stage: QueueStage,
     ) -> Option<Action> {
         if !ctx.win.vim_enabled() {
             return None;
@@ -654,39 +652,31 @@ impl PromptState {
             range: delete_range,
         };
 
-        Some(if to_request_queue {
-            Action::SubmitToRequestQueue { submission, edit }
-        } else {
-            Action::Submit { submission, edit }
+        Some(Action::Submit {
+            submission,
+            edit,
+            stage,
         })
     }
 
-    pub(crate) fn submit_action(
-        &mut self,
-        ctx: &mut PromptCtx<'_>,
-        to_request_queue: bool,
-    ) -> Action {
-        if let Some(action) = self.visual_submit_action(ctx, to_request_queue) {
+    /// Submits the visual selection or the whole prompt at `stage`. An empty
+    /// prompt submits empty, which continues or advances work; steering an
+    /// empty prompt does nothing.
+    pub(crate) fn submit_action(&mut self, ctx: &mut PromptCtx<'_>, stage: QueueStage) -> Action {
+        if let Some(action) = self.visual_submit_action(ctx, stage) {
             return action;
         }
 
-        let source_empty = ctx.buf.source().is_empty();
-        let no_attachments = ctx.buf.attachment_ids.is_empty();
-        if source_empty && no_attachments {
-            Action::SubmitEmpty
-        } else {
-            let submission = self.submission_from_range(ctx.buf, 0..ctx.buf.source().len());
-            if to_request_queue {
-                Action::SubmitToRequestQueue {
-                    submission,
-                    edit: SubmitEdit::Clear,
-                }
-            } else {
-                Action::Submit {
-                    submission,
-                    edit: SubmitEdit::Clear,
-                }
-            }
+        if ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty() {
+            return match stage {
+                QueueStage::Turn => Action::SubmitEmpty,
+                QueueStage::Request => Action::Noop,
+            };
+        }
+        Action::Submit {
+            submission: self.submission_from_range(ctx.buf, 0..ctx.buf.source().len()),
+            edit: SubmitEdit::Clear,
+            stage,
         }
     }
 
@@ -809,9 +799,8 @@ impl PromptState {
             }
 
             // ── Submit / newline ─────────────────────────────────────────
-            KeyAction::Submit | KeyAction::SubmitToRequestQueue => {
-                self.submit_action(ctx, matches!(action, KeyAction::SubmitToRequestQueue))
-            }
+            KeyAction::Submit => self.submit_action(ctx, QueueStage::Turn),
+            KeyAction::SubmitToRequestQueue => self.submit_action(ctx, QueueStage::Request),
             KeyAction::InsertNewline => {
                 if self.selection_range(ctx.as_ref()).is_some() {
                     self.save_undo(ctx);
@@ -2061,10 +2050,13 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            false,
+            QueueStage::Turn,
         );
 
-        let Action::Submit { submission, edit } = action else {
+        let Action::Submit {
+            submission, edit, ..
+        } = action
+        else {
             panic!("expected selected submit");
         };
         assert_eq!(submission.display, "send [send.png]");
@@ -2108,10 +2100,13 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            false,
+            QueueStage::Turn,
         );
 
-        let Action::Submit { submission, edit } = action else {
+        let Action::Submit {
+            submission, edit, ..
+        } = action
+        else {
             panic!("expected whole prompt submit");
         };
         assert_eq!(submission.content.text_content(), "alpha beta");

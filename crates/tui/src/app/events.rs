@@ -366,15 +366,16 @@ impl TuiApp {
         }
     }
 
-    /// Submits the prompt as Enter does, for Lua that owns the Enter key,
-    /// such as a completer. `text` replaces the prompt's text first.
-    pub(crate) fn submit_prompt(&mut self, text: Option<String>) {
+    /// Submits the prompt for Lua as Enter (`Turn`) or steer (`Request`) does,
+    /// such as from a completer or a rebound key. `text` replaces the prompt's
+    /// text first. Steering an empty prompt does nothing.
+    pub(crate) fn submit_prompt(&mut self, text: Option<String>, stage: QueueStage) {
         let action = {
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
             if let Some(text) = text {
                 self.prompt.replace_text(&mut pctx, text);
             }
-            self.prompt.submit_action(&mut pctx)
+            self.prompt.submit_action(&mut pctx, stage)
         };
         let outcome = if self.prompt_work_state().is_busy() {
             self.dispatch_running_input_action(action)
@@ -847,11 +848,12 @@ impl TuiApp {
 
     fn dispatch_running_input_action(&mut self, input_action: Action) -> EventOutcome {
         match input_action {
-            Action::Submit { submission, edit } => {
-                return self.handle_running_submit(submission, edit, QueueStage::Turn);
-            }
-            Action::SubmitToRequestQueue { submission, edit } => {
-                return self.handle_running_submit(submission, edit, QueueStage::Request);
+            Action::Submit {
+                submission,
+                edit,
+                stage,
+            } => {
+                return self.handle_running_submit(submission, edit, stage);
             }
             Action::SubmitEmpty => {
                 return self.handle_empty_submit();
@@ -1103,20 +1105,16 @@ impl TuiApp {
 
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
-            Action::Submit { submission, edit }
-                if self.prompt_work_state() == PromptWorkState::Paused =>
-            {
-                self.handle_running_submit(submission, edit, QueueStage::Turn)
+            Action::Submit {
+                submission,
+                edit,
+                stage,
+            } if self.prompt_work_state() == PromptWorkState::Paused => {
+                self.handle_running_submit(submission, edit, stage)
             }
-            Action::SubmitToRequestQueue { submission, edit }
-                if self.prompt_work_state() == PromptWorkState::Paused =>
-            {
-                self.handle_running_submit(submission, edit, QueueStage::Request)
-            }
-            Action::Submit { submission, edit }
-            | Action::SubmitToRequestQueue { submission, edit } => {
-                EventOutcome::Submit { submission, edit }
-            }
+            Action::Submit {
+                submission, edit, ..
+            } => EventOutcome::Submit { submission, edit },
             Action::SubmitEmpty => self.handle_empty_submit(),
             Action::EditInEditor => {
                 self.edit_in_editor();

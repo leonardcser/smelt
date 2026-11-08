@@ -144,7 +144,9 @@ impl TuiApp {
             }
             match shared.pop_command() {
                 Some(crate::lua::DeferredCommand::Line(line)) => self.apply_lua_command(&line),
-                Some(crate::lua::DeferredCommand::SubmitPrompt(text)) => self.submit_prompt(text),
+                Some(crate::lua::DeferredCommand::SubmitPrompt { text, stage }) => {
+                    self.submit_prompt(text, stage)
+                }
                 None => break,
             }
         }

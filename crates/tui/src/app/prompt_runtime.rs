@@ -100,8 +100,12 @@ impl PromptRuntime {
         self.input.handle_event(ctx, event, history, clipboard, now)
     }
 
-    pub(crate) fn submit_action(&mut self, ctx: &mut PromptCtx<'_>) -> Action {
-        self.input.submit_action(ctx, false)
+    pub(crate) fn submit_action(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        stage: crate::app::QueueStage,
+    ) -> Action {
+        self.input.submit_action(ctx, stage)
     }
 
     pub(crate) fn key_context(

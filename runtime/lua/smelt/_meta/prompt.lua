@@ -84,6 +84,10 @@ prompt.set_resize_handle = nil
 ---@type fun(text: string): nil
 prompt.set_text = nil
 
+--- Steer the current response with the prompt as Ctrl+Enter does: the agent reads it at its next request instead of waiting for the turn to end. Starts a turn when the agent is idle; does nothing when the prompt is empty. With `text`, the prompt holds `text` first. The app submits after the current Lua callback returns.
+---@type fun(text: string?): nil
+prompt.steer = nil
+
 --- Submit the prompt as Enter does: send it, queue it while the agent works, or run the command it holds. With `text`, the prompt holds `text` first. The app submits after the current Lua callback returns.
 ---@type fun(text: string?): nil
 prompt.submit = nil
