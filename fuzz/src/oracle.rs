@@ -48,7 +48,7 @@ impl Snapshot {
             pending: app.pending_tool_invocation_ids(),
             streaming: app.streaming_state(),
             session_messages: app.session_message_count(),
-            queued_messages: app.queued_message_count(),
+            queued_messages: app.queued_request_count(),
             queue_empty: app.queue_is_empty(),
             turn_paused: app.turn_is_paused(),
             queued_next_starts: app.next_queued_input_starts_turn(),
