@@ -2,6 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
+use smelt_fuzz::arb::short_string;
 use smelt_permissions::rules::{
     ModeBehavior, RawModePerms, RawPerms, RawRuleSet, ToolDefaults, ToolEffectKind,
     ToolPermDefaults,
@@ -10,7 +11,6 @@ use smelt_permissions::{
     builtin_subpattern_parser, split_shell_commands, split_shell_commands_with_ops, Decision,
     PermissionRequirement, Permissions, ToolOrigin, ToolPath,
 };
-use smelt_fuzz::arb::short_string;
 use std::collections::HashMap;
 use std::sync::Arc;
 

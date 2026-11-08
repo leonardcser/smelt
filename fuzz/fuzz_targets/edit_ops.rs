@@ -149,8 +149,7 @@ fn run(input: Input) {
             ),
             Op::SetCursor { pos } => {
                 let source = ui.buf_mut(buf).unwrap().source().to_string();
-                let p =
-                    smelt_text::snap_grapheme(&source, (pos as usize).min(source.len()));
+                let p = smelt_text::snap_grapheme(&source, (pos as usize).min(source.len()));
                 ui.win_mut(win).unwrap().set_cpos(p);
             }
             Op::KeyChar {
