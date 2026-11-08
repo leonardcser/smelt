@@ -48,6 +48,11 @@ layout.gutter = nil
 ---@type fun(items: table): smelt.layout.Node
 layout.hbox = nil
 
+--- Image render directive for a display snapshot from `smelt.image.display_snapshot_async`, returned as a tool `display_content` field and passed by its `content_id`. The snapshot is fitted to the available width and `opts.max_rows`; it shows as full-resolution Kitty graphics when the terminal supports them and colored half-blocks otherwise, with `opts.label` when the snapshot cannot be decoded. Copying the image yields `opts.source`.
+---@see smelt.image.display_snapshot_async
+---@type fun(content_id: integer, opts: table?): smelt.layout.Node
+layout.image = nil
+
 --- Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap. A nonempty span table whose spans are all `selectable = false` is decorative: copying skips the row and its newline unless layout composition adds selectable cells or source text.
 ---@type fun(spans: any, opts: table?): smelt.layout.Node
 layout.line = nil

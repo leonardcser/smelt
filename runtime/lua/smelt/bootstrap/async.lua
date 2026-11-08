@@ -144,6 +144,18 @@ function smelt.image.read_as_data_url_async(path, mime)
   return nil, result.err
 end
 
+-- Decode an image off the main thread into a small display copy for
+-- `smelt.layout.image`. Returns `{ data, width, height }` with the source
+-- dimensions, or `(nil, err)` when the file cannot be read or decoded.
+---@type fun(path: string): { data: string, width: integer, height: integer }?, string?
+function smelt.image.display_snapshot_async(path)
+  local result = smelt.task.external(function(id)
+    internal.image.__start_display_snapshot(id, path)
+  end)
+  if result.data ~= nil then return result, nil end
+  return nil, result.err
+end
+
 if smelt.notebook then
   -- Render a notebook off the main thread. Same return shape as
   -- `smelt.notebook.read`, plus raw notebook JSON and mtime on success.

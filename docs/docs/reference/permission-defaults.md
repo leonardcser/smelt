@@ -13,6 +13,7 @@ What each mode allows before any of your own rules apply. To change them, see
 | Tool                  | Normal | Plan               | Apply | Yolo  |
 | --------------------- | ------ | ------------------ | ----- | ----- |
 | `read_file`           | Allow  | Allow              | Allow | Allow |
+| `show_image`          | Allow  | Allow              | Allow | Allow |
 | `glob`                | Allow  | Allow              | Allow | Allow |
 | `grep`                | Allow  | Allow              | Allow | Allow |
 | `ask_user_question`   | Allow  | Allow              | Allow | Allow |

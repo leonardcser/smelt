@@ -540,6 +540,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `auto_compact` | `boolean` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
 | `auto_continue` | `"off"` \| `"goal"` \| `"always"` | `"goal"` | Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session. Except with `off`, a turn paused by a quota or rate limit resumes on its own. |
 | `math_rendering` | `"unicode"` \| `"graphics"` | `"graphics"` | Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported). |
+| `kitty_graphics` | `"auto"` \| `"on"` \| `"off"` | `"auto"` | Use Kitty graphics for images and math: `auto` detects terminal support, `on` and `off` force it. |
 | `show_tps` | `boolean` | `true` | Tokens/sec in status bar. |
 | `show_tokens` | `boolean` | `true` | Context token count in status bar. |
 | `show_cost` | `boolean` | `true` | Session cost in status bar. |

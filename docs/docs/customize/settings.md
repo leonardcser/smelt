@@ -34,6 +34,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `auto_compact` | `boolean` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
 | `auto_continue` | `"off"` \| `"goal"` \| `"always"` | `"goal"` | Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session. Except with `off`, a turn paused by a quota or rate limit resumes on its own. |
 | `math_rendering` | `"unicode"` \| `"graphics"` | `"graphics"` | Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported). |
+| `kitty_graphics` | `"auto"` \| `"on"` \| `"off"` | `"auto"` | Use Kitty graphics for images and math: `auto` detects terminal support, `on` and `off` force it. |
 | `show_tps` | `boolean` | `true` | Tokens/sec in status bar. |
 | `show_tokens` | `boolean` | `true` | Context token count in status bar. |
 | `show_cost` | `boolean` | `true` | Session cost in status bar. |
@@ -135,14 +136,3 @@ Full payloads can contain prompts, source code and tool results, so treat a
 session database or `smelt export requests` output created in this mode as
 sensitive. `SMELT_REQUEST_AUDIT=off|summary|full` pins the mode for a process and
 wins over config.
-
-## Math rendering (LaTeX)
-
-LaTeX math in Markdown (`$$...$$`, `\[...\]`, `$...$`, `\(...\)`) renders as images on
-terminals that support the Kitty graphics protocol and as Unicode text elsewhere.
-Set `math_rendering = "unicode"` to always use text. Inside tmux, enable
-passthrough with `set -g allow-passthrough all`; with `on`, tmux drops images
-drawn while the pane is hidden until smelt regains focus. Copying an equation
-copies its original Markdown source.
-
-<figure class="term" data-replay="../../assets/replays/math.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>

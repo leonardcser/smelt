@@ -28,6 +28,7 @@ smelt-perf = { version = "0.3.0", path = "../perf" }
 keyring-core = "1.0.0"
 smelt-text = { workspace = true }
 uuid = { version = "1.29.0", features = ["v4"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [features]
 # Linux credential storage over the D-Bus secret service. Fuzz builds leave it

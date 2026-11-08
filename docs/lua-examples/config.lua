@@ -64,6 +64,10 @@ smelt.settings.auto_continue = "goal"
 -- possible values: unicode, graphics
 smelt.settings.math_rendering = "graphics"
 
+-- Use Kitty graphics for images and math: `auto` detects terminal support, `on` and `off` force it.
+-- possible values: auto, on, off
+smelt.settings.kitty_graphics = "auto"
+
 -- Tokens/sec in status bar.
 smelt.settings.show_tps = true
 

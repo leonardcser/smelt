@@ -113,6 +113,16 @@ Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` / `{ layout, fit=true }` for a fixed, weighted, or renderer-defined intrinsic-width slot. `fit=true` uses unwrapped content width when available, capped by the parent; fixed and fit slots are allocated before fill slots. The first item owns row-level copy metadata by default; set `copy_owner=true` on exactly one item when another column contains the primary copyable content.
 
+## `smelt.layout.image`
+
+```lua
+fun(content_id: integer, opts: table?): smelt.layout.Node
+```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Image render directive for a display snapshot from `smelt.image.display_snapshot_async`, returned as a tool `display_content` field and passed by its `content_id`. The snapshot is fitted to the available width and `opts.max_rows`; it shows as full-resolution Kitty graphics when the terminal supports them and colored half-blocks otherwise, with `opts.label` when the snapshot cannot be decoded. Copying the image yields `opts.source`.
+
 ## `smelt.layout.line`
 
 ```lua

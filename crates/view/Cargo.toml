@@ -30,6 +30,7 @@ ratex-render = { version = "0.1.14", features = ["embed-fonts"] }
 ratex-parser = "0.1.14"
 ratex-layout = "0.1.14"
 ratex-types = "0.1.14"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

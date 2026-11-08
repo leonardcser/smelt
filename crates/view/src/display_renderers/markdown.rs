@@ -6,10 +6,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Range,
     rc::Rc,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc, Mutex, OnceLock,
-    },
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
@@ -35,7 +32,6 @@ use smelt_buffer::buffer::{AtomicObject, AtomicSpan, SpanMeta};
 use smelt_term::kitty;
 use smelt_term::RasterImage;
 
-static NEXT_MATH_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
 const MIN_DISPLAY_MATH_SCALE: f32 = 0.8;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -105,7 +101,7 @@ impl MathImageCache {
                 if png.len() > 2 * 1024 * 1024 {
                     return None;
                 }
-                let id = NEXT_MATH_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
+                let id = kitty::next_image_id();
                 Some(MathRaster {
                     rows: (0..rows)
                         .map(|row| kitty::placeholder_row(row, cols))

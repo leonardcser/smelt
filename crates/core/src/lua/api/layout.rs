@@ -5,9 +5,9 @@ use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 use smelt_transcript::content::block_layout::{
     BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, ContentDiffSpec,
-    ContentRenderSpec, ContentSpec, DiffSpec, FileViewSpec, GutterSpec, HboxItem, LineSpec,
-    LuaLeaf, MarkdownSpec, PanelSpec, RefreshSpec, RowPrefixSpec, RunsSpec, SeparatorSpec,
-    StyleSpec, TextSpec,
+    ContentRenderSpec, ContentSpec, DiffSpec, FileViewSpec, GutterSpec, HboxItem, ImageSpec,
+    LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RefreshSpec, RowPrefixSpec, RunsSpec,
+    SeparatorSpec, StyleSpec, TextSpec,
 };
 
 pub struct LuaBlockLayout(pub BlockLayout);
@@ -475,6 +475,31 @@ pub(super) fn register(
                     content,
                     path,
                     lang,
+                },
+            ))))
+        },
+    )?;
+    m.fn_(
+        "image",
+        "Image render directive for a display snapshot from `smelt.image.display_snapshot_async`, returned as a tool `display_content` field and passed by its `content_id`. The snapshot is fitted to the available width and `opts.max_rows`; it shows as full-resolution Kitty graphics when the terminal supports them and colored half-blocks otherwise, with `opts.label` when the snapshot cannot be decoded. Copying the image yields `opts.source`.",
+        &["content_id", "opts"],
+        |_, (id, opts): (u64, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let field = |name: &str| -> LuaResult<Option<String>> {
+                match &opts {
+                    Some(t) => t.get::<Option<String>>(name),
+                    None => Ok(None),
+                }
+            };
+            let max_rows = match &opts {
+                Some(t) => t.get::<Option<u16>>("max_rows")?,
+                None => None,
+            };
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Image(
+                ImageSpec {
+                    id: smelt_transcript::transcript_content::ContentId::new(id),
+                    label: field("label")?.unwrap_or_else(|| "[image]".into()),
+                    source: field("source")?.unwrap_or_default(),
+                    max_rows,
                 },
             ))))
         },

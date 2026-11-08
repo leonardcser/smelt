@@ -98,6 +98,8 @@ fn handle_reader_command(
 /// so the event loop can wait on input and replies at the same time.
 pub(crate) struct TerminalReplies {
     #[cfg(unix)]
+    probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    #[cfg(unix)]
     probe_rx: tokio::sync::mpsc::UnboundedReceiver<bool>,
     #[cfg(unix)]
     geometry_rx: tokio::sync::mpsc::UnboundedReceiver<(u32, u32)>,
@@ -123,7 +125,7 @@ impl TerminalInput {
         #[cfg(unix)]
         let (geometry_tx, geometry_rx) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(unix)]
-        let shutdown = platform::spawn_reader(pending, tx, probe_tx, geometry_tx)?;
+        let shutdown = platform::spawn_reader(pending, tx, probe_tx.clone(), geometry_tx)?;
         #[cfg(not(unix))]
         let shutdown = {
             drop(pending);
@@ -134,6 +136,8 @@ impl TerminalInput {
             shutdown: Some(shutdown),
         };
         let replies = TerminalReplies {
+            #[cfg(unix)]
+            probe_tx,
             #[cfg(unix)]
             probe_rx,
             #[cfg(unix)]
@@ -147,7 +151,8 @@ impl TerminalInput {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
         let (geometry_tx, geometry_rx) = tokio::sync::mpsc::unbounded_channel();
-        let shutdown = platform::spawn_reader_from_fd(fd, Vec::new(), tx, probe_tx, geometry_tx)?;
+        let shutdown =
+            platform::spawn_reader_from_fd(fd, Vec::new(), tx, probe_tx.clone(), geometry_tx)?;
         let input = Self {
             rx,
             shutdown: Some(shutdown),
@@ -155,6 +160,7 @@ impl TerminalInput {
         Ok((
             input,
             TerminalReplies {
+                probe_tx,
                 probe_rx,
                 geometry_rx,
             },
@@ -188,9 +194,20 @@ impl Drop for TerminalInput {
 }
 
 impl TerminalReplies {
+    /// Asks tmux about the attached client's terminal in the background. The
+    /// answer arrives from [`Self::recv`] as [`TerminalReply::KittyGraphics`].
+    #[cfg(unix)]
+    fn detect_tmux_client(&self) {
+        let probe_tx = self.probe_tx.clone();
+        tokio::spawn(async move {
+            let _ = probe_tx.send(tmux_client_supports_kitty().await);
+        });
+    }
+
     /// Waits for the next reply. Only the first answer to [`kitty_probe_query`]
-    /// counts, and some terminals never send one, so it is awaited only while
-    /// `kitty_probe_pending`. Never resolves once the reader has stopped.
+    /// or [`Self::detect_tmux_client`] counts, and some terminals never answer
+    /// the probe, so it is awaited only while `kitty_probe_pending`. Never
+    /// resolves once the reader has stopped.
     pub(crate) async fn recv(&mut self, kitty_probe_pending: bool) -> TerminalReply {
         #[cfg(unix)]
         {
@@ -210,23 +227,135 @@ impl TerminalReplies {
     }
 }
 
-/// The kitty graphics query, followed by the device attributes fence when the
-/// terminal is reached directly. tmux answers device attributes itself, which
-/// says nothing about the outer terminal, so there an unsupported terminal
-/// sends no answer at all.
-#[cfg(unix)]
-pub(crate) fn kitty_probe_query() -> Vec<u8> {
-    let mut query = smelt_term::kitty::control_sequence(KITTY_PROBE);
-    if std::env::var_os("TMUX").is_none() {
-        query.extend_from_slice(DEVICE_ATTRIBUTES_QUERY);
+/// Kitty graphics detection. Outside tmux smelt asks the terminal directly.
+/// tmux drops the terminal's answer, so there smelt asks tmux which terminal
+/// the client runs in, and tmux answers the cell-size query itself. Answers
+/// arrive from [`TerminalReplies::recv`] while the event loop runs.
+pub(crate) struct KittyProbe {
+    #[cfg(unix)]
+    in_tmux: bool,
+    pending: bool,
+    #[cfg(unix)]
+    supported: bool,
+}
+
+impl KittyProbe {
+    /// Sends the first query. `write` sends a control sequence and reports
+    /// whether it reached a terminal.
+    pub(crate) fn start(replies: &TerminalReplies, mut write: impl FnMut(&[u8]) -> bool) -> Self {
+        #[cfg(unix)]
+        {
+            let in_tmux = std::env::var_os("TMUX").is_some();
+            let pending = if in_tmux {
+                replies.detect_tmux_client();
+                write(CELL_PIXEL_QUERY);
+                true
+            } else {
+                write(&kitty_probe_query())
+            };
+            Self {
+                in_tmux,
+                pending,
+                supported: false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (replies, &mut write);
+            Self { pending: false }
+        }
     }
+
+    /// Whether an answer is still awaited; pass to [`TerminalReplies::recv`].
+    pub(crate) fn pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Records a [`TerminalReply::KittyGraphics`] answer.
+    pub(crate) fn answered(&mut self, supported: bool, mut write: impl FnMut(&[u8]) -> bool) {
+        self.pending = false;
+        #[cfg(unix)]
+        {
+            self.supported = supported;
+            if supported && !self.in_tmux {
+                write(CELL_PIXEL_QUERY);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (supported, &mut write);
+    }
+
+    /// A font change can alter cell pixels without changing rows or columns.
+    /// Inside tmux a resize can also mean another client took over the window,
+    /// so ask tmux again, at most once at a time while resize events stream in.
+    pub(crate) fn resized(
+        &mut self,
+        replies: &TerminalReplies,
+        mut write: impl FnMut(&[u8]) -> bool,
+    ) {
+        #[cfg(unix)]
+        {
+            if self.in_tmux && !self.pending {
+                replies.detect_tmux_client();
+                self.pending = true;
+            }
+            if self.in_tmux || self.supported {
+                write(CELL_PIXEL_QUERY);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (replies, &mut write);
+    }
+}
+
+/// The kitty graphics query, followed by the device attributes fence. Only
+/// for a terminal reached directly: tmux forwards the query to the outer
+/// terminal but drops its answer, so use [`tmux_client_supports_kitty`] there.
+#[cfg(unix)]
+fn kitty_probe_query() -> Vec<u8> {
+    let mut query = KITTY_PROBE.to_vec();
+    query.extend_from_slice(DEVICE_ATTRIBUTES_QUERY);
     query
 }
 
-/// Asks for the cell size in pixels, answered as [`TerminalReply::CellPixels`].
+/// tmux format naming the attached client's terminal and the pane's passthrough mode.
 #[cfg(unix)]
-pub(crate) fn cell_pixel_query() -> Vec<u8> {
-    smelt_term::kitty::control_sequence(CELL_PIXEL_QUERY)
+const TMUX_CLIENT_FORMAT: &str = "#{client_termname}\t#{client_termtype}\t#{allow-passthrough}";
+
+/// Inside tmux, asks tmux whether the attached client's terminal implements
+/// the kitty graphics protocol and passthrough lets graphics reach it.
+#[cfg(unix)]
+pub(crate) async fn tmux_client_supports_kitty() -> bool {
+    let output = tokio::process::Command::new("tmux")
+        .args(["display-message", "-p", TMUX_CLIENT_FORMAT])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await;
+    match output {
+        Ok(output) if output.status.success() => {
+            tmux_client_info_supports_kitty(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => false,
+    }
+}
+
+/// Matches terminals that implement kitty graphics with Unicode placeholders,
+/// which is how images survive tmux redraws.
+#[cfg(unix)]
+fn tmux_client_info_supports_kitty(info: &str) -> bool {
+    let mut fields = info.trim_end_matches(['\r', '\n']).split('\t');
+    let termname = fields.next().unwrap_or_default();
+    let termtype = fields.next().unwrap_or_default();
+    let passthrough = fields.next().unwrap_or_default();
+    if !matches!(passthrough, "on" | "all") {
+        return false;
+    }
+    [termname, termtype].iter().any(|field| {
+        let field = field.to_ascii_lowercase();
+        field.contains("kitty") || field.contains("ghostty")
+    })
 }
 
 #[cfg(unix)]
@@ -1398,8 +1527,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn tmux_client_info_detects_kitty_capable_terminals_with_passthrough() {
+        assert!(tmux_client_info_supports_kitty("xterm-ghostty\t\tall\n"));
+        assert!(tmux_client_info_supports_kitty("xterm-kitty\t\ton\n"));
+        assert!(tmux_client_info_supports_kitty(
+            "xterm-256color\tghostty 1.4.0\tall\n"
+        ));
+        assert!(!tmux_client_info_supports_kitty("xterm-ghostty\t\toff\n"));
+        assert!(!tmux_client_info_supports_kitty("xterm-256color\t\tall\n"));
+        assert!(!tmux_client_info_supports_kitty(
+            "xterm-256color\tWezTerm 20240203\tall\n"
+        ));
+        assert!(!tmux_client_info_supports_kitty(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pipe_backed_kitty_probe_preserves_user_input() {
-        assert!(kitty_probe_query().starts_with(&smelt_term::kitty::control_sequence(KITTY_PROBE)));
         let _lock = terminal_reader_test_lock();
         let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
         writer.write_all(b"z\x1b_Gi=16777214;OK\x1b\\").unwrap();

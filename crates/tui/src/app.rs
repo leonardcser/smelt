@@ -3575,7 +3575,13 @@ impl TuiApp {
     }
 
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
-        smelt_view::display_layout::set_kitty_probe_result(false);
+        smelt_view::display_layout::restore_kitty_detection(self.core.recent.state_root());
+        smelt_view::display_layout::set_kitty_graphics_setting(
+            smelt_view::display_layout::KittyGraphics::from_setting(
+                &self.core.config.settings.kitty_graphics,
+            ),
+        );
+        smelt_view::display_layout::update_kitty_geometry();
         let platform_startup = smelt_perf::perf::begin("startup:platform");
         let probe_input = crate::theme::detect_background(self.ui.theme_mut());
         // Install the background-aware baked theme before Lua loads so a
@@ -3648,18 +3654,10 @@ impl TuiApp {
             };
         self.platform.set_input_pause(term_events.pause_handle());
         // The kitty graphics answer arrives through `term_replies` while the
-        // loop runs, so the first frame never waits for it. Inside tmux an
-        // unsupported terminal never answers at all.
-        #[cfg(unix)]
-        let mut kitty_probe_pending = matches!(
-            self.platform
-                .write_terminal_control(&crate::term_input::kitty_probe_query()),
-            Ok(true)
-        );
-        #[cfg(not(unix))]
-        let kitty_probe_pending = false;
-        #[cfg(unix)]
-        let mut kitty_supported = false;
+        // loop runs, so the first frame never waits for it.
+        let mut kitty_probe = crate::term_input::KittyProbe::start(&term_replies, |bytes| {
+            matches!(self.platform.write_terminal_control(bytes), Ok(true))
+        });
         // Independent SIGWINCH listener: crossterm's Unix signal source intermittently
         // drops resize events (signal-hook-mio counter / mio readiness race), so we keep
         // our own tokio-native handler there. Both fire on resize; the duplicate just
@@ -4027,25 +4025,24 @@ impl TuiApp {
                     self.request_continuation_render();
                 }
 
-                reply = term_replies.recv(kitty_probe_pending) => {
+                reply = term_replies.recv(kitty_probe.pending()) => {
                     #[cfg(unix)]
                     {
                         use crate::term_input::TerminalReply;
                         match reply {
                             TerminalReply::KittyGraphics(supported) => {
-                                kitty_probe_pending = false;
-                                kitty_supported = supported;
-                                smelt_view::display_layout::set_kitty_probe_result(supported);
-                                if supported {
-                                    let _ = self.platform.write_terminal_control(
-                                        &crate::term_input::cell_pixel_query(),
-                                    );
-                                }
+                                smelt_view::display_layout::set_kitty_detected(supported);
+                                kitty_probe.answered(supported, |bytes| {
+                                    matches!(self.platform.write_terminal_control(bytes), Ok(true))
+                                });
                             }
                             TerminalReply::CellPixels(pixels) => {
                                 smelt_view::display_layout::set_kitty_cell_pixels(Some(pixels));
                             }
                         }
+                        smelt_view::display_layout::remember_kitty_detection(
+                            self.core.recent.state_root(),
+                        );
                         self.request_urgent_render();
                     }
                     #[cfg(not(unix))]
@@ -4053,14 +4050,9 @@ impl TuiApp {
                 }
 
                 Some(_) = window_change => {
-                    // A font change can alter cell pixels without changing rows
-                    // or columns; the answer lands as a `CellPixels` reply.
-                    #[cfg(unix)]
-                    if kitty_supported {
-                        let _ = self
-                            .platform
-                            .write_terminal_control(&crate::term_input::cell_pixel_query());
-                    }
+                    kitty_probe.resized(&term_replies, |bytes| {
+                        matches!(self.platform.write_terminal_control(bytes), Ok(true))
+                    });
                     if let Ok((w, h)) = terminal::size() {
                         if w != self.last_width || h != self.last_height {
                             self.handle_resize(w, h);

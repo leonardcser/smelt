@@ -9413,3 +9413,102 @@ fn statusline_sources_get_the_width_and_clip_what_overflows() {
     assert_eq!(app.eval_lua::<u16>("return _G.__width").unwrap(), 30);
     assert_eq!(frame.rows[10], "=".repeat(30), "{}", frame.text());
 }
+
+/// Runs the real `show_image` tool on `path` and feeds its result back as the
+/// engine would. Returns the app and the model-facing result text.
+fn run_show_image(path: &std::path::Path) -> (TestApp, String) {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 30);
+    app.start_turn(42);
+    let invocation_id = protocol::InvocationId::new(1);
+    let args = std::collections::HashMap::from([(
+        "file_path".to_string(),
+        serde_json::json!(path.to_string_lossy()),
+    )]);
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
+        call_id: "show".into(),
+        tool_name: "show_image".into(),
+        args: args.clone(),
+        called_at_ms: 0,
+    }));
+    app.clear_actions();
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id,
+        request_id: 1,
+        call_id: "show".into(),
+        tool_name: "show_image".into(),
+        args,
+    }));
+    app.wait_for_tool_result("show");
+    let result = app
+        .drain_engine_sends()
+        .into_iter()
+        .find_map(|command| match command {
+            protocol::UiCommand::ToolResult {
+                content,
+                is_error,
+                metadata,
+                display_content,
+                ..
+            } => Some(
+                protocol::ToolOutcome::new(content, is_error, metadata)
+                    .with_display_content(display_content),
+            ),
+            _ => None,
+        })
+        .expect("show_image result");
+    let content = result.content.clone();
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+        invocation_id,
+        call_id: "show".into(),
+        result,
+        elapsed_ms: Some(1),
+    }));
+    (app, content)
+}
+
+fn half_block_rows(frame: &str) -> usize {
+    frame.lines().filter(|line| line.contains('▀')).count()
+}
+
+fn save_swatch(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("swatch.png");
+    image::RgbaImage::from_pixel(64, 128, image::Rgba([200, 30, 30, 255]))
+        .save(&path)
+        .unwrap();
+    path
+}
+
+#[test]
+fn show_image_tool_draws_half_blocks_without_graphics_support() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = save_swatch(dir.path());
+    let (mut app, content) = run_show_image(&path);
+    assert!(content.starts_with("displayed "), "{content}");
+    let frame = app.render_to_frame().text();
+    assert_eq!(half_block_rows(&frame), 8, "{frame}");
+}
+
+#[test]
+fn show_image_tool_keeps_showing_the_image_after_the_file_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = save_swatch(dir.path());
+    let (mut app, _) = run_show_image(&path);
+    app.render_to_frame();
+    drop(dir);
+    assert!(!path.exists());
+    // A resize lays the transcript out again from scratch.
+    app.set_terminal_size(70, 30);
+    let frame = app.render_to_frame().text();
+    assert_eq!(half_block_rows(&frame), 8, "{frame}");
+}
+
+#[test]
+fn show_image_tool_reports_files_it_cannot_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.png");
+    std::fs::write(&path, "not an image").unwrap();
+    let (_, content) = run_show_image(&path);
+    assert!(content.starts_with("cannot display"), "{content}");
+}

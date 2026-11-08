@@ -113,6 +113,76 @@ pub fn data_url_from_bytes(bytes: &[u8], mime: &str) -> String {
     format!("data:{mime};base64,{b64}")
 }
 
+/// Longest edge of a display snapshot: enough to fill a wide terminal with
+/// Kitty graphics, small enough to keep sessions compact.
+const SNAPSHOT_EDGE: u32 = 1024;
+const MAX_SNAPSHOT_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A display copy of an image, so a transcript keeps showing what the user saw
+/// even after the file changes. `width` and `height` are the source dimensions.
+pub struct DisplaySnapshot {
+    pub data: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Decode `path` and re-encode it at most `SNAPSHOT_EDGE` on the long side, as
+/// base64 JPEG when fully opaque and PNG otherwise.
+pub fn display_snapshot(path: &str) -> Result<DisplaySnapshot, String> {
+    use image::codecs::{jpeg::JpegEncoder, png::PngEncoder};
+    use image::{imageops::FilterType, ImageEncoder, ImageReader};
+
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len > MAX_SNAPSHOT_SOURCE_BYTES {
+        return Err("image file is larger than 64 MB".into());
+    }
+    let reader = ImageReader::open(path)
+        .and_then(ImageReader::with_guessed_format)
+        .map_err(|e| e.to_string())?;
+    if reader.format().is_none() {
+        return Err(
+            "unsupported image format: supported formats are png, jpg/jpeg, gif, webp, and bmp"
+                .into(),
+        );
+    }
+    let image = reader
+        .decode()
+        .map_err(|e| format!("could not decode image: {e}"))?;
+    let (width, height) = (image.width(), image.height());
+    let image = if width.max(height) > SNAPSHOT_EDGE {
+        image.resize(SNAPSHOT_EDGE, SNAPSHOT_EDGE, FilterType::Triangle)
+    } else {
+        image
+    };
+    let rgba = image.to_rgba8();
+    let mut bytes = Vec::new();
+    let encoded = if rgba.pixels().all(|pixel| pixel.0[3] == u8::MAX) {
+        let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+        JpegEncoder::new_with_quality(&mut bytes, 90).encode_image(&rgb)
+    } else {
+        PngEncoder::new(&mut bytes).write_image(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+    };
+    encoded.map_err(|e| format!("could not encode image: {e}"))?;
+    Ok(DisplaySnapshot {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        width,
+        height,
+    })
+}
+
+/// Decode a [`DisplaySnapshot::data`] payload.
+pub fn decode_display_snapshot(data: &str) -> Option<image::RgbaImage> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .ok()?;
+    Some(image::load_from_memory(&bytes).ok()?.to_rgba8())
+}
+
 pub fn image_label_from_path(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
@@ -258,6 +328,45 @@ mod tests {
     }
 
     // ---- image_label_from_path ----
+
+    #[test]
+    fn display_snapshot_downscales_and_keeps_source_dimensions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.png");
+        image::RgbaImage::from_pixel(2048, 512, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        let snapshot = display_snapshot(path.to_str().unwrap()).unwrap();
+        assert_eq!((snapshot.width, snapshot.height), (2048, 512));
+        let decoded = decode_display_snapshot(&snapshot.data).unwrap();
+        assert_eq!(decoded.dimensions(), (1024, 256));
+    }
+
+    #[test]
+    fn display_snapshot_keeps_transparency() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("clear.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 0]))
+            .save(&path)
+            .unwrap();
+        let snapshot = display_snapshot(path.to_str().unwrap()).unwrap();
+        let decoded = decode_display_snapshot(&snapshot.data).unwrap();
+        assert_eq!(decoded.get_pixel(0, 0).0[3], 0);
+    }
+
+    #[test]
+    fn display_snapshot_rejects_files_it_cannot_decode() {
+        let dir = tempdir().unwrap();
+        let svg = dir.path().join("vector.svg");
+        std::fs::write(&svg, r#"<svg><text>relay</text></svg>"#).unwrap();
+        let err = display_snapshot(svg.to_str().unwrap()).err().unwrap();
+        assert!(err.starts_with("unsupported image format"), "{err}");
+        let corrupt = dir.path().join("bad.png");
+        std::fs::write(&corrupt, b"\x89PNG\r\n\x1a\nbroken").unwrap();
+        let err = display_snapshot(corrupt.to_str().unwrap()).err().unwrap();
+        assert!(err.starts_with("could not decode image"), "{err}");
+        assert!(display_snapshot("/does/not/exist.png").is_err());
+    }
 
     #[test]
     fn image_label_uses_basename() {

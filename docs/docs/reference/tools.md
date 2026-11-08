@@ -31,6 +31,17 @@ read a window of a large text file.
 | `limit`      | Number of lines to read (default: 2000)   |
 | `timeout_ms` | Read timeout in milliseconds (default: 15000) |
 
+### `show_image`
+
+Shows you an image file (png, jpg, gif, webp, bmp) in the transcript, with
+Kitty graphics or colored half-blocks. The model does not see it; it uses
+`read_file` for that. Interactive sessions only. To remove it, add
+`smelt.builtins.disable({ tools = { "show_image" } })` to `early.lua`.
+
+| Parameter   | Description                           |
+| ----------- | ------------------------------------- |
+| `file_path` | Absolute path to the image (required) |
+
 ### `write_file`
 
 Writes a file to the local filesystem, overwriting any existing file at the

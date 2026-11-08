@@ -82,5 +82,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
+    {
+        let s = shared.clone();
+        m.private_fn(
+            "__start_display_snapshot",
+            &["task_id", "path"],
+            move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match engine::image::display_snapshot(&path) {
+                        Ok(snapshot) => serde_json::json!({
+                            "data": snapshot.data,
+                            "width": snapshot.width,
+                            "height": snapshot.height,
+                        }),
+                        Err(err) => serde_json::json!({ "err": err }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+
     Ok(())
 }

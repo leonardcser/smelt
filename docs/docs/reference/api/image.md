@@ -19,6 +19,16 @@ fun(bytes: string, mime: string): string
 
 Encode raw `bytes` as a base64 `data:` URL with the given `mime` type.
 
+## `smelt.image.display_snapshot_async`
+
+```lua
+fun(path: string): { data: string, width: integer, height: integer }?, string?
+```
+
+Decode an image off the main thread into a small display copy for
+`smelt.layout.image`. Returns `{ data, width, height }` with the source
+dimensions, or `(nil, err)` when the file cannot be read or decoded.
+
 ## `smelt.image.is_image_file`
 
 ```lua

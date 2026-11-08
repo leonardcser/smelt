@@ -1,5 +1,6 @@
 //! Display renderers for compiled transcript blocks.
 
+mod image_leaf;
 mod layout_ir;
 mod markdown;
 mod temp_rows;

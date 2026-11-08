@@ -172,6 +172,7 @@ macro_rules! settings {
     (@effect vim) => { SettingEffect::Input };
     (@effect system_clipboard) => { SettingEffect::Input };
     (@effect math_rendering) => { SettingEffect::Render };
+    (@effect kitty_graphics) => { SettingEffect::Render };
     (@effect show_tps) => { SettingEffect::Render };
     (@effect show_tokens) => { SettingEffect::Render };
     (@effect show_cost) => { SettingEffect::Render };
@@ -210,6 +211,8 @@ settings! {
     auto_continue:         String = "goal", choices: ["off", "goal", "always"];
     /// Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported).
     math_rendering:        String = "graphics", choices: ["unicode", "graphics"];
+    /// Use Kitty graphics for images and math: `auto` detects terminal support, `on` and `off` force it.
+    kitty_graphics:        String = "auto", choices: ["auto", "on", "off"];
     /// Tokens/sec in status bar.
     show_tps:              Bool   = true;
     /// Context token count in status bar.
@@ -956,6 +959,7 @@ mod tests {
             ("vim", SettingEffect::Input),
             ("system_clipboard", SettingEffect::Input),
             ("math_rendering", SettingEffect::Render),
+            ("kitty_graphics", SettingEffect::Render),
             ("show_tps", SettingEffect::Render),
             ("show_tokens", SettingEffect::Render),
             ("show_cost", SettingEffect::Render),

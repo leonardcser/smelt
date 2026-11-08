@@ -657,7 +657,15 @@ impl TuiApp {
         if prediction_disabled {
             self.invalidate_prompt_prediction();
         }
-        if file_icons_changed || settings.math_rendering != old.math_rendering {
+        if settings.kitty_graphics != old.kitty_graphics {
+            smelt_view::display_layout::set_kitty_graphics_setting(
+                smelt_view::display_layout::KittyGraphics::from_setting(&settings.kitty_graphics),
+            );
+        }
+        if file_icons_changed
+            || settings.math_rendering != old.math_rendering
+            || settings.kitty_graphics != old.kitty_graphics
+        {
             self.sync_inline_options();
             self.sync_transcript_renderer_generation();
         }

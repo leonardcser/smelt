@@ -12,6 +12,13 @@ local image = {}
 ---@type fun(bytes: string, mime: string): string
 image.data_url_from_bytes = nil
 
+--- Decode an image off the main thread into a small display copy for
+--- `smelt.layout.image`. Returns `{ data, width, height }` with the source
+--- dimensions, or `(nil, err)` when the file cannot be read or decoded.
+---@see smelt.layout.image
+---@type fun(path: string): { data: string, width: integer, height: integer }?, string?
+image.display_snapshot_async = nil
+
 --- Return `true` if `p` looks like an image file (matched by extension/sniffing).
 ---@type fun(p: string): boolean
 image.is_image_file = nil

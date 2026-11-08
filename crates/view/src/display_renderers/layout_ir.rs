@@ -759,6 +759,9 @@ fn render_ir_leaf(
         IrLeaf::Separator(spec) => {
             render_separator_spec(out, spec, width, row_start, row_count, gutter)
         }
+        IrLeaf::Image(spec) => {
+            super::image_leaf::render_image_spec(out, spec, width, row_start, row_count, gutter)
+        }
         IrLeaf::SourceView(smelt_transcript::content::block_layout::SourceViewIr::Diff(cache)) => {
             let indent = gutter_width(gutter);
             let target =
@@ -782,6 +785,7 @@ fn measure_ir_leaf(
         IrLeaf::Markdown(spec) => measure_markdown_spec(spec, width, inline_options),
         IrLeaf::Code(spec) => measure_code_spec(spec, width),
         IrLeaf::Separator(spec) => measure_separator_spec(spec),
+        IrLeaf::Image(spec) => super::image_leaf::measure_image_spec(spec, width),
         IrLeaf::SourceView(smelt_transcript::content::block_layout::SourceViewIr::Diff(cache)) => {
             smelt_transcript::content::highlight::measure_diff_ir(
                 cache,
@@ -2917,6 +2921,7 @@ fn include_leaf_in_exact_measure_budget(leaf: &IrLeaf, budget: &mut ExactLayoutB
         IrLeaf::Markdown(spec) => budget.add_bytes(spec.content.len()),
         IrLeaf::Code(spec) => budget.add_bytes(spec.content.len()),
         IrLeaf::Separator(spec) => budget.add_spans(spec.label.iter()),
+        IrLeaf::Image(spec) => budget.add_bytes(spec.label.len()),
         IrLeaf::Content(spec) => match &spec.render {
             ContentRenderSpec::Markdown { .. } => budget.add_bytes(spec.content.len()),
             _ => false,

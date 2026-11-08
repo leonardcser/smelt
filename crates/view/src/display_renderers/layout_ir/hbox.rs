@@ -84,7 +84,7 @@ fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
             .max()
             .unwrap_or(0),
         IrLeaf::Separator(spec) => styled_spans_width(&spec.label).min(u16::MAX as usize) as u16,
-        IrLeaf::SourceView(_) => total_width,
+        IrLeaf::Image(_) | IrLeaf::SourceView(_) => total_width,
     }
 }
 

@@ -197,6 +197,27 @@ pub struct SeparatorSpec {
     pub selectable: bool,
 }
 
+/// Image directive whose display snapshot stays behind an opaque transcript
+/// content ID. `label` is shown when images are off or the snapshot is
+/// unreadable; `source` is what copying the image yields.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageSpec {
+    pub id: ContentId,
+    pub label: String,
+    pub source: String,
+    pub max_rows: Option<u16>,
+}
+
+/// Width-dependent image leaf holding the base64 display snapshot. The
+/// renderer fits it to the available columns and `max_rows` at layout time.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetainedImageSpec {
+    pub content: TranscriptContent,
+    pub label: String,
+    pub source: String,
+    pub max_rows: Option<u16>,
+}
+
 /// Full-width background panel wrapper.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PanelSpec {
@@ -233,6 +254,7 @@ pub enum LayoutLeaf {
     Code(CodeSpec),
     Separator(SeparatorSpec),
     SourceView(SourceViewIr),
+    Image(RetainedImageSpec),
 }
 
 /// Width-independent leaf returned by Lua before transient source directives are
@@ -251,6 +273,7 @@ pub enum LuaLeaf {
     Separator(SeparatorSpec),
     Diff(DiffSpec),
     FileView(FileViewSpec),
+    Image(ImageSpec),
 }
 
 pub type IrLeaf = LayoutLeaf;
@@ -438,6 +461,7 @@ fn leaf_dynamic_bytes(leaf: &LayoutLeaf) -> usize {
         LayoutLeaf::Markdown(spec) => spec.content.capacity(),
         LayoutLeaf::Code(spec) => spec.content.capacity().saturating_add(spec.lang.capacity()),
         LayoutLeaf::Separator(spec) => styled_spans_bytes(&spec.label, spec.label.capacity()),
+        LayoutLeaf::Image(spec) => spec.label.capacity().saturating_add(spec.source.capacity()),
         LayoutLeaf::SourceView(source_view) => source_view
             .retained_bytes()
             .saturating_sub(std::mem::size_of_val(source_view)),

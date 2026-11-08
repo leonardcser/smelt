@@ -18,18 +18,48 @@ use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 
-// Zero means the terminal has not acknowledged the graphics probe or has no pixel geometry.
+// Zero means the cell size in pixels is unknown.
 static KITTY_CELL_PIXELS: AtomicU64 = AtomicU64::new(0);
-static KITTY_PROBED: AtomicBool = AtomicBool::new(false);
+static KITTY_DETECTED: AtomicBool = AtomicBool::new(false);
+static KITTY_SETTING: AtomicU8 = AtomicU8::new(KittyGraphics::Auto as u8);
 
-pub fn set_kitty_probe_result(supported: bool) {
-    KITTY_PROBED.store(supported, Ordering::Relaxed);
-    set_kitty_cell_pixels(None);
-    update_kitty_geometry();
+/// The `kitty_graphics` setting: trust detection, or force support on or off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KittyGraphics {
+    Auto,
+    On,
+    Off,
+}
+
+impl KittyGraphics {
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "on" => Self::On,
+            "off" => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+}
+
+pub fn set_kitty_graphics_setting(setting: KittyGraphics) {
+    KITTY_SETTING.store(setting as u8, Ordering::Relaxed);
+}
+
+pub fn set_kitty_detected(supported: bool) {
+    KITTY_DETECTED.store(supported, Ordering::Relaxed);
+}
+
+fn kitty_graphics_enabled() -> bool {
+    match KITTY_SETTING.load(Ordering::Relaxed) {
+        s if s == KittyGraphics::On as u8 => true,
+        s if s == KittyGraphics::Off as u8 => false,
+        _ => KITTY_DETECTED.load(Ordering::Relaxed),
+    }
 }
 
 pub fn set_kitty_cell_pixels(geometry: Option<(u32, u32)>) {
@@ -38,9 +68,9 @@ pub fn set_kitty_cell_pixels(geometry: Option<(u32, u32)>) {
 }
 
 pub fn update_kitty_geometry() {
-    // tmux may report zero or synthesized pixel dimensions via ioctl. Only a
-    // cell-size reply from the outer terminal is authoritative there.
-    if !KITTY_PROBED.load(Ordering::Relaxed) || std::env::var_os("TMUX").is_some() {
+    // tmux may report zero or synthesized pixel dimensions via ioctl. There
+    // only its answer to the cell-size query is authoritative.
+    if std::env::var_os("TMUX").is_some() {
         return;
     }
     if let Some(geometry) = crossterm::terminal::window_size()
@@ -60,9 +90,69 @@ fn cell_pixels(columns: u16, rows: u16, width: u16, height: u16) -> Option<(u32,
     (w > 0 && h > 0).then_some((w, h))
 }
 
+/// The cell size in pixels when Kitty graphics are enabled and the size is known.
 pub fn kitty_cell_pixels() -> Option<(u32, u32)> {
-    let packed = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
+    let packed = kitty_cell_pixels_packed();
     (packed != 0).then_some(((packed >> 32) as u32, packed as u32))
+}
+
+fn kitty_cell_pixels_packed() -> u64 {
+    if kitty_graphics_enabled() {
+        KITTY_CELL_PIXELS.load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+/// The last detection answer for one terminal, kept across launches so the
+/// first frame already draws what the probe will confirm a moment later.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct KittyMemory {
+    terminal: String,
+    supported: bool,
+    cell: Option<(u32, u32)>,
+}
+
+static KITTY_MEMORY: std::sync::Mutex<Option<KittyMemory>> = std::sync::Mutex::new(None);
+
+fn kitty_memory_path(state_root: &std::path::Path) -> std::path::PathBuf {
+    state_root.join("kitty_graphics.json")
+}
+
+fn terminal_identity() -> String {
+    let var = |name| std::env::var(name).unwrap_or_default();
+    let tmux = std::env::var_os("TMUX").is_some();
+    format!("{}|{}|tmux={tmux}", var("TERM"), var("TERM_PROGRAM"))
+}
+
+/// Starts from the answer remembered for this terminal, or no support.
+pub fn restore_kitty_detection(state_root: &std::path::Path) {
+    let memory = std::fs::read(kitty_memory_path(state_root))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<KittyMemory>(&bytes).ok())
+        .filter(|memory| memory.terminal == terminal_identity());
+    set_kitty_detected(memory.as_ref().is_some_and(|memory| memory.supported));
+    set_kitty_cell_pixels(memory.as_ref().and_then(|memory| memory.cell));
+    *KITTY_MEMORY.lock().unwrap_or_else(|e| e.into_inner()) = memory;
+}
+
+/// Saves the current detection answer when it differs from the remembered one.
+pub fn remember_kitty_detection(state_root: &std::path::Path) {
+    let packed = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
+    let current = KittyMemory {
+        terminal: terminal_identity(),
+        supported: KITTY_DETECTED.load(Ordering::Relaxed),
+        cell: (packed != 0).then_some(((packed >> 32) as u32, packed as u32)),
+    };
+    let mut remembered = KITTY_MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+    if remembered.as_ref() == Some(&current) {
+        return;
+    }
+    if let Ok(json) = serde_json::to_vec(&current) {
+        if std::fs::write(kitty_memory_path(state_root), json).is_ok() {
+            *remembered = Some(current);
+        }
+    }
 }
 
 pub const DISPLAY_RENDERER_VERSION: u64 = 17;
@@ -85,12 +175,15 @@ pub fn transcript_renderer_cache_key(
             None => hash,
         });
     }
-    if inline_options.math_graphics {
-        let geometry = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
-        let images = (geometry != 0)
-            .then(smelt_term::kitty::image_generation)
-            .unwrap_or_default();
-        key = Some(key.unwrap_or_default() ^ geometry.rotate_left(31) ^ images.rotate_left(7));
+    // Images and math draw as Kitty graphics sized to the cell when it is known.
+    // Math also retries graphics admission once the live image budget frees up.
+    let geometry = kitty_cell_pixels_packed();
+    if geometry != 0 {
+        let mut graphics = geometry.rotate_left(31);
+        if inline_options.math_graphics {
+            graphics ^= smelt_term::kitty::image_generation().rotate_left(7);
+        }
+        key = Some(key.unwrap_or_default() ^ graphics);
     }
     key
 }
@@ -1572,6 +1665,22 @@ fn compile_layout_ir_with_cache(
         BlockLayout::Leaf(LuaLeaf::Separator(spec)) => {
             Ok(BlockLayout::Leaf(IrLeaf::Separator(spec.clone())))
         }
+        BlockLayout::Leaf(LuaLeaf::Image(spec)) => {
+            let content = cache
+                .content_sources
+                .iter()
+                .find(|content| content.id() == spec.id)
+                .cloned()
+                .ok_or_else(|| format!("unknown transcript content id {}", spec.id.get()))?;
+            Ok(BlockLayout::Leaf(IrLeaf::Image(
+                smelt_transcript::content::block_layout::RetainedImageSpec {
+                    content,
+                    label: spec.label.clone(),
+                    source: spec.source.clone(),
+                    max_rows: spec.max_rows,
+                },
+            )))
+        }
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
             let ext = spec
                 .lang
@@ -1674,6 +1783,7 @@ fn compile_layout_syntax(
         | BlockLayout::Leaf(IrLeaf::Markdown(_))
         | BlockLayout::Leaf(IrLeaf::Code(_))
         | BlockLayout::Leaf(IrLeaf::Separator(_))
+        | BlockLayout::Leaf(IrLeaf::Image(_))
         | BlockLayout::Leaf(IrLeaf::SourceView(_)) => {}
         BlockLayout::Leaf(IrLeaf::Runs(spec)) => {
             spec.syntax_highlights = compile_styled_syntax(&spec.lines.0, inline_syntax, theme);
@@ -2166,6 +2276,33 @@ mod tests {
         assert_eq!(cell_pixels(80, 24, 800, 0), None);
         assert_eq!(cell_pixels(80, 24, 800, 480), Some((10, 20)));
         assert_eq!(cell_pixels(80, 24, 960, 576), Some((12, 24)));
+    }
+
+    #[test]
+    fn kitty_detection_is_restored_only_for_the_same_terminal() {
+        let state = tempfile::tempdir().unwrap();
+        set_kitty_graphics_setting(KittyGraphics::Auto);
+        set_kitty_detected(true);
+        set_kitty_cell_pixels(Some((9, 19)));
+        remember_kitty_detection(state.path());
+
+        set_kitty_detected(false);
+        set_kitty_cell_pixels(None);
+        restore_kitty_detection(state.path());
+        assert_eq!(kitty_cell_pixels(), Some((9, 19)));
+
+        let other = KittyMemory {
+            terminal: "another-terminal".into(),
+            supported: true,
+            cell: Some((9, 19)),
+        };
+        std::fs::write(
+            kitty_memory_path(state.path()),
+            serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
+        restore_kitty_detection(state.path());
+        assert_eq!(kitty_cell_pixels(), None);
     }
 
     #[test]
