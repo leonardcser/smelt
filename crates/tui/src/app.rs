@@ -10,6 +10,7 @@ pub(crate) mod dialog;
 pub(crate) mod document;
 pub(crate) mod drafts;
 pub(crate) mod engine_events;
+pub mod ephemeral_dir;
 pub(crate) mod events;
 #[cfg(test)]
 mod harness_tests;
@@ -174,7 +175,7 @@ pub struct ShutdownContext {
 #[derive(Debug)]
 pub enum SessionPersistence {
     Persistent,
-    Ephemeral { dir: tempfile::TempDir },
+    Ephemeral(ephemeral_dir::EphemeralDir),
 }
 
 impl SessionPersistence {
@@ -183,14 +184,11 @@ impl SessionPersistence {
     }
 
     pub fn ephemeral() -> std::io::Result<Self> {
-        tempfile::Builder::new()
-            .prefix("smelt-session-")
-            .tempdir()
-            .map(|dir| Self::Ephemeral { dir })
+        ephemeral_dir::EphemeralDir::create().map(Self::Ephemeral)
     }
 
     fn is_ephemeral(&self) -> bool {
-        matches!(self, Self::Ephemeral { .. })
+        matches!(self, Self::Ephemeral(_))
     }
 
     fn artifact_dir(
@@ -200,7 +198,7 @@ impl SessionPersistence {
     ) -> std::path::PathBuf {
         match self {
             Self::Persistent => sessions.artifact_dir_for(session),
-            Self::Ephemeral { dir } => dir.path().to_path_buf(),
+            Self::Ephemeral(ephemeral) => ephemeral.path().to_path_buf(),
         }
     }
 
