@@ -491,6 +491,30 @@ fn native_shells_join_the_process_list_and_stop_through_their_agent() {
 }
 
 #[test]
+fn ps_dialog_lists_a_shell_the_agent_starts_while_it_is_open() {
+    let mut app = TestApp::builder().build();
+    app.animate_with_virtual_clock();
+    native_background_session(&mut app);
+    app.type_text("/ps");
+    app.press(KeyCode::Enter);
+    app.feed_one(SourceEvent::LuaWakeup);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("(no jobs)"), "{frame}");
+
+    let now = engine::clock::unix_time_ms(app.tui.core.clock.as_ref());
+    app.feed_one(SourceEvent::engine(native_shell(now, true)));
+    let frame = app.advance_animation(1000).text();
+    assert!(frame.contains("npm run dev"), "{frame}");
+    assert!(!frame.contains("(no jobs)"), "{frame}");
+
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
+        processes: Vec::new(),
+    }));
+    let frame = app.advance_animation(1000).text();
+    assert!(frame.contains("(no jobs)"), "{frame}");
+}
+
+#[test]
 fn rewinding_drops_a_reply_claude_code_is_streaming_on_its_own() {
     let mut app = TestApp::builder().build();
     app.animate_with_virtual_clock();

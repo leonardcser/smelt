@@ -860,3 +860,17 @@ fn job_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
 
     assert!(!app.agent_running());
 }
+
+#[test]
+fn ps_opens_while_the_agent_is_working() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.type_text("/ps");
+    app.press(KeyCode::Enter);
+    app.feed_one(SourceEvent::LuaWakeup);
+    assert!(
+        app.state().active_modal.is_some(),
+        "/ps must open during a turn"
+    );
+    assert!(app.render_to_frame().text().contains("(no jobs)"));
+}

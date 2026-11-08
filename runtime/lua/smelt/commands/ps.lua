@@ -212,4 +212,4 @@ end
 
 smelt.cmd.register("ps", function()
   smelt.spawn(open_ps)
-end, { desc = "show and manage running commands", busy = "reject" })
+end, { desc = "show and manage running commands", busy = "run" })
