@@ -4100,3 +4100,56 @@ fn diff_preview_mouse_drag_paints_selection_and_copies() {
         format!("{}\n{line}\n{}", &line[2..], &line[..11])
     );
 }
+
+#[test]
+fn native_document_scroll_writes_use_rows_added_since_the_last_paint() {
+    use smelt_buffer::document::{DocumentRow, DocumentSnapshot, RowSource};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Growing(AtomicU64);
+    impl RowSource for Growing {
+        fn snapshot(&self) -> DocumentSnapshot {
+            let total_rows = self.0.load(Ordering::Acquire);
+            DocumentSnapshot {
+                generation: total_rows,
+                total_rows,
+            }
+        }
+        fn rows(
+            &self,
+            range: std::ops::Range<u64>,
+            _: &smelt_core::theme::Theme,
+        ) -> Vec<DocumentRow> {
+            let end = range.end.min(self.0.load(Ordering::Acquire));
+            (range.start..end)
+                .map(|row| DocumentRow {
+                    text: format!("row {row}"),
+                    ..Default::default()
+                })
+                .collect()
+        }
+    }
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    app.run_lua_result(
+        r#"
+        list = smelt.win.new(smelt.buf.new(), { name = 'doc.list', surface = 'list_inert', kind = 'list' })
+        smelt.overlay.new({ name = 'documents', width = 60, height = 12, layout = smelt.ui.layout.leaf(list) })
+        "#,
+    )
+    .unwrap();
+    let win = app.ui_probe().named_win("doc.list").unwrap();
+    let source = Arc::new(Growing(AtomicU64::new(50)));
+    app.tui.ui.set_window_document(win, Some(source.clone()));
+    app.run_lua_result("list:cursor(49)").unwrap();
+    app.render_silent();
+    let bottom = app.ui_probe().win(win).unwrap().scroll_top();
+    assert!(bottom > 0);
+    // Rows arrive above; a scroll written before the next repaint reaches
+    // them instead of stopping at the last painted length.
+    source.0.store(60, Ordering::Release);
+    app.run_lua_result(&format!("list:scroll({})", bottom + 10))
+        .unwrap();
+    app.render_silent();
+    assert_eq!(app.ui_probe().win(win).unwrap().scroll_top(), bottom + 10);
+}

@@ -53,6 +53,18 @@ fn main() {
                 bench_name: "viewer_search_benchmark",
             });
         }
+        Some("bench-files") => {
+            for test_filter in ["file_finder_benchmark", "code_search_benchmark"] {
+                bench_support::run_cargo_test_benchmark(bench_support::CargoTestBenchmark {
+                    package: "smelt-tui",
+                    test_filter,
+                    features: &["harness"],
+                    release: true,
+                    env: Vec::new(),
+                    bench_name: test_filter,
+                });
+            }
+        }
         Some("bench-file-search") => bench_file_search::run(args.collect()),
         Some("bench-session-search") => bench_session_search::run(args.collect()),
         Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
@@ -82,6 +94,7 @@ fn print_usage() {
     eprintln!(
         "  bench-search                          benchmark typing a search in a large viewer"
     );
+    eprintln!("  bench-files                           benchmark file and code search previews");
     eprintln!(
         "  bench-file-search [--runs N] [--entries N] [--queries CSV] benchmark file fuzzy search"
     );

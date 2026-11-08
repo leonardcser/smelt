@@ -12,6 +12,11 @@ local files = {}
 ---@type fun(item: table, opts: table?): boolean, string?
 files.accept = nil
 
+--- Search the contents of workspace files and stream matching lines. Returns a `smelt.files.Grep`, or `(nil, err)` for an invalid pattern. The query is literal unless `opts.regex`, and case-insensitive unless it has an uppercase letter. Files come from the same index as `files.search`; binary files are skipped. Files are searched in parallel and results arrive in path order. Options: `{ cwd?, source?, limit?, regex?, reverse?, icons? }`. `limit` caps kept lines (default 10000); counting continues past it. `reverse` puts the first match on the last row and fills short lists with blank rows above (see `fill`). `icons = { colors?, light? }` adds file icons before paths.
+---@see smelt.files.Grep
+---@type fun(query: string, opts: table?): smelt.files.Grep?, string?
+files.grep = nil
+
 --- Trigger an asynchronous full rescan for the current workspace or `opts.cwd`. Returns `(true, nil)` or `(false, err)`.
 ---@type fun(opts: table?): boolean, string?
 files.rescan = nil

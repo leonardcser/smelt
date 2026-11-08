@@ -71,6 +71,8 @@ pub struct WorkspaceFiles {
     roots: HashMap<PathBuf, PathBuf>,
     git_roots: HashSet<PathBuf>,
     search_worker: Option<SearchWorker>,
+    /// File paths of each project, by the index generation they came from.
+    file_lists: HashMap<(PathBuf, SearchSource), GenerationFiles>,
 }
 
 #[derive(Debug)]
@@ -187,6 +189,7 @@ impl Drop for WorkspaceWatcher {
 }
 
 type SharedProjectState = Arc<RwLock<ProjectState>>;
+type GenerationFiles = (u64, Arc<Vec<String>>);
 
 #[derive(Debug)]
 struct ProjectState {
@@ -233,6 +236,16 @@ pub struct SearchRequest {
     pub offset: usize,
     pub include_dirs: bool,
     pub source: SearchSource,
+}
+
+/// Indexed files of one project, for searching their contents.
+#[derive(Clone, Debug)]
+pub struct FileList {
+    pub root: PathBuf,
+    /// Root-relative slash paths, sorted.
+    pub files: Arc<Vec<String>>,
+    /// Indexing is still running, so `files` may grow.
+    pub scanning: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -419,6 +432,7 @@ impl WorkspaceFiles {
             roots: HashMap::new(),
             git_roots: HashSet::new(),
             search_worker: None,
+            file_lists: HashMap::new(),
         }
     }
 
@@ -450,6 +464,35 @@ impl WorkspaceFiles {
             .search_worker
             .get_or_insert_with(|| SearchWorker::new(INLINE_SEARCH_BUDGET))
             .request(key, snapshot))
+    }
+
+    pub fn files(&mut self, cwd: &Path, source: SearchSource) -> Result<FileList, String> {
+        let root = self.workspace_root(cwd);
+        self.ensure_project(&root, source)?;
+        let key = (root, source);
+        let project = &self.projects[&key];
+        let snapshot = project.snapshot()?;
+        let files = match self.file_lists.get(&key) {
+            Some((generation, files)) if *generation == snapshot.generation => Arc::clone(files),
+            _ => {
+                let files: Arc<Vec<String>> = Arc::new(
+                    snapshot
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.kind == ItemKind::File)
+                        .map(|entry| entry.path.clone())
+                        .collect(),
+                );
+                self.file_lists
+                    .insert(key.clone(), (snapshot.generation, Arc::clone(&files)));
+                files
+            }
+        };
+        Ok(FileList {
+            root: self.projects[&key].root.clone(),
+            files,
+            scanning: snapshot.scanning || !snapshot.warmup_complete,
+        })
     }
 
     pub fn accept(&mut self, request: AcceptRequest) -> Result<(), String> {

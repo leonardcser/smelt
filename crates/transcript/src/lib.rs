@@ -2,8 +2,10 @@
 //! content storage, markdown and stream parsing, syntax and diff highlighting,
 //! and the builders that turn blocks into styled lines.
 
+pub mod code_search;
 pub mod content;
 pub mod diff;
+pub mod file_preview;
 pub mod hash;
 pub mod paused_timer;
 pub mod tool_presentation;

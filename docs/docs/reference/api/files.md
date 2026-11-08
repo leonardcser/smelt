@@ -19,6 +19,16 @@ fun(item: table, opts: table?): boolean, string?
 
 Record a selected file result for recent-selection ranking. Options: `{ cwd? }`. Returns `(true, nil)` or `(false, err)`.
 
+## `smelt.files.grep`
+
+```lua
+fun(query: string, opts: table?): smelt.files.Grep?, string?
+```
+
+Types: [`smelt.files.Grep`](types.md#smeltfilesgrep)
+
+Search the contents of workspace files and stream matching lines. Returns a `smelt.files.Grep`, or `(nil, err)` for an invalid pattern. The query is literal unless `opts.regex`, and case-insensitive unless it has an uppercase letter. Files come from the same index as `files.search`; binary files are skipped. Files are searched in parallel and results arrive in path order. Options: `{ cwd?, source?, limit?, regex?, reverse?, icons? }`. `limit` caps kept lines (default 10000); counting continues past it. `reverse` puts the first match on the last row and fills short lists with blank rows above (see `fill`). `icons = { colors?, light? }` adds file icons before paths.
+
 ## `smelt.files.rescan`
 
 ```lua

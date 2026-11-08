@@ -1,7 +1,6 @@
 //! Compact unified-patch index with random-access, foldable row projections.
 //! Patch text is stored once; only requested display rows are allocated/styled.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -9,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use crate::style::{Color, Style};
 use smelt_buffer::buffer::{LineDecoration, SourceLine, Span, SpanMeta};
 use smelt_buffer::document::{DocumentRow, DocumentSnapshot, DocumentViewport, RowSource, ViewId};
+use smelt_buffer::text::display_text;
 use smelt_buffer::theme::{intern, intern_anonymous_style, HlGroup, Theme};
 
 mod inline;
@@ -1219,26 +1219,6 @@ fn styled_row(text: String, group: &str, prefix: u16) -> DocumentRow {
             ..Default::default()
         },
     }
-}
-
-/// Make terminal control characters visible rather than interpreting patch data.
-/// `text` as rows show it: tabs expand to four spaces and control characters
-/// are escaped. Borrows `text` when it shows as is.
-fn display_text(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(|ch| ch.is_control()) {
-        return Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '\t' => out.push_str("    "),
-            ch if ch.is_control() => {
-                out.extend(ch.escape_default());
-            }
-            ch => out.push(ch),
-        }
-    }
-    Cow::Owned(out)
 }
 
 #[cfg(test)]

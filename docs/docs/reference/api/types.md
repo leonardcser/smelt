@@ -649,6 +649,23 @@ Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-m
 | `ask` | `string[]` |  | Patterns that always prompt. |
 | `deny` | `string[]` |  | Patterns that auto-deny. |
 
+### `smelt.files.Grep`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+A running content search from `smelt.files.grep`. Rows are zero-based. The search stops on `cancel` or when collected.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `document` | `fun(self: smelt.files.Grep): smelt.document.Document` | yes | Row source for `win:document`: one `path:line:column: text` row per matching line, with syntax colours and highlighted matches. Grows while the search runs. |
+| `progress` | `fun(self: smelt.files.Grep): { rows: integer, total: integer, files_searched: integer, files_total: integer, done: boolean, indexing: boolean, version: integer }` | yes | Search progress. `rows` are kept lines, `total` all matching lines. `indexing` means the file index was still being built when the search started. `version` changes with any other field. |
+| `sync` | `fun(self: smelt.files.Grep): integer` | yes | Show every match found so far in the document. The document only changes on `sync` and `fill`, so a caller can keep its selection in step. Returns how many rows appeared above the existing ones: shift the cursor and scroll by that much to keep the same rows on screen. Always 0 unless reversed. |
+| `item` | `fun(self: smelt.files.Grep, row: integer): { index: integer, path: string, line: integer, column: integer, text: string }?` | yes | The match on a document row, or nil for a fill row: 1-based match index in path order, root-relative path, 1-based line and character column, and trimmed line text. |
+| `row` | `fun(self: smelt.files.Grep, index: integer): integer?` | yes | Document row of the 1-based match index, or nil if it is not shown yet. |
+| `fill` | `fun(self: smelt.files.Grep, rows: integer): integer` | yes | Keep at least `rows` rows in a reversed document, filling above the matches, so a short list sits at the bottom of a window that tall. Returns the rows added above, as `sync` does; negative when it removed some. |
+| `root` | `fun(self: smelt.files.Grep): string` | yes | Directory that item paths are relative to. |
+| `cancel` | `fun(self: smelt.files.Grep)` | yes | Stop searching. Rows found so far stay available. |
+
 ### `smelt.input.Input`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.

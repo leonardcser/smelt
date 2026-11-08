@@ -439,14 +439,18 @@ impl Drop for PlatformRuntime {
 }
 
 impl crate::app::TuiApp {
-    pub(crate) fn open_file_in_editor(&mut self, path: &str) -> Result<(), String> {
+    pub(crate) fn open_file_in_editor(
+        &mut self,
+        path: &str,
+        line: Option<u32>,
+    ) -> Result<(), String> {
         let path = self.core.env.cwd().join(path);
         if !path.is_file() {
             return Err(format!("editor: not a file: {}", path.display()));
         }
         let (program, mut args) = crate::input::editor::editor_command_from_env()
             .map_err(|error| format!("editor: {error}"))?;
-        args.push(path.into_os_string());
+        args.extend(crate::input::editor::file_args(&program, path, line));
         match self.run_editor(&program, &args) {
             Ok(status) if status.success() => Ok(()),
             Ok(status) => Err(format!("editor exited with {status}")),

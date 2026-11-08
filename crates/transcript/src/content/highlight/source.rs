@@ -79,7 +79,7 @@ impl Syntax {
         )
     }
 
-    fn is_plain(self) -> bool {
+    pub(crate) fn is_plain(self) -> bool {
         std::ptr::eq(self.0, SYNTAX_SET.find_syntax_plain_text())
     }
 }

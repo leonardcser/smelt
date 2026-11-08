@@ -29,6 +29,8 @@ term-maths = "1.0.0"
 rust-latex-parser = "0.1.0"
 ratex-parser = "0.1.14"
 ratex-font = "0.1.14"
+regex = "1.13.1"
+memchr = "2.8.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

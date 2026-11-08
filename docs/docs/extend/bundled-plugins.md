@@ -32,7 +32,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.diff` | /diff: working changes, branch review and commit history. |
 | `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
-| `smelt.plugins.file_finder` | /files (all or git): fuzzy workspace or Git-tracked file search with source preview. |
+| `smelt.plugins.file_finder` | /files and /search: find workspace or Git-tracked files by name, or search their contents, with a source preview beside the results. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan artifacts and approval UI. |
 | `smelt.plugins.predict` | Input prediction plugin. |
@@ -63,7 +63,8 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 ## File finder
 
 [Find a file and open it in your editor](../guide/workflows.md#review-changes-and-open-files)
-with `/files` or `/files git`.
+with `/files` or `/files git`, or search file contents with `/search` or
+`/search git`.
 
 No global keybindings are installed. To add your own:
 
@@ -75,4 +76,8 @@ end, { desc = "find workspace file" })
 smelt.keymap.set("n", "<leader>fg", function()
   smelt.cmd.run("files git")
 end, { desc = "find Git-tracked file" })
+
+smelt.keymap.set("n", "<leader>fs", function()
+  smelt.cmd.run("search")
+end, { desc = "search file contents" })
 ```

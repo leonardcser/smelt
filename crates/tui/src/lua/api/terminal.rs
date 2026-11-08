@@ -128,10 +128,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     m.live_only_fn(
         "open_editor",
-        "Open an existing file in $VISUAL, then $EDITOR, falling back to vi. Relative paths resolve against the session cwd. Suspends the terminal until the editor exits, then repaints smelt. Returns `(true, nil)` or `(false, err)`.",
-        &["path"],
-        |_, path: String| -> LuaResult<(bool, Option<String>)> {
-            match crate::lua::with_platform_host(|host| host.open_editor(&path)) {
+        "Open an existing file in $VISUAL, then $EDITOR, falling back to vi. Relative paths resolve against the session cwd. `opts.line` opens at a 1-based line (`+line path`, or `path:line` for Helix, VS Code, Sublime and Zed). Suspends the terminal until the editor exits, then repaints smelt. Returns `(true, nil)` or `(false, err)`.",
+        &["path", "opts"],
+        |_, (path, opts): (String, Option<mlua::Table>)| -> LuaResult<(bool, Option<String>)> {
+            let line = match opts {
+                Some(opts) => opts.get::<Option<u32>>("line")?.filter(|line| *line > 0),
+                None => None,
+            };
+            match crate::lua::with_platform_host(|host| host.open_editor(&path, line)) {
                 Ok(()) => Ok((true, None)),
                 Err(error) => Ok((false, Some(error))),
             }

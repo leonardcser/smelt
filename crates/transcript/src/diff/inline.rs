@@ -4,12 +4,13 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use super::{display_text, Diff, Kind};
+use super::{Diff, Kind};
 use crate::content::highlight::diff::diff_inline::{
     align_changed_lines_deadline, inline_highlights_for_pair_deadline, LineAlignment,
     MAX_LINE_ALIGNMENT_LINES,
 };
 use crate::content::highlight::diff::DiffByteRange;
+use smelt_buffer::text::display_text;
 
 const ALIGN_BYTES: usize = 8192;
 const PAIR_BYTES: usize = 8192;

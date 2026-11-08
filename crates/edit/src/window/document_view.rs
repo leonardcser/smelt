@@ -367,6 +367,11 @@ impl Window {
     }
 
     pub fn scroll_row_total(&self, buf: &Buffer) -> RowIndex {
+        // A native document may have grown since its rows were last
+        // materialized; scroll writes follow its current length.
+        if let Some(source) = self.row_source() {
+            return source.snapshot().total_rows;
+        }
         let state = self.document_view_state_ref();
         if state.active {
             state.materialized.total_rows

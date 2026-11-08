@@ -13,6 +13,16 @@ description: "Indexed read-only documents shared by native data providers and Lu
 
 Indexed read-only documents shared by native data providers and Lua-created windows.
 
+## `smelt.document.file`
+
+```lua
+fun(path: string, opts: table?): smelt.document.Document?, string?
+```
+
+Types: [`smelt.document.Document`](types.md#smeltdocumentdocument)
+
+Read a file for previewing, up to `opts.max_bytes` (default 16 MiB; longer files end with a `[preview truncated]` row). Returns a document of numbered source lines, or `(nil, err)` where `err` is `"binary"` for binary files. Only rows a window shows are built; their syntax colours are parsed on a background thread from a nearby point, so a deep line costs the same as the first. Options: `{ max_bytes?, query?, regex?, line? }`. Lines matching `query` (same rules as `smelt.files.grep`) are highlighted, and the 1-based `line` gets the cursor-line background.
+
 ## `smelt.document.text`
 
 ```lua

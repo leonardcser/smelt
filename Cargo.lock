@@ -3957,9 +3957,11 @@ dependencies = [
 name = "smelt-transcript"
 version = "0.0.0-dev"
 dependencies = [
+ "memchr",
  "pulldown-cmark",
  "ratex-font",
  "ratex-parser",
+ "regex",
  "rust-latex-parser",
  "seahash",
  "serde",

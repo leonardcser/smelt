@@ -446,6 +446,18 @@
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
 
+--- A running content search from `smelt.files.grep`. Rows are zero-based. The search stops on `cancel` or when collected.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.files.Grep
+---@field document fun(self: smelt.files.Grep): smelt.document.Document Row source for `win:document`: one `path:line:column: text` row per matching line, with syntax colours and highlighted matches. Grows while the search runs.
+---@field progress fun(self: smelt.files.Grep): { rows: integer, total: integer, files_searched: integer, files_total: integer, done: boolean, indexing: boolean, version: integer } Search progress. `rows` are kept lines, `total` all matching lines. `indexing` means the file index was still being built when the search started. `version` changes with any other field.
+---@field sync fun(self: smelt.files.Grep): integer Show every match found so far in the document. The document only changes on `sync` and `fill`, so a caller can keep its selection in step. Returns how many rows appeared above the existing ones: shift the cursor and scroll by that much to keep the same rows on screen. Always 0 unless reversed.
+---@field item fun(self: smelt.files.Grep, row: integer): { index: integer, path: string, line: integer, column: integer, text: string }? The match on a document row, or nil for a fill row: 1-based match index in path order, root-relative path, 1-based line and character column, and trimmed line text.
+---@field row fun(self: smelt.files.Grep, index: integer): integer? Document row of the 1-based match index, or nil if it is not shown yet.
+---@field fill fun(self: smelt.files.Grep, rows: integer): integer Keep at least `rows` rows in a reversed document, filling above the matches, so a short list sits at the bottom of a window that tall. Returns the rows added above, as `sync` does; negative when it removed some.
+---@field root fun(self: smelt.files.Grep): string Directory that item paths are relative to.
+---@field cancel fun(self: smelt.files.Grep) Stop searching. Rows found so far stay available.
+
 --- Single-line input handle returned by `smelt.input.new(opts)`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.input.Input

@@ -82,7 +82,7 @@ pub fn register_host_api(
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;
     defaults::register(lua, smelt, shared)?;
-    document::register(lua, smelt)?;
+    document::register(lua, smelt, shared)?;
     diff::register(lua, smelt, shared)?;
     events::register(lua, smelt, shared)?;
     files::register(lua, smelt, shared)?;

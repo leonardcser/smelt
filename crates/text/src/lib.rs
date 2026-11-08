@@ -404,9 +404,57 @@ pub fn insert_str(s: &mut String, pos: usize, ins: &str) -> usize {
     p
 }
 
+/// `text` as rows show it: tabs expand to four spaces and other control
+/// characters are escaped, so source text never drives the terminal.
+/// Borrows `text` when it shows as is.
+pub fn display_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\t' => out.push_str("    "),
+            ch if ch.is_control() => out.extend(ch.escape_default()),
+            ch => out.push(ch),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Maps byte offsets in one line to offsets in its [`display_text`].
+/// Cheapest for increasing offsets.
+#[derive(Default)]
+pub struct DisplayOffsets {
+    source: usize,
+    display: usize,
+}
+
+impl DisplayOffsets {
+    pub fn display(&mut self, line: &str, byte: usize) -> usize {
+        if byte < self.source {
+            *self = Self::default();
+        }
+        self.display += display_text(slice(line, self.source..byte)).len();
+        self.source = byte.max(self.source);
+        self.display
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_offsets_follow_expanded_tabs_and_escapes() {
+        let line = "\ta\u{1}b";
+        assert_eq!(display_text(line), "    a\\u{1}b");
+        let mut offsets = DisplayOffsets::default();
+        assert_eq!(offsets.display(line, 1), 4);
+        assert_eq!(offsets.display(line, 3), 10);
+        assert_eq!(offsets.display(line, 0), 0);
+        assert_eq!(offsets.display(line, 4), 11);
+    }
 
     /// 9 bytes, 3 chars - drives non-boundary offsets.
     const CJK: &str = "日本語";

@@ -96,6 +96,35 @@ fn split_windows_editor_command(raw: &str) -> io::Result<Vec<OsString>> {
     Ok(parts)
 }
 
+/// Arguments that open `path`, at 1-based `line` when given. Editors that
+/// take `path:line` get that; the rest get the common `+line path`.
+pub(crate) fn file_args(
+    program: &std::ffi::OsStr,
+    path: PathBuf,
+    line: Option<u32>,
+) -> Vec<OsString> {
+    let Some(line) = line else {
+        return vec![path.into_os_string()];
+    };
+    let name = std::path::Path::new(program)
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match name.as_str() {
+        "code" | "codium" | "cursor" => {
+            let mut target = path.into_os_string();
+            target.push(format!(":{line}"));
+            vec!["-g".into(), target]
+        }
+        "hx" | "helix" | "subl" | "zed" => {
+            let mut target = path.into_os_string();
+            target.push(format!(":{line}"));
+            vec![target]
+        }
+        _ => vec![format!("+{line}").into(), path.into_os_string()],
+    }
+}
+
 /// Stage `text` into a tempfile and build an [`EditorRequest`].
 pub(crate) fn prepare(text: &str, runtime_dir: &std::path::Path) -> io::Result<EditorRequest> {
     let tmp = tempfile::Builder::new()
@@ -130,6 +159,20 @@ pub(crate) fn finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_args_place_the_line_for_each_editor_family() {
+        let args = |program: &str, line| {
+            file_args(program.as_ref(), PathBuf::from("src/a.rs"), line)
+                .into_iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(args("nvim", None), ["src/a.rs"]);
+        assert_eq!(args("/usr/bin/vim", Some(7)), ["+7", "src/a.rs"]);
+        assert_eq!(args("hx", Some(7)), ["src/a.rs:7"]);
+        assert_eq!(args("code", Some(7)), ["-g", "src/a.rs:7"]);
+    }
 
     #[test]
     fn split_handles_bare_program() {
