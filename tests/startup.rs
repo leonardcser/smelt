@@ -3553,6 +3553,65 @@ fn prompt_file_cleanup_does_not_kill_smelt() {
     }
 }
 
+#[test]
+fn headless_search_tools_report_paths_relative_to_cwd() {
+    let work = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(work.path()).unwrap();
+    let src = work.join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("notes.txt"), "needle-marker\n").unwrap();
+    let call = |id: &str, name: &str, arguments: serde_json::Value| {
+        stream_event(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": id, "type": "function",
+                "function": {"name": name, "arguments": arguments.to_string()}
+            }]}}]
+        })) + &stream_finish_reason("tool_calls")
+    };
+    let bodies = [
+        call(
+            "grep",
+            "grep",
+            serde_json::json!({
+                "pattern": "needle-marker", "path": src, "output_mode": "content", "-n": true
+            }),
+        ),
+        call(
+            "glob",
+            "glob",
+            serde_json::json!({"pattern": "src/*.txt", "path": work}),
+        ),
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "Found it."}}]}))
+            + &stream_finish(),
+    ];
+    let trial = run_headless_stream_with_launch(
+        &bodies,
+        StreamEnding::Eof,
+        "\"test-model\"",
+        "json",
+        "openai-compatible",
+        |_, command| {
+            command
+                .current_dir(&work)
+                .args(["--mode", "yolo"])
+                .arg("Find the needle.");
+        },
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    let result = |request: usize, id: &str| {
+        trial.request_bodies[request]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["tool_call_id"] == id)
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(result(1, "grep"), "src/notes.txt:1:needle-marker");
+    assert_eq!(result(2, "glob"), "src/notes.txt");
+}
+
 fn stream_content() -> String {
     stream_event(
         serde_json::json!({"choices": [{"delta": {"content": "partial 界", "reasoning_content": "thinking"}}]}),

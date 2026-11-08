@@ -29,8 +29,10 @@ function smelt.tools.path_summary(path, ctx, opts)
   return (opts.prefix or "") .. shown .. (opts.suffix or "")
 end
 
+-- The prefixes of the directory that tool processes run in, which every host
+-- provides.
 local function cwd_prefixes()
-  local cwd = smelt.session.cwd()
+  local cwd = smelt.os.cwd()
   if not cwd or cwd == "" then return {} end
   local last = cwd:sub(-1)
   if last == "/" or last == "\\" then return { cwd } end
