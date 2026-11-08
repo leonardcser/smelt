@@ -109,7 +109,7 @@ local function shell(spec)
 
   -- Dragging the divider resizes the results and the preview; the handle
   -- outlives remounts so the chosen width survives terminal resizes.
-  local split = layout.split("horizontal", { size = spec.list_width or "40%", min_first = 30, min_second = 30 })
+  local split = layout.split("horizontal", { key = "file_finder", size = spec.list_width or "40%", min_first = 30, min_second = 30 })
   local function mount()
     -- Results and input share one frame: the input's top edge is the
     -- separator. With a preview, the split divider is the shared right edge.

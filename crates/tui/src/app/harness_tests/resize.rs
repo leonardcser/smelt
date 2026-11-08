@@ -639,3 +639,58 @@ fn removing_a_captured_split_restores_content_dragging() {
         area.y + 3,
     );
 }
+
+#[test]
+fn keyed_split_remembers_dragged_size_and_follows_configured_default() {
+    let mut app = TestApp::builder().build();
+    open(&mut app, "root");
+    app.run_lua_result(
+        r#"
+        local layout = smelt.ui.layout
+        smelt.settings.splits.test_view = 30
+        keyed = layout.split('horizontal', {key = 'test_view', size = 40, resize = 'cells', min_first = 15, min_second = 18})
+        assert(keyed:size() == 30)
+        smelt.ui.layout.set(function()
+            return keyed:layout(layout.leaf(a), layout.leaf(b))
+        end)
+    "#,
+    )
+    .unwrap();
+    paint(&mut app);
+    let first = rect(&app, "resize.a");
+    assert_eq!(first.width, 30);
+
+    let row = first.y + 3;
+    let col = first.x + first.width;
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), col, row);
+    mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        col + 12,
+        row,
+    );
+    mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        col + 12,
+        row,
+    );
+    assert_eq!(rect(&app, "resize.a").width, 42);
+
+    app.run_lua_result(
+        r#"
+        local saved = smelt.state.persistent('splits')
+        assert(saved.test_view == 42, tostring(saved.test_view))
+        smelt.settings.splits.test_view = 25
+        local reopened = smelt.ui.layout.split('horizontal', {key = 'test_view', size = 40})
+        assert(reopened:size() == 42, 'dragged size wins over the configured default')
+        local other = smelt.ui.layout.split('horizontal', {key = 'other_view', size = 40})
+        assert(other:size() == 40)
+        smelt.settings.splits.bad_view = 'wide'
+        local fallback = smelt.ui.layout.split('horizontal', {key = 'bad_view', size = 40})
+        assert(fallback:size() == 40)
+        assert(not pcall(smelt.ui.layout.hsplit, smelt.ui.layout.leaf(a), smelt.ui.layout.leaf(b), {key = 'x'}))
+    "#,
+    )
+    .unwrap();
+}

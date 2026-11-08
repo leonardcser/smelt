@@ -145,6 +145,7 @@ pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
     BootstrapChunk::ui("headerline.lua"),
     BootstrapChunk::ui("scroll_pills.lua"),
     BootstrapChunk::ui("layout.lua"),
+    BootstrapChunk::ui("splits.lua"),
     BootstrapChunk::host("modes.lua"),
 ];
 

@@ -262,6 +262,16 @@ impl LuaSplit {
     }
 }
 
+/// The `split:size()` form of a preference: integer cells or `ratio:N/M`.
+pub(crate) fn split_size_json(size: SplitSize) -> serde_json::Value {
+    match size {
+        SplitSize::Cells(cells) => cells.into(),
+        SplitSize::Ratio(ratio) => {
+            format!("ratio:{}/{}", ratio.numerator(), ratio.denominator()).into()
+        }
+    }
+}
+
 fn split_changed(lua: &Lua, changed: bool) -> LuaResult<bool> {
     if changed {
         let shared = super::win::current_shared(lua)?;
@@ -278,13 +288,11 @@ impl mlua::UserData for LuaSplit {
             this.layout(first, second, opts.as_ref())
         });
         methods.add_method("size", |lua, this, ()| -> LuaResult<mlua::Value> {
-            match this.0.preferred_size() {
-                SplitSize::Cells(cells) => Ok(mlua::Value::Integer(i64::from(cells))),
-                SplitSize::Ratio(ratio) => Ok(mlua::Value::String(lua.create_string(format!(
-                    "ratio:{}/{}",
-                    ratio.numerator(),
-                    ratio.denominator()
-                ))?)),
+            match split_size_json(this.0.preferred_size()) {
+                serde_json::Value::String(text) => {
+                    Ok(mlua::Value::String(lua.create_string(text)?))
+                }
+                size => Ok(mlua::Value::Integer(size.as_i64().unwrap_or_default())),
             }
         });
         methods.add_method("set_size", |lua, this, size: mlua::Value| {
@@ -397,15 +405,20 @@ fn create_split(axis: Axis, opts: Option<&mlua::Table>) -> LuaResult<LuaSplit> {
             Ok(DividerStyles { normal, active })
         })
         .transpose()?;
-    Ok(LuaSplit(Split::new(
-        axis,
-        SplitOptions {
-            size,
-            minimum: [first, second],
-            resize_mode,
-            styles,
-        },
-    )))
+    let options = SplitOptions {
+        size,
+        minimum: [first, second],
+        resize_mode,
+        styles,
+    };
+    let key = opts
+        .map(|opts| opts.get::<Option<String>>("key"))
+        .transpose()?
+        .flatten();
+    Ok(LuaSplit(match key {
+        Some(key) => Split::keyed(axis, options, key),
+        None => Split::new(axis, options),
+    }))
 }
 
 struct SplitOpts(mlua::Table);
@@ -424,6 +437,7 @@ impl LuaType for SplitOpts {
             doc: "Options for a two-pane resizable layout. Sizes include each child's border and padding. If the terminal cannot fit both minima, they shrink proportionally without discarding the preferred split.",
             fields: vec![
                 LuaClassField { name: "size", ty: "integer | string".into(), optional: true, doc: "Initial first-pane size in cells, a percentage such as 30%, or ratio:N/M. Defaults to 50%. The resize option controls how user sizing is retained across terminal resizes." },
+                LuaClassField { name: "key", ty: "string".into(), optional: true, doc: "With layout.split, remember the size under this name (layout.split only). The split starts at the size the user last dragged it to, else smelt.settings.splits[key], else size. Each resize is saved." },
                 LuaClassField { name: "resize", ty: "'cells' | 'proportional'".into(), optional: true, doc: "How user resizing is retained across terminal-size changes. Defaults to proportional; cells keeps a fixed first-pane width or height." },
                 LuaClassField { name: "min_first", ty: "integer".into(), optional: true, doc: "Minimum first-pane size in cells; defaults to 1." },
                 LuaClassField { name: "min_second", ty: "integer".into(), optional: true, doc: "Minimum second-pane size in cells; defaults to 1." },
@@ -720,6 +734,8 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
     ] {
         m.fn_(name, doc, &["first", "second", "opts"], move |_, (first, second, opts): (LuaUiLayout, LuaUiLayout, Option<SplitOpts>)| -> LuaResult<LuaUiLayout> {
             let opts = opts.as_ref().map(|opts| &opts.0);
+            reject_options(opts, &["key"],
+                "only layout.split remembers sizes; pass key there")?;
             create_split(axis, opts)?.layout(first, second, opts)
         })?;
     }

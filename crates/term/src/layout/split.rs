@@ -4,7 +4,7 @@ use super::{Chrome, LayoutTree, Rect};
 use crate::Style;
 use std::num::NonZeroU16;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 
@@ -143,6 +143,8 @@ struct SplitState {
     axis: Axis,
     options: SplitOptions,
     position: Mutex<SplitSize>,
+    key: Option<Arc<str>>,
+    resized: AtomicBool,
 }
 
 /// A retained split handle. Clones share identity, immutable configuration, and
@@ -160,7 +162,17 @@ pub struct SplitGeometry {
 }
 
 impl Split {
-    pub fn new(axis: Axis, mut options: SplitOptions) -> Self {
+    pub fn new(axis: Axis, options: SplitOptions) -> Self {
+        Self::build(axis, options, None)
+    }
+
+    /// A split whose preference changes are reported through
+    /// [`Split::take_resized`], so the host can persist them under `key`.
+    pub fn keyed(axis: Axis, options: SplitOptions, key: impl Into<Arc<str>>) -> Self {
+        Self::build(axis, options, Some(key.into()))
+    }
+
+    fn build(axis: Axis, mut options: SplitOptions, key: Option<Arc<str>>) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         options.minimum = options.minimum.map(|n| n.max(1));
         Self(Arc::new(SplitState {
@@ -168,7 +180,22 @@ impl Split {
             axis,
             position: Mutex::new(options.size),
             options,
+            key,
+            resized: AtomicBool::new(false),
         }))
+    }
+
+    pub fn key(&self) -> Option<&str> {
+        self.0.key.as_deref()
+    }
+
+    /// The preference when it changed since the last call. Always `None` for
+    /// an unkeyed split.
+    pub fn take_resized(&self) -> Option<SplitSize> {
+        self.0
+            .resized
+            .swap(false, Ordering::Relaxed)
+            .then(|| self.preferred_size())
     }
 
     pub fn id(&self) -> SplitId {
@@ -193,6 +220,9 @@ impl Split {
         let mut position = self.0.position.lock().unwrap();
         let changed = *position != size;
         *position = size;
+        if changed && self.0.key.is_some() {
+            self.0.resized.store(true, Ordering::Relaxed);
+        }
         changed
     }
 

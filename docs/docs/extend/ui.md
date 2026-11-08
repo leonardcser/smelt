@@ -149,6 +149,18 @@ If you rebuild the layout from a composer function, create the split once with
 the composer, so the user's chosen size is kept. `split:size()` and
 `split:set_size()` save and restore it.
 
+Pass `key = "my_view"` to `layout.split` to remember the user's size across
+sessions. The split starts at the size the user last dragged it to, then at
+`smelt.settings.splits.my_view`, then at `size`. Built-in views use the keys
+`diff`, `agent_view`, `file_finder` and `resume`:
+
+```lua
+smelt.settings.splits = { diff = 50, file_finder = "30%" }
+```
+
+Dragged sizes are stored in `~/.local/state/smelt/plugins/splits.json`. Delete
+a key there to return that view to its default.
+
 `layout.frame(body, { border = "single", padding = 1, title = "details" })` adds
 chrome around any subtree.
 

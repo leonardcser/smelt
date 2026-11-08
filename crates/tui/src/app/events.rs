@@ -221,6 +221,7 @@ impl TuiApp {
 
         // Notify Lua subscribers if the prompt buffer changed (drives filter-as-you-type pickers).
         self.emit_prompt_text_changed_if_dirty();
+        self.emit_split_resizes();
 
         let redraw = self.apply_event_outcome(outcome);
         self.save_deferred_session_batch_if_ready();
@@ -383,6 +384,7 @@ impl TuiApp {
             self.dispatch_input_action(action)
         };
         self.emit_prompt_text_changed_if_dirty();
+        self.emit_split_resizes();
         if matches!(outcome, EventOutcome::Quit) {
             self.pending_quit = true;
         }

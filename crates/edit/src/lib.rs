@@ -902,6 +902,15 @@ impl Ui {
             .chain(self.overlays.iter().map(|(_, value)| &value.layout))
     }
 
+    /// Keyed splits whose preference changed since the last call, as
+    /// `(key, size)`. Covers pointer drags, keyboard resizes and Lua calls.
+    pub fn take_resized_splits(&self) -> Vec<(String, layout::SplitSize)> {
+        self.layout_trees()
+            .flat_map(LayoutTree::splits)
+            .filter_map(|split| Some((split.key()?.to_owned(), split.take_resized()?)))
+            .collect()
+    }
+
     /// Measure a subtree with the same window sizing policy used by rendering.
     pub fn measure_layout(&self, tree: &LayoutTree, cap: (u16, u16)) -> (u16, u16) {
         tree.natural_size_with(

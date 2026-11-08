@@ -488,3 +488,19 @@ fn surface_routes_mouse_drags_to_dividers() {
     assert_eq!(cancelled.phase, SplitPhase::Cancelled);
     assert_eq!(surface.active_split(), None);
 }
+
+#[test]
+fn keyed_split_reports_each_preference_change_once() {
+    let keyed = Split::keyed(Axis::Horizontal, SplitOptions::default(), "view");
+    assert_eq!(keyed.key(), Some("view"));
+    assert_eq!(keyed.take_resized(), None);
+    assert!(keyed.set_preferred_size(SplitSize::Cells(12)));
+    assert_eq!(keyed.take_resized(), Some(SplitSize::Cells(12)));
+    assert_eq!(keyed.take_resized(), None);
+    assert!(!keyed.set_preferred_size(SplitSize::Cells(12)));
+    assert_eq!(keyed.take_resized(), None);
+
+    let unkeyed = Split::new(Axis::Horizontal, SplitOptions::default());
+    assert!(unkeyed.set_preferred_size(SplitSize::Cells(12)));
+    assert_eq!(unkeyed.take_resized(), None);
+}

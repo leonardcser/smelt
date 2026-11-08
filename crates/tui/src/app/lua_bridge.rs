@@ -104,6 +104,25 @@ impl TuiApp {
         }
     }
 
+    /// Publish `split_resized` for keyed splits whose size changed, so Lua can
+    /// persist what the user chose.
+    pub(crate) fn emit_split_resizes(&mut self) {
+        let resized = self.ui.take_resized_splits();
+        if resized.is_empty() {
+            return;
+        }
+        for (key, size) in resized {
+            self.core.signals.emit_dyn(
+                "split_resized",
+                std::rc::Rc::new(smelt_core::signals::SplitResized {
+                    key,
+                    size: crate::lua::api::overlay_layout::split_size_json(size),
+                }),
+            );
+        }
+        self.pump_lua();
+    }
+
     pub(crate) fn flush_lua_callbacks(&mut self) {
         let work = self.lua.shared().begin_work();
         self.drain_lua_invocations();

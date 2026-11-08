@@ -501,6 +501,14 @@ pub struct ToolStart {
     pub args: std::collections::HashMap<String, serde_json::Value>,
 }
 
+/// Payload for the `split_resized` event. `size` is the preferred split size
+/// as `split:size()` returns it: integer cells or a `ratio:N/M` string.
+#[derive(Debug, Clone)]
+pub struct SplitResized {
+    pub key: String,
+    pub size: serde_json::Value,
+}
+
 /// Payload for the `tool_end` signal. `elapsed_ms` is `None` when not timed.
 #[derive(Debug, Clone)]
 pub struct ToolEnd {
@@ -630,6 +638,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("settings_autoupgrade"),
     state("settings_terminal_title"),
     event("shutdown"),
+    event("split_resized"),
     event("stream_delta"),
     event("stream_phase"),
     state("task_label"),
@@ -859,6 +868,16 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
                 }
             }
             let _ = t.set("args", args);
+        }
+        mlua::Value::Table(t)
+    });
+    signals.register_lua_projector::<SplitResized, _>(|s, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("key", s.key.as_str());
+        if let Ok(size) = crate::lua::value::from_json(lua, &s.size) {
+            let _ = t.set("size", size);
         }
         mlua::Value::Table(t)
     });

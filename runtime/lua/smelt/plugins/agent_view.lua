@@ -43,7 +43,7 @@ function M.open()
   local preview, preview_buf = window("transcript", "readonly_text")
   local status, status_buf = window("status", "selectable_text")
   preview_buf:lines({ "Select an agent to view its transcript." })
-  local split = layout.split("horizontal", { size = 34, min_first = 24, min_second = 32 })
+  local split = layout.split("horizontal", { key = "agent_view", size = 34, min_first = 24, min_second = 32 })
   local list = smelt.list.new({
     leaf = sidebar, buf = sidebar_buf, items = rows, empty_text = "  (no subagents)",
     render = function(run)

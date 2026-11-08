@@ -81,7 +81,7 @@ function M.open(opts)
     placeholder = "Commit ID or revision",
   })
   local info, info_buf = window("commit", { surface = "readonly_text", pad_left = 1, scrollbar = true })
-  local split = layout.split("horizontal", { size = 42, min_first = 26, min_second = 32 })
+  local split = layout.split("horizontal", { key = "diff", size = 42, min_first = 26, min_second = 32 })
   -- Before the first paint, estimate the sidebar from the overlay width so the
   -- first frame already uses the right tab labels.
   do

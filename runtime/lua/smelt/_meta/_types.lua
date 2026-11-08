@@ -1337,6 +1337,7 @@
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.ui.layout.SplitOpts
 ---@field size? integer | string Initial first-pane size in cells, a percentage such as 30%, or ratio:N/M. Defaults to 50%. The resize option controls how user sizing is retained across terminal resizes.
+---@field key? string With layout.split, remember the size under this name (layout.split only). The split starts at the size the user last dragged it to, else smelt.settings.splits[key], else size. Each resize is saved.
 ---@field resize? 'cells' | 'proportional' How user resizing is retained across terminal-size changes. Defaults to proportional; cells keeps a fixed first-pane width or height.
 ---@field min_first? integer Minimum first-pane size in cells; defaults to 1.
 ---@field min_second? integer Minimum second-pane size in cells; defaults to 1.
@@ -1417,7 +1418,7 @@
 
 --- Name of an event. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.events.Name string|"block_done"|"cmd_post"|"cmd_pre"|"confirm_resolved"|"history"|"input_submit"|"session_ended"|"session_started"|"shutdown"|"stream_delta"|"stream_phase"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"
+---@alias smelt.events.Name string|"block_done"|"cmd_post"|"cmd_pre"|"confirm_resolved"|"history"|"input_submit"|"session_ended"|"session_started"|"shutdown"|"split_resized"|"stream_delta"|"stream_phase"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"
 
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.input.Event "change"|"submit"|"cancel"

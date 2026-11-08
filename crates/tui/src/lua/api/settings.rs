@@ -27,6 +27,10 @@ const TABLE_SETTINGS: &[TableSettingDecl] = &[
         key: "transcript",
         init: init_transcript_settings,
     },
+    TableSettingDecl {
+        key: "splits",
+        init: |lua| lua.create_table(),
+    },
 ];
 
 fn table_setting_decl(key: &str) -> Option<&'static TableSettingDecl> {
@@ -159,7 +163,7 @@ pub(super) fn register(
         lua,
         smelt,
         "settings",
-        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. Transcript keys are `show_timestamps`, `view`, and `limits`; unknown keys raise, including on table replacement. Nested `view` and `limits` tables remain extensible. Available during configuration loading and in headless mode.",
+        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications`, `settings.splits` and `settings.transcript` are Lua tables for plugin preferences. `settings.splits` maps a split key such as `diff` or `file_finder` to its default size (cells, a percentage such as 30%, or ratio:N/M); a size the user dragged wins. Transcript keys are `show_timestamps`, `view`, and `limits`; unknown keys raise, including on table replacement. Nested `view` and `limits` tables remain extensible. Available during configuration loading and in headless mode.",
         Tier::Host,
     )?;
     // Keep table settings behind the proxy so replacing an existing table is validated too.

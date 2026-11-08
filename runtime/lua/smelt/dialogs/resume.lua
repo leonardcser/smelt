@@ -407,7 +407,7 @@ smelt.cmd.register("resume", function()
     local root = left
     if show_preview then
       -- Dragging the divider resizes the results and the preview.
-      local split = smelt.ui.layout.split("horizontal", { size = "40%", min_first = 30, min_second = 30 })
+      local split = smelt.ui.layout.split("horizontal", { key = "resume", size = "40%", min_first = 30, min_second = 30 })
       root = split:layout(left, smelt.ui.layout.leaf(preview_leaf, {
         border = { top = "Comment", bottom = "Comment", right = "Comment" },
         title = smelt.dialog.title(" transcript "),
