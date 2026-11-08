@@ -288,6 +288,56 @@ impl Split {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Edge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// Whether the outer `edge` of `tree` is drawn as a border, looking through
+/// plain containers to the nodes that touch that edge.
+fn has_edge(tree: &LayoutTree, edge: Edge) -> bool {
+    let border = tree.chrome().border.unwrap_or_default();
+    let own = match edge {
+        Edge::Top => border.top,
+        Edge::Right => border.right,
+        Edge::Bottom => border.bottom,
+        Edge::Left => border.left,
+    };
+    if own.is_some() {
+        return true;
+    }
+    let vertical = matches!(edge, Edge::Top | Edge::Bottom);
+    let at_start = matches!(edge, Edge::Top | Edge::Left);
+    // Items stacked along the edge's axis: only the first or last touches it.
+    let touching = |items: &mut dyn Iterator<Item = &LayoutTree>, along: bool| {
+        let mut nodes: Vec<&LayoutTree> = items.collect();
+        if nodes.is_empty() {
+            return false;
+        }
+        if along {
+            let node = if at_start {
+                nodes.remove(0)
+            } else {
+                nodes.pop().unwrap()
+            };
+            has_edge(node, edge)
+        } else {
+            nodes.into_iter().all(|n| has_edge(n, edge))
+        }
+    };
+    match tree {
+        LayoutTree::Leaf { .. } => false,
+        LayoutTree::Frame { child, .. } => has_edge(child, edge),
+        LayoutTree::Vbox { items, .. } => touching(&mut items.iter().map(|i| &i.1), vertical),
+        LayoutTree::Hbox { items, .. } => touching(&mut items.iter().map(|i| &i.1), !vertical),
+        // Nested splits report only their own border, keeping the walk shallow.
+        LayoutTree::Split { .. } => false,
+    }
+}
+
 /// A resolved divider shared by painting and pointer hit-testing.
 #[derive(Clone, Copy, Debug)]
 pub struct SplitDivider {
@@ -301,15 +351,14 @@ pub struct SplitDivider {
 
 impl SplitDivider {
     pub fn new(split: &Split, rect: Rect, children: &[LayoutTree; 2]) -> Self {
-        let borders = [0, 1].map(|i| children[i].chrome().border.unwrap_or_default());
         let (join_start, join_end) = match split.axis() {
             Axis::Horizontal => (
-                borders.iter().all(|b| b.top.is_some()),
-                borders.iter().all(|b| b.bottom.is_some()),
+                children.iter().all(|c| has_edge(c, Edge::Top)),
+                children.iter().all(|c| has_edge(c, Edge::Bottom)),
             ),
             Axis::Vertical => (
-                borders.iter().all(|b| b.left.is_some()),
-                borders.iter().all(|b| b.right.is_some()),
+                children.iter().all(|c| has_edge(c, Edge::Left)),
+                children.iter().all(|c| has_edge(c, Edge::Right)),
             ),
         };
         Self {
@@ -326,7 +375,7 @@ impl SplitDivider {
         self.styles.unwrap_or(defaults).get(active)
     }
 
-    pub fn paint(self, grid: &mut crate::Grid, style: Style) {
+    pub fn paint(self, grid: &mut crate::Grid, style: Style, joins: &mut super::LineJoins) {
         if self.rect.width == 0 || self.rect.height == 0 {
             return;
         }
@@ -347,7 +396,7 @@ impl SplitDivider {
                 Axis::Horizontal => (self.rect.x, self.rect.y.saturating_add(n)),
                 Axis::Vertical => (self.rect.x.saturating_add(n), self.rect.y),
             };
-            slice.set(x, y, ch, style);
+            joins.put(&mut slice, x, y, ch, style);
         }
     }
 }

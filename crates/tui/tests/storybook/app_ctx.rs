@@ -60,6 +60,24 @@ impl AppStoryCtx {
             .wait_for_document(name, std::time::Duration::from_secs(5));
     }
 
+    /// Pump background work until `text` appears in the rendered frame.
+    pub fn wait_for_text(&mut self, text: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            self.app.feed_one(SourceEvent::LuaWakeup);
+            self.app.advance_animation(100);
+            let frame = self.app.render_to_frame().text();
+            if frame.contains(text) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "missing {text}:\n{frame}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     pub fn advance_time(&mut self, ms: u64) {
         self.app.feed_one(SourceEvent::Tick(ms));
     }

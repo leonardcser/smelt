@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 608
 expression: frame.text()
 ---
 
@@ -12,10 +11,10 @@ expression: frame.text()
      │                                                           │
      │                                                           │
      │                                                           │
+     │                                                           │
      │   85.7K 1d   first pass at the resume picker              │
      │   12.1K 5m   investigate parser regression                │
-     └───────────────────────────────────────────────────────────┘
-     ┌ filter ───────────────────────────────────────────────────┐
+     ├───────────────────────────────────────────────────────────┤
   tip│ parser                            ⌥d: delete · workspace  │ing…
 ─────└───────────────────────────────────────────────────────────┘──────
 

@@ -659,7 +659,7 @@ fn search_lists_matching_lines_and_previews_each_at_its_line() {
         "{frame}"
     );
     assert_eq!(row("src/lib.rs:63:9: run(task);"), first - 2, "{frame}");
-    assert!(rows[first + 1].contains('└'), "{frame}");
+    assert!(rows[first + 1].contains('├'), "{frame}");
     assert!(rows[first - 1].contains("\u{e68b} src/lib.rs"), "{frame}");
     assert!(frame.contains("  2 Task list"), "{frame}");
     app.press(KeyCode::Up);
@@ -700,7 +700,7 @@ fn search_lists_matching_lines_and_previews_each_at_its_line() {
             .unwrap()
     };
     let first = row("notes.txt:2:1");
-    assert!(frame.rows[first + 1].contains('└'), "{}", frame.text());
+    assert!(frame.rows[first + 1].contains('├'), "{}", frame.text());
     let selected = row("src/lib.rs:63:9");
     let col = frame.rows[selected].find("src").unwrap();
     let col = frame.rows[selected][..col].chars().count();
@@ -748,7 +748,7 @@ fn search_selection(frame: &crate::smelt_edit::SnapshotFrame) -> (Option<usize>,
         .chars()
         .count();
     let bottom = (top + 1..frame.rows.len())
-        .find(|&row| frame.rows[row].chars().nth(left) == Some('└'))
+        .find(|&row| frame.rows[row].chars().nth(left) == Some('├'))
         .unwrap();
     let selected = (top + 1..bottom).find(|&row| frame.styles[row][left + 2].bg.is_some());
     (selected, bottom - 1)
@@ -793,4 +793,37 @@ fn search_selection_stays_on_the_bottom_row_while_typing() {
     let frame = wait_for_frame(&mut app, "(no matches)");
     let (selected, bottom) = search_selection(&app.render_to_frame());
     assert_eq!(selected, Some(bottom), "{frame}");
+}
+
+#[test]
+fn file_finder_divider_drag_resizes_results_and_preview() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let (_dir, mut app) = fixture_app();
+    app.run_lua_result("smelt.cmd.run('files')").unwrap();
+    wait_for_frame(&mut app, " preview ");
+    let preview_rect = |app: &TestApp| {
+        let win = app.ui_probe().named_win("smelt.files.preview").unwrap();
+        app.ui_probe().win(win).unwrap().viewport.unwrap().rect
+    };
+    let before = preview_rect(&app);
+    for (kind, delta) in [
+        (MouseEventKind::Down(MouseButton::Left), 0),
+        (MouseEventKind::Drag(MouseButton::Left), -10),
+        (MouseEventKind::Up(MouseButton::Left), -10),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row: before.y + 4,
+            column: (before.x - 1).saturating_add_signed(delta),
+            modifiers: KeyModifiers::NONE,
+        })));
+        app.render_silent();
+    }
+    let after = preview_rect(&app);
+    assert_eq!(
+        after.width,
+        before.width + 10,
+        "{}",
+        app.render_to_frame().text()
+    );
 }

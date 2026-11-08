@@ -317,6 +317,7 @@ impl ResolvedLayout {
         active_split: Option<SplitId>,
         paint: &mut PaintDispatch,
     ) {
+        let mut joins = super::LineJoins::default();
         for op in &self.operations {
             match op {
                 LayoutPaintOp::Chrome { area, chrome, root } => {
@@ -325,16 +326,18 @@ impl ResolvedLayout {
                     } else {
                         ChromePaintCtx::default()
                     };
-                    super::paint_chrome(grid, *area, chrome, theme, context);
+                    super::paint_chrome_joined(grid, *area, chrome, theme, context, &mut joins);
                 }
                 LayoutPaintOp::Leaf { id, rect } => paint(*id, *rect, grid),
                 LayoutPaintOp::Divider(divider) => {
                     divider.paint(
                         grid,
                         divider.style(style.dividers, active_split == Some(divider.id)),
+                        &mut joins,
                     );
                 }
             }
         }
+        joins.resolve(grid);
     }
 }

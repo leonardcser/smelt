@@ -107,22 +107,31 @@ local function shell(spec)
   ui.list_win:on("selection_changed", spec.selected)
   for _, win in ipairs({ input, ui.list_win, preview }) do win:on("dismiss", ui.close) end
 
-  local left = layout.vbox({
-    { layout.leaf(ui.list_win, { border = { all = "Comment" } }), height = "fill" },
-    { layout.hbox({
-      { layout.leaf(input), width = "fill" },
-      { layout.leaf(count_win, { measure = count_size }), width = "fit" },
-    }, { border = { all = "Comment" }, gap = 0 }), height = 3 },
-  }, { gap = 0 })
+  -- Dragging the divider resizes the results and the preview; the handle
+  -- outlives remounts so the chosen width survives terminal resizes.
+  local split = layout.split("horizontal", { size = spec.list_width or "40%", min_first = 30, min_second = 30 })
   local function mount()
+    -- Results and input share one frame: the input's top edge is the
+    -- separator. With a preview, the split divider is the shared right edge.
+    local list_edge = { top = "Comment", left = "Comment" }
+    local input_edge = { top = "Comment", left = "Comment", bottom = "Comment" }
+    if not show_preview then
+      list_edge.right = "Comment"
+      input_edge.right = "Comment"
+    end
+    local left = layout.vbox({
+      { layout.leaf(ui.list_win, { border = list_edge }), height = "fill" },
+      { layout.hbox({
+        { layout.leaf(input), width = "fill" },
+        { layout.leaf(count_win, { measure = count_size }), width = "fit" },
+      }, { border = input_edge, gap = 0 }), height = 3 },
+    }, { gap = 0 })
     local root = left
     if show_preview then
-      root = layout.hbox({
-        { left, width = spec.list_width or "40%" },
-        { layout.leaf(preview, {
-          border = { all = "Comment" }, title = smelt.dialog.title(" preview "),
-        }), width = "fill" },
-      }, { gap = 0, padding = 0 })
+      root = split:layout(left, layout.leaf(preview, {
+        border = { top = "Comment", bottom = "Comment", right = "Comment" },
+        title = smelt.dialog.title(" preview "),
+      }))
     end
     overlay = smelt.overlay.new({
       name = spec.name, anchor = "center", border = "none", modal = true,

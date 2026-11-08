@@ -9,7 +9,7 @@ expression: "frame.replace(&id[..8], \"abcdef01\").replace(&id[..7], \"abcdef0\"
     │ Combined changes vs main +2 -1          │ Branch changes vs main                                                                │
     │ abcdef0 feature revision         +2 -1  │ Committed changes only                                                                │
     │                                         │ 1 commit                                                                              │
-    │                                         │─ main...abcdef01 ─────────────────────────────────────────────────────────────────────│
+    │                                         ├─ main...abcdef01 ─────────────────────────────────────────────────────────────────────┤
     │                                         │             M  file.rs  changes +2 -1                                                 │
     │                                         │             @@ -1 +1,2 @@                                                             │
     │                                         │    1        - base                                                                    │

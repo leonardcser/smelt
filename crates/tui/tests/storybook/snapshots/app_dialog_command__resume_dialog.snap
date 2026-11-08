@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 608
 expression: frame.text()
 ---
 
@@ -9,13 +8,13 @@ expression: frame.text()
      │                                                           │
      │                                                           │
      │                                                           │
+     │                                                           │
      │    1.4M 5d   spike: notebook preview                      │
      │   85.7K 1d   first pass at the resume picker              │
      │    1.0M 7h   ├─ fix prompt keybindings                    │
      │    4.0K 2h   └─ wire up the diff renderer                 │
      │   12.1K 5m      └─ investigate parser regression          │
-     └───────────────────────────────────────────────────────────┘
-     ┌ filter ───────────────────────────────────────────────────┐
+     ├───────────────────────────────────────────────────────────┤
   tip│ filter sessions…                  ⌥d: delete · workspace  │ing…
 ─────└───────────────────────────────────────────────────────────┘──────
 

@@ -855,6 +855,20 @@ pub fn paint_chrome(
     theme: &crate::Theme,
     ctx: ChromePaintCtx,
 ) {
+    let mut joins = LineJoins::default();
+    paint_chrome_joined(grid, area, chrome, theme, ctx, &mut joins);
+}
+
+/// Like [`paint_chrome`], recording line cells in `joins` so touching borders
+/// can merge into junctions once the whole layout has painted.
+pub fn paint_chrome_joined(
+    grid: &mut crate::grid::Grid,
+    area: Rect,
+    chrome: &Chrome,
+    theme: &crate::Theme,
+    ctx: ChromePaintCtx,
+    joins: &mut LineJoins,
+) {
     let Some(border) = chrome.border else {
         return;
     };
@@ -864,6 +878,13 @@ pub fn paint_chrome(
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // Only single-line borders join; other glyph families stay as drawn.
+    let mut unjoined = LineJoins::default();
+    let joins = if border.style == BorderStyle::Single {
+        joins
+    } else {
+        &mut unjoined
+    };
     let (h, v, tl, tr, bl, br) = match border.style {
         BorderStyle::Single => ('─', '│', '┌', '┐', '└', '┘'),
         BorderStyle::Double => ('═', '║', '╔', '╗', '╚', '╝'),
@@ -912,37 +933,37 @@ pub fn paint_chrome(
 
     if border.top.is_some() {
         for col in area.x..=right {
-            slice.set(col, area.y, h, top_style);
+            joins.put(&mut slice, col, area.y, h, top_style);
         }
     }
     if border.bottom.is_some() && bottom != area.y {
         for col in area.x..=right {
-            slice.set(col, bottom, h, bot_style);
+            joins.put(&mut slice, col, bottom, h, bot_style);
         }
     }
     if border.left.is_some() {
         for row in area.y..=bottom {
-            slice.set(area.x, row, v, left_style);
+            joins.put(&mut slice, area.x, row, v, left_style);
         }
     }
     if border.right.is_some() && right != area.x {
         for row in area.y..=bottom {
-            slice.set(right, row, v, right_style);
+            joins.put(&mut slice, right, row, v, right_style);
         }
     }
     // Corners only when both adjacent edges are present. Active side edges own
     // their endpoint corners; otherwise top/bottom keeps the existing priority.
     if border.top.is_some() && border.left.is_some() {
-        slice.set(area.x, area.y, tl, top_left_style);
+        joins.put(&mut slice, area.x, area.y, tl, top_left_style);
     }
     if border.top.is_some() && border.right.is_some() && right != area.x {
-        slice.set(right, area.y, tr, top_right_style);
+        joins.put(&mut slice, right, area.y, tr, top_right_style);
     }
     if border.bottom.is_some() && border.left.is_some() && bottom != area.y {
-        slice.set(area.x, bottom, bl, bot_left_style);
+        joins.put(&mut slice, area.x, bottom, bl, bot_left_style);
     }
     if border.bottom.is_some() && border.right.is_some() && bottom != area.y && right != area.x {
-        slice.set(right, bottom, br, bot_right_style);
+        joins.put(&mut slice, right, bottom, br, bot_right_style);
     }
 
     if border.top.is_some() {
@@ -951,6 +972,103 @@ pub fn paint_chrome(
                 let style = merge_title_span_style(title_style, span.span.style);
                 slice.set_symbol(col, area.y, grapheme, style);
             });
+        }
+    }
+}
+
+const UP: u8 = 1;
+const DOWN: u8 = 2;
+const LEFT: u8 = 4;
+const RIGHT: u8 = 8;
+
+fn line_mask(ch: char) -> Option<u8> {
+    Some(match ch {
+        '─' => LEFT | RIGHT,
+        '│' => UP | DOWN,
+        '┌' => DOWN | RIGHT,
+        '┐' => DOWN | LEFT,
+        '└' => UP | RIGHT,
+        '┘' => UP | LEFT,
+        '├' => UP | DOWN | RIGHT,
+        '┤' => UP | DOWN | LEFT,
+        '┬' => LEFT | RIGHT | DOWN,
+        '┴' => LEFT | RIGHT | UP,
+        '┼' => UP | DOWN | LEFT | RIGHT,
+        _ => return None,
+    })
+}
+
+fn line_glyph(mask: u8) -> char {
+    match mask {
+        m if m == LEFT | RIGHT || m == LEFT || m == RIGHT => '─',
+        m if m == UP | DOWN || m == UP || m == DOWN => '│',
+        m if m == DOWN | RIGHT => '┌',
+        m if m == DOWN | LEFT => '┐',
+        m if m == UP | RIGHT => '└',
+        m if m == UP | LEFT => '┘',
+        m if m == UP | DOWN | RIGHT => '├',
+        m if m == UP | DOWN | LEFT => '┤',
+        m if m == LEFT | RIGHT | DOWN => '┬',
+        m if m == LEFT | RIGHT | UP => '┴',
+        _ => '┼',
+    }
+}
+
+/// Single-line box glyphs painted during one layout pass. Borders and dividers
+/// that touch merge into junctions: a line cell gains a direction when the
+/// neighbouring cell's line points at it.
+#[derive(Default)]
+pub struct LineJoins {
+    cells: std::collections::HashMap<(u16, u16), (u8, crate::grid::Style)>,
+}
+
+impl LineJoins {
+    pub fn put(
+        &mut self,
+        slice: &mut crate::grid::GridSlice<'_>,
+        x: u16,
+        y: u16,
+        ch: char,
+        style: crate::grid::Style,
+    ) {
+        if let Some(mask) = line_mask(ch) {
+            self.cells.insert((x, y), (mask, style));
+        }
+        slice.set(x, y, ch, style);
+    }
+
+    /// Redraw cells whose neighbours connect to them. Cells overwritten since
+    /// (titles) keep their symbol.
+    pub fn resolve(&self, grid: &mut crate::grid::Grid) {
+        let reaches = |x: Option<u16>, y: Option<u16>, bit: u8| {
+            x.zip(y)
+                .and_then(|pos| self.cells.get(&pos))
+                .is_some_and(|(mask, _)| mask & bit != 0)
+        };
+        let mut updates = Vec::new();
+        for (&(x, y), &(mask, style)) in &self.cells {
+            let mut joined = mask;
+            if reaches(Some(x), y.checked_sub(1), DOWN) {
+                joined |= UP;
+            }
+            if reaches(Some(x), y.checked_add(1), UP) {
+                joined |= DOWN;
+            }
+            if reaches(x.checked_sub(1), Some(y), RIGHT) {
+                joined |= LEFT;
+            }
+            if reaches(x.checked_add(1), Some(y), LEFT) {
+                joined |= RIGHT;
+            }
+            let mut buf = [0; 4];
+            let drawn = line_glyph(mask).encode_utf8(&mut buf);
+            if joined != mask && grid.cell(x, y).symbol.as_str() == drawn {
+                updates.push((x, y, line_glyph(joined), style));
+            }
+        }
+        let mut slice = grid.as_mut_slice();
+        for (x, y, ch, style) in updates {
+            slice.set(x, y, ch, style);
         }
     }
 }

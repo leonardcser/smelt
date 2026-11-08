@@ -220,6 +220,7 @@ pub struct Frame {
     theme: std::sync::Arc<Theme>,
     windows: Vec<PaintedWindow>,
     owners: ScreenOwners,
+    joins: layout::LineJoins,
 }
 
 /// Which painted window's text shows in each screen cell. Anything painted
@@ -322,14 +323,21 @@ impl Frame {
                         normal,
                         active: dragging,
                     };
-                    divider.paint(grid, divider.style(styles, active));
+                    divider.paint(grid, divider.style(styles, active), &mut self.joins);
                 }
                 PreparedFrameCommand::Chrome {
                     area,
                     chrome,
                     context,
                 } => {
-                    layout::paint_chrome(grid, area, &chrome, theme, context);
+                    layout::paint_chrome_joined(
+                        grid,
+                        area,
+                        &chrome,
+                        theme,
+                        context,
+                        &mut self.joins,
+                    );
                     self.owners.mark(area, ScreenOwners::NONE);
                 }
                 PreparedFrameCommand::Window { win, rect, context } => {
@@ -355,6 +363,10 @@ impl Frame {
                             scroll_top: window.scroll_top(),
                         });
                     }
+                }
+                PreparedFrameCommand::ResolveJoins => {
+                    self.joins.resolve(grid);
+                    self.joins = layout::LineJoins::default();
                 }
                 PreparedFrameCommand::Paint(leaf) => {
                     self.owners.mark(leaf.rect, ScreenOwners::NONE);
@@ -396,6 +408,8 @@ enum PreparedFrameCommand {
         rect: Rect,
         context: DrawContext,
     },
+    /// A layout finished painting; merge its touching borders.
+    ResolveJoins,
     Paint(PreparedPaintLeaf),
 }
 
@@ -2965,6 +2979,7 @@ impl Ui {
             now: (self.clock)(),
         };
         collect_root_frame_commands(&scene.root, &scene.decorations, active_resize, &mut builder);
+        builder.commands.push(PreparedFrameCommand::ResolveJoins);
         for overlay in &scene.overlays {
             if !overlay.transparent {
                 builder
@@ -2977,6 +2992,7 @@ impl Ui {
                 })
                 .unwrap_or_default();
             collect_layout_frame_commands(&overlay.layout, root_chrome, &mut builder);
+            builder.commands.push(PreparedFrameCommand::ResolveJoins);
         }
         PreparedFrame {
             commands: builder.commands,
@@ -2998,6 +3014,7 @@ impl Ui {
             theme: prepared.theme,
             windows: Vec::new(),
             owners,
+            joins: layout::LineJoins::default(),
         }
     }
 

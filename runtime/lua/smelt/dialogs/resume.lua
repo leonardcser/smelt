@@ -370,13 +370,20 @@ smelt.cmd.register("resume", function()
     input_leaf:key("ctrl-w", toggle_workspace)
     input_leaf:key("alt-d",  delete_selected)
 
+    -- Results and filter share one frame: the filter's top edge is the
+    -- separator. With a preview, the split divider is the shared right edge.
+    local list_edge = { top = "Comment", left = "Comment" }
+    local input_edge = { top = "Comment", left = "Comment", bottom = "Comment" }
+    if not show_preview then
+      list_edge.right = "Comment"
+      input_edge.right = "Comment"
+    end
     local list_layout = smelt.ui.layout.leaf(list_leaf, {
-      border = { all = "Comment" },
+      border = list_edge,
       title = smelt.dialog.title(" sessions "),
     })
     local input_layout = smelt.ui.layout.leaf(input_leaf, {
-      border = { all = "Comment" },
-      title = smelt.dialog.title(" filter "),
+      border = input_edge,
     })
     local left = smelt.ui.layout.vbox({
       { list_layout,  height = "fill" },
@@ -384,13 +391,12 @@ smelt.cmd.register("resume", function()
     }, { gap = 0 })
     local root = left
     if show_preview then
-      root = smelt.ui.layout.hbox({
-        { left, width = "40%" },
-        { smelt.ui.layout.leaf(preview_leaf, {
-            border = { all = "Comment" },
-            title = smelt.dialog.title(" transcript "),
-          }), width = "fill" },
-      }, { gap = 0, padding = 0 })
+      -- Dragging the divider resizes the results and the preview.
+      local split = smelt.ui.layout.split("horizontal", { size = "40%", min_first = 30, min_second = 30 })
+      root = split:layout(left, smelt.ui.layout.leaf(preview_leaf, {
+        border = { top = "Comment", bottom = "Comment", right = "Comment" },
+        title = smelt.dialog.title(" transcript "),
+      }))
     end
 
     overlay = smelt.overlay.new({

@@ -623,6 +623,20 @@ app_story!(file_finder_dialog, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(search_dialog, |ctx| {
+    ctx.set_viewport(120, 30);
+    ctx.write_workspace_file(
+        "src/main.rs",
+        "fn main() {\n    let task = spawn_task();\n    run(task);\n}\n",
+    );
+    ctx.write_workspace_file("notes.txt", "no match here\nTask list\n");
+    ctx.run_command("search");
+    ctx.type_prompt("task");
+    ctx.wait_for_text("3 matches");
+    ctx.wait_for_document("smelt.search.preview");
+    ctx.assert_snapshot();
+});
+
 app_story!(resume_dialog, |ctx| {
     ctx.set_viewport(72, 18);
     // /resume drives `smelt.session.list()`. Seed real `SessionMeta`
