@@ -109,6 +109,10 @@ function gallery(user: string, step: number): Chunk[] | null {
     }
     return text("`cart.rs` is the biggest; `lib.rs` only declares the modules.");
   }
+  if (/screenshot of the cart page/i.test(user)) {
+    if (step === 0) return calls("", [{ name: "show_image", args: { file_path: `${PROJECT}/screenshots/cart.png` } }]);
+    return text("The lamp now shows 10% off: $50.00 down to $45.00.");
+  }
   if (/run the checkout tests/i.test(user)) {
     if (step === 0) return bash("", "cargo test -q --test checkout", "Run the checkout tests");
     return text("There is no `checkout` test target. The cart tests live in `tests/cart.rs`.");

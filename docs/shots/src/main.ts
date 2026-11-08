@@ -64,7 +64,7 @@ const plain = (ansi: string) => ansi.replace(/\x1b\[[0-9;:]*m/g, "");
 const framesFile = (name: string) => path.join(import.meta.dir, `../.cache/frames/${name}.json`);
 
 async function record(scene: Scene): Promise<Recording> {
-  const opts: RunOptions = { ...base, scheme: scene.scheme ?? "dark", cols: scene.cols ?? cols, rows: scene.rows ?? 30, typeDelay: 55, live: !scene.mock, wordDelay: 25, vim: scene.vim ?? false, files: scene.files, home: scene.home, args: scene.args, init: scene.init, tps: true, recordEvery: 100, kitty: scene.kitty };
+  const opts: RunOptions = { ...base, scheme: scene.scheme ?? "dark", cols: scene.cols ?? cols, rows: scene.rows ?? 30, typeDelay: 55, live: !scene.mock, wordDelay: 25, vim: scene.vim ?? false, files: scene.files, projectFiles: scene.projectFiles, home: scene.home, args: scene.args, init: scene.init, tps: true, recordEvery: 100, kitty: scene.kitty };
   const { frames, keylog, marks, images } = await run(scene.steps, opts);
   return { frames, keylog, marks, images };
 }
@@ -111,9 +111,10 @@ function timeline(rec: Recording, scene: Scene): Moment[] {
  * The site plays these in the browser as real text (see docs/docs/javascripts/replay.js).
  * Each frame lists its screen lines, with `null` for a line unchanged since the previous frame,
  * and `k`, the keys to overlay, when the scene shows them. `img` holds the Kitty graphics images
- * the screens place, by id. `scheme: "light"` marks a recording made on a light terminal.
+ * the screens place, by id; `photos: true` keeps their colors in the light scheme. `scheme: "light"`
+ * marks a recording made on a light terminal.
  */
-async function writeReplay(name: string, size: { cols: number; rows: number; scheme?: Scheme }, moments: Moment[], images: Record<number, KittyImage> = {}) {
+async function writeReplay(name: string, size: { cols: number; rows: number; scheme?: Scheme; photos?: true }, moments: Moment[], images: Record<number, KittyImage> = {}) {
   const file = path.join(replaysDir, `${name}.json`);
   let prev: string[] = [];
   const frames = moments.map((m) => {
@@ -143,7 +144,7 @@ async function makeScene(name: string, scene: Scene) {
     await Bun.write(framesFile(name), JSON.stringify(rec));
   }
   const moments = timeline(rec, scene);
-  await writeReplay(name, { cols: scene.cols ?? cols, rows: scene.rows ?? 30, ...(scene.scheme === "light" ? { scheme: scene.scheme } : {}) }, moments, rec.images);
+  await writeReplay(name, { cols: scene.cols ?? cols, rows: scene.rows ?? 30, ...(scene.scheme === "light" ? { scheme: scene.scheme } : {}), ...(scene.photos ? { photos: true as const } : {}) }, moments, rec.images);
   if (scene.readme) {
     const { pngs, ms } = await renderReplay(name);
     const file = path.join(repo, "assets/demo.gif");

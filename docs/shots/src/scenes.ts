@@ -39,6 +39,8 @@ export type Scene = {
   scheme?: Scheme;
   /** Record through a Kitty graphics terminal, so math renders as images. */
   kitty?: boolean;
+  /** Its images are pictures, shown in their own colors in both schemes instead of flipped like math. */
+  photos?: boolean;
   /** Play in real time. Otherwise stretches with no typing nearby are sped up. */
   realtime?: boolean;
   /** Open on the first prompt, fully typed, just before it is sent. */
@@ -47,6 +49,8 @@ export type Scene = {
   from?: RegExp;
   /** Extra files for the config dir, keyed by path under `~/.config/smelt/`. */
   files?: Record<string, string>;
+  /** Extra project files, keyed by path in the project, copied from `fixtures/` by name. */
+  projectFiles?: Record<string, string>;
   /** Run in a throwaway `$HOME`, so the config is at `~/.config/smelt/`, where the agent can write a plugin. */
   home?: boolean;
   /** Command-line arguments for smelt, for a scripted scene: `--mode yolo` lets its tools run unasked. */
@@ -216,6 +220,26 @@ export const scenes: Record<string, Scene> = {
       { key: "Enter" },
       { until: /─ ● done/ },
       { pause: 2500 },
+    ],
+  },
+
+  /** The agent shows an image in the transcript, drawn as an image by a Kitty graphics terminal. */
+  image: {
+    mock: true,
+    fromSubmit: true,
+    realtime: true,
+    kitty: true,
+    photos: true,
+    cols: 90,
+    rows: 34,
+    projectFiles: { "screenshots/cart.png": "cart.png" },
+    steps: [
+      { pause: 1200 },
+      { type: "show me the screenshot of the cart page" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /─ ● done/ },
+      { pause: 3000 },
     ],
   },
 

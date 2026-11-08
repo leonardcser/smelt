@@ -67,6 +67,7 @@ Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain. The `files` scene also 
 - The project is a throwaway fixture at `/tmp/acme-app` with a real
   Rust crate with one deliberate bug, so `cargo test` compiles and streams for real.
   It needs a Rust toolchain.
+  A scene's `projectFiles` copies more files in from `fixtures/`, like the `image` scene's screenshot.
 - The build identity is blanked in captures. Clocks are pinned to a fixed time by the generated `init.lua`.
 - To add a still, append a `{ shot: "name", rows: N }` step to `stills` in `src/scenes.ts`.
   To embed any replay in a page:
@@ -85,8 +86,8 @@ Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain. The `files` scene also 
   (`keys: false` turns it off). Text typed into the prompt and anything pressed in vim's insert
   mode is left out. The home page hides the overlay, except for the vim and cursor replays, which keep it in
   the window's top-right corner (`data-keys="corner"`), and the README GIF has none.
-- `kitty: true` (the `math` scene) attaches a client to the tmux session that answers smelt's
-  Kitty graphics probes through passthrough and keeps the images smelt sends. The replay stores
+- `kitty: true` (the `math` and `image` scenes) attaches a client to the tmux session, as Ghostty,
+  that answers smelt's Kitty graphics probes through passthrough and keeps the images smelt sends. The replay stores
   them under `img`, and `replay.js` draws them over their Unicode placeholder cells.
 - Each scene is recorded once in the dark scheme; the player derives the light one by flipping
   the lightness of every color.

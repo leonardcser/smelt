@@ -68,6 +68,17 @@ smelt.settings.system_clipboard = false
 `/copy` and `/yank` still report an error when no system clipboard backend is
 available. Terminal-level `Cmd+V` paste support depends on your terminal.
 
+## Images or math show as blocks or text
+
+smelt uses Kitty graphics only when it detects support.
+
+- **tmux:** add `set -g allow-passthrough all` to your tmux config.
+- **SSH:** the remote `TERM` is often `xterm-256color`. With Ghostty, set
+  `shell-integration-features = ssh-terminfo`, or force graphics with
+  `smelt.settings.kitty_graphics = "on"`.
+
+Set `kitty_graphics = "off"` if graphics draw incorrectly.
+
 ## A shell command is taking too long
 
 Press `Ctrl+G` to stop following a foreground agent-started `bash` job while the

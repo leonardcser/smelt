@@ -71,6 +71,8 @@ export type RunOptions = {
   tps: boolean;
   /** Extra files for the config dir, keyed by path under `~/.config/smelt/`. */
   files?: Record<string, string>;
+  /** Extra project files, keyed by path in the project, copied from `fixtures/` by name. */
+  projectFiles?: Record<string, string>;
   /** Poll the screen at this interval to record animation frames; 0 disables recording. */
   recordEvery: number;
   /** Attach a terminal that speaks the Kitty graphics protocol, so math renders as images. */
@@ -122,6 +124,10 @@ async function prepare(port: number | null, opts: RunOptions) {
   for (const [file, body] of Object.entries(fixture)) {
     await mkdir(path.dirname(path.join(project, file)), { recursive: true });
     await writeFile(path.join(project, file), body);
+  }
+  for (const [file, source] of Object.entries(opts.projectFiles ?? {})) {
+    await mkdir(path.dirname(path.join(project, file)), { recursive: true });
+    await copyFile(path.join(root, "fixtures", source), path.join(project, file));
   }
 
   // A committed repo, so `git status` in the demo is clean instead of an error.
@@ -274,8 +280,9 @@ function attachKitty(images: Record<number, KittyImage>) {
   const decoder = new TextDecoder();
   let pending = "";
   let current: number | undefined;
+  // tmux tells smelt which terminal its client runs in, and smelt trusts Ghostty with graphics.
   const client = Bun.spawn(["tmux", "attach", "-t", tmuxName], {
-    env: { ...process.env, TMUX: "", TERM: "xterm-256color" },
+    env: { ...process.env, TMUX: "", TERM: "xterm-ghostty" },
     terminal: {
       cols: 200,
       rows: 60,
