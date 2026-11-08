@@ -35,6 +35,24 @@ local function basename(s)
   return s:match("([^/]+)$") or s
 end
 
+-- Models sometimes send numbers and booleans as strings ("30000", "true").
+local function num_arg(v, default)
+  local n = tonumber(v)
+  if n == nil or n ~= n then return default end
+  return math.floor(n)
+end
+
+local function bool_arg(v, default)
+  if type(v) == "boolean" then return v end
+  if v == "true" then return true end
+  if v == "false" then return false end
+  return default
+end
+
+local function timeout_arg(v)
+  return math.min(math.max(num_arg(v, DEFAULT_TIMEOUT_MS), 1), MAX_TIMEOUT_MS)
+end
+
 local function format_duration(secs)
   if secs < 60 then
     return string.format("%ds", secs)
@@ -107,20 +125,16 @@ function M.execute(args, ctx)
     return { content = err, is_error = true }
   end
 
-  local background = args.background == true
-  local background_on_timeout = args.background_on_timeout
-  if background_on_timeout == nil then background_on_timeout = DEFAULT_BACKGROUND_ON_TIMEOUT end
-  if args.notify_on_completion == false and not background then
+  local background = bool_arg(args.background, false)
+  local background_on_timeout = bool_arg(args.background_on_timeout, DEFAULT_BACKGROUND_ON_TIMEOUT)
+  local notify = bool_arg(args.notify_on_completion, true)
+  if not notify and not background then
     return { content = "notify_on_completion=false requires background=true", is_error = true }
   end
 
-  local timeout_ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
-  if timeout_ms > MAX_TIMEOUT_MS then
-    timeout_ms = MAX_TIMEOUT_MS
-  end
+  local timeout_ms = timeout_arg(args.timeout_ms)
 
   if background then
-    local notify = args.notify_on_completion ~= false
     local job_id = smelt.process.spawn_bg(command, notify)
     return {
       content = "started background process " .. job_id
@@ -196,13 +210,12 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   summary = function(args)
     local cmd = args.command or ""
     if cmd == "" then return nil end
-    local timeout_ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
-    if timeout_ms > MAX_TIMEOUT_MS then timeout_ms = MAX_TIMEOUT_MS end
+    local timeout_ms = timeout_arg(args.timeout_ms)
     local lines = {}
     for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
       local spans = { { text = line, syntax = "bash" } }
       if #lines == 0 then
-        local suffix = args.background and "(background)" or ("(timeout: " .. format_timeout(timeout_ms) .. ")")
+        local suffix = bool_arg(args.background, false) and "(background)" or ("(timeout: " .. format_timeout(timeout_ms) .. ")")
         spans[#spans + 1] = {
           text = suffix,
           selectable = false,
