@@ -13,27 +13,40 @@ follows the new content, not the session size.
 | `session_values` | Small named values such as the first user message and the active checkpoint |
 | `history` | One row per model history item, with the cumulative user ordinal, mode and note columns that indexed queries need |
 | `side_rows` | Turn metadata, metadata snapshots, context snapshots and checkpoint events, keyed by history position |
-| `transcript` | One row per transcript block, with cumulative row estimates at six widths, the compact summary a sparse transcript keeps in memory, its search text and one compressed payload of block, origin and tool state |
-| `requests` | Request audit entries with flat `body`, `response` and `error` payloads |
+| `transcript` | One row per transcript block, with cumulative row estimates at six widths, the compact summary a sparse transcript keeps in memory, its search text and one payload of block, origin and tool state |
+| `blobs` | Large JSON string contents, once each across the whole database, keyed by SHA-256 |
+| `blob_refs` | Which history, transcript and request rows hold which blobs |
+| `search_text` | Conversation text of each history item that has any: user input, assistant replies and compaction summaries |
+| `search` | FTS5 trigram index over `search_text`, kept in step by triggers |
+| `requests` | Request audit entries with `body`, `response` and `error` payloads |
 | `prompts` | Submitted prompts for input history recall |
 | `usage` | Tokens and cost per model call; calls before yesterday fold into one row per day and model |
 
 Files a session owns, such as Claude Code plans and its native session link, live in
 `<state>/artifacts/<id>/`.
 
-Large bodies are stored with zstd when that saves at least an eighth. The search
-text stays plain so `instr` can scan it, and a record's preview is its first 512
-bytes. The WAL is checkpointed at 1 MiB and truncated back to that size. Readers
-query rows by position or by indexed columns and decode only the rows they return.
+History bodies, transcript payloads and search text, and request payloads are
+documents (`crates/store/src/document.rs`). A document is JSON whose strings of
+8 KiB or more live in `blobs`: the row keeps the rest, compressed with zstd when
+that saves at least an eighth, and the offsets to splice the strings back. The
+same tool output read twice, the history and transcript copies of one output, a
+repeated image and every row a fork copies share one blob. A save drops the
+references of the rows it replaces and deletes the blobs no row holds anymore,
+in the same transaction. Text and tool output shrink about five times; base64
+images and encrypted reasoning barely compress and dominate what real sessions
+keep on disk.
+
+A record's preview is the first 512 bytes of its search text. The WAL is
+checkpointed at 1 MiB and truncated back to that size. Readers query rows by
+position or by indexed columns and decode only the rows they return.
 
 Each session has an exclusive writer lock at `<state>/locks/<id>.lock`. A
 second process that opens the same session gets `StoreError::Owned` and opens it
-read-only. Readers never take the lock. A newer build does not upgrade an existing
-schema while any session lock is held, because older builds keep writing the old
-schema until they exit.
+read-only. Readers never take the lock.
 
-Deleting a session runs `PRAGMA incremental_vacuum` so the file shrinks in bounded
-steps. Pages freed by suffix rewrites, such as a rewind, are reused by later saves.
+Deleting a session frees the blobs only it held and runs `PRAGMA
+incremental_vacuum`, so the file shrinks in bounded steps. Pages freed by suffix
+rewrites, such as a rewind, are reused by later saves.
 
 ## Saves
 
@@ -53,17 +66,23 @@ storage. Only `@file` input preparation and writer startup can reject an accepte
 submission. A crash mid-turn loses at most the unsaved suffix; the next writable
 start marks the turn `interrupted`. smelt never resends it automatically.
 
-Forks copy the source rows with `INSERT ... SELECT` in one transaction. A fork that
-preserves unsaved edits then commits those edits as a suffix of the copy.
+Forks copy the source rows with `INSERT ... SELECT` in one transaction. The copies
+refer to the source's blobs, so a fork costs the rows without their large strings.
+A fork that preserves unsaved edits then commits those edits as a suffix of the copy.
+
+`SessionWriter::batch` applies several commits as one atomic save, so an import
+writes a session of any size in bounded chunks.
 
 ## Reads
 
 Resume reads the session header, side rows, the model context from the active
 checkpoint on, and the transcript tail that fills the viewport. Older transcript
 blocks load on demand as the user scrolls, and evicted blocks leave memory again.
-Transcript search scans the stored search text with `instr`; on a 20,000-turn
-synthetic session a full miss takes about 30 ms and a common hit well under 1 ms
-(`cargo xtask bench-session-search`).
+Transcript search reads the session's search text in block order and stops at its
+page limit. A record whose stored JSON lacks the JSON form of the query is skipped
+without decoding it. Finding sessions by their conversation text
+(`smelt.session.search`, used by `/resume`) queries the `search` index instead of
+reading sessions; queries need at least three characters.
 
 ## Session operations
 
@@ -138,8 +157,33 @@ materialization is a cold operation.
 
 ## Schema
 
-`SCHEMA_VERSION` in `crates/store/src/db.rs` is checked on open. A new database is
-created with the current schema; any other version is refused without writing.
+A smelt database has `PRAGMA application_id` "smlt" and `PRAGMA user_version`
+`SCHEMA_VERSION` from `crates/store/src/db.rs`, both checked on open. An empty
+file is created with the current schema; any other file is refused without
+writing to it.
+
+A later schema change must not rewrite the whole database while every process
+waits: add columns and tables, and convert existing rows lazily, per session.
+
+## Scaling
+
+`cargo run --release -p xtask -- bench-store` builds 300 sessions of 60 turns and
+one of 4,000, with realistic tool output, reasoning and images, and checks that the
+interactions users wait on stay flat. `--state-dir` measures a copy of a real
+state directory instead; `--mutate` also forks and deletes its largest session.
+
+| Measurement (synthetic, 2.1 GB of JSON) | Result |
+| --- | --- |
+| Database size | 417 MiB |
+| Save, first tenth of the long session / last tenth (p95) | 19 ms / 26 ms |
+| Resume of the long session (p95) | 17 ms |
+| Session search: rare / common / absent word (p95) | 0.8 / 28 / 0.4 ms |
+| Transcript search over 16,000 records: hit / full miss | 1.8 / 133 ms |
+| Fork / delete of the long session | 0.61 / 0.47 s |
+
+On a copy of 391 real sessions (2.7 GB in the previous layout, 1.8 GB now), the
+largest session resumes in 59 ms at p95, session search stays below 2 ms, and
+forking it takes 0.56 s.
 
 ## Maintenance
 

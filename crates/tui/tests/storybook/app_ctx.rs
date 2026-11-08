@@ -492,6 +492,12 @@ impl AppStoryCtx {
         self.app.type_text(s);
     }
 
+    /// Run Lua tasks until they park, waiting for blocking host work such as
+    /// a store search to resolve.
+    pub fn settle_tasks(&mut self) {
+        self.app.drive_lua_tasks();
+    }
+
     pub fn preview_transcript_search(&mut self, query: &str) {
         self.app.focus_transcript();
         self.app

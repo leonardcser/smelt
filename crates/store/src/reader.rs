@@ -4,6 +4,7 @@ use protocol::HistoryItem;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::db::{self, signed, unsigned};
+use crate::document;
 use crate::error::{Result, StoreError};
 use crate::transcript::{self, *};
 use crate::types::*;
@@ -46,13 +47,15 @@ fn block_by_id_sql() -> String {
 
 /// Decodes [`TRANSCRIPT_COLUMNS`] starting at column `first`.
 pub(crate) fn transcript_from_row_at(
+    conn: &Connection,
     row: &Row<'_>,
     first: usize,
 ) -> rusqlite::Result<StoredTranscriptBlock> {
     let column = |i: usize| first + i;
     let payload: Vec<u8> = row.get(column(8))?;
     let (block_json, origin_json, tool_state_json) =
-        transcript::decode_payload(&payload).map_err(crate::error::to_sql_error)?;
+        transcript::decode_payload(conn, &payload).map_err(crate::error::to_sql_error)?;
+    let indexed_text: Vec<u8> = row.get(column(7))?;
     Ok(StoredTranscriptBlock {
         block_idx: unsigned(row.get(column(0))?),
         history_idx: row.get::<_, Option<i64>>(column(1))?.map(unsigned),
@@ -61,7 +64,8 @@ pub(crate) fn transcript_from_row_at(
         tool_name: row.get(column(4))?,
         content_hash: row.get(column(5))?,
         estimated_text_bytes: unsigned(row.get(column(6))?),
-        indexed_text: row.get(column(7))?,
+        indexed_text: document::load_text(conn, &indexed_text)
+            .map_err(crate::error::to_sql_error)?,
         block_json,
         origin_json,
         tool_state_json,
@@ -72,13 +76,9 @@ pub(crate) fn transcript_from_row_at(
 
 fn decode_summary(row: &Row<'_>, column: usize) -> rusqlite::Result<Vec<u8>> {
     let summary: Vec<u8> = row.get(column)?;
-    Ok(db::decode_blob(&summary)
+    Ok(document::decompress(&summary)
         .map_err(crate::error::to_sql_error)?
         .into_owned())
-}
-
-fn transcript_from_row(row: &Row<'_>) -> rusqlite::Result<StoredTranscriptBlock> {
-    transcript_from_row_at(row, 0)
 }
 
 const PROFILE_COLUMNS: &str = "idx, block_idx, history_idx, kind, role, first_line, text_bytes,
@@ -219,7 +219,7 @@ impl SessionReader {
             row.get::<_, Vec<u8>>(0)
         })?;
         let items: Vec<HistoryItem> = rows
-            .map(|body| db::decode_json(&body?))
+            .map(|body| document::load_json(&self.conn, &body?))
             .collect::<Result<_>>()?;
         smelt_perf::perf::record_value("store:history:rows_read", items.len() as u64);
         Ok(items)
@@ -246,7 +246,7 @@ impl SessionReader {
         let mut budget = protocol::HistoryTailBudget::new(max_items, max_bytes);
         let mut items = Vec::new();
         while let Some(row) = rows.next()? {
-            let item: HistoryItem = db::decode_json(&row.get::<_, Vec<u8>>(0)?)?;
+            let item: HistoryItem = document::load_json(&self.conn, &row.get::<_, Vec<u8>>(0)?)?;
             if !budget.try_prepend(&item)? {
                 break;
             }
@@ -362,10 +362,9 @@ impl SessionReader {
             "SELECT {TRANSCRIPT_COLUMNS} FROM transcript
              WHERE sid = ?1 AND idx >= ?2 AND idx < ?3 ORDER BY idx"
         ))?;
-        let rows = stmt.query_map(
-            params![self.sid, signed(start), signed(end)],
-            transcript_from_row,
-        )?;
+        let rows = stmt.query_map(params![self.sid, signed(start), signed(end)], |row| {
+            transcript_from_row_at(&self.conn, row, 0)
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -604,7 +603,7 @@ impl SessionReader {
             let record = stmt
                 .query_row(params![self.sid, signed(block.block_idx)], |row| {
                     let idx = unsigned(row.get(0)?) as usize;
-                    Ok((idx, transcript_from_row_at(row, 1)?))
+                    Ok((idx, transcript_from_row_at(&self.conn, row, 1)?))
                 })
                 .optional()?;
             found.extend(record);
@@ -627,14 +626,12 @@ impl SessionReader {
         let _perf = smelt_perf::perf::begin("store:search_candidates");
         let sql = match direction {
             TranscriptSearchDirection::Forward => {
-                "SELECT block_idx, history_idx FROM transcript
-                 WHERE sid = ?1 AND block_idx >= ?2 AND instr(indexed_text, ?3) > 0
-                 ORDER BY block_idx LIMIT ?4"
+                "SELECT block_idx, history_idx, indexed_text FROM transcript
+                 WHERE sid = ?1 AND block_idx >= ?2 ORDER BY block_idx"
             }
             TranscriptSearchDirection::Backward => {
-                "SELECT block_idx, history_idx FROM transcript
-                 WHERE sid = ?1 AND block_idx <= ?2 AND instr(indexed_text, ?3) > 0
-                 ORDER BY block_idx DESC LIMIT ?4"
+                "SELECT block_idx, history_idx, indexed_text FROM transcript
+                 WHERE sid = ?1 AND block_idx <= ?2 ORDER BY block_idx DESC"
             }
         };
         let origin = match (origin_block_idx, direction) {
@@ -642,17 +639,31 @@ impl SessionReader {
             (None, TranscriptSearchDirection::Forward) => 0,
             (None, TranscriptSearchDirection::Backward) => i64::MAX,
         };
+        // A text holds `query` only if its JSON form holds the JSON form of
+        // `query`, so a miss is ruled out without decoding the text.
+        let escaped = serde_json::to_string(query)?;
+        let escaped = memchr::memmem::Finder::new(&escaped.as_bytes()[1..escaped.len() - 1]);
         let mut stmt = self.conn.prepare_cached(sql)?;
-        let rows = stmt.query_map(
-            params![self.sid, origin, query, signed(limit as u64)],
-            |row| {
-                Ok(TranscriptSearchCandidate {
-                    block_idx: unsigned(row.get(0)?),
-                    history_idx: row.get::<_, Option<i64>>(1)?.map(unsigned),
-                })
-            },
-        )?;
-        let mut candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = stmt.query(params![self.sid, origin])?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next()? {
+            let cell = row.get_ref(2)?.as_blob()?;
+            let json = document::load(&self.conn, cell)?;
+            if escaped.find(&json).is_none() {
+                continue;
+            }
+            let text: String = serde_json::from_slice(&json)?;
+            if !text.contains(query) {
+                continue;
+            }
+            candidates.push(TranscriptSearchCandidate {
+                block_idx: unsigned(row.get(0)?),
+                history_idx: row.get::<_, Option<i64>>(1)?.map(unsigned),
+            });
+            if candidates.len() == limit {
+                break;
+            }
+        }
         candidates.sort_unstable_by_key(|candidate| candidate.block_idx);
         Ok(candidates)
     }
@@ -686,7 +697,8 @@ impl SessionReader {
         crate::export::history_jsonl(&self.conn, self.sid, out, cancelled)
     }
 
-    /// User and assistant text of the whole session, oldest first.
+    /// User input, assistant replies and compaction summaries of the whole
+    /// session, oldest first.
     pub fn conversation_text(&self) -> Result<String> {
         crate::export::conversation_text(&self.conn, self.sid)
     }

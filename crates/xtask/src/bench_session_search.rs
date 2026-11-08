@@ -88,7 +88,7 @@ fn print_usage() {
     eprintln!(
         "usage: cargo run --release -p xtask -- bench-session-search --state-dir PATH [--session ID] [--runs N] [--allow-debug]"
     );
-    eprintln!("PATH is a smelt state directory that contains sessions/sessions.db.");
+    eprintln!("PATH is a copy of a smelt state directory, which holds smelt.db.");
     eprintln!("Timing thresholds require a release build unless --allow-debug is passed.");
 }
 

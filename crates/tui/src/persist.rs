@@ -64,8 +64,7 @@ impl PersistenceCause {
             smelt_store::StoreError::Io(_)
             | smelt_store::StoreError::Sqlite(_)
             | smelt_store::StoreError::Cancelled
-            | smelt_store::StoreError::UnsupportedSchema { .. }
-            | smelt_store::StoreError::UpgradeBlocked { .. } => {
+            | smelt_store::StoreError::UnsupportedSchema { .. } => {
                 PersistenceFailureClass::Environment
             }
         };

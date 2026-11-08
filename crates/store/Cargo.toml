@@ -14,6 +14,8 @@ smelt-text = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-protocol = { workspace = true }
 zstd = "0.14.3"
+memchr = "2.8.3"
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

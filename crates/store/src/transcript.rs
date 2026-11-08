@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use smelt_text::cell_width;
 
-use crate::db;
+use crate::document;
 use crate::error::{Result, StoreError};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -178,9 +178,11 @@ impl StoredTranscriptBlock {
 
 pub const PREVIEW_MAX_BYTES: usize = 512;
 
-/// The `payload` column: block, origin and tool state as one line of compact
-/// JSON each, an empty line for a missing value, compressed together.
+/// The `payload` column: a document of block, origin and tool state as one line
+/// of compact JSON each, an empty line for a missing value.
 pub(crate) fn encode_payload(
+    conn: &rusqlite::Connection,
+    row: document::RowKey,
     block_json: &str,
     origin_json: Option<&str>,
     tool_state_json: Option<&str>,
@@ -192,12 +194,15 @@ pub(crate) fn encode_payload(
         ));
     }
     let text = lines.map(Option::unwrap_or_default).join("\n");
-    Ok(db::encode_blob(text.as_bytes()))
+    document::store(conn, row, text.as_bytes())
 }
 
 /// Block, origin and tool state JSON from a `payload` column.
-pub(crate) fn decode_payload(blob: &[u8]) -> Result<(String, Option<String>, Option<String>)> {
-    let text = String::from_utf8(db::decode_blob(blob)?.into_owned())
+pub(crate) fn decode_payload(
+    conn: &rusqlite::Connection,
+    cell: &[u8],
+) -> Result<(String, Option<String>, Option<String>)> {
+    let text = String::from_utf8(document::load(conn, cell)?.into_owned())
         .map_err(|_| StoreError::Integrity("transcript payload is not UTF-8".to_owned()))?;
     let mut lines = text.split('\n').map(str::to_owned);
     let (Some(block), Some(origin), Some(tool_state), None) =

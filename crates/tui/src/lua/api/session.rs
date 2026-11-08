@@ -1029,29 +1029,24 @@ pub(super) fn register(
     })?;
     m.advanced_fn(
         "text",
-        "Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.",
+        "Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing.",
         &["id"],
         |_, id: String| -> LuaResult<Option<String>> {
             Ok(crate::lua::with_session_host(|host| host.session_conversation_text(&id)))
         },
     )?;
-    let texts_sink = shared.core.resume_sink();
+    let search_sink = shared.core.resume_sink();
     m.private_live_only_fn(
-        "__start_texts",
-        &["task_id", "ids"],
-        move |_, (task_id, ids): (u64, Vec<String>)| -> LuaResult<()> {
-            let cancel = smelt_core::lua::current_task_cancel().ok_or_else(|| {
-                mlua::Error::RuntimeError("session texts require a Lua task".into())
-            })?;
+        "__start_search",
+        &["task_id", "query"],
+        move |_, (task_id, query): (u64, String)| -> LuaResult<()> {
             let storage = crate::lua::with_session_host(|host| host.session_storage());
-            texts_sink.clone().spawn_blocking_resolve(task_id, move || {
-                let texts: serde_json::Map<String, serde_json::Value> = storage
-                    .load_conversation_texts(ids, cancel)
-                    .into_iter()
-                    .map(|(id, text)| (id, serde_json::Value::String(text)))
-                    .collect();
-                serde_json::json!({ "texts": texts })
-            });
+            search_sink
+                .clone()
+                .spawn_blocking_resolve(task_id, move || match storage.search(&query) {
+                    Ok(ids) => serde_json::json!({ "ids": ids }),
+                    Err(error) => serde_json::json!({ "err": error.to_string() }),
+                });
             Ok(())
         },
     )?;

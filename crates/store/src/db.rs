@@ -5,9 +5,11 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::error::{Result, StoreError};
-use crate::{lock, transcript, Store, StoredTranscriptBlock};
+use crate::Store;
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 1;
+/// `PRAGMA application_id` of a smelt database: "smlt".
+const APPLICATION_ID: i32 = 0x736d_6c74;
 const SCHEMA: &str = include_str!("schema.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// SQLite keeps a checkpointed WAL at its largest size unless this caps it.
@@ -15,48 +17,9 @@ const WAL_SIZE_LIMIT: i64 = 1024 * 1024;
 /// Checkpoint before the WAL outgrows its size limit, in 4 KiB pages.
 const WAL_CHECKPOINT_PAGES: i64 = WAL_SIZE_LIMIT / 4096;
 
-/// Encodes the `summary` column of a transcript row. The store keeps summaries
-/// opaque, so an upgrade that adds them asks the transcript model.
-pub type RecordSummarizer<'a> = &'a dyn Fn(StoredTranscriptBlock) -> serde_json::Result<Vec<u8>>;
-
-/// Opens the shared database, creating it and its schema on first use. An
-/// older schema needs [`upgrade_existing`] first.
+/// Opens the shared database, creating it and its schema on first use. A file
+/// with another schema is refused without writing to it.
 pub(crate) fn open(store: &Store) -> Result<Connection> {
-    let (conn, version) = connect(store)?;
-    match version {
-        SCHEMA_VERSION => Ok(conn),
-        0 => {
-            upgrade(store, &conn, 0, |conn| Ok(conn.execute_batch(SCHEMA)?))?;
-            Ok(conn)
-        }
-        found => Err(StoreError::UnsupportedSchema {
-            found,
-            expected: SCHEMA_VERSION,
-        }),
-    }
-}
-
-/// Brings an older schema up to [`SCHEMA_VERSION`]; other versions are left as
-/// they are.
-// COMPAT(store-schema-v1) COMPAT(store-schema-v2)
-pub(crate) fn upgrade_existing(store: &Store, summarize: RecordSummarizer<'_>) -> Result<()> {
-    let (conn, version) = connect(store)?;
-    let step = |conn: &Connection| {
-        if version == 1 {
-            upgrade_v1(conn)?;
-        }
-        upgrade_v2(conn, summarize)
-    };
-    if matches!(version, 1 | 2) {
-        upgrade(store, &conn, version, step)?;
-        // Give the pages of the dropped columns and table back to the file system.
-        incremental_vacuum(&conn, None)?;
-    }
-    Ok(())
-}
-
-/// A configured connection and the schema version it found.
-fn connect(store: &Store) -> Result<(Connection, i32)> {
     let path = &store.database_path();
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
@@ -69,11 +32,19 @@ fn connect(store: &Store) -> Result<(Connection, i32)> {
     restrict_permissions(path)?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.set_prepared_statement_cache_capacity(64);
-    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0 {
-        // Auto-vacuum must be chosen before WAL and the first table. Setting it
-        // takes the write lock, so only a new database does it.
-        conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")?;
+    match schema_of(&conn)? {
+        (APPLICATION_ID, SCHEMA_VERSION) => {}
+        (0, 0) => create(&conn)?,
+        (application_id, version) => {
+            return Err(StoreError::UnsupportedSchema {
+                found: if application_id == APPLICATION_ID {
+                    version
+                } else {
+                    0
+                },
+                expected: SCHEMA_VERSION,
+            })
+        }
     }
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -83,41 +54,44 @@ fn connect(store: &Store) -> Result<(Connection, i32)> {
     )?;
     conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
     conn.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
-    Ok((conn, version))
+    Ok(conn)
 }
 
-pub(crate) fn upgrade_pending(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    Ok((1..SCHEMA_VERSION).contains(&version))
+fn schema_of(conn: &Connection) -> Result<(i32, i32)> {
+    Ok((
+        conn.query_row("PRAGMA application_id", [], |row| row.get(0))?,
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))?,
+    ))
 }
 
-/// Runs `step` and marks the schema current, in one write transaction, if the
-/// database is still at version `from`. Another process may have done it while
-/// this one waited for the lock. An existing schema stays as it is while other
-/// processes own sessions, since older builds keep writing it until they exit.
-fn upgrade(
-    store: &Store,
-    conn: &Connection,
-    from: i32,
-    step: impl FnOnce(&Connection) -> Result<()>,
-) -> Result<()> {
+/// Creates the schema in a new database, unless another process did while this
+/// one waited for the write lock.
+fn create(conn: &Connection) -> Result<()> {
+    // Auto-vacuum must be chosen before WAL and the first table.
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")?;
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
-        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version == from {
-            if from > 0 {
-                let sessions = lock::owned_sessions(&store.locks_dir())?;
-                if sessions > 0 {
-                    return Err(StoreError::UpgradeBlocked { sessions });
-                }
+        match schema_of(conn)? {
+            (0, 0) => {}
+            (APPLICATION_ID, SCHEMA_VERSION) => return Ok(()),
+            (_, found) => {
+                return Err(StoreError::UnsupportedSchema {
+                    found,
+                    expected: SCHEMA_VERSION,
+                })
             }
-            step(conn)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        let tables: i64 =
+            conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
+        if tables > 0 {
+            return Err(StoreError::UnsupportedSchema {
+                found: 0,
+                expected: SCHEMA_VERSION,
+            });
+        }
+        conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "application_id", APPLICATION_ID)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     })();
     match result {
@@ -127,102 +101,6 @@ fn upgrade(
             return Err(err);
         }
     }
-    Ok(())
-}
-
-// COMPAT(store-schema-v1): databases from smelt 0.8 development builds keep the
-// transcript preview, origin and tool state as plain columns.
-fn upgrade_v1(conn: &Connection) -> Result<()> {
-    conn.execute_batch("ALTER TABLE transcript ADD COLUMN payload BLOB NOT NULL DEFAULT x''")?;
-    let mut select = conn.prepare(
-        "SELECT rowid, block, origin, tool_state FROM transcript
-         WHERE rowid > ?1 ORDER BY rowid LIMIT 256",
-    )?;
-    let mut update = conn.prepare("UPDATE transcript SET payload = ?2 WHERE rowid = ?1")?;
-    let mut after = 0_i64;
-    loop {
-        let rows = select
-            .query_map([after], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let Some(&(last, ..)) = rows.last() else {
-            break;
-        };
-        after = last;
-        for (rowid, block, origin, tool_state) in rows {
-            let block = String::from_utf8(decode_blob(&block)?.into_owned())
-                .map_err(|_| StoreError::Integrity("transcript block is not UTF-8".to_owned()))?;
-            let payload =
-                transcript::encode_payload(&block, origin.as_deref(), tool_state.as_deref())?;
-            update.execute(rusqlite::params![rowid, payload])?;
-        }
-    }
-    conn.execute_batch(
-        "ALTER TABLE transcript DROP COLUMN preview;
-         ALTER TABLE transcript DROP COLUMN origin;
-         ALTER TABLE transcript DROP COLUMN tool_state;
-         ALTER TABLE transcript DROP COLUMN block;",
-    )?;
-    Ok(())
-}
-
-// COMPAT(store-schema-v2): databases from smelt 0.8 development builds have no
-// transcript `summary` column. The table is rebuilt so the summary comes before
-// the large columns, as in the current schema.
-fn upgrade_v2(conn: &Connection, summarize: RecordSummarizer<'_>) -> Result<()> {
-    let start = SCHEMA
-        .find("CREATE TABLE transcript (")
-        .expect("schema creates the transcript table");
-    let len = SCHEMA[start..]
-        .find("CREATE TABLE requests")
-        .expect("schema creates the requests table after the transcript");
-    let create = &SCHEMA[start..start + len];
-    conn.execute_batch(&format!(
-        "ALTER TABLE transcript RENAME TO transcript_v2;
-         ALTER TABLE transcript_v2 ADD COLUMN summary BLOB NOT NULL DEFAULT x'00';
-         DROP INDEX transcript_blocks;
-         DROP INDEX transcript_history;
-         DROP INDEX transcript_kinds;
-         DROP INDEX transcript_roles;
-         {create}"
-    ))?;
-    let columns = "sid, idx, block_idx, history_idx, kind, role, rows_20, rows_40, rows_80, \
-        rows_120, rows_160, rows_240, text_bytes, tool_render_revision, tool_call_id, tool_name, \
-        content_hash, first_line, summary, indexed_text, payload";
-    let mut select = conn.prepare(&format!(
-        "SELECT rowid, {} FROM transcript_v2 WHERE rowid > ?1 ORDER BY rowid LIMIT 256",
-        crate::reader::TRANSCRIPT_COLUMNS
-    ))?;
-    let mut insert = conn.prepare(&format!(
-        "INSERT INTO transcript ({columns}) SELECT {} FROM transcript_v2 WHERE rowid = ?1",
-        columns.replace("summary", "?2")
-    ))?;
-    let mut after = 0_i64;
-    loop {
-        let rows = select
-            .query_map([after], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    crate::reader::transcript_from_row_at(row, 1)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let Some(&(last, _)) = rows.last() else {
-            break;
-        };
-        after = last;
-        for (rowid, row) in rows {
-            let summary = encode_blob(&summarize(row)?);
-            insert.execute(rusqlite::params![rowid, summary])?;
-        }
-    }
-    conn.execute_batch("DROP TABLE transcript_v2")?;
     Ok(())
 }
 
@@ -277,46 +155,6 @@ fn restrict_permissions(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
-}
-
-/// Compressed JSON bodies start with a tag byte so small ones stay uncompressed.
-const RAW: u8 = 0;
-const ZSTD: u8 = 1;
-const COMPRESS_MIN_BYTES: usize = 1024;
-const ZSTD_LEVEL: i32 = 1;
-
-pub(crate) fn encode_blob(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() >= COMPRESS_MIN_BYTES {
-        if let Ok(compressed) = zstd::bulk::compress(bytes, ZSTD_LEVEL) {
-            // Keep compression only when it saves at least an eighth.
-            if compressed.len() + bytes.len() / 8 < bytes.len() {
-                let mut out = Vec::with_capacity(compressed.len() + 1);
-                out.push(ZSTD);
-                out.extend_from_slice(&compressed);
-                return out;
-            }
-        }
-    }
-    let mut out = Vec::with_capacity(bytes.len() + 1);
-    out.push(RAW);
-    out.extend_from_slice(bytes);
-    out
-}
-
-pub(crate) fn decode_blob(blob: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>> {
-    match blob.split_first() {
-        Some((&RAW, body)) => Ok(std::borrow::Cow::Borrowed(body)),
-        Some((&ZSTD, body)) => Ok(std::borrow::Cow::Owned(zstd::stream::decode_all(body)?)),
-        _ => Err(StoreError::Integrity("unknown blob encoding".into())),
-    }
-}
-
-pub(crate) fn encode_json(value: &impl serde::Serialize) -> Result<Vec<u8>> {
-    Ok(encode_blob(&serde_json::to_vec(value)?))
-}
-
-pub(crate) fn decode_json<T: serde::de::DeserializeOwned>(blob: &[u8]) -> Result<T> {
-    Ok(serde_json::from_slice(&decode_blob(blob)?)?)
 }
 
 /// Converts a stored nonnegative integer.
@@ -404,143 +242,26 @@ mod tests {
         );
     }
 
-    // COMPAT(store-schema-v1) COMPAT(store-schema-v2)
     #[test]
-    fn version_1_transcript_rows_upgrade_to_the_current_schema() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
-        let path = store.database_path();
-        let conn = open(&store).unwrap();
-        conn.execute_batch(
-            "DROP TABLE transcript;
-             CREATE TABLE transcript (
-                 sid INTEGER NOT NULL REFERENCES sessions (sid) ON DELETE CASCADE,
-                 idx INTEGER NOT NULL,
-                 block_idx INTEGER NOT NULL,
-                 history_idx INTEGER,
-                 kind TEXT NOT NULL,
-                 role TEXT NOT NULL,
-                 rows_20 INTEGER NOT NULL,
-                 rows_40 INTEGER NOT NULL,
-                 rows_80 INTEGER NOT NULL,
-                 rows_120 INTEGER NOT NULL,
-                 rows_160 INTEGER NOT NULL,
-                 rows_240 INTEGER NOT NULL,
-                 text_bytes INTEGER NOT NULL,
-                 tool_render_revision INTEGER NOT NULL,
-                 tool_call_id TEXT,
-                 tool_name TEXT,
-                 content_hash TEXT NOT NULL,
-                 first_line TEXT NOT NULL,
-                 preview TEXT NOT NULL,
-                 origin TEXT,
-                 tool_state TEXT,
-                 indexed_text TEXT NOT NULL,
-                 block BLOB NOT NULL,
-                 PRIMARY KEY (sid, idx)
-             );
-             CREATE INDEX transcript_blocks ON transcript (sid, block_idx, idx);
-             CREATE INDEX transcript_history ON transcript (sid, history_idx, idx)
-                 WHERE history_idx IS NOT NULL;
-             CREATE INDEX transcript_kinds ON transcript (sid, kind, idx);
-             CREATE INDEX transcript_roles ON transcript (sid, role, idx);
-             INSERT INTO sessions (id, created_at, updated_at) VALUES ('s', 0, 0);
-             PRAGMA user_version = 1;",
-        )
-        .unwrap();
-        let output = "x".repeat(4096);
-        let rows = [
-            ("{\"Text\":{}}", None, None),
-            (
-                "{\"ToolCall\":{}}",
-                Some("{\"History\":3}"),
-                Some(format!("{{\"output\":\"{output}\"}}")),
-            ),
-        ];
-        for (idx, (block, origin, tool_state)) in rows.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO transcript VALUES (1, ?1, ?1, NULL, 'tool', 'tool', 1, 1, 1, 1, 1,
-                     1, 0, 0, NULL, NULL, '', '', 'preview', ?2, ?3, 'text', ?4)",
-                rusqlite::params![
-                    idx as i64,
-                    origin,
-                    tool_state,
-                    encode_blob(block.as_bytes())
-                ],
-            )
-            .unwrap();
+    fn other_databases_are_refused_without_writing() {
+        for setup in [
+            "PRAGMA user_version = 3; CREATE TABLE sessions (id TEXT);",
+            "CREATE TABLE notes (body TEXT);",
+            "PRAGMA application_id = 1936551028; PRAGMA user_version = 99;",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(dir.path());
+            Connection::open(store.database_path())
+                .unwrap()
+                .execute_batch(setup)
+                .unwrap();
+            let before = fs::read(store.database_path()).unwrap();
+            assert!(
+                matches!(open(&store), Err(StoreError::UnsupportedSchema { .. })),
+                "{setup}"
+            );
+            assert_eq!(fs::read(store.database_path()).unwrap(), before, "{setup}");
         }
-        drop(conn);
-
-        let summarize: RecordSummarizer<'_> =
-            &|row| Ok(format!("{} {}", row.block_idx, row.block_json).into_bytes());
-        assert!(upgrade_pending(&path).unwrap());
-        assert!(matches!(
-            open(&store),
-            Err(StoreError::UnsupportedSchema { found: 1, .. })
-        ));
-        let owner = lock::SessionLock::acquire(&store, "s").unwrap();
-        assert!(matches!(
-            upgrade_existing(&store, summarize),
-            Err(StoreError::UpgradeBlocked { sessions: 1 })
-        ));
-        assert!(upgrade_pending(&path).unwrap());
-        drop(owner);
-        upgrade_existing(&store, summarize).unwrap();
-        let conn = open(&store).unwrap();
-        assert!(!upgrade_pending(&path).unwrap());
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-        let payloads = conn
-            .prepare("SELECT payload FROM transcript ORDER BY idx")
-            .unwrap()
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
-            .unwrap()
-            .map(|payload| transcript::decode_payload(&payload.unwrap()).unwrap())
-            .collect::<Vec<_>>();
-        let expected = rows
-            .iter()
-            .map(|(block, origin, tool_state)| {
-                (
-                    block.to_string(),
-                    origin.map(str::to_owned),
-                    tool_state.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(payloads, expected);
-        let columns = conn
-            .prepare("SELECT name FROM pragma_table_info('transcript')")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        for dropped in ["preview", "origin", "tool_state", "block"] {
-            assert!(!columns.iter().any(|name| name == dropped), "{columns:?}");
-        }
-        let position = |name: &str| columns.iter().position(|column| column == name);
-        assert!(
-            position("summary") < position("indexed_text"),
-            "{columns:?}"
-        );
-        let summaries = conn
-            .prepare("SELECT summary FROM transcript ORDER BY idx")
-            .unwrap()
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
-            .unwrap()
-            .map(|summary| String::from_utf8(decode_blob(&summary.unwrap()).unwrap().into_owned()))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            summaries,
-            rows.iter()
-                .enumerate()
-                .map(|(idx, (block, ..))| format!("{idx} {block}"))
-                .collect::<Vec<_>>()
-        );
     }
 
     #[test]

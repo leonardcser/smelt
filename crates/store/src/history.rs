@@ -61,11 +61,19 @@ pub(crate) fn note_projection(
     Some(HistoryNoteProjection { kind, mode })
 }
 
-/// Conversation text of a history item: user input and assistant replies.
+/// Conversation text of a history item: user input, assistant replies and
+/// compaction summaries. Mode and process status notices are not conversation.
 pub(crate) fn conversation_text(item: &HistoryItem) -> Option<std::borrow::Cow<'_, str>> {
     match item {
-        HistoryItem::User { content, .. } => Some(content.text_content()),
+        HistoryItem::User { content, .. } => match protocol::classify_user_history_content(content)
+        {
+            protocol::UserHistoryContent::Plain => Some(content.text_content()),
+            protocol::UserHistoryContent::CompactionSummary { summary } => Some(summary.into()),
+            protocol::UserHistoryContent::ModeChange { .. }
+            | protocol::UserHistoryContent::ProcessStatus { .. } => None,
+        },
         HistoryItem::Assistant(step) => step.content.as_ref().map(|content| content.text_content()),
+        HistoryItem::Note(HistoryNote::Compaction { text }) => Some(text.as_str().into()),
         HistoryItem::System { .. } | HistoryItem::Note(_) => None,
     }
 }

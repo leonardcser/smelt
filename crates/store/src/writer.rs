@@ -2,6 +2,7 @@ use protocol::request_log::RequestLogEntry;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::db::{self, signed, unsigned};
+use crate::document::{self, Owner, RowKey};
 use crate::error::{Result, StoreError};
 use crate::history::HistoryRow;
 use crate::lock::SessionLock;
@@ -54,55 +55,32 @@ impl SessionWriter {
         identity: &SessionIdentity,
         commit: &SessionCommit,
     ) -> Result<StoreHead> {
+        let mut batch = self.batch(identity)?;
+        batch.apply(commit)?;
+        batch.commit()
+    }
+
+    /// Starts one atomic save made of several commits, so a large session can be
+    /// written without holding all of it in memory. Dropping the batch discards it.
+    pub fn batch<'w>(&'w mut self, identity: &'w SessionIdentity) -> Result<SessionBatch<'w>> {
         if identity.id != self.session_id {
             return Err(StoreError::Integrity(format!(
                 "commit for session {} reached the writer of {}",
                 identity.id, self.session_id
             )));
         }
-        let _perf = smelt_perf::perf::begin("store:commit");
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let sid = match self.sid {
-            Some(sid) => sid,
-            None => create_session(&tx, identity)?,
-        };
-        let mut head = read_head(&tx, sid)?;
-        let mut text_bytes: i64 = tx
-            .prepare_cached("SELECT text_bytes FROM sessions WHERE sid = ?1")?
-            .query_row([sid], |row| row.get(0))?;
-        if let Some(history) = &commit.history {
-            smelt_perf::perf::record_value("store:commit:history_rows", history.items.len() as u64);
-            let (len, bytes) = write_history(&tx, sid, head.history_len.get(), history)?;
-            head.history_len = HistoryLen::new(len);
-            text_bytes = text_bytes.saturating_add(bytes);
-        }
-        for table in SideTable::ALL {
-            if let Some(rows) = commit.side_rows(table) {
-                write_side_rows(&tx, sid, table, rows)?;
-            }
-        }
-        if let Some(transcript) = &commit.transcript {
-            smelt_perf::perf::record_value(
-                "store:commit:transcript_rows",
-                transcript.records.len() as u64,
-            );
-            let count = write_transcript(&tx, sid, head.transcript_record_count.get(), transcript)?;
-            head.transcript_record_count = TranscriptRecordCount::new(count);
-        }
-        if let Some(message) = &commit.first_user_message {
-            write_value(&tx, sid, "first_user_message", message.as_deref())?;
-        }
-        if let Some(checkpoint) = &commit.checkpoint {
-            let json = checkpoint.as_ref().map(serde_json::to_string).transpose()?;
-            write_value(&tx, sid, "checkpoint", json.as_deref())?;
-        }
-        write_metadata(&tx, sid, &commit.metadata, head, text_bytes)?;
-        tx.commit()?;
-        self.sid = Some(sid);
-        self.head = head;
-        Ok(head)
+        Ok(SessionBatch {
+            perf: smelt_perf::perf::begin("store:commit"),
+            tx: self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?,
+            identity,
+            sid: self.sid,
+            head: self.head,
+            released: Vec::new(),
+            writer_sid: &mut self.sid,
+            writer_head: &mut self.head,
+        })
     }
 
     pub fn append_request(
@@ -113,7 +91,10 @@ impl SessionWriter {
         let sid = self.sid.ok_or_else(|| StoreError::NotFound {
             session_id: self.session_id.clone(),
         })?;
-        crate::requests::append(&self.conn, sid, entry, mode)
+        let tx = self.conn.transaction()?;
+        let id = crate::requests::append(&tx, sid, entry, mode)?;
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Copies this session into a new one.
@@ -128,11 +109,94 @@ impl SessionWriter {
     }
 
     /// Deletes this session and releases it.
-    pub fn delete(self, store: &Store) -> Result<()> {
-        delete(&self.conn, &self.session_id)?;
+    pub fn delete(mut self, store: &Store) -> Result<()> {
+        delete(&mut self.conn, &self.session_id)?;
         let _ = std::fs::remove_dir_all(store.session_artifact_dir(&self.session_id));
         Ok(())
     }
+}
+
+/// An atomic save in progress; see [`SessionWriter::batch`].
+pub struct SessionBatch<'w> {
+    perf: Option<smelt_perf::perf::Guard>,
+    tx: Transaction<'w>,
+    identity: &'w SessionIdentity,
+    sid: Option<i64>,
+    head: StoreHead,
+    /// Blobs that rows of this save stopped holding.
+    released: Vec<i64>,
+    writer_sid: &'w mut Option<i64>,
+    writer_head: &'w mut StoreHead,
+}
+
+impl SessionBatch<'_> {
+    /// Applies the next commit. The first one creates the session.
+    pub fn apply(&mut self, commit: &SessionCommit) -> Result<StoreHead> {
+        let sid = match self.sid {
+            Some(sid) => sid,
+            None => *self.sid.insert(create_session(&self.tx, self.identity)?),
+        };
+        self.head = apply(&self.tx, sid, commit, &mut self.released)?;
+        Ok(self.head)
+    }
+
+    /// Makes every applied commit durable at once.
+    pub fn commit(self) -> Result<StoreHead> {
+        document::collect(&self.tx, self.released)?;
+        self.tx.commit()?;
+        *self.writer_sid = self.sid;
+        *self.writer_head = self.head;
+        drop(self.perf);
+        Ok(self.head)
+    }
+}
+
+/// Writes one save into an open transaction, adding the blobs that rows stopped
+/// holding to `released`.
+fn apply(
+    tx: &Transaction,
+    sid: i64,
+    commit: &SessionCommit,
+    released: &mut Vec<i64>,
+) -> Result<StoreHead> {
+    let mut head = read_head(tx, sid)?;
+    let mut text_bytes: i64 = tx
+        .prepare_cached("SELECT text_bytes FROM sessions WHERE sid = ?1")?
+        .query_row([sid], |row| row.get(0))?;
+    if let Some(history) = &commit.history {
+        smelt_perf::perf::record_value("store:commit:history_rows", history.items.len() as u64);
+        let (len, bytes) = write_history(tx, sid, head.history_len.get(), history, released)?;
+        head.history_len = HistoryLen::new(len);
+        text_bytes = text_bytes.saturating_add(bytes);
+    }
+    for table in SideTable::ALL {
+        if let Some(rows) = commit.side_rows(table) {
+            write_side_rows(tx, sid, table, rows)?;
+        }
+    }
+    if let Some(transcript) = &commit.transcript {
+        smelt_perf::perf::record_value(
+            "store:commit:transcript_rows",
+            transcript.records.len() as u64,
+        );
+        let count = write_transcript(
+            tx,
+            sid,
+            head.transcript_record_count.get(),
+            transcript,
+            released,
+        )?;
+        head.transcript_record_count = TranscriptRecordCount::new(count);
+    }
+    if let Some(message) = &commit.first_user_message {
+        write_value(tx, sid, "first_user_message", message.as_deref())?;
+    }
+    if let Some(checkpoint) = &commit.checkpoint {
+        let json = checkpoint.as_ref().map(serde_json::to_string).transpose()?;
+        write_value(tx, sid, "checkpoint", json.as_deref())?;
+    }
+    write_metadata(tx, sid, &commit.metadata, head, text_bytes)?;
+    Ok(head)
 }
 
 pub(crate) fn read_head(conn: &Connection, sid: i64) -> Result<StoreHead> {
@@ -236,6 +300,7 @@ fn write_history(
     sid: i64,
     len: u64,
     suffix: &HistorySuffix,
+    released: &mut Vec<i64>,
 ) -> Result<(u64, i64)> {
     if suffix.start > len {
         return Err(StoreError::InvalidSuffix {
@@ -250,6 +315,9 @@ fn write_history(
             "SELECT coalesce(sum(text_bytes), 0) FROM history WHERE sid = ?1 AND idx >= ?2",
         )?
         .query_row(params![sid, start], |row| row.get(0))?;
+    document::release_from(tx, sid, Owner::History, start, released)?;
+    tx.prepare_cached("DELETE FROM search_text WHERE sid = ?1 AND idx >= ?2")?
+        .execute(params![sid, start])?;
     let deleted = tx
         .prepare_cached("DELETE FROM history WHERE sid = ?1 AND idx >= ?2")?
         .execute(params![sid, start])?;
@@ -266,15 +334,27 @@ fn write_history(
              base_mode, text_bytes, body)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?;
+    let mut insert_text =
+        tx.prepare_cached("INSERT INTO search_text (sid, idx, text) VALUES (?1, ?2, ?3)")?;
     for (offset, item) in suffix.items.iter().enumerate() {
+        let idx = start + offset as i64;
         let json = serde_json::to_vec(item)?;
         let row = HistoryRow::of(item);
         users += i64::from(row.user_turn);
         let bytes = json.len() as i64;
         added += bytes;
+        let body = document::store(
+            tx,
+            RowKey {
+                sid,
+                owner: Owner::History,
+                key: idx,
+            },
+            &json,
+        )?;
         insert.execute(params![
             sid,
-            start + offset as i64,
+            idx,
             users,
             row.user_turn,
             row.visible,
@@ -283,8 +363,12 @@ fn write_history(
             row.mode,
             row.base_mode,
             bytes,
-            db::encode_blob(&json),
+            body,
         ])?;
+        if let Some(text) = crate::history::conversation_text(item).filter(|text| !text.is_empty())
+        {
+            insert_text.execute(params![sid, idx, text.as_ref()])?;
+        }
     }
     Ok((suffix.start + suffix.items.len() as u64, added - removed))
 }
@@ -350,6 +434,7 @@ fn write_transcript(
     sid: i64,
     len: u64,
     suffix: &TranscriptRecordSuffix,
+    released: &mut Vec<i64>,
 ) -> Result<u64> {
     if suffix.start > len {
         return Err(StoreError::InvalidSuffix {
@@ -359,6 +444,7 @@ fn write_transcript(
         });
     }
     let start = signed(suffix.start);
+    document::release_from(tx, sid, Owner::Transcript, start, released)?;
     let deleted = tx
         .prepare_cached("DELETE FROM transcript WHERE sid = ?1 AND idx >= ?2")?
         .execute(params![sid, start])?;
@@ -372,11 +458,17 @@ fn write_transcript(
              ?18, ?19, ?20, ?21)",
     )?;
     for (offset, record) in suffix.records.iter().enumerate() {
+        let idx = start + offset as i64;
+        let row = RowKey {
+            sid,
+            owner: Owner::Transcript,
+            key: idx,
+        };
         cumulative = cumulative.add(record.extent_profile());
         let rows = cumulative.rows().map(signed);
         insert.execute(params![
             sid,
-            start + offset as i64,
+            idx,
             signed(record.block_idx),
             record.history_idx.map(signed),
             record.kind,
@@ -393,9 +485,11 @@ fn write_transcript(
             record.tool_name,
             record.content_hash,
             record.first_line(),
-            db::encode_blob(&record.summary),
-            record.indexed_text,
+            document::compress(&record.summary),
+            document::store_text(tx, row, &record.indexed_text)?,
             transcript::encode_payload(
+                tx,
+                row,
                 &record.block_json,
                 record.origin_json.as_deref(),
                 record.tool_state_json.as_deref(),
@@ -411,6 +505,7 @@ pub(crate) fn fork(
     target_id: &str,
     created_at: i64,
 ) -> Result<StoreHead> {
+    let _perf = smelt_perf::perf::begin("store:fork");
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let source = db::require_session_key(&tx, source_id)?;
     if db::session_key(&tx, target_id)?.is_some() {
@@ -439,6 +534,10 @@ pub(crate) fn fork(
              text_bytes, body FROM history WHERE sid = ?1",
         "INSERT INTO side_rows (sid, tbl, key, value)
          SELECT ?2, tbl, key, value FROM side_rows WHERE sid = ?1",
+        "INSERT INTO search_text (sid, idx, text)
+         SELECT ?2, idx, text FROM search_text WHERE sid = ?1",
+        "INSERT INTO blob_refs (sid, tbl, key, blob)
+         SELECT ?2, tbl, key, blob FROM blob_refs WHERE sid = ?1 AND tbl IN (0, 1)",
         "INSERT INTO transcript (sid, idx, block_idx, history_idx, kind, role, rows_20, rows_40,
              rows_80, rows_120, rows_160, rows_240, text_bytes, tool_render_revision,
              tool_call_id, tool_name, content_hash, first_line, summary, indexed_text, payload)
@@ -454,16 +553,228 @@ pub(crate) fn fork(
     Ok(head)
 }
 
-pub(crate) fn delete(conn: &Connection, session_id: &str) -> Result<()> {
-    let deleted = conn
-        .prepare_cached("DELETE FROM sessions WHERE id = ?1")?
-        .execute([session_id])?;
-    if deleted == 0 {
-        return Err(StoreError::NotFound {
-            session_id: session_id.to_owned(),
-        });
-    }
+pub(crate) fn delete(conn: &mut Connection, session_id: &str) -> Result<()> {
+    let _perf = smelt_perf::perf::begin("store:delete");
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let sid = db::require_session_key(&tx, session_id)?;
+    let mut released = Vec::new();
+    document::release_session(&tx, sid, &mut released)?;
+    tx.prepare_cached("DELETE FROM sessions WHERE sid = ?1")?
+        .execute([sid])?;
+    document::collect(&tx, released)?;
+    tx.commit()?;
     // Give the deleted pages back in bounded steps instead of growing the file forever.
     db::incremental_vacuum(conn, Some(4096))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use protocol::{AssistantStep, Content, HistoryItem};
+
+    use super::*;
+    use crate::document::SPLIT_MIN_BYTES;
+    use crate::StoredTranscriptBlock;
+
+    fn identity(id: &str) -> SessionIdentity {
+        SessionIdentity {
+            id: id.to_owned(),
+            created_at: 0,
+            parent_id: None,
+        }
+    }
+
+    fn reply(text: &str, reasoning: &str) -> HistoryItem {
+        HistoryItem::assistant(AssistantStep::terminal(
+            Some(Content::text(text)),
+            Some(reasoning.to_owned()),
+            Vec::new(),
+        ))
+    }
+
+    fn record(block_idx: u64, indexed_text: &str) -> StoredTranscriptBlock {
+        StoredTranscriptBlock {
+            block_idx,
+            history_idx: None,
+            kind: "tool".to_owned(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: String::new(),
+            estimated_text_bytes: indexed_text.len() as u64,
+            summary: b"summary".to_vec(),
+            indexed_text: indexed_text.to_owned(),
+            block_json: serde_json::json!({ "output": indexed_text }).to_string(),
+            origin_json: None,
+            tool_state_json: None,
+            tool_render_revision: 0,
+        }
+    }
+
+    fn history(start: u64, items: Vec<HistoryItem>) -> SessionCommit {
+        SessionCommit {
+            history: Some(HistorySuffix { start, items }),
+            ..SessionCommit::default()
+        }
+    }
+
+    fn blobs(store: &Store) -> i64 {
+        store
+            .connect()
+            .unwrap()
+            .query_row("SELECT count(*) FROM blobs", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn blobs_live_while_any_row_of_any_session_holds_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let thinking = "deliberation ".repeat(SPLIT_MIN_BYTES);
+        let items = vec![
+            HistoryItem::user(Content::text("question")),
+            reply("answer", &thinking),
+            reply("again", &thinking),
+        ];
+        let mut writer = store.writer("a").unwrap();
+        writer
+            .commit(&identity("a"), &history(0, items.clone()))
+            .unwrap();
+        assert_eq!(blobs(&store), 1, "equal reasoning is stored once");
+
+        writer.fork_to("b", 1, &store).unwrap();
+        assert_eq!(blobs(&store), 1, "a fork shares its source's blobs");
+
+        // Rewinding the source drops its references but not the fork's.
+        writer
+            .commit(&identity("a"), &history(1, Vec::new()))
+            .unwrap();
+        assert_eq!(blobs(&store), 1);
+        writer.delete(&store).unwrap();
+        assert_eq!(
+            store.reader("b").unwrap().history_range(0, 3).unwrap(),
+            items
+        );
+
+        store.delete("b").unwrap();
+        assert_eq!(blobs(&store), 0);
+    }
+
+    #[test]
+    fn session_search_follows_saves_forks_and_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let mut writer = store.writer("a").unwrap();
+        let items = vec![
+            HistoryItem::user(Content::text("Where is the \"Frobnicator\" config?")),
+            HistoryItem::user(Content::text(format!(
+                "{}switched to plan mode",
+                protocol::note::MODE_NOTE_PREFIX
+            ))),
+            reply("In settings.lua", ""),
+            HistoryItem::user(protocol::compaction_summary_content("We found the config.")),
+        ];
+        writer.commit(&identity("a"), &history(0, items)).unwrap();
+        let search = |query: &str| {
+            let mut ids = store.search_sessions(query).unwrap();
+            ids.sort();
+            ids
+        };
+        assert_eq!(search("frobnicator"), ["a"]);
+        assert_eq!(search("the \"frob"), ["a"]);
+        assert_eq!(search("SETTINGS.LUA"), ["a"]);
+        assert!(search("fr").is_empty(), "shorter than the trigram minimum");
+        assert!(search("deliberation").is_empty());
+        assert!(
+            search("plan mode").is_empty(),
+            "notices are not conversation"
+        );
+        assert_eq!(search("found the config"), ["a"]);
+
+        writer.fork_to("b", 1, &store).unwrap();
+        assert_eq!(search("settings"), ["a", "b"]);
+
+        writer
+            .commit(&identity("a"), &history(2, vec![reply("elsewhere", "")]))
+            .unwrap();
+        assert_eq!(search("settings"), ["b"]);
+        assert_eq!(search("elsewhere"), ["a"]);
+        assert_eq!(
+            store.reader("a").unwrap().conversation_text().unwrap(),
+            "Where is the \"Frobnicator\" config?\nelsewhere\n"
+        );
+
+        store.delete("b").unwrap();
+        assert!(search("settings").is_empty());
+    }
+
+    #[test]
+    fn transcript_search_reads_split_and_escaped_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let long = format!("{}needle in \"quotes\"\n", "hay\t".repeat(SPLIT_MIN_BYTES));
+        let commit = SessionCommit {
+            transcript: Some(TranscriptRecordSuffix {
+                start: 0,
+                records: vec![
+                    record(0, "short needle"),
+                    record(1, &long),
+                    record(2, "\n"),
+                    record(3, "a\\b"),
+                ],
+            }),
+            ..SessionCommit::default()
+        };
+        store
+            .writer("a")
+            .unwrap()
+            .commit(&identity("a"), &commit)
+            .unwrap();
+        let reader = store.reader("a").unwrap();
+        let hits = |query: &str| {
+            reader
+                .search_transcript_candidate_page(
+                    query,
+                    None,
+                    crate::TranscriptSearchDirection::Forward,
+                    16,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.block_idx)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hits("needle"), [0, 1]);
+        assert_eq!(hits("in \"quotes\"\n"), [1]);
+        // The newline is stored as the escape `\n`, which holds no `n`.
+        assert_eq!(hits("n"), [0, 1]);
+        assert_eq!(hits("\n"), [1, 2]);
+        assert_eq!(hits("\\"), [3]);
+        assert_eq!(reader.transcript_range(1, 2).unwrap()[0], record(1, &long));
+    }
+
+    #[test]
+    fn a_batch_saves_all_its_commits_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let mut writer = store.writer("a").unwrap();
+        let id = identity("a");
+        let save_both = |batch: &mut SessionBatch<'_>| {
+            for (at, text) in ["first", "second"].into_iter().enumerate() {
+                let item = HistoryItem::user(Content::text(text));
+                batch.apply(&history(at as u64, vec![item])).unwrap();
+            }
+        };
+        let mut batch = writer.batch(&id).unwrap();
+        save_both(&mut batch);
+        drop(batch);
+        assert!(!writer.exists());
+        assert!(!store.exists("a").unwrap());
+
+        let mut batch = writer.batch(&id).unwrap();
+        save_both(&mut batch);
+        let head = batch.commit().unwrap();
+        assert_eq!(writer.head(), head);
+        assert_eq!(head.history_len.get(), 2);
+        assert_eq!(store.search_sessions("second").unwrap(), ["a"]);
+    }
 }

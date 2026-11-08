@@ -6,7 +6,8 @@ use protocol::TokenUsage;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use serde_json::Value;
 
-use crate::db::{self, signed, unsigned};
+use crate::db::{signed, unsigned};
+use crate::document::{self, Owner, RowKey};
 use crate::error::Result;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -231,24 +232,39 @@ pub(crate) fn append(
     } else {
         stop_diagnostics(error.as_ref(), true)
     };
-    let body = full.then(|| db::encode_json(&entry.body)).transpose()?;
-    let response = response.as_ref().map(db::encode_json).transpose()?;
-    let error = error.as_ref().map(db::encode_json).transpose()?;
+    // Payloads are documents of this row, so its id comes first. Ids are the
+    // next rowid, as SQLite would choose.
+    let id: i64 = conn.query_row("SELECT coalesce(max(id), 0) + 1 FROM requests", [], |row| {
+        row.get(0)
+    })?;
+    let row = RowKey {
+        sid,
+        owner: Owner::Request,
+        key: id,
+    };
+    let store = |value: &Value| document::store_json(conn, row, value);
+    let body = full
+        .then(|| document::store_json(conn, row, &entry.body))
+        .transpose()?;
+    let response = response.as_ref().map(store).transpose()?;
+    let error = error.as_ref().map(store).transpose()?;
     let usage = entry.usage.as_ref();
     let completed_at = entry
         .elapsed_ms
         .map(|elapsed| signed(entry.timestamp_ms.saturating_add(elapsed)));
     conn.prepare_cached(
-        "INSERT INTO requests (sid, request_id, kind, turn_id, ask_id, started_at, completed_at,
+        "INSERT INTO requests (id, sid, request_id, kind, turn_id, ask_id, started_at, completed_at,
              provider, model, api_base, url, http_status, history_len, attempt, stream,
              prompt_cache_key, background, raw_body_size, response_kind, response_summary,
              error_summary, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
              reasoning_tokens, context_tokens, cost_micros, tokens_per_sec, usage, body,
              response, error)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-             ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
+             ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33,
+             ?34)",
     )?
     .execute(params![
+        id,
         sid,
         entry.request_id.to_string(),
         entry.kind,
@@ -291,7 +307,7 @@ pub(crate) fn append(
         response,
         error,
     ])?;
-    Ok(conn.last_insert_rowid())
+    Ok(id)
 }
 
 pub(crate) fn query(
@@ -469,7 +485,10 @@ pub(crate) fn payloads(
     let Some((body, response, response_kind, error)) = row else {
         return Ok(None);
     };
-    let decode = |blob: Option<Vec<u8>>| blob.map(|blob| db::decode_json(&blob)).transpose();
+    let decode = |cell: Option<Vec<u8>>| {
+        cell.map(|cell| document::load_json(conn, &cell))
+            .transpose()
+    };
     Ok(Some(RequestAuditPayloads {
         body: decode(body)?,
         response_payload_kind: response_kind

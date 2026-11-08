@@ -1,5 +1,9 @@
 -- One database holds every session. Rows are keyed by session and position, and
 -- a save only replaces the changed suffix of each sequence.
+--
+-- Bodies are documents (see `document.rs`): JSON whose large strings live once in
+-- `blobs`, so the same tool output, image or reasoning block costs its bytes once
+-- however many rows, sessions and forks hold it.
 
 CREATE TABLE sessions (
     sid INTEGER PRIMARY KEY,
@@ -74,8 +78,8 @@ CREATE TABLE side_rows (
 -- this record at each profile width, so any range's extent is one subtraction.
 -- `summary` is the compact record a sparse transcript keeps in memory. It comes
 -- before the large columns, so record windows read it without their overflow pages.
--- `indexed_text` is the plain search text; its start is the record's preview.
--- `payload` holds the block, origin and tool state, compressed together.
+-- `indexed_text` is the record's search text as a document holding one JSON string.
+-- `payload` is a document of the block, origin and tool state, one JSON line each.
 CREATE TABLE transcript (
     sid INTEGER NOT NULL REFERENCES sessions (sid) ON DELETE CASCADE,
     idx INTEGER NOT NULL,
@@ -96,7 +100,7 @@ CREATE TABLE transcript (
     content_hash TEXT NOT NULL,
     first_line TEXT NOT NULL,
     summary BLOB NOT NULL,
-    indexed_text TEXT NOT NULL,
+    indexed_text BLOB NOT NULL,
     payload BLOB NOT NULL,
     PRIMARY KEY (sid, idx)
 );
@@ -104,6 +108,48 @@ CREATE INDEX transcript_blocks ON transcript (sid, block_idx, idx);
 CREATE INDEX transcript_history ON transcript (sid, history_idx, idx) WHERE history_idx IS NOT NULL;
 CREATE INDEX transcript_kinds ON transcript (sid, kind, idx);
 CREATE INDEX transcript_roles ON transcript (sid, role, idx);
+
+-- Large JSON string contents shared by every document that holds them, keyed by
+-- their SHA-256. `data` is compressed like any other body.
+CREATE TABLE blobs (
+    id INTEGER PRIMARY KEY,
+    hash BLOB NOT NULL UNIQUE,
+    data BLOB NOT NULL
+);
+
+-- Which rows hold which blobs. `tbl` is the owning table (0 history, 1 transcript,
+-- 2 requests) and `key` its position or request id. A blob lives while any row
+-- refers to it.
+CREATE TABLE blob_refs (
+    sid INTEGER NOT NULL REFERENCES sessions (sid) ON DELETE CASCADE,
+    tbl INTEGER NOT NULL,
+    key INTEGER NOT NULL,
+    blob INTEGER NOT NULL REFERENCES blobs (id),
+    PRIMARY KEY (sid, tbl, key, blob)
+) WITHOUT ROWID;
+CREATE INDEX blob_refs_by_blob ON blob_refs (blob);
+
+-- Conversation text of each history item that has any: user input, assistant
+-- replies and compaction summaries. `search` indexes it for finding sessions.
+CREATE TABLE search_text (
+    id INTEGER PRIMARY KEY,
+    sid INTEGER NOT NULL REFERENCES sessions (sid) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    UNIQUE (sid, idx)
+);
+CREATE VIRTUAL TABLE search USING fts5 (
+    text,
+    content = 'search_text',
+    content_rowid = 'id',
+    tokenize = 'trigram'
+);
+CREATE TRIGGER search_text_insert AFTER INSERT ON search_text BEGIN
+    INSERT INTO search (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER search_text_delete AFTER DELETE ON search_text BEGIN
+    INSERT INTO search (search, rowid, text) VALUES ('delete', old.id, old.text);
+END;
 
 CREATE TABLE requests (
     id INTEGER PRIMARY KEY,

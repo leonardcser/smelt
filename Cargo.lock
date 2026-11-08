@@ -3882,9 +3882,11 @@ name = "smelt-store"
 version = "0.0.0-dev"
 dependencies = [
  "libc",
+ "memchr",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "smelt-perf 0.3.0",
  "smelt-protocol 0.0.0-dev",
  "smelt-text",

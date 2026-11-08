@@ -107,6 +107,29 @@ pub(crate) fn list(conn: &Connection, query: &CatalogQuery) -> Result<CatalogPag
     })
 }
 
+/// The shortest query [`search`] matches: the trigram index needs three characters.
+pub const SEARCH_MIN_CHARS: usize = 3;
+
+/// Ids of the sessions whose conversation text contains `query`, ignoring case.
+pub(crate) fn search(conn: &Connection, query: &str) -> Result<Vec<String>> {
+    if query.chars().count() < SEARCH_MIN_CHARS {
+        return Ok(Vec::new());
+    }
+    let _perf = smelt_perf::perf::begin("store:search_sessions");
+    // One quoted phrase, which the trigram index matches as a substring.
+    let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+    let mut stmt = conn.prepare_cached(
+        "SELECT s.id FROM sessions s WHERE s.sid IN (
+             SELECT t.sid FROM search JOIN search_text t ON t.id = search.rowid
+             WHERE search MATCH ?1)",
+    )?;
+    let ids = stmt
+        .query_map([phrase], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    smelt_perf::perf::record_value("store:search_sessions:matches", ids.len() as u64);
+    Ok(ids)
+}
+
 /// The list query and its filter values, ending with the row limit parameter.
 /// Only the filters in use appear, so each shape seeks its index.
 fn list_statement(query: &CatalogQuery) -> (String, Vec<&dyn ToSql>) {

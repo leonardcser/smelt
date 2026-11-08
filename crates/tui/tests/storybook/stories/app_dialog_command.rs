@@ -722,6 +722,7 @@ app_story!(resume_dialog, |ctx| {
     ctx.assert_snapshot();
 
     ctx.type_prompt("parser");
+    ctx.settle_tasks();
     ctx.assert_snapshot();
 });
 

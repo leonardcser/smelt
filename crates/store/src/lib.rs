@@ -4,9 +4,12 @@
 //! position. A save replaces the changed suffix of each sequence in one transaction,
 //! so its cost follows the new content, not the session size. Readers query rows
 //! by position or by indexed columns and never decode more than they return.
+//! Large JSON strings are stored once however many rows hold them, and a full-text
+//! index over conversation text finds sessions without reading them.
 
 mod catalog;
 mod db;
+mod document;
 mod error;
 mod export;
 mod history;
@@ -21,8 +24,8 @@ mod writer;
 
 use std::path::{Path, PathBuf};
 
-pub use catalog::{CatalogCursor, CatalogPage, CatalogQuery, CatalogSession};
-pub use db::{create_private_dir_all, RecordSummarizer, SCHEMA_VERSION};
+pub use catalog::{CatalogCursor, CatalogPage, CatalogQuery, CatalogSession, SEARCH_MIN_CHARS};
+pub use db::{create_private_dir_all, SCHEMA_VERSION};
 pub use error::{Result, StoreError};
 pub use history::is_user_turn;
 pub use reader::{SessionReader, StorageStats};
@@ -41,7 +44,7 @@ pub use types::{
     SideRows, StoreHead, TranscriptRecordCount, TranscriptRecordSuffix,
 };
 pub use usage::UsageEntry;
-pub use writer::SessionWriter;
+pub use writer::{SessionBatch, SessionWriter};
 
 /// The database and session files under the state directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,18 +77,6 @@ impl Store {
 
     pub fn session_artifact_dir(&self, session_id: &str) -> PathBuf {
         self.artifacts_dir().join(session_id)
-    }
-
-    /// Whether the next open upgrades an older schema first, which takes a
-    /// while on a large database.
-    pub fn upgrade_pending(&self) -> Result<bool> {
-        db::upgrade_pending(&self.database_path())
-    }
-
-    /// Upgrades an older schema; `summarize` encodes the transcript summaries
-    /// it adds.
-    pub fn upgrade(&self, summarize: RecordSummarizer<'_>) -> Result<()> {
-        db::upgrade_existing(self, summarize)
     }
 
     pub(crate) fn connect(&self) -> Result<rusqlite::Connection> {
@@ -125,6 +116,12 @@ impl Store {
 
     pub fn ids_with_prefix(&self, prefix: &str, limit: u32) -> Result<Vec<String>> {
         catalog::ids_with_prefix(&self.connect()?, prefix, limit)
+    }
+
+    /// Ids of the sessions whose conversation text contains `query`, ignoring
+    /// case. Queries shorter than [`SEARCH_MIN_CHARS`] match nothing.
+    pub fn search_sessions(&self, query: &str) -> Result<Vec<String>> {
+        catalog::search(&self.connect()?, query)
     }
 
     /// Copies a saved session into a new one that names it as parent.
@@ -170,7 +167,7 @@ impl Store {
     /// Deletes a session nobody has open.
     pub fn delete(&self, session_id: &str) -> Result<()> {
         let _lock = lock::SessionLock::acquire(self, session_id)?;
-        writer::delete(&self.connect()?, session_id)?;
+        writer::delete(&mut self.connect()?, session_id)?;
         let _ = std::fs::remove_dir_all(self.session_artifact_dir(session_id));
         Ok(())
     }

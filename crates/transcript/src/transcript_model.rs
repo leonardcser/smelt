@@ -1138,17 +1138,6 @@ pub fn encode_record_summary(
     serde_json::to_vec(&*stored)
 }
 
-/// The summary [`encode_record_summary`] gives a stored row, for a schema
-/// upgrade that adds summaries to existing rows.
-pub fn stored_record_summary(
-    mut row: smelt_store::StoredTranscriptBlock,
-) -> serde_json::Result<Vec<u8>> {
-    let indexed_text = std::mem::take(&mut row.indexed_text);
-    let estimated_text_bytes = row.estimated_text_bytes;
-    let record = TranscriptBlockRecord::try_from(row)?;
-    encode_record_summary(&record, &indexed_text, estimated_text_bytes)
-}
-
 /// Compact records of a record window, decoded from their stored summaries.
 pub fn compact_record_summaries(
     start_record_index: usize,

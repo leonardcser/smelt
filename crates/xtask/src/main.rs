@@ -5,6 +5,7 @@ static ALLOCATOR: smelt_core::allocator::Allocator = smelt_core::allocator::ALLO
 
 mod bench_file_search;
 mod bench_session_search;
+mod bench_store;
 mod bench_support;
 mod bench_transcript_layout;
 mod fuzz;
@@ -67,6 +68,7 @@ fn main() {
         }
         Some("bench-file-search") => bench_file_search::run(args.collect()),
         Some("bench-session-search") => bench_session_search::run(args.collect()),
+        Some("bench-store") => bench_store::run(args.collect()),
         Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
         Some("gen-file-icons") => gen_file_icons::run(args.collect()),
         Some("gen-lua-docs") => gen_lua_docs::run(),
@@ -100,6 +102,9 @@ fn print_usage() {
     );
     eprintln!(
         "  bench-session-search --state-dir PATH [--session ID] [--runs N] [--allow-debug] benchmark saved transcript search"
+    );
+    eprintln!(
+        "  bench-store [--sessions N] [--turns N] [--big-turns N] [--state-dir PATH] benchmark session store scaling"
     );
     eprintln!(
         "  bench-transcript-layout [--runs N] [--workloads CSV] [--scale-500mb] run transcript layout benches"

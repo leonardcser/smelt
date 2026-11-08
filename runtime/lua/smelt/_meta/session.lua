@@ -127,6 +127,15 @@ session.retry_persistence = nil
 ---@type fun(history_idx: integer?, opts: table?): nil
 session.rewind_to = nil
 
+--- Find saved sessions whose conversation text (`smelt.session.text`)
+--- contains `query`, ignoring case, using the full-text index off the UI
+--- thread. Must run in a yieldable task. Returns the matching session ids
+--- in no particular order; queries shorter than three characters match
+--- nothing.
+---@see smelt.session.text
+---@type fun(query: string): string[]
+session.search = nil
+
 --- Enable or disable accelerated inference for the current session.
 ---@type fun(enabled: boolean): nil
 session.set_fast_mode = nil
@@ -149,15 +158,9 @@ session.switch_cwd = nil
 session.system = nil
 
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
+--- Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing.
 ---@type fun(id: string): string?
 session.text = nil
-
---- Read `smelt.session.text(id)` for many ids in parallel off the UI
---- thread. Must run in a yieldable task. Returns a table keyed by id;
---- missing and unavailable sessions are omitted.
----@type fun(ids: string[]): table<string, string>
-session.texts = nil
 
 --- Cumulative token usage across every turn this session has made. Returns a table with `input` (non-cached input), `output`, `cache_read`, `cache_write`, `cached_input`, `input_total`, `reasoning` (output detail), `standard_total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).
 ---@type fun(): table

@@ -347,23 +347,14 @@ impl SessionStorage {
             .context("read session text")
     }
 
-    /// Conversation texts of many sessions, read in parallel. Missing sessions are
-    /// omitted, order is not stable, and sessions not started when `cancel` fires
-    /// are skipped.
-    pub fn load_conversation_texts(
-        &self,
-        ids: Vec<String>,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Vec<(String, String)> {
-        let _perf = smelt_perf::perf::begin("session:load_conversation_texts");
-        let storage = self.clone();
-        crate::utils::parallel_filter_map(ids, move |id| {
-            if cancel.is_cancelled() {
-                return None;
-            }
-            let text = storage.load_conversation_text(&id).ok()?;
-            Some((id, text))
-        })
+    /// Ids of the sessions whose conversation text contains `query`, ignoring
+    /// case, from the full-text index. Queries shorter than
+    /// [`smelt_store::SEARCH_MIN_CHARS`] match nothing.
+    pub fn search(&self, query: &str) -> SessionStoreResult<Vec<String>> {
+        let _perf = smelt_perf::perf::begin("session:search");
+        self.store()
+            .search_sessions(query)
+            .context("search sessions")
     }
 
     pub fn export_history_jsonl(

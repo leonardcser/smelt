@@ -282,6 +282,9 @@ the standard suite. Do not add these acceptance runs to commit/push hooks.
 - `cargo xtask bench-file-search --help`: fuzzy ranking over a generated path tree.
 - `cargo run --release -p xtask -- bench-session-search --help`: saved transcript
   search latency and peak memory over a state directory, including a full-scan miss.
+- `cargo run --release -p xtask -- bench-store --help`: session store scaling with
+  many and very long sessions: saves, resume, searches, fork, delete and size on
+  disk. See [Session storage](session-storage.md#scaling).
 - [Cross-agent memory/install](../benchmarks/memory/README.md): reproducible
   published comparisons with versioned data, not a product gate.
 

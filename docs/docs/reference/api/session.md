@@ -228,6 +228,18 @@ fun(history_idx: integer?, opts: table?): nil
 
 Rewind the session to a prior user turn. Stored targets prepare in the background and apply only if the session and draft remain unchanged. `history_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
 
+## `smelt.session.search`
+
+```lua
+fun(query: string): string[]
+```
+
+Find saved sessions whose conversation text (`smelt.session.text`)
+contains `query`, ignoring case, using the full-text index off the UI
+thread. Must run in a yieldable task. Returns the matching session ids
+in no particular order; queries shorter than three characters match
+nothing.
+
 ## `smelt.session.set_fast_mode`
 
 ```lua
@@ -278,17 +290,7 @@ fun(id: string): string?
 
 **Advanced:** Low-level building block for plugins that need full control. It may change more freely than the rest of the API.
 
-Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
-
-## `smelt.session.texts`
-
-```lua
-fun(ids: string[]): table<string, string>
-```
-
-Read `smelt.session.text(id)` for many ids in parallel off the UI
-thread. Must run in a yieldable task. Returns a table keyed by id;
-missing and unavailable sessions are omitted.
+Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing.
 
 ## `smelt.session.tokens`
 

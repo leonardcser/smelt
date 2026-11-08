@@ -35,24 +35,3 @@ Remove `crates/core/src/migrate_v07.rs`, its startup hook and `session migrate`
 command in `src/main.rs`, the store's `import_prompts` and `import_usage`, and
 the `smelt-store-v07` dependency of `smelt-core` in the next minor release after
 0.8.
-
-## `store-schema-v1`
-
-Development builds of smelt 0.8 created `smelt.db` at schema version 1, which kept
-the transcript preview, origin and tool state as plain columns. Opening such a
-database moves origin and tool state into the compressed `payload` column, drops
-the old columns and returns the freed pages to the file system.
-
-Remove `upgrade_v1` and its test in `crates/store/src/db.rs` and the version 1
-case in `upgrade_existing` with the 0.8 release.
-
-## `store-schema-v2`
-
-Development builds of smelt 0.8 created `smelt.db` at schema version 2, which had
-no transcript `summary` column. Opening such a database encodes a summary for
-each transcript row and rebuilds the table so the summary comes before the large
-columns.
-
-Remove `upgrade_v2`, `upgrade_existing`, `RecordSummarizer`, `Store::upgrade`,
-`stored_record_summary` and the startup upgrade in `src/main.rs` with the 0.8
-release, together with `store-schema-v1`.

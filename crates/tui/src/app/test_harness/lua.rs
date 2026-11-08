@@ -154,7 +154,7 @@ impl TestApp {
     /// a history read in flight. Production spreads this work over budgeted
     /// wakeups, so a single pass leaves it unfinished on a loaded machine.
     /// Tasks parked on engine replies, dialogs or future timers stay parked.
-    pub(crate) fn drive_lua_tasks(&mut self) {
+    pub fn drive_lua_tasks(&mut self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             self.tui.pump_lua();

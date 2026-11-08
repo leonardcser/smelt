@@ -169,7 +169,7 @@ pub enum LuaOp {
     /// Call one of the recently-added read-only Lua APIs: `win:scroll()`
     /// getter, `paint:rect()`, `smelt.transcript.loaded_blocks_expensive()`,
     /// `smelt.text.fit(s, w)`, `win:content_width()`,
-    /// `smelt.session.text(id)`, `smelt.session.texts({ids})`.
+    /// `smelt.session.text(id)`, `smelt.session.search(query)`.
     /// `kind % 7` picks the probe. These surfaces aren't reached by the
     /// lifecycle ops above - exercising them keeps the new
     /// render-pipeline and session-search accessors honest under fuzz.
@@ -935,7 +935,7 @@ fn emit_api_probe(out: &mut String, fn_idx: u16, arg_kind: u8, api_metas: &[(&st
 /// 3: `smelt.text.fit(string, width)`
 /// 4: `win:content_width()` on a tracked win
 /// 5: `smelt.session.text(id)` against a missing id (sidecar fallback path)
-/// 6: `smelt.session.texts({ids})` parallel batch read
+/// 6: `smelt.session.search(query)` full-text session search
 /// All wrapped in `pcall` so a missing handle or an API regression
 /// surfaces as a fuzz-visible failure (panic) rather than a silent miss.
 fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
@@ -973,7 +973,7 @@ fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
         }
         _ => {
             out.push_str(
-                "pcall(function() return smelt.session and smelt.session.texts and smelt.session.texts({ \"__fuzz_missing_a\", \"__fuzz_missing_b\" }) end)\n",
+                "pcall(function() return smelt.session and smelt.session.search and smelt.session.search(\"fuzz \\\"quoted\\\" query\") end)\n",
             );
         }
     }

@@ -2011,6 +2011,63 @@ fn open_sparse_resume_preview(guard: &TestEnvironmentGuard) -> TestApp {
 }
 
 #[test]
+fn resume_filter_finds_sessions_by_saved_conversation_text() {
+    let guard = test_home_guard();
+    drop(TestApp::builder().build_with_test_home_guard(&guard));
+    let sessions = smelt_core::session::storage();
+    for (id, title, reply) in [
+        ('a', "first", "the quokka lives on Rottnest"),
+        ('b', "second", "nothing to see"),
+    ] {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.id = id.to_string().repeat(64);
+        session.title = Some(title.into());
+        session.history = vec![
+            protocol::HistoryItem::user(protocol::Content::text("tell me")),
+            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text(reply)),
+                None,
+                Vec::new(),
+            )),
+        ];
+        sessions.save(&session).expect("save searchable session");
+    }
+
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.set_terminal_size(120, 32);
+    assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
+    let settle = |app: &mut TestApp| {
+        app.settle_lua();
+        app.render_silent();
+        app.feed_one(SourceEvent::Tick(50));
+        app.tick_timers();
+        app.settle_lua();
+        app.render_silent();
+    };
+    settle(&mut app);
+    assert!(app.state().active_modal.is_some());
+    // Saved sessions ran in another directory.
+    app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
+    app.type_text("QUOKKA");
+    // The index lookup runs off the UI thread.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let list = app.window_lines_containing("first").unwrap_or_default();
+        let only_first = list.iter().any(|line| line.contains("first"))
+            && list.iter().all(|line| !line.contains("second"));
+        if only_first {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "only the matching session is listed: {list:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut app);
+    }
+}
+
+#[test]
 fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
     let guard = test_home_guard();
     let mut app = open_sparse_resume_preview(&guard);

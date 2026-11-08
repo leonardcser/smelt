@@ -1,7 +1,7 @@
 //! `cargo xtask synth` - generate a synthetic session for perf testing.
 //!
-//! Writes a session with `--turns` (user, assistant) message pairs to
-//! `<state>/sessions/<id>/`, then prints the new session id. Resume it via
+//! Saves a session with `--turns` (user, assistant) message pairs to the
+//! session database, then prints the new session id. Resume it via
 //! `smelt -r <id>` to inspect scrolling, layout, and theme performance against
 //! a long transcript without a live LLM.
 

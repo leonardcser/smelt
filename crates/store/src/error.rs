@@ -27,10 +27,6 @@ pub enum StoreError {
         found: i32,
         expected: i32,
     },
-    /// Sessions of an older build still use the schema an upgrade would change.
-    UpgradeBlocked {
-        sessions: usize,
-    },
 }
 
 impl StoreError {
@@ -61,7 +57,6 @@ impl StoreError {
             Self::Cancelled => "cancelled",
             Self::Integrity(_) => "integrity",
             Self::UnsupportedSchema { .. } => "unsupported_schema",
-            Self::UpgradeBlocked { .. } => "upgrade_blocked",
         }
     }
 }
@@ -89,16 +84,12 @@ impl fmt::Display for StoreError {
             ),
             Self::Cancelled => f.write_str("cancelled"),
             Self::Integrity(message) => write!(f, "integrity error: {message}"),
-            Self::UnsupportedSchema { found, expected } => write!(
+            Self::UnsupportedSchema { found, expected } if found > expected => write!(
                 f,
-                "unsupported session database schema {found}; this build supports {expected}"
+                "the session database has schema {found}, newer than this build supports ({expected}); update smelt"
             ),
-            Self::UpgradeBlocked { sessions: 1 } => f.write_str(
-                "1 session is still open in an older smelt; quit it, then start smelt again"
-            ),
-            Self::UpgradeBlocked { sessions } => write!(
-                f,
-                "{sessions} sessions are still open in an older smelt; quit them, then start smelt again"
+            Self::UnsupportedSchema { .. } => f.write_str(
+                "the session database was not written by this smelt release; move it aside to start with an empty one"
             ),
         }
     }
@@ -115,6 +106,12 @@ impl From<std::io::Error> for StoreError {
 impl From<rusqlite::Error> for StoreError {
     fn from(err: rusqlite::Error) -> Self {
         Self::Sqlite(err)
+    }
+}
+
+impl From<rusqlite::types::FromSqlError> for StoreError {
+    fn from(err: rusqlite::types::FromSqlError) -> Self {
+        Self::Sqlite(err.into())
     }
 }
 

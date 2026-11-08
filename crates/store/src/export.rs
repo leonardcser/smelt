@@ -3,7 +3,8 @@ use std::io::Write;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use crate::db::{self, unsigned};
+use crate::db::unsigned;
+use crate::document;
 use crate::error::{Result, StoreError};
 
 pub(crate) fn history_jsonl(
@@ -18,50 +19,22 @@ pub(crate) fn history_jsonl(
         if cancelled() {
             return Err(StoreError::Cancelled);
         }
-        out.write_all(&db::decode_blob(&row.get::<_, Vec<u8>>(0)?)?)?;
+        out.write_all(&document::load(conn, row.get_ref(0)?.as_blob()?)?)?;
         out.write_all(b"\n")?;
     }
     Ok(())
 }
 
-/// The kinds of transcript records that make up a session's conversation text.
-const CONVERSATION_KINDS: &str = "('user', 'assistant', 'compacted')";
-
 pub(crate) fn conversation_text(conn: &Connection, sid: i64) -> Result<String> {
     let mut output = String::new();
-    let mut push = |text: &str| {
-        if !text.is_empty() {
-            output.push_str(text);
-            if !text.ends_with('\n') {
-                output.push('\n');
-            }
-        }
-    };
-    let mut stmt = conn.prepare_cached(&format!(
-        "SELECT indexed_text FROM transcript WHERE sid = ?1 AND kind IN {CONVERSATION_KINDS}
-         ORDER BY idx"
-    ))?;
+    let mut stmt =
+        conn.prepare_cached("SELECT text FROM search_text WHERE sid = ?1 ORDER BY idx")?;
     let mut rows = stmt.query([sid])?;
-    let mut any = false;
     while let Some(row) = rows.next()? {
-        any = true;
-        push(&row.get::<_, String>(0)?);
-    }
-    // Sessions saved without transcript records fall back to their history.
-    let records: i64 = conn.query_row(
-        "SELECT record_count FROM sessions WHERE sid = ?1",
-        [sid],
-        |row| row.get(0),
-    )?;
-    if !any && records == 0 {
-        let mut stmt =
-            conn.prepare_cached("SELECT body FROM history WHERE sid = ?1 ORDER BY idx")?;
-        let mut rows = stmt.query([sid])?;
-        while let Some(row) = rows.next()? {
-            let item: protocol::HistoryItem = db::decode_json(&row.get::<_, Vec<u8>>(0)?)?;
-            if let Some(text) = crate::history::conversation_text(&item) {
-                push(&text);
-            }
+        let text = row.get_ref(0)?.as_str()?;
+        output.push_str(text);
+        if !text.ends_with('\n') {
+            output.push('\n');
         }
     }
     Ok(output)

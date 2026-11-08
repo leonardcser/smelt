@@ -24,6 +24,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 /// Directory under the state root that keeps the original 0.7 sessions.
 pub const ARCHIVE: &str = "v0.7";
+/// History items or transcript records read and written at a time.
+const IMPORT_CHUNK: usize = 256;
 /// Written into the archive once an import has run to the end.
 const DONE: &str = "imported";
 /// State entries moved into the archive and imported from there.
@@ -219,17 +221,8 @@ fn import_session(
     let reader = v07::LineageSessionReader::try_open_existing_in_lineage(root, &at.lineage_id, id)?
         .ok_or("missing from its lineage")?;
     let old = reader.snapshot()?;
-    // One item at a time, so each 0.7 item is freed once converted.
-    let history = reader
-        .history_range(0, old.head.history_len.get())?
-        .into_iter()
-        .map(|item| convert(&item))
-        .collect::<Result<_>>()?;
-    let records = reader
-        .transcript_range(0, old.head.transcript_record_count.get())?
-        .into_iter()
-        .map(|row| transcript_row(&row))
-        .collect::<Result<_>>()?;
+    let history_len = old.head.history_len.get();
+    let record_count = old.head.transcript_record_count.get();
     let metadata = old.metadata;
     let rows = |rows: Vec<(v07::HistoryIndex, Value)>| {
         Some(smelt_store::SideRows {
@@ -241,7 +234,7 @@ fn import_session(
         Some(Value::Array(events)) => events,
         _ => Vec::new(),
     };
-    let commit = smelt_store::SessionCommit {
+    let header = smelt_store::SessionCommit {
         metadata: smelt_store::SessionMetadata {
             title: metadata.title,
             slug: metadata.slug,
@@ -261,10 +254,6 @@ fn import_session(
         },
         first_user_message: Some(metadata.first_user_message),
         checkpoint: Some(metadata.checkpoint_json),
-        history: Some(smelt_store::HistorySuffix {
-            start: 0,
-            items: history,
-        }),
         turn_metas: rows(old.side_tables.turn_metas),
         metadata_snapshots: rows(old.side_tables.metadata_snapshots),
         context_snapshots: rows(old.side_tables.context_snapshots),
@@ -272,15 +261,50 @@ fn import_session(
             start: 0,
             rows: (0..).zip(checkpoint_events).collect(),
         }),
-        transcript: Some(smelt_store::TranscriptRecordSuffix { start: 0, records }),
+        ..Default::default()
     };
     let identity = smelt_store::SessionIdentity {
         id: id.to_owned(),
         created_at: old.identity.created_at,
         parent_id: old.identity.parent_id,
     };
-    store.writer(id)?.commit(&identity, &commit)?;
-    drop(commit);
+    // A session can be larger than memory allows twice over, so it is read and
+    // written in chunks, all in one atomic save.
+    let part = |history, transcript| smelt_store::SessionCommit {
+        metadata: header.metadata.clone(),
+        history,
+        transcript,
+        ..Default::default()
+    };
+    let mut writer = store.writer(id)?;
+    let mut batch = writer.batch(&identity)?;
+    batch.apply(&header)?;
+    for start in (0..history_len).step_by(IMPORT_CHUNK) {
+        let end = (start + IMPORT_CHUNK as u64).min(history_len);
+        let items = reader
+            .history_range(start, end)?
+            .iter()
+            .map(convert)
+            .collect::<Result<_>>()?;
+        batch.apply(&part(
+            Some(smelt_store::HistorySuffix { start, items }),
+            None,
+        ))?;
+    }
+    for start in (0..record_count).step_by(IMPORT_CHUNK) {
+        let end = (start + IMPORT_CHUNK as u64).min(record_count);
+        let records = reader
+            .transcript_range(start, end)?
+            .iter()
+            .map(transcript_row)
+            .collect::<Result<_>>()?;
+        batch.apply(&part(
+            None,
+            Some(smelt_store::TranscriptRecordSuffix { start, records }),
+        ))?;
+    }
+    batch.commit()?;
+    drop(writer);
     if let Err(error) = storage.load_meta(id) {
         store.delete(id)?;
         return Err(error.into());

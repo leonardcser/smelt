@@ -151,9 +151,10 @@ smelt.cmd.register("resume", function()
       title_hays[e.id] = display_title(e) .. " " .. (e.subtitle or "")
     end
 
-    -- Lowercased conversation text by session id; `nil` until the background
-    -- load started below finishes.
-    local texts = nil
+    -- Sessions whose conversation text contains `content_query`, from the
+    -- full-text index; matches for an older query are not shown.
+    local content_query = nil
+    local content_matches = nil
 
     local function visible_tree()
       local candidates = {}
@@ -168,11 +169,10 @@ smelt.cmd.register("resume", function()
       for i, e in ipairs(candidates) do hays[i] = title_hays[e.id] end
       local matched = {}
       for _, i in ipairs(smelt.fuzzy.rank(hays, query)) do matched[i] = true end
-      local needle = query:lower()
+      local content = content_query == query and content_matches or {}
       local visible = {}
       for i, e in ipairs(candidates) do
-        local blob = texts and texts[e.id]
-        if matched[i] or (blob ~= nil and blob:find(needle, 1, true) ~= nil) then
+        if matched[i] or content[e.id] then
           table.insert(visible, e)
         end
       end
@@ -281,11 +281,11 @@ smelt.cmd.register("resume", function()
       schedule_preview()
     end
 
-    local function merge_texts(raw)
-      local lowered = {}
-      for id, text in pairs(raw) do lowered[id] = text:lower() end
-      texts = lowered
-      if resolved or query == "" then return end
+    local function merge_content(q, ids)
+      if resolved or q ~= query then return end
+      local set = {}
+      for _, id in ipairs(ids) do set[id] = true end
+      content_query, content_matches = q, set
       local e = list:selected()
       if e and e.id ~= auto_selected_id then
         list:set_items_preserve(visible_tree(), function(e) return e.id end)
@@ -295,12 +295,27 @@ smelt.cmd.register("resume", function()
       end
     end
 
-    local texts_load
+    local content_search
+
+    -- Starts the content search for the current query and returns whether it
+    -- did. Its result refilters, so the list changes once per query instead
+    -- of flashing title-only matches first.
+    local function search_content()
+      if content_search then content_search:remove() end
+      content_search = nil
+      local q = query
+      if q == "" then return false end
+      content_search = smelt.spawn(function()
+        local ok, ids = pcall(smelt.session.search, q)
+        merge_content(q, ok and ids or {})
+      end)
+      return true
+    end
 
     local function close(value)
       if resolved then return end
       resolved = true
-      if texts_load then texts_load:remove() end
+      if content_search then content_search:remove() end
       if preview_timer then
         preview_timer:remove()
         preview_timer = nil
@@ -319,7 +334,7 @@ smelt.cmd.register("resume", function()
 
     input_leaf:on("text_changed", function(raw)
       query = (raw and raw.text) or ""
-      refilter()
+      if not search_content() then refilter() end
     end)
     list_leaf:on("selection_changed", function() schedule_preview() end)
     list_leaf:on("resized", function() select_bottom() end)
@@ -347,7 +362,7 @@ smelt.cmd.register("resume", function()
         if x.id == e.id then table.remove(entries, i); break end
       end
       title_hays[e.id] = nil
-      if texts then texts[e.id] = nil end
+      if content_matches then content_matches[e.id] = nil end
       refilter()
     end
 
@@ -428,10 +443,6 @@ smelt.cmd.register("resume", function()
     select_bottom()
     render_preview()
     input_leaf:focus()
-
-    local text_ids = {}
-    for _, e in ipairs(entries) do table.insert(text_ids, e.id) end
-    texts_load = smelt.spawn(function() merge_texts(smelt.session.texts(text_ids)) end)
 
     local picked = smelt.task.wait(task_id)
     if picked then smelt.session.load(picked.id) end
