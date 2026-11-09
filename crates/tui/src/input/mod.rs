@@ -453,13 +453,7 @@ impl PromptState {
     /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
     fn toggle_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {
-            let ids: Vec<_> = snap
-                .attachments
-                .into_iter()
-                .map(|a| self.store.lock().unwrap().insert(a))
-                .collect();
-            self.install_source(ctx, snap.buf, snap.cpos, ids);
-            self.from_paste = snap.from_paste;
+            self.unstash(ctx, snap);
         } else {
             let source_empty = ctx.buf.source().is_empty();
             let no_attachments = ctx.buf.attachment_ids.is_empty();
@@ -488,13 +482,23 @@ impl PromptState {
 
     pub(crate) fn restore_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {
-            let ids: Vec<_> = snap
-                .attachments
-                .into_iter()
-                .map(|a| self.store.lock().unwrap().insert(a))
-                .collect();
+            self.unstash(ctx, snap);
+        }
+    }
+
+    /// Put a stash snapshot back. Text already in the prompt stays, below the
+    /// stashed text.
+    fn unstash(&mut self, ctx: &mut PromptCtx<'_>, snap: InputSnapshot) {
+        let ids: Vec<_> = snap
+            .attachments
+            .into_iter()
+            .map(|a| self.store.lock().unwrap().insert(a))
+            .collect();
+        if ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty() {
             self.install_source(ctx, snap.buf, snap.cpos, ids);
             self.from_paste = snap.from_paste;
+        } else {
+            self.prepend_attached(ctx, format!("{}\n", snap.buf), ids);
         }
     }
 
@@ -1860,6 +1864,28 @@ mod tests {
         });
         assert!(input.skip_shell_escape(), "Stash should restore from_paste");
         assert_eq!(input.buf.source(), "!test");
+    }
+
+    #[test]
+    fn unstash_keeps_current_prompt_below_stashed_text() {
+        let mut input = Harness::new();
+        input.buf.set_source("stashed".to_string());
+        input.win.set_cpos(7);
+        input.state.toggle_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
+        input.buf.set_source("current".to_string());
+        input.win.set_cpos(3);
+
+        input.state.toggle_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
+
+        assert_eq!(input.buf.source(), "stashed\ncurrent");
+        assert_eq!(input.win.cpos(), 3 + "stashed\n".len());
+        assert!(input.state.stash.is_none());
     }
 
     #[test]

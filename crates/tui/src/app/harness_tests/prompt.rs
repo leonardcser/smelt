@@ -1856,10 +1856,12 @@ fn multiline_stash_keeps_prompt_top_bar_visible() {
         let before = app.render_to_frame().text();
         assert!(before.contains("test-model"), "{before}");
 
+        let pasted = "another line\n".repeat(15);
+        let mut expected = draft.to_string();
         for _ in 0..2 {
             app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
             assert_eq!(app.state().prompt_text, "");
-            for text in ["", "another line\n".repeat(15).as_str()] {
+            for text in ["", pasted.as_str()] {
                 app.feed_one(SourceEvent::Term(Event::Paste(text.to_string())));
                 let frame = app.render_to_frame().text();
                 assert!(frame.contains("Stashed"), "height {height}:\n{frame}");
@@ -1870,7 +1872,8 @@ fn multiline_stash_keeps_prompt_top_bar_visible() {
                 assert!(app.transcript_window().viewport.unwrap().rect.height >= 2);
             }
             app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
-            assert_eq!(app.state().prompt_text, draft);
+            expected = format!("{expected}\n{pasted}");
+            assert_eq!(app.state().prompt_text, expected);
             let frame = app.render_to_frame().text();
             assert!(!frame.contains("Stashed"), "{frame}");
             assert!(frame.contains("test-model"), "{frame}");
