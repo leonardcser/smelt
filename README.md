@@ -47,24 +47,20 @@ Why we made these choices, and what they cost:
 
 ## Benchmarks
 
-Lower is better.
+Lower is better. Median of 3 runs, measured on 2026-11-08.
 
-<!-- bench:table -->
+| Agent       | Install size | Startup  | Memory at start | CPU on a task | Memory after 64 turns |
+| ----------- | ------------ | -------- | --------------- | ------------- | --------------------- |
+| smelt       | 47 MiB       | 36 ms    | 19 MiB          | 1.6 s         | **102 MiB**           |
+| pi          | 384 MiB      | 288 ms   | 101 MiB         | **1.4 s**     | 211 MiB               |
+| fx          | **12 MiB**   | **7 ms** | **6 MiB**       | 1.9 s         | 253 MiB               |
+| codex       | 516 MiB      | 76 ms    | 127 MiB         | 2.6 s         | 329 MiB               |
+| omp         | 271 MiB      | 822 ms   | 285 MiB         | 2.9 s         | 482 MiB               |
+| claude code | 325 MiB      | 267 ms   | 174 MiB         | 3.5 s         | 497 MiB               |
+| opencode    | 247 MiB      | 820 ms   | 430 MiB         | 3.9 s         | 717 MiB               |
 
-| Agent       | Version               | Memory at start | Install size | Peak memory on tasks | CPU time on tasks |
-| ----------- | --------------------- | --------------- | ------------ | -------------------- | ----------------- |
-| **smelt**   | `v0.6.5-46-b1b4ae4d7` | **34 MiB**      | **46 MiB**   | **0.10 GiB**         | **6.1 s**         |
-| pi          | `1.5.0`               | 110 MiB         | 483 MiB      | 0.14 GiB             | 9.7 s             |
-| codex       | `0.166.0`             | 140 MiB         | 853 MiB      | 0.22 GiB             | 9.8 s             |
-| claude code | `2.1.316`             | 189 MiB         | 313 MiB      | 0.24 GiB             | 17.5 s            |
-| opencode    | `2.2.5`               | 328 MiB         | 1684 MiB     | 0.71 GiB             | 116 s             |
-
-<!-- /bench -->
-
-Versions shown apply to the reproducible startup and install measurements;
-task results come from an older Terminal-Bench study.
-[Methodology and full results](https://smeltagent.dev/guide/benchmarks/)
-· [Run the benchmarks](benchmarks/memory/)
+[Method](https://smeltagent.dev/guide/benchmarks/)
+· [Full results and code](https://leonardcser.github.io/harness-resource-bench)
 
 ## Install
 

@@ -1,102 +1,100 @@
 ---
 title: "Benchmarks vs Claude Code, Codex and opencode"
 description:
-  "Memory and install size of smelt, pi, codex, claude code and opencode, and
-  their memory and CPU on Terminal-Bench 2.1 tasks."
+  "Startup time, memory, CPU and install size of smelt, pi, codex, claude code,
+  opencode, omp and fx on the same scripted coding work."
 ---
 
 # Benchmarks
 
-smelt against four other coding agents. Lower is better.
-
-- **At start:** smelt uses 34 MiB, the others 110 to 328 MiB.
-- **Install:** smelt writes 46 MiB, the others 313 to 1684 MiB.
-- **On real tasks:** smelt peaks at 0.10 GiB, the others 0.14 to 0.71 GiB.
-
-The first two you can
-[rerun yourself](https://github.com/leonardcser/smelt/tree/main/benchmarks/memory)
-on Linux with podman. They were measured on 2026-11-02 with smelt built from
-`main` using the `dist` profile (`v0.6.5-46-b1b4ae4d7`), pi 1.5.0, codex
-0.166.0, claude code 2.1.316 and opencode 2.2.5, each in its own container.
-
-## Memory at start
-
-Total memory of the agent's processes once it has started and sent its first
-request. Median of 7 runs.
+smelt and six other coding agents on the same scripted work. Lower is better.
+Median of 3 runs, measured on 2026-11-08.
 
 <div class="bench" markdown="0">
-<!-- chart:cold-start -->
-  <figure class="chart">
-    <ol>
-      <li class="me" title="smelt: median 34 MiB, middle half 33 to 36 MiB, 7 runs"><span>smelt</span><i style="--v:10.2%;--lo:10.1%;--hi:11.0%"></i><b>34 MiB</b></li>
-      <li title="pi: median 110 MiB, middle half 106 to 120 MiB, 7 runs"><span>pi</span><i style="--v:33.1%;--lo:31.9%;--hi:36.1%"></i><b>110 MiB</b></li>
-      <li title="codex: median 140 MiB, middle half 139 to 141 MiB, 7 runs"><span>codex</span><i style="--v:42.0%;--lo:41.8%;--hi:42.5%"></i><b>140 MiB</b></li>
-      <li title="claude code: median 189 MiB, middle half 188 to 190 MiB, 7 runs"><span>claude code</span><i style="--v:56.7%;--lo:56.6%;--hi:57.3%"></i><b>189 MiB</b></li>
-      <li title="opencode: median 328 MiB, middle half 327 to 332 MiB, 7 runs"><span>opencode</span><i style="--v:98.7%;--lo:98.5%;--hi:100.0%"></i><b>328 MiB</b></li>
-    </ol>
-  </figure>
-<!-- /chart -->
-<p class="legend"><i></i> median <i class="range"></i> middle half of runs</p>
+  <div class="charts">
+    <figure class="chart">
+      <figcaption>install size</figcaption>
+      <ol>
+        <li><span>fx</span><i style="--v:2.4%;--lo:2.4%;--hi:2.4%"></i><b>12 MiB</b></li>
+        <li class="me"><span>smelt</span><i style="--v:9.1%;--lo:9.1%;--hi:9.1%"></i><b>47 MiB</b></li>
+        <li><span>opencode</span><i style="--v:47.9%;--lo:47.9%;--hi:47.9%"></i><b>247 MiB</b></li>
+        <li><span>omp</span><i style="--v:52.6%;--lo:52.6%;--hi:52.6%"></i><b>271 MiB</b></li>
+        <li><span>claude code</span><i style="--v:62.9%;--lo:62.9%;--hi:62.9%"></i><b>325 MiB</b></li>
+        <li><span>pi</span><i style="--v:74.6%;--lo:74.6%;--hi:74.6%"></i><b>384 MiB</b></li>
+        <li><span>codex</span><i style="--v:100.0%;--lo:100.0%;--hi:100.0%"></i><b>516 MiB</b></li>
+      </ol>
+    </figure>
+    <figure class="chart">
+      <figcaption>startup time</figcaption>
+      <ol>
+        <li><span>fx</span><i style="--v:0.8%;--lo:0.7%;--hi:0.8%"></i><b>7 ms</b></li>
+        <li class="me"><span>smelt</span><i style="--v:3.9%;--lo:3.9%;--hi:4.1%"></i><b>36 ms</b></li>
+        <li><span>codex</span><i style="--v:8.4%;--lo:8.4%;--hi:9.0%"></i><b>76 ms</b></li>
+        <li><span>claude code</span><i style="--v:29.7%;--lo:29.4%;--hi:30.0%"></i><b>267 ms</b></li>
+        <li><span>pi</span><i style="--v:32.0%;--lo:31.6%;--hi:32.3%"></i><b>288 ms</b></li>
+        <li><span>opencode</span><i style="--v:91.1%;--lo:91.0%;--hi:100.0%"></i><b>820 ms</b></li>
+        <li><span>omp</span><i style="--v:91.4%;--lo:91.3%;--hi:91.5%"></i><b>822 ms</b></li>
+      </ol>
+    </figure>
+    <figure class="chart">
+      <figcaption>memory at start</figcaption>
+      <ol>
+        <li><span>fx</span><i style="--v:1.4%;--lo:1.4%;--hi:1.4%"></i><b>6 MiB</b></li>
+        <li class="me"><span>smelt</span><i style="--v:4.5%;--lo:4.5%;--hi:4.5%"></i><b>19 MiB</b></li>
+        <li><span>pi</span><i style="--v:23.4%;--lo:23.2%;--hi:23.4%"></i><b>101 MiB</b></li>
+        <li><span>codex</span><i style="--v:29.4%;--lo:29.3%;--hi:33.8%"></i><b>127 MiB</b></li>
+        <li><span>claude code</span><i style="--v:40.4%;--lo:40.3%;--hi:40.4%"></i><b>174 MiB</b></li>
+        <li><span>omp</span><i style="--v:66.1%;--lo:59.3%;--hi:71.5%"></i><b>285 MiB</b></li>
+        <li><span>opencode</span><i style="--v:99.9%;--lo:94.7%;--hi:100.0%"></i><b>430 MiB</b></li>
+      </ol>
+    </figure>
+    <figure class="chart">
+      <figcaption>CPU on a task, 24 tool calls</figcaption>
+      <ol>
+        <li><span>pi</span><i style="--v:34.6%;--lo:34.5%;--hi:34.6%"></i><b>1.4 s</b></li>
+        <li class="me"><span>smelt</span><i style="--v:41.7%;--lo:41.5%;--hi:41.8%"></i><b>1.6 s</b></li>
+        <li><span>fx</span><i style="--v:47.0%;--lo:46.4%;--hi:47.1%"></i><b>1.9 s</b></li>
+        <li><span>codex</span><i style="--v:65.8%;--lo:65.8%;--hi:66.4%"></i><b>2.6 s</b></li>
+        <li><span>omp</span><i style="--v:72.9%;--lo:72.3%;--hi:74.6%"></i><b>2.9 s</b></li>
+        <li><span>claude code</span><i style="--v:88.4%;--lo:87.8%;--hi:90.0%"></i><b>3.5 s</b></li>
+        <li><span>opencode</span><i style="--v:99.9%;--lo:99.0%;--hi:100.0%"></i><b>3.9 s</b></li>
+      </ol>
+    </figure>
+    <figure class="chart">
+      <figcaption>CPU when idle, 5 minutes</figcaption>
+      <ol>
+        <li class="me"><span>smelt</span><i style="--v:0.0%;--lo:0.0%;--hi:0.0%"></i><b>0.5 ms</b></li>
+        <li><span>codex</span><i style="--v:1.5%;--lo:1.4%;--hi:1.5%"></i><b>34 ms</b></li>
+        <li><span>pi</span><i style="--v:3.8%;--lo:3.7%;--hi:5.0%"></i><b>89 ms</b></li>
+        <li><span>claude code</span><i style="--v:21.3%;--lo:21.1%;--hi:21.5%"></i><b>504 ms</b></li>
+        <li><span>omp</span><i style="--v:33.2%;--lo:33.1%;--hi:36.8%"></i><b>785 ms</b></li>
+        <li><span>fx</span><i style="--v:35.9%;--lo:35.8%;--hi:36.0%"></i><b>849 ms</b></li>
+        <li><span>opencode</span><i style="--v:51.5%;--lo:49.7%;--hi:100.0%"></i><b>1.2 s</b></li>
+      </ol>
+    </figure>
+    <figure class="chart">
+      <figcaption>memory after 64 turns</figcaption>
+      <ol>
+        <li class="me"><span>smelt</span><i style="--v:13.7%;--lo:13.6%;--hi:13.8%"></i><b>102 MiB</b></li>
+        <li><span>pi</span><i style="--v:28.5%;--lo:27.2%;--hi:29.7%"></i><b>211 MiB</b></li>
+        <li><span>fx</span><i style="--v:34.1%;--lo:32.5%;--hi:37.9%"></i><b>253 MiB</b></li>
+        <li><span>codex</span><i style="--v:44.3%;--lo:44.0%;--hi:44.4%"></i><b>329 MiB</b></li>
+        <li><span>omp</span><i style="--v:65.0%;--lo:64.0%;--hi:66.5%"></i><b>482 MiB</b></li>
+        <li><span>claude code</span><i style="--v:67.0%;--lo:65.5%;--hi:68.7%"></i><b>497 MiB</b></li>
+        <li><span>opencode</span><i style="--v:96.7%;--lo:93.2%;--hi:100.0%"></i><b>717 MiB</b></li>
+      </ol>
+    </figure>
+  </div>
+  <p class="legend"><i></i> median <i class="range"></i> range of runs</p>
 </div>
 
-This is an agent waiting for the model, not working on a task.
+## Method
 
-## Install size
+A scripted model gives every agent the same work and checks each tool result.
+The agents run for real, each alone in a container with 2 CPUs and 4 GiB, and
+the host measures the container from outside. All runs use one Linux host.
 
-Bytes each install writes to disk. smelt is one binary; the others install a
-runtime and packages.
+Versions: smelt `0.8.0`, pi `1.5.0`, codex `0.167.0`, claude code `2.1.319`, opencode `2.2.6`, omp `18.18.0`, fx `0.0.16`.
 
-<div class="bench" markdown="0">
-<!-- chart:install -->
-  <figure class="chart">
-    <ol>
-      <li class="me" title="smelt: 46 MiB, 1 run"><span>smelt</span><i style="--v:2.7%"></i><b>46 MiB</b></li>
-      <li title="claude code: 313 MiB, 1 run"><span>claude code</span><i style="--v:18.6%"></i><b>313 MiB</b></li>
-      <li title="pi: 483 MiB, 1 run"><span>pi</span><i style="--v:28.7%"></i><b>483 MiB</b></li>
-      <li title="codex: 853 MiB, 1 run"><span>codex</span><i style="--v:50.7%"></i><b>853 MiB</b></li>
-      <li title="opencode: 1684 MiB, 1 run"><span>opencode</span><i style="--v:100.0%"></i><b>1684 MiB</b></li>
-    </ol>
-  </figure>
-<!-- /chart -->
-</div>
-
-## Terminal-Bench study
-
-Peak memory and CPU time on 20
-[Terminal-Bench 2.1](https://github.com/harbor-framework/terminal-bench-2-1)
-tasks, 3 attempts each, with Qwen3.8 27B. The study ran in October 2026 on a
-private model server, so you cannot rerun it, and its versions are older: smelt
-v0.6.0, pi 1.3.0, codex 0.162.1, claude code 2.1.301 and opencode 1.19.1. CPU
-time includes the task's own commands. Median per run.
-
-<div class="bench" markdown="0">
-<div class="charts">
-  <figure class="chart">
-    <figcaption>memory</figcaption>
-    <ol>
-      <li class="me" title="smelt: median 0.10 GiB, middle half 0.08 to 0.14 GiB"><span>smelt</span><i style="--v:13.2%;--lo:10.8%;--hi:19.2%"></i><b>0.10 GiB</b></li>
-      <li title="pi: median 0.14 GiB, middle half 0.13 to 0.16 GiB"><span>pi</span><i style="--v:18.5%;--lo:17.4%;--hi:21.7%"></i><b>0.14 GiB</b></li>
-      <li title="codex: median 0.22 GiB, middle half 0.21 to 0.26 GiB"><span>codex</span><i style="--v:29.7%;--lo:28.2%;--hi:34.7%"></i><b>0.22 GiB</b></li>
-      <li title="claude code: median 0.24 GiB, middle half 0.23 to 0.28 GiB"><span>claude code</span><i style="--v:32.6%;--lo:31.6%;--hi:37.8%"></i><b>0.24 GiB</b></li>
-      <li title="opencode: median 0.71 GiB, middle half 0.68 to 0.74 GiB"><span>opencode</span><i style="--v:95.4%;--lo:91.9%;--hi:100.0%"></i><b>0.71 GiB</b></li>
-    </ol>
-  </figure>
-  <figure class="chart">
-    <figcaption>CPU time</figcaption>
-    <ol>
-      <li class="me" title="smelt: median 6.1 s, middle half 3.5 to 17.1 s"><span>smelt</span><i style="--v:2.3%;--lo:1.3%;--hi:6.4%"></i><b>6.1 s</b></li>
-      <li title="pi: median 9.7 s, middle half 5.6 to 16 s"><span>pi</span><i style="--v:3.6%;--lo:2.1%;--hi:6.0%"></i><b>9.7 s</b></li>
-      <li title="codex: median 9.8 s, middle half 6.9 to 33.9 s"><span>codex</span><i style="--v:3.7%;--lo:2.6%;--hi:12.7%"></i><b>9.8 s</b></li>
-      <li title="claude code: median 17.5 s, middle half 8.6 to 33.8 s"><span>claude code</span><i style="--v:6.5%;--lo:3.2%;--hi:12.6%"></i><b>17.5 s</b></li>
-      <li title="opencode: median 116 s, middle half 44.1 to 267.5 s"><span>opencode</span><i style="--v:43.4%;--lo:16.5%;--hi:100.0%"></i><b>116 s</b></li>
-    </ol>
-  </figure>
-</div>
-<p class="legend"><i></i> median <i class="range"></i> middle half of runs</p>
-</div>
-
-## Limits
-
-- Every agent ran headless, so the cost of drawing a terminal interface is not
-  included.
-- One machine and one container image, with Node 22 for the Node agents.
+Session disk use, CPU by streaming speed, the full method and the code to rerun
+it are on [harness-resource-bench](https://leonardcser.github.io/harness-resource-bench).

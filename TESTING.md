@@ -49,5 +49,5 @@ as explicit optimized benchmarks, not commit/push hooks or shared-CI latency gat
 Retain timeout/deadlock checks; remove settled experiments and duplicate metrics.
 
 See [benchmark commands and resource acceptance](docs/transcript-layout-benchmarks.md),
-[cross-agent comparisons](benchmarks/memory/README.md), and
+[cross-agent comparisons](https://github.com/leonardcser/harness-resource-bench), and
 [documentation recordings](docs/shots/README.md).

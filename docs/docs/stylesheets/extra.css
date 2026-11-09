@@ -283,15 +283,29 @@ body:has(.home) .md-header__source .md-source__repository {
   font-family: var(--md-code-font-family), "Symbols Nerd Font Mono", monospace;
 }
 
+/* Tables span the full width of the content. */
+.md-typeset__table {
+  display: block;
+}
+.md-typeset table:not([class]) {
+  display: table;
+  width: 100%;
+}
+
 /* Benchmark bar charts (guide/benchmarks.md): the bar is the median, the capped
-   line spans the middle half of runs. smelt in the primary color. */
+   line spans the range of runs. smelt in the primary color. */
 .md-typeset .bench {
   --muted: var(--md-default-fg-color--light);
   --bar: var(--md-default-fg-color--lightest);
 }
 .md-typeset .bench .charts {
   display: grid;
-  gap: 1.5rem;
+  gap: 1.5rem 2.5rem;
+}
+@media (min-width: 45em) {
+  .md-typeset .bench .charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .md-typeset .bench figure {
   display: block;
@@ -344,14 +358,11 @@ body:has(.home) .md-header__source .md-source__repository {
   font-weight: 400;
   text-align: right;
 }
-.md-typeset .bench li.me {
-  color: var(--md-default-fg-color);
-  font-weight: 700;
-}
 .md-typeset .bench li.me i {
   --bar: var(--md-primary-fg-color);
 }
-.md-typeset .bench li.me b {
+.md-typeset .bench li.me :is(span, b) {
+  color: var(--md-primary-fg-color);
   font-weight: 700;
 }
 .md-typeset .bench .legend {

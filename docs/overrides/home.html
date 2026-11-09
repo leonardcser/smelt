@@ -456,6 +456,7 @@
   .home .chart figcaption {
     margin: 0 0 0.5rem;
     font-size: 0.68rem;
+    font-style: normal;
     color: var(--md-default-fg-color);
   }
   .home .chart ol {
@@ -472,7 +473,7 @@
     font-size: 0.64rem;
     color: var(--home-muted);
   }
-  /* The bar is the median; the capped line spans the middle half of runs. */
+  /* The bar is the median; the capped line spans the range of runs. */
   .home .chart li i {
     position: relative;
     height: 0.75rem;
@@ -493,17 +494,15 @@
     background: linear-gradient(var(--home-muted), var(--home-muted)) center / 100% 1px no-repeat;
   }
   .home .chart li b {
+    color: var(--home-muted);
     font-weight: 400;
     text-align: right;
-  }
-  .home .chart li.me {
-    color: var(--md-default-fg-color);
-    font-weight: 700;
   }
   .home .chart li.me i {
     --bar: var(--home-ember);
   }
-  .home .chart li.me b {
+  .home .chart li.me :is(span, b) {
+    color: var(--home-ember);
     font-weight: 700;
   }
   @media (max-width: 52rem) {
@@ -633,30 +632,54 @@
     </div>
     <div class="cell">
       <h2>Small and fast</h2>
-      <p>smelt installs as one 46 MiB binary and uses 34 MiB at start. The other four agents write 313 to 1684 MiB and use 110 to 328 MiB. Measured on 2026-11-02 with a smelt main dist build and the latest stable comparison-agent releases, while waiting for the model. Lower is better.</p>
+      <p>Lower is better. Median of 3 runs, measured on 2026-11-08. <a href="https://leonardcser.github.io/harness-resource-bench">Full results</a>.</p>
       <div class="charts">
         <figure class="chart">
-          <figcaption>install size</figcaption>
+          <figcaption>startup time</figcaption>
           <ol>
-<!-- bench:install -->
-          <li class="me" title="smelt: 46 MiB, 1 run"><span>smelt</span><i style="--v:2.7%"></i><b>46 MiB</b></li>
-          <li title="claude code: 313 MiB, 1 run"><span>claude code</span><i style="--v:18.6%"></i><b>313 MiB</b></li>
-          <li title="pi: 483 MiB, 1 run"><span>pi</span><i style="--v:28.7%"></i><b>483 MiB</b></li>
-          <li title="codex: 853 MiB, 1 run"><span>codex</span><i style="--v:50.7%"></i><b>853 MiB</b></li>
-          <li title="opencode: 1684 MiB, 1 run"><span>opencode</span><i style="--v:100.0%"></i><b>1684 MiB</b></li>
-<!-- /bench -->
+            <li><span>fx</span><i style="--v:0.8%;--lo:0.7%;--hi:0.8%"></i><b>7 ms</b></li>
+            <li class="me"><span>smelt</span><i style="--v:3.9%;--lo:3.9%;--hi:4.1%"></i><b>36 ms</b></li>
+            <li><span>codex</span><i style="--v:8.4%;--lo:8.4%;--hi:9.0%"></i><b>76 ms</b></li>
+            <li><span>claude code</span><i style="--v:29.7%;--lo:29.4%;--hi:30.0%"></i><b>267 ms</b></li>
+            <li><span>pi</span><i style="--v:32.0%;--lo:31.6%;--hi:32.3%"></i><b>288 ms</b></li>
+            <li><span>opencode</span><i style="--v:91.1%;--lo:91.0%;--hi:100.0%"></i><b>820 ms</b></li>
+            <li><span>omp</span><i style="--v:91.4%;--lo:91.3%;--hi:91.5%"></i><b>822 ms</b></li>
           </ol>
         </figure>
         <figure class="chart">
-          <figcaption>memory at start</figcaption>
+          <figcaption>CPU on a coding task</figcaption>
           <ol>
-<!-- bench:cold-start -->
-          <li class="me" title="smelt: median 34 MiB, middle half 33 to 36 MiB, 7 runs"><span>smelt</span><i style="--v:10.2%;--lo:10.1%;--hi:11.0%"></i><b>34 MiB</b></li>
-          <li title="pi: median 110 MiB, middle half 106 to 120 MiB, 7 runs"><span>pi</span><i style="--v:33.1%;--lo:31.9%;--hi:36.1%"></i><b>110 MiB</b></li>
-          <li title="codex: median 140 MiB, middle half 139 to 141 MiB, 7 runs"><span>codex</span><i style="--v:42.0%;--lo:41.8%;--hi:42.5%"></i><b>140 MiB</b></li>
-          <li title="claude code: median 189 MiB, middle half 188 to 190 MiB, 7 runs"><span>claude code</span><i style="--v:56.7%;--lo:56.6%;--hi:57.3%"></i><b>189 MiB</b></li>
-          <li title="opencode: median 328 MiB, middle half 327 to 332 MiB, 7 runs"><span>opencode</span><i style="--v:98.7%;--lo:98.5%;--hi:100.0%"></i><b>328 MiB</b></li>
-<!-- /bench -->
+            <li><span>pi</span><i style="--v:34.6%;--lo:34.5%;--hi:34.6%"></i><b>1.4 s</b></li>
+            <li class="me"><span>smelt</span><i style="--v:41.7%;--lo:41.5%;--hi:41.8%"></i><b>1.6 s</b></li>
+            <li><span>fx</span><i style="--v:47.0%;--lo:46.4%;--hi:47.1%"></i><b>1.9 s</b></li>
+            <li><span>codex</span><i style="--v:65.8%;--lo:65.8%;--hi:66.4%"></i><b>2.6 s</b></li>
+            <li><span>omp</span><i style="--v:72.9%;--lo:72.3%;--hi:74.6%"></i><b>2.9 s</b></li>
+            <li><span>claude code</span><i style="--v:88.4%;--lo:87.8%;--hi:90.0%"></i><b>3.5 s</b></li>
+            <li><span>opencode</span><i style="--v:99.9%;--lo:99.0%;--hi:100.0%"></i><b>3.9 s</b></li>
+          </ol>
+        </figure>
+        <figure class="chart">
+          <figcaption>CPU when idle</figcaption>
+          <ol>
+            <li class="me"><span>smelt</span><i style="--v:0.0%;--lo:0.0%;--hi:0.0%"></i><b>0.5 ms</b></li>
+            <li><span>codex</span><i style="--v:1.5%;--lo:1.4%;--hi:1.5%"></i><b>34 ms</b></li>
+            <li><span>pi</span><i style="--v:3.8%;--lo:3.7%;--hi:5.0%"></i><b>89 ms</b></li>
+            <li><span>claude code</span><i style="--v:21.3%;--lo:21.1%;--hi:21.5%"></i><b>504 ms</b></li>
+            <li><span>omp</span><i style="--v:33.2%;--lo:33.1%;--hi:36.8%"></i><b>785 ms</b></li>
+            <li><span>fx</span><i style="--v:35.9%;--lo:35.8%;--hi:36.0%"></i><b>849 ms</b></li>
+            <li><span>opencode</span><i style="--v:51.5%;--lo:49.7%;--hi:100.0%"></i><b>1.2 s</b></li>
+          </ol>
+        </figure>
+        <figure class="chart">
+          <figcaption>memory after 64 turns</figcaption>
+          <ol>
+            <li class="me"><span>smelt</span><i style="--v:13.7%;--lo:13.6%;--hi:13.8%"></i><b>102 MiB</b></li>
+            <li><span>pi</span><i style="--v:28.5%;--lo:27.2%;--hi:29.7%"></i><b>211 MiB</b></li>
+            <li><span>fx</span><i style="--v:34.1%;--lo:32.5%;--hi:37.9%"></i><b>253 MiB</b></li>
+            <li><span>codex</span><i style="--v:44.3%;--lo:44.0%;--hi:44.4%"></i><b>329 MiB</b></li>
+            <li><span>omp</span><i style="--v:65.0%;--lo:64.0%;--hi:66.5%"></i><b>482 MiB</b></li>
+            <li><span>claude code</span><i style="--v:67.0%;--lo:65.5%;--hi:68.7%"></i><b>497 MiB</b></li>
+            <li><span>opencode</span><i style="--v:96.7%;--lo:93.2%;--hi:100.0%"></i><b>717 MiB</b></li>
           </ol>
         </figure>
       </div>
