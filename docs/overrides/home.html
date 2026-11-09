@@ -382,6 +382,12 @@
   .home .feature--wide {
     grid-column: 1 / -1;
   }
+  .home .features--split {
+    align-items: center;
+  }
+  .home .features--split p {
+    margin-bottom: 0;
+  }
   @media (max-width: 52em) {
     .home .features {
       grid-template-columns: minmax(0, 1fr);
@@ -684,6 +690,20 @@
         </figure>
       </div>
       <a class="more" href="guide/benchmarks/">Benchmarks →</a>
+    </div>
+    <div class="cell">
+      <div class="features features--split">
+        <div class="feature">
+          <h2>Open source</h2>
+          <p>smelt is free software under the <a href="https://github.com/leonardcser/smelt/blob/main/LICENSE">MIT license</a>, built in the open. Fix a bug, write a feature or open an issue.</p>
+          <div><a class="more" href="https://github.com/leonardcser/smelt">GitHub →</a><a class="more" href="https://github.com/leonardcser/smelt/issues">Issues →</a><a class="more" href="https://github.com/leonardcser/smelt/blob/main/CONTRIBUTING.md">Contributing →</a></div>
+        </div>
+        <figure class="code">
+          <pre><span class="p">$</span> git clone https://github.com/leonardcser/smelt
+<span class="p">$</span> cd smelt
+<span class="p">$</span> cargo build --bin smelt   <span class="c"># build from source</span></pre>
+        </figure>
+      </div>
     </div>
     <div class="cell">
       <h2>Try it</h2>
