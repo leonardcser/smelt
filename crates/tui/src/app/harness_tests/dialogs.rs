@@ -59,6 +59,48 @@ fn upgrade_status_view_updates_guidance_without_reopening() {
     }
 }
 
+#[test]
+fn startup_banner_shows_compact_upgrade_status() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 24);
+    assert!(app.run_lua(
+        r#"
+        smelt.settings.autoupgrade = "off"
+        smelt.build.display = "v0.6.2"
+        smelt.process.run = function() return upgrade_reply end
+        "#
+    ));
+    for (name, reply) in [
+        (
+            "upgrade_banner_downloading",
+            r#"{ exit_code = 0, stdout = '{"current":"v0.6.2","status":{"operation_id":"w","channel":"stable","target":"v0.7.0","stage":"downloading","running":true,"downloaded_bytes":18874368,"total_bytes":33554432}}' }"#,
+        ),
+        (
+            "upgrade_banner_downloading_unstable",
+            r#"{ exit_code = 0, stdout = '{"current":"v0.6.2","status":{"operation_id":"w","channel":"unstable","target":"main@abc1234","stage":"downloading","running":true,"downloaded_bytes":1048576,"total_bytes":2097152}}' }"#,
+        ),
+        (
+            "upgrade_banner_failed",
+            r#"{ exit_code = 0, stdout = '{"current":"v0.6.2","status":{"stage":"failed","error":"Checksum mismatch","running":false}}' }"#,
+        ),
+        (
+            "upgrade_banner_installed",
+            r#"{ exit_code = 0, stdout = '{"current":"v0.7.0","status":{"stage":"installed","target":"v0.7.0","running":false}}' }"#,
+        ),
+    ] {
+        assert!(app.run_lua(&format!(
+            "upgrade_reply = {reply}; smelt.cmd.run('upgrade status')"
+        )));
+        drive_lua_tasks(&mut app);
+        app.press(KeyCode::Esc);
+        insta::assert_snapshot!(name, upgrade_banner_frame(&mut app));
+    }
+}
+
+fn upgrade_banner_frame(app: &mut TestApp) -> String {
+    app.render_to_frame().text()
+}
+
 fn upgrade_status_dialog(app: &mut TestApp) -> String {
     app.render_to_frame()
         .text()

@@ -440,8 +440,11 @@ local function open_splash()
 		state.paint:on("release", on_release)
 	end
 	local logo_w, logo_h = banner.logo_mark_size()
-	local label_lines = { { text = smelt.build.display or "", dim = true } }
-	for _, sub in ipairs(banner.collect_subtitles()) do
+	local subtitles, version_suffix = banner.collect_subtitles()
+	local version = smelt.build.display or ""
+	if version_suffix ~= "" then version = version .. " " .. version_suffix end
+	local label_lines = { { text = version, dim = true } }
+	for _, sub in ipairs(subtitles) do
 		label_lines[#label_lines + 1] = sub
 	end
 	local max_label_w = 0
@@ -488,9 +491,7 @@ local function transcript_fits_banner()
 	end
 	local _, logo_h = banner.logo_mark_size()
 	local label_h = 1 -- version line, always present
-	for _ in pairs(banner.collect_subtitles()) do
-		label_h = label_h + 1
-	end
+	label_h = label_h + #banner.collect_subtitles()
 	-- `FIRE_HEADROOM` reserves rows above the wordmark for the fire
 	-- animation; without it the centered overlay clips on its first paint.
 	return rect.height >= logo_h + FIRE_HEADROOM + label_h

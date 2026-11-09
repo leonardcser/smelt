@@ -138,7 +138,8 @@ end
 -- registration order. Each source returns one of:
 --   * nil                                - contribute nothing
 --   * string                             - one dim line
---   * { text, dim?, style_group? }       - one styled entry
+--   * { text, dim?, style_group?, suffix? } - one styled entry; `suffix` is
+--                                          appended to the version row
 --   * { entry, entry, ... }              - multiple styled entries
 -- Returns a `Reg` whose `:remove()` drops the source.
 
@@ -151,6 +152,8 @@ function M.on_subtitles_changed(fn)
 	subtitles_changed = fn
 end
 
+--- Returns the subtitle lines and the text that follows the version on the
+--- first row, joined from every source's `suffix` in source order.
 function M.collect_subtitles()
 	local sources = {}
 	for _, source in pairs(banner_sources) do
@@ -160,51 +163,50 @@ function M.collect_subtitles()
 		if a.order ~= b.order then return a.order < b.order end
 		return a.seq < b.seq
 	end)
-	local lines = {}
+	local lines, suffixes = {}, {}
+	local function add(entry)
+		if entry.suffix and entry.suffix ~= "" then
+			suffixes[#suffixes + 1] = tostring(entry.suffix)
+		end
+		if entry.text then
+			lines[#lines + 1] = {
+				text = tostring(entry.text),
+				dim = entry.dim ~= false,
+				style_group = entry.style_group,
+			}
+		end
+	end
 	for _, source in ipairs(sources) do
 		local ok, result = pcall(source.fn)
 		if not ok then
 			smelt.notify.error("banner.source: " .. tostring(result))
-		elseif result == nil then
-			-- skip
 		elseif type(result) == "string" then
-			if result ~= "" then
-				lines[#lines + 1] = { text = result, dim = true }
-			end
+			if result ~= "" then add({ text = result }) end
 		elseif type(result) == "table" then
-			if result.text then
-				lines[#lines + 1] = {
-					text = tostring(result.text),
-					dim = result.dim ~= false,
-					style_group = result.style_group,
-				}
+			if result.text or result.suffix then
+				add(result)
 			else
 				for _, entry in ipairs(result) do
-					if entry and entry.text then
-						lines[#lines + 1] = {
-							text = tostring(entry.text),
-							dim = entry.dim ~= false,
-							style_group = entry.style_group,
-						}
-					end
+					if entry then add(entry) end
 				end
 			end
 		end
 	end
-	return lines
+	return lines, table.concat(suffixes, " ")
 end
 
 smelt.banner = smelt.banner or {}
 
 --- A subtitle line under the banner logo.
 ---@class smelt.banner.Subtitle
----@field text string Line text.
+---@field text? string Line text. Omit it to contribute only a `suffix`.
 ---@field dim? boolean Render dimmed. Defaults to true.
 ---@field style_group? string Highlight group applied to the line.
+---@field suffix? string Text appended to the version row, e.g. `"→ v0.7.0 · /upgrade"`. Suffixes from several sources join in source order.
 
 --- Add a named source of banner subtitle lines. `fn` runs whenever the banner is
 --- built and returns nil, a string (one dim line), a `smelt.banner.Subtitle`, or
---- a list of them. Sources render by ascending `opts.order` (default 0), then
+--- a list of them. A `suffix` extends the version row instead of adding a line. Sources render by ascending `opts.order` (default 0), then
 --- in registration order. Errors in `fn` are reported as notifications. Adding a
 --- name that already exists replaces that source. Returns a `Reg` that removes
 --- this source, unless a later `source` with the same name has replaced it.

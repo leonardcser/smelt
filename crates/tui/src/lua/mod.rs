@@ -3793,7 +3793,10 @@ mod tests {
     }
 
     fn upgrade_banner(rt: &LuaRuntime) -> Option<String> {
-        lua_eval(rt, "return _G.upgrade_banner()")
+        lua_eval(
+            rt,
+            "local r = _G.upgrade_banner(); return r and r.suffix or nil",
+        )
     }
 
     const CHECK: &str = "upgrade check --json --channel stable";
@@ -3821,7 +3824,7 @@ mod tests {
         assert_eq!(cli_calls(&rt), [UPGRADE_STATUS]);
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("v0.6.3 installed, restart smelt to use it")
+            Some("→ v0.6.3 · restart to use it")
         );
         assert!(drain_notifications(&rt).is_empty());
         assert!(drain_warnings(&rt).is_empty());
@@ -3863,7 +3866,7 @@ mod tests {
         assert_eq!(cli_calls(&rt), [CHECK, AUTO, UPGRADE_STATUS]);
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("upgrade failed  →  /upgrade status")
+            Some("· upgrade failed · /upgrade status")
         );
         assert!(drain_notifications(&rt).is_empty());
         assert!(drain_warnings(&rt).is_empty());
@@ -3908,10 +3911,7 @@ mod tests {
             drain_notifications(&rt),
             ["update v0.6.3 available, run /upgrade"]
         );
-        assert_eq!(
-            upgrade_banner(&rt).as_deref(),
-            Some("update v0.6.3 available  →  /upgrade")
-        );
+        assert_eq!(upgrade_banner(&rt).as_deref(), Some("→ v0.6.3 · /upgrade"));
 
         rt.lua
             .load(r#"smelt.settings.autoupgrade = "off"; _G.settings_changed()"#)
@@ -3967,7 +3967,7 @@ mod tests {
         assert!(lua_eval::<bool>(&rt, "return _G.progress_armed"));
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("v0.6.3 (stable): downloading 0.0 MiB  →  /upgrade status")
+            Some("→ v0.6.3 · downloading")
         );
 
         rt.lua.load(r#"
@@ -3978,7 +3978,7 @@ mod tests {
         assert!(!lua_eval::<bool>(&rt, "return _G.progress_armed"));
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("v0.6.3 installed, restart smelt to use it")
+            Some("→ v0.6.3 · restart to use it")
         );
     }
 
@@ -3991,7 +3991,7 @@ mod tests {
         );
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("upgrade failed  →  /upgrade status")
+            Some("· upgrade failed · /upgrade status")
         );
         assert!(!lua_eval::<bool>(&rt, "return _G.progress_armed or false"));
     }
@@ -4029,7 +4029,7 @@ mod tests {
         assert_eq!(cli_calls(&rt), [INSTALL]);
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("v0.6.3 installed, restart smelt to use it")
+            Some("→ v0.6.3 · restart to use it")
         );
         assert_eq!(drain_notifications(&rt).len(), 1);
         rt.lua
@@ -4093,7 +4093,7 @@ mod tests {
         assert_eq!(cli_calls(&rt), [INSTALL]);
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("smelt (stable): checking for updates  →  /upgrade status")
+            Some("· checking for updates")
         );
         drain_notifications(&rt);
         rt.lua.load(r#"
@@ -4198,9 +4198,7 @@ mod tests {
         assert_eq!(cli_calls(&rt), [INSTALL]);
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some(
-                "main@abc1234 (unstable): downloading 1.0 MiB / 2.0 MiB (50%)  →  /upgrade status"
-            )
+            Some("→ main@abc1234 · downloading 50%")
         );
         assert!(drain_errors(&rt).is_empty());
         drain_notifications(&rt);
@@ -4217,7 +4215,7 @@ mod tests {
         );
         assert_eq!(
             upgrade_banner(&rt).as_deref(),
-            Some("v0.6.3-1-abc1234 installed, restart smelt to use it")
+            Some("→ v0.6.3-1-abc1234 · restart to use it")
         );
     }
 
@@ -4266,14 +4264,14 @@ mod tests {
                 true,
                 "0.6.2",
                 Some("0.6.1"),
-                Some("previously v0.6.1  →  /changelog"),
+                Some("· updated from v0.6.1 · /changelog"),
                 "0.6.2",
             ),
             (
                 true,
                 "0.6.2",
                 Some("0.7.0"),
-                Some("previously v0.7.0  →  /changelog"),
+                Some("· updated from v0.7.0 · /changelog"),
                 "0.6.2",
             ),
             (true, "0.6.2", Some("0.6.2"), None, "0.6.2"),

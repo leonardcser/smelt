@@ -1,0 +1,28 @@
+---
+source: crates/tui/src/app/harness_tests/dialogs.rs
+expression: upgrade_banner_frame(&mut app)
+---
+
+
+
+
+
+
+
+                          ▄
+                         ▄▀▀▄▄▄
+                       ▄▀▀▀▀▀▀▀▀▄▀▀▄
+                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                    ▀▀▀ ▀▀▀▀▀ ▀▀▀ ▀  ▀▀▀
+                    ▄▄▀ ▀ ▀ ▀ ▀▄▄ ▀▄  ▀▄
+          v0.6.2 · upgrade failed · /upgrade status
+
+          f1 help   / commands   @ attach   ! shell
+
+
+
+  tip ctrl+enter / ctrl+q, steer the current response wit…
+────────────────────────────────────────── test/test-model ─
+
+────────────────────────────────────────────────────────────
+ ○ normal                                           1:1 100%

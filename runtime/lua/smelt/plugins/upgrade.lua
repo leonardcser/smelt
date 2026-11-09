@@ -2,10 +2,13 @@
 --
 -- The `smelt upgrade` CLI checks GitHub, downloads, verifies and swaps the
 -- binary. This plugin runs it in the background at startup and every hour, and
--- shows the outcome as one dim line under the startup banner:
---   * "update vX available  →  /upgrade"
---   * "vX installed, restart smelt to use it"
---   * "previously vX  →  /changelog" on the first launch after a version change
+-- shows the outcome on the startup banner's version row, after the running
+-- version:
+--   * "→ vX · /upgrade" when an update is available
+--   * "→ vX · downloading 56%" while an installation runs
+--   * "→ vX · restart to use it" once installed
+--   * "· upgrade failed · /upgrade status"
+--   * "· updated from vX · /changelog" on the first launch after a version change
 --
 -- With `autoupgrade = "auto"` (the default), updates the CLI marks as safe
 -- install without asking. The running session keeps its version until the
@@ -114,26 +117,42 @@ local function status_text(status)
   return text
 end
 
+-- Short progress for the banner: "downloading 56%".
+local function progress_text(status)
+  local text = (stages[status.stage] or status.stage or "upgrading"):match("^[^,]+")
+  local total = status.total_bytes
+  if status.stage == "downloading" and total and total > 0 then
+    text = text .. string.format(" %d%%", math.min(100, math.floor((status.downloaded_bytes or 0) * 100 / total)))
+  end
+  return text
+end
+
+-- What follows the running version on the banner's version row: "→ target"
+-- when a newer version is known, then what happened or the command to run.
 local function banner_text()
   local snapshot, check = session.snapshot, session.check
   local status = snapshot and snapshot.status
   local current = check and check.current or snapshot and snapshot.current
   if status and status.running then
-    return status_text(status) .. "  →  /upgrade status"
+    local target = status.target and ("→ " .. status.target .. " ") or ""
+    return target .. "· " .. progress_text(status)
   elseif status and (status.stage == "failed" or status.stage == "interrupted") then
-    return "upgrade " .. status.stage .. "  →  /upgrade status"
+    return "· upgrade " .. status.stage .. " · /upgrade status"
   elseif current and current ~= smelt.build.display then
-    return current .. " installed, restart smelt to use it"
+    return "→ " .. current .. " · restart to use it"
   elseif check and check.update then
-    return "update " .. check.latest .. " available  →  /upgrade"
+    return "→ " .. check.latest .. " · /upgrade"
   elseif not check and status and status.stage == "available" and status.target then
-    return "update " .. status.target .. " available  →  /upgrade"
+    return "→ " .. status.target .. " · /upgrade"
   elseif session.updated_from then
-    return "previously v" .. session.updated_from .. "  →  /changelog"
+    return "· updated from v" .. session.updated_from .. " · /changelog"
   end
 end
 
-smelt.banner.source("upgrade", banner_text)
+smelt.banner.source("upgrade", function()
+  local suffix = banner_text()
+  return suffix and { suffix = suffix }
+end)
 
 local status_view
 -- Timer control, defined with the timers below.
