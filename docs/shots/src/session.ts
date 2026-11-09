@@ -29,6 +29,8 @@ export type Step =
   /** Glide the mouse over `over` ms onto the first text matching `to`, then hold it there `hold` ms. */
   | { glide: { to: RegExp; over?: number; hold?: number } }
   | { pause: number }
+  /** From here on, images smelt shows are photos, kept in their own colors in the light scheme, not flipped like math. */
+  | { photos: boolean }
   /** From here on, play the recording this many times faster (1 is real time). */
   | { speed: number }
   /** Wait for a screen match, including one already visible, without approving dialogs. */
@@ -53,7 +55,7 @@ export type KeyEvent = { at: number; label: string; typed?: boolean };
 export type Capture = { name: string; rows: number; ansi: string };
 
 /** A Kitty graphics image smelt placed with Unicode placeholders, `cols` by `rows` cells. */
-export type KittyImage = { png: string; cols: number; rows: number };
+export type KittyImage = { png: string; cols: number; rows: number; photo?: true };
 
 export type RunOptions = {
   scheme: Scheme;
@@ -276,7 +278,7 @@ const screen = async () => (await snapshot()).ansi;
  * Attaches to the session as the outer terminal smelt sees through tmux passthrough: it answers
  * the Kitty graphics probe and the cell size query, and keeps every image smelt transmits.
  */
-function attachKitty(images: Record<number, KittyImage>) {
+function attachKitty(images: Record<number, KittyImage>, photos: () => boolean) {
   const decoder = new TextDecoder();
   let pending = "";
   let current: number | undefined;
@@ -300,7 +302,7 @@ function attachKitty(images: Record<number, KittyImage>) {
           if (keys.a === "q") term.write(`\x1b_Gi=${keys.i};OK\x1b\\`);
           else if (keys.a === "T") {
             current = Number(keys.i);
-            images[current] = { png: m[2], cols: Number(keys.c), rows: Number(keys.r) };
+            images[current] = { png: m[2], cols: Number(keys.c), rows: Number(keys.r), ...(images[current]?.photo || photos() ? { photo: true as const } : {}) };
           } else if (keys.a === undefined && current !== undefined) images[current].png += m[2];
           if (keys.m === "0" || (keys.a === "T" && keys.m !== "1")) current = undefined;
         }
@@ -354,7 +356,8 @@ export async function run(
   await tmux("set-option", "-t", tmuxName, "window-size", "manual");
 
   const images: Record<number, KittyImage> = {};
-  const kitty = opts.kitty ? attachKitty(images) : null;
+  let photos = false;
+  const kitty = opts.kitty ? attachKitty(images, () => photos) : null;
   if (kitty) {
     await tmux("set-option", "-t", tmuxName, "allow-passthrough", "on");
     while (!(await $`tmux list-clients -t ${tmuxName}`.quiet().text()).trim()) await Bun.sleep(50);
@@ -482,6 +485,8 @@ export async function run(
         marks.push({ at: Date.now() - t0, speed: step.speed });
       } else if ("pause" in step) {
         await Bun.sleep(step.pause);
+      } else if ("photos" in step) {
+        photos = step.photos;
       } else if ("steer" in step) {
         // The head is the snake cell that appeared since the last read; steer once per tick.
         let dir = "Right";

@@ -395,7 +395,7 @@
         self.images = {};
         Object.keys(data.img || {}).forEach(function (id) {
           var image = data.img[id];
-          self.images[id] = { url: "data:image/png;base64," + image.png, cols: image.cols, rows: image.rows, photo: data.photos };
+          self.images[id] = { url: "data:image/png;base64," + image.png, cols: image.cols, rows: image.rows, photo: image.photo };
         });
         self.total = data.frames.reduce(function (t, f) {
           return t + f.ms;

@@ -76,13 +76,10 @@ the editor at that line.
 
 ## See images and math
 
-The agent can show you an image file, such as a screenshot or a chart:
+The agent can show you an image file, such as a screenshot or a chart, and LaTeX
+math in answers renders as images too:
 
-<figure class="term" data-replay="../../assets/replays/image.json" aria-label="The agent shows a plot of the lamp discount inline in the transcript" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
-
-LaTeX math in answers renders as images too:
-
-<figure class="term" data-replay="../../assets/replays/math.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+<figure class="term" data-replay="../../assets/replays/graphics.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images, then the agent showing a plot of the lamp discount inline" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 Both need a terminal with Kitty graphics, such as kitty or Ghostty. Elsewhere,
 images show as colored half-blocks and math as Unicode text. Copying an image

@@ -39,8 +39,6 @@ export type Scene = {
   scheme?: Scheme;
   /** Record through a Kitty graphics terminal, so math renders as images. */
   kitty?: boolean;
-  /** Its images are pictures, shown in their own colors in both schemes instead of flipped like math. */
-  photos?: boolean;
   /** Play in real time. Otherwise stretches with no typing nearby are sped up. */
   realtime?: boolean;
   /** Open on the first prompt, fully typed, just before it is sent. */
@@ -247,35 +245,23 @@ export const scenes: Record<string, Scene> = {
     ],
   },
 
-  /** Display math in an answer, drawn as images by a Kitty graphics terminal. */
-  math: {
+  /** Math in an answer and an image the agent shows, both drawn as images by a Kitty graphics terminal. */
+  graphics: {
+    mock: true,
     fromSubmit: true,
     realtime: true,
     kitty: true,
     cols: 80,
-    rows: 28,
+    rows: 24,
+    projectFiles: { "plots/lamp.png": "lamp.png" },
     steps: [
       { pause: 1200 },
       { type: "what are the equations for gradient descent and adam? keep it brief" },
       { pause: 400 },
       { key: "Enter" },
       { until: /─ ● done/ },
-      { pause: 2500 },
-    ],
-  },
-
-  /** The agent shows an image in the transcript, drawn as an image by a Kitty graphics terminal. */
-  image: {
-    mock: true,
-    fromSubmit: true,
-    realtime: true,
-    kitty: true,
-    photos: true,
-    cols: 90,
-    rows: 34,
-    projectFiles: { "plots/lamp.png": "lamp.png" },
-    steps: [
-      { pause: 1200 },
+      { pause: 1500 },
+      { photos: true },
       { type: "show me the plot of the lamp discount" },
       { pause: 400 },
       { key: "Enter" },

@@ -87,6 +87,12 @@ function gallery(user: string, step: number): Chunk[] | null {
         "Everything stays in whole cents, so no float rounding creeps in, and a percent over 100 is held at 100 " +
         "so a price never goes below zero. A fixed amount off goes through `Rule::Fixed`, which saturates the same way.",
     );
+  if (/equations for gradient descent and adam/i.test(user))
+    return text(
+      "Gradient descent\n\n$$\\theta_{t+1} = \\theta_t - \\eta\\,\\nabla L(\\theta_t)$$\n\nAdam\n\n" +
+        "$$m_t = \\beta_1 m_{t-1} + (1-\\beta_1)\\,g_t,\\qquad v_t = \\beta_2 v_{t-1} + (1-\\beta_2)\\,g_t^2$$\n\n" +
+        "$$\\theta_{t+1} = \\theta_t - \\eta\\,\\frac{\\hat m_t}{\\sqrt{\\hat v_t}+\\epsilon}$$\n\nOperations on $g_t$ are elementwise.",
+    );
   if (/what does apply_discount do\?/i.test(user)) return text("Takes a price in cents and a percent, and returns the price after the discount.");
   if (/money math/i.test(user)) {
     if (step === 0) return calls("", [{ name: "crate_info", args: { name: "rust_decimal" } }, { name: "crate_info", args: { name: "bigdecimal" } }]);
@@ -111,7 +117,7 @@ function gallery(user: string, step: number): Chunk[] | null {
   }
   if (/plot of the lamp discount/i.test(user)) {
     if (step === 0) return calls("", [{ name: "show_image", args: { file_path: `${PROJECT}/plots/lamp.png` } }]);
-    return text("Left: final price by price and discount. Right: the `/ 10` bug charges nothing for a 10% discount on a $50 lamp, and goes negative beyond that.");
+    return text("The `/ 10` bug charges nothing for a 10% discount on a $50 lamp.");
   }
   if (/run the checkout tests/i.test(user)) {
     if (step === 0) return bash("", "cargo test -q --test checkout", "Run the checkout tests");
