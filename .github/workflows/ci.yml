@@ -21,8 +21,11 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
@@ -35,6 +38,10 @@ jobs:
     steps:
       - name: Check conventional commit format
         uses: amannn/action-semantic-pull-request@v6
+        with:
+          # The same as the default, with a limit of 60 characters on the title.
+          headerPattern: '^(?=.{1,60}$)(\w*)(?:\(([\w$.\-*/ ]*)\))?!?: (.*)$'
+          headerPatternCorrespondence: type, scope, subject
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -45,7 +52,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust
         run: rustup toolchain install
@@ -110,7 +117,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust
         run: rustup toolchain install
@@ -134,7 +141,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust
         run: rustup toolchain install
@@ -168,7 +175,7 @@ jobs:
       TARGET: x86_64-unknown-linux-musl
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust
         run: |
@@ -202,7 +209,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up latest stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -240,7 +247,7 @@ jobs:
             local_deps: smelt-style smelt-ansi
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust
         run: rustup toolchain install
@@ -296,7 +303,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -340,7 +347,7 @@ jobs:
       CARGO_BUILD_JOBS: 2
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust
         run: rustup toolchain install
@@ -372,7 +379,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust
         run: rustup toolchain install
