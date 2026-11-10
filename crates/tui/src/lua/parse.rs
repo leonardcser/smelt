@@ -275,8 +275,6 @@ impl LuaStyle {
     }
 }
 
-pub(crate) use smelt_core::lua::options::validate_keys;
-
 /// Read style fields (`fg`, `bg`, `bold`, `dim`, `italic`, `underline`, `crossedout`, `reverse`)
 /// off a table. Unknown keys raise. Colors take any form [`color`]
 /// accepts, with theme groups looked up in `groups`; `fg = false` /
@@ -326,53 +324,50 @@ impl StylePatch {
 /// Parse a partial style table: only keys present in `t` change.
 /// `fg = false` / `bg = false` clear a color.
 pub(crate) fn style_patch(t: &mlua::Table, groups: Groups) -> Result<StylePatch, String> {
-    validate_keys(
-        t,
-        &[
-            "hl_group",
-            "fg",
-            "bg",
-            "bold",
-            "dim",
-            "italic",
-            "underline",
-            "crossedout",
-            "reverse",
-        ],
-        "style",
-    )
-    .map_err(|e| e.to_string())?;
+    // One pass over the keys present: paints restyle cells on every frame.
     let mut patch = StylePatch::default();
-    if let Some(name) = t
-        .get::<Option<String>>("hl_group")
-        .map_err(|e| e.to_string())?
-    {
-        patch.group =
-            Some(groups(&name).ok_or_else(|| format!("style: unknown theme group '{name}'"))?);
-    }
-    for (key, layer, slot) in [
-        ("fg", Layer::Fg, &mut patch.fg),
-        ("bg", Layer::Bg, &mut patch.bg),
-    ] {
-        match t.get::<mlua::Value>(key).map_err(|e| e.to_string())? {
-            mlua::Value::Nil => {}
-            mlua::Value::Boolean(false) => *slot = Some(Some(Color::Reset)),
-            value => *slot = Some(color(&value, layer, groups).map_err(|e| format!("{key}: {e}"))?),
-        }
-    }
-    for (key, slot) in [
-        ("bold", &mut patch.bold),
-        ("dim", &mut patch.dim),
-        ("italic", &mut patch.italic),
-        ("underline", &mut patch.underline),
-        ("crossedout", &mut patch.crossedout),
-        ("reverse", &mut patch.reverse),
-    ] {
-        *slot = match t.get::<mlua::Value>(key).map_err(|e| e.to_string())? {
-            mlua::Value::Nil => None,
-            mlua::Value::Boolean(value) => Some(value),
-            _ => return Err(format!("style.{key}: expected boolean")),
+    for pair in t.pairs::<mlua::Value, mlua::Value>() {
+        let (key, value) = pair.map_err(|e| e.to_string())?;
+        let name = match &key {
+            mlua::Value::String(name) => name.to_str().map_err(|e| e.to_string())?,
+            _ => return Err(format!("style: unknown option {key:?}")),
         };
+        let flag = match &*name {
+            "hl_group" => {
+                let mlua::Value::String(group) = &value else {
+                    return Err("style.hl_group: expected string".into());
+                };
+                let group = group.to_str().map_err(|e| e.to_string())?;
+                patch.group = Some(
+                    groups(&group)
+                        .ok_or_else(|| format!("style: unknown theme group '{group}'"))?,
+                );
+                continue;
+            }
+            "fg" | "bg" => {
+                let (layer, slot) = if &*name == "fg" {
+                    (Layer::Fg, &mut patch.fg)
+                } else {
+                    (Layer::Bg, &mut patch.bg)
+                };
+                *slot = Some(match value {
+                    mlua::Value::Boolean(false) => Some(Color::Reset),
+                    value => color(&value, layer, groups).map_err(|e| format!("{name}: {e}"))?,
+                });
+                continue;
+            }
+            "bold" => &mut patch.bold,
+            "dim" => &mut patch.dim,
+            "italic" => &mut patch.italic,
+            "underline" => &mut patch.underline,
+            "crossedout" => &mut patch.crossedout,
+            "reverse" => &mut patch.reverse,
+            _ => return Err(format!("style: unknown option {key:?}")),
+        };
+        let mlua::Value::Boolean(value) = value else {
+            return Err(format!("style.{name}: expected boolean"));
+        };
+        *flag = Some(value);
     }
     Ok(patch)
 }

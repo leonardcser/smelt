@@ -174,18 +174,21 @@ local FLARE_COOL_MS = 650
 local PAUSED_LEVEL = 0.4
 local FRAME_MS = 44
 
-local function mix(a, b, t)
+-- The color `t` of the way from `a` to `b`, into `out` when given.
+local function mix(a, b, t, out)
   t = math.max(0, math.min(t, 1))
-  return {
-    math.floor(a[1] + (b[1] - a[1]) * t),
-    math.floor(a[2] + (b[2] - a[2]) * t),
-    math.floor(a[3] + (b[3] - a[3]) * t),
-  }
+  out = out or {}
+  out[1] = math.floor(a[1] + (b[1] - a[1]) * t)
+  out[2] = math.floor(a[2] + (b[2] - a[2]) * t)
+  out[3] = math.floor(a[3] + (b[3] - a[3]) * t)
+  return out
 end
 
-local function ground() return smelt.theme.is_light() and { 252, 251, 249 } or { 23, 23, 28 } end
+local GROUND_LIGHT, GROUND_DARK = { 252, 251, 249 }, { 23, 23, 28 }
+local ASH_LIGHT, ASH_DARK = { 168, 164, 158 }, { 96, 96, 108 }
+local function ground() return smelt.theme.is_light() and GROUND_LIGHT or GROUND_DARK end
 -- The gray a finished coal settles to. The cool-down ends on exactly this color.
-local function ash() return smelt.theme.is_light() and { 168, 164, 158 } or { 96, 96, 108 } end
+local function ash() return smelt.theme.is_light() and ASH_LIGHT or ASH_DARK end
 
 -- How hot the coal burns, from 0 to 1. A bump from each tool call is folded in
 -- when the call starts or ends, and heat then rises while a call is pending and
@@ -305,10 +308,9 @@ local function flare(i, age, now)
   return math.max(landed, swept)
 end
 
-local function rest_color()
-  local rest = smelt.theme.is_light() and 120 or 150
-  return { rest, rest, rest }
-end
+local REST_LIGHT, REST_DARK = { 120, 120, 120 }, { 150, 150, 150 }
+local FLASH_LIGHT, FLASH_DARK = { 40, 12, 0 }, { 255, 252, 240 }
+local function rest_color() return smelt.theme.is_light() and REST_LIGHT or REST_DARK end
 
 -- The label types in, followed by an ellipsis. Each typed letter lays the bar
 -- out again; the colors change on every frame without a layout.
@@ -316,9 +318,14 @@ local shown, shown_since
 local function typed_label(label, ctx)
   local now = smelt.time.now_ms()
   if label ~= shown then shown, shown_since = label, now end
-  local letters = {}
-  for _, code in utf8.codes(label) do letters[#letters + 1] = utf8.char(code) end
+  local letters, widths = {}, {}
+  for _, code in utf8.codes(label) do
+    local letter = utf8.char(code)
+    letters[#letters + 1], widths[#widths + 1] = letter, smelt.text.width(letter)
+  end
   local count = #letters
+  widths[count + 1] = smelt.text.width("\u{2026}")
+  local patch = { fg = {} }
   local age = now - shown_since
   local typed = math.min(count, math.floor(age / TYPE_MS))
   if typed < count then ctx.invalidate_after(TYPE_MS - age % TYPE_MS) end
@@ -328,15 +335,15 @@ local function typed_label(label, ctx)
     priority = LABEL_PRIORITY,
     paint = function(slice, paint_ctx)
       local now = smelt.time.now_ms()
-      local flash = smelt.theme.is_light() and { 40, 12, 0 } or { 255, 252, 240 }
+      local flash = smelt.theme.is_light() and FLASH_LIGHT or FLASH_DARK
       local rest = rest_color()
       local age = now - shown_since
       local x = 0
       for i = 1, typed + 1 do
-        local letter = i <= typed and letters[i] or "\u{2026}"
-        local width = smelt.text.width(letter)
+        local width = i <= typed and widths[i] or widths[count + 1]
         local landed = i <= typed or age >= count * TYPE_MS
-        slice:patch_style(x, 0, width, 1, { fg = mix(rest, flash, landed and flare(i, age, now) or 0) })
+        mix(rest, flash, landed and flare(i, age, now) or 0, patch.fg)
+        slice:patch_style(x, 0, width, 1, patch)
         x = x + width
       end
       paint_ctx.invalidate_after(next_frame(now))

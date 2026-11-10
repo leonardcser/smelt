@@ -116,18 +116,20 @@ local function paint_items(bar, slice, ctx)
   local win = bar.paints_win
   if not win or #bar.paints == 0 then return end
   ctx.invalidate_after = bar.paint_after
+  bar.paint_ctx = ctx
   for _, placed in ipairs(bar.paints) do
-    local area = { x = placed.col, y = placed.row, width = placed.width, height = 1 }
-    slice:window(win, function(cells) placed.item.paint(cells, ctx) end, area)
+    slice:window(win, placed.draw, placed.area)
   end
 end
 
--- Remember where the items with a `paint` landed in `rows` of `win`.
+-- Remember where the items with a `paint` landed in `rows` of `win`, with the
+-- area and draw function each frame reuses.
 local function place_paints(bar, rows, win)
   local paints = {}
   for i, row in ipairs(rows) do
     for _, placed in ipairs(row.paints or {}) do
-      placed.row = i - 1
+      placed.area = { x = placed.col, y = i - 1, width = placed.width, height = 1 }
+      placed.draw = function(cells) placed.item.paint(cells, bar.paint_ctx) end
       paints[#paints + 1] = placed
     end
   end
