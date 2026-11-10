@@ -66,6 +66,9 @@ struct Inner {
     store: smelt_store::Store,
 }
 
+/// Artifact file that marks a session as a spawned agent's record.
+pub(crate) const AGENT_VIEW_FILE: &str = "agent-view.json";
+
 impl SessionStorage {
     pub fn from_env(env: &engine::env::RuntimeEnv) -> Self {
         Self::new(env.state_dir().clone())
@@ -134,6 +137,15 @@ impl SessionStorage {
 
     pub fn artifact_dir_for(&self, session: &Session) -> PathBuf {
         self.artifact_dir_for_id(&session.id)
+    }
+
+    /// Whether the session records a spawned agent rather than a user conversation.
+    fn is_agent_session(&self, id: &str) -> bool {
+        SessionId::parse(id).is_ok_and(|id| {
+            self.session_artifact_dir(&id)
+                .join(AGENT_VIEW_FILE)
+                .exists()
+        })
     }
 
     pub fn session_artifact_dir(&self, id: &SessionId) -> PathBuf {
@@ -323,8 +335,15 @@ impl SessionStorage {
                 parent_id: parent_id.map(str::to_owned),
             })
             .context("list sessions")?;
+        // Agent sessions belong to their parent and load through `children`.
+        let hide_agents = parent_id.is_none();
         Ok(SessionListPage {
-            sessions: page.sessions.into_iter().map(list_meta).collect(),
+            sessions: page
+                .sessions
+                .into_iter()
+                .filter(|session| !hide_agents || !self.is_agent_session(&session.id))
+                .map(list_meta)
+                .collect(),
             next_cursor: page.next_cursor.map(|cursor| SessionListCursor {
                 updated_at_ms: cursor.updated_at.max(0) as u64,
                 id: cursor.id,
@@ -908,6 +927,34 @@ mod tests {
         assert_eq!(listed, ids);
         assert!(second.next_cursor.is_none());
         assert_eq!(storage.children(&parent.id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn listing_hides_agent_sessions_but_children_keep_them() {
+        let (_root, storage) = storage();
+        let parent = session(Vec::new());
+        storage.save(&parent).unwrap();
+        let fork = parent.fork(1);
+        storage.save(&fork).unwrap();
+        let agent = parent.fork(1);
+        storage.save(&agent).unwrap();
+        let dir = storage.artifact_dir_for_id(&agent.id);
+        storage.create_private_dir_all(&dir).unwrap();
+        storage
+            .write_private_file(&dir.join(AGENT_VIEW_FILE), b"{}")
+            .unwrap();
+
+        let mut listed: Vec<_> = storage
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|meta| meta.id)
+            .collect();
+        listed.sort();
+        let mut expected = vec![parent.id.clone(), fork.id.clone()];
+        expected.sort();
+        assert_eq!(listed, expected);
+        assert_eq!(storage.children(&parent.id).unwrap().len(), 2);
     }
 
     #[test]

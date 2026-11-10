@@ -50,7 +50,7 @@ impl Archive {
                         .map_err(|error| error.to_string())?;
                     let path = storage
                         .artifact_dir_for_id(&snapshot.saved.session_id)
-                        .join("agent-view.json");
+                        .join(crate::session::AGENT_VIEW_FILE);
                     let bytes =
                         serde_json::to_vec(&snapshot.saved).map_err(|error| error.to_string())?;
                     storage
@@ -136,7 +136,7 @@ pub(super) fn load(
     {
         let path = storage
             .artifact_dir_for_id(&meta.id)
-            .join("agent-view.json");
+            .join(crate::session::AGENT_VIEW_FILE);
         let bytes = match storage.read_private_file(&path, 1024 * 1024) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
