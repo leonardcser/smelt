@@ -196,22 +196,67 @@ impl Default for Cell {
     }
 }
 
+/// A set of grid rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RowSet(Vec<bool>);
+
+impl RowSet {
+    fn insert(&mut self, y: u16) {
+        let y = usize::from(y);
+        if y >= self.0.len() {
+            self.0.resize(y + 1, false);
+        }
+        self.0[y] = true;
+    }
+
+    fn insert_range(&mut self, rows: std::ops::Range<u16>) {
+        for y in rows {
+            self.insert(y);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub(crate) fn contains(&self, y: u16) -> bool {
+        self.0.get(usize::from(y)).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn union_with(&mut self, other: &RowSet) {
+        for y in other.iter() {
+            self.insert(y);
+        }
+    }
+
+    /// The rows in the set, top to bottom.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = u16> + '_ {
+        (0..self.0.len()).filter(|&y| self.0[y]).map(|y| y as u16)
+    }
+}
+
 #[derive(Clone)]
 pub struct Grid {
     cells: Vec<Cell>,
     width: u16,
     height: u16,
     terminal_cursor_position: Option<(u16, u16)>,
+    /// Rows written since the grid last copied another; the rest still equal
+    /// it. A fresh or cleared grid has every row written.
+    written: RowSet,
 }
 
 impl Grid {
     pub fn new(width: u16, height: u16) -> Self {
         let len = width as usize * height as usize;
+        let mut written = RowSet::default();
+        written.insert_range(0..height);
         Self {
             cells: vec![Cell::default(); len],
             width,
             height,
             terminal_cursor_position: None,
+            written,
         }
     }
 
@@ -237,12 +282,33 @@ impl Grid {
         }
     }
 
-    /// Become a copy of `other`, reusing this grid's storage.
-    pub fn copy_from(&mut self, other: &Grid) {
+    /// Become a copy of `other`, reusing this grid's storage, with no row written.
+    pub(crate) fn copy_from(&mut self, other: &Grid) {
         self.cells.clone_from(&other.cells);
         self.width = other.width;
         self.height = other.height;
         self.terminal_cursor_position = other.terminal_cursor_position;
+        self.written.clear();
+    }
+
+    pub(crate) fn written_rows(&self) -> &RowSet {
+        &self.written
+    }
+
+    /// Copy the written rows back from `base`, the grid this one last copied.
+    /// `rows` receives those rows and `old` what they held, row by row.
+    pub(crate) fn revert_written(&mut self, base: &Grid, rows: &mut RowSet, old: &mut Vec<Cell>) {
+        debug_assert_eq!((self.width, self.height), (base.width, base.height));
+        std::mem::swap(rows, &mut self.written);
+        old.clear();
+        let width = usize::from(self.width);
+        for y in rows.iter() {
+            let span = usize::from(y) * width..(usize::from(y) + 1) * width;
+            old.extend_from_slice(&self.cells[span.clone()]);
+            self.cells[span.clone()].clone_from_slice(&base.cells[span]);
+        }
+        self.terminal_cursor_position = base.terminal_cursor_position;
+        self.written.clear();
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -266,6 +332,7 @@ impl Grid {
     pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         if x < self.width && y < self.height {
             let idx = self.idx(x, y);
+            self.written.insert(y);
             Some(&mut self.cells[idx])
         } else {
             None
@@ -353,6 +420,7 @@ impl Grid {
         } else {
             (symbol, image)
         };
+        self.written.insert(y);
         let idx = self.idx(x, y);
         let old_width = self.cells[idx].symbol.width();
         let old_was_continuation = self.cells[idx].symbol.is_continuation();
@@ -439,6 +507,8 @@ impl Grid {
             *cell = Cell::default();
         }
         self.terminal_cursor_position = None;
+        self.written.clear();
+        self.written.insert_range(0..self.height);
     }
 
     /// A slice covering the whole grid. All drawing goes through [`GridSlice`].
@@ -478,6 +548,26 @@ impl Grid {
                 None
             }
         })
+    }
+
+    /// The cells of row `y` that differ from `old`.
+    pub(crate) fn row_diff<'a>(
+        &'a self,
+        y: u16,
+        old: &'a [Cell],
+    ) -> impl Iterator<Item = CellUpdate<'a>> {
+        let row_width = self.width;
+        self.row(y)
+            .iter()
+            .zip(old)
+            .enumerate()
+            .filter(|(_, (cell, old))| !cell.symbol.is_continuation() && cell != old)
+            .map(move |(x, (cell, _))| CellUpdate {
+                x: x as u16,
+                y,
+                row_width,
+                cell,
+            })
     }
 
     /// Every row of the grid as a one-row rect, top to bottom: the damage
@@ -575,9 +665,10 @@ impl Grid {
             0..shift
         };
         band[exposed].fill(Cell::default());
+        self.written.insert_range(top..bottom);
     }
 
-    pub fn swap_with(&mut self, other: &mut Grid) {
+    pub(crate) fn swap_with(&mut self, other: &mut Grid) {
         std::mem::swap(&mut self.cells, &mut other.cells);
         std::mem::swap(&mut self.width, &mut other.width);
         std::mem::swap(&mut self.height, &mut other.height);
@@ -585,6 +676,7 @@ impl Grid {
             &mut self.terminal_cursor_position,
             &mut other.terminal_cursor_position,
         );
+        std::mem::swap(&mut self.written, &mut other.written);
     }
 
     fn idx(&self, x: u16, y: u16) -> usize {

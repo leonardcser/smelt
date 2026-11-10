@@ -1095,7 +1095,7 @@ impl TuiApp {
         let composed_stale = self
             .composed
             .as_ref()
-            .is_none_or(|composed| (composed.grid.width(), composed.grid.height()) != size);
+            .is_none_or(|composed| (composed.grid().width(), composed.grid().height()) != size);
         let compose = compose || frame_trace.is_none_or(|trace| trace.compose) || composed_stale;
         let clock = if compose {
             Some(self.compose_frame())
@@ -1341,11 +1341,9 @@ impl TuiApp {
         };
         let _perf = smelt_perf::perf::begin("compositor:present");
         let now = self.core.clock.instant_now();
-        let mut grid = self.ui.begin_present(&composed.grid);
-        let mut revealing = self
-            .conversation
-            .reveal_mut()
-            .present(&mut grid, &composed, now);
+        let mut frame = self.ui.begin_present(&composed);
+        let grid = frame.grid_mut();
+        let mut revealing = self.conversation.reveal_mut().present(grid, &composed, now);
         for stream in self
             .plugin_streams
             .iter()
@@ -1354,7 +1352,7 @@ impl TuiApp {
             revealing |= stream
                 .borrow_mut()
                 .reveal_mut()
-                .present(&mut grid, &composed, now);
+                .present(grid, &composed, now);
         }
         if revealing {
             self.frame_scheduler
@@ -1370,11 +1368,11 @@ impl TuiApp {
         let changes = frame_paints
             .iter()
             .any(|slot| slot.options.history())
-            .then(|| self.paint_timeline.present_history(&grid));
+            .then(|| self.paint_timeline.present_history(grid));
         crate::lua::paint::scope_composed(&composed, || {
-            self.run_frame_paints(&frame_paints, &mut grid, &clock, changes.as_ref());
+            self.run_frame_paints(&frame_paints, grid, &clock, changes.as_ref());
         });
-        let _ = self.ui.flush_frame(out, grid);
+        let _ = self.ui.flush_present(out, frame, &composed);
         self.composed = Some(composed);
     }
 

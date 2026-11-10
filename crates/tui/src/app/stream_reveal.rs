@@ -267,7 +267,7 @@ impl<K: Hash + Eq> StreamReveal<K> {
                         break;
                     };
                     let y = painted.text.y + (row - painted.scroll_top) as u16;
-                    let count = row_glyphs(&composed.grid, composed, painted, y);
+                    let count = row_glyphs(composed.grid(), composed, painted, y);
                     let row = row - start;
                     let is_new = known.is_some_and(|known| row >= known);
                     new_rows_shown += RowIndex::from(is_new);
@@ -570,7 +570,7 @@ mod tests {
         reveal.arrive(&(), start);
         reveal.measure(&composed, Some(window), |_| Some((0, 6)), start);
         assert_eq!(reveal.streams[&()].pace.hidden, 0);
-        let mut grid = composed.grid.clone();
+        let mut grid = composed.grid().clone();
         assert!(
             !reveal.present(&mut grid, &composed, start),
             "no frames to wait for"

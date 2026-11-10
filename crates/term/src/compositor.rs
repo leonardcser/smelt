@@ -1,5 +1,5 @@
 use super::flush::flush_diff;
-use super::grid::Grid;
+use super::grid::{Cell, Grid, RowSet};
 use super::kitty;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::QueueableCommand;
@@ -13,15 +13,59 @@ const MAX_SPARE_GRIDS: usize = 2;
 /// Double-buffered terminal renderer. Diffs each frame against `previous`
 /// and flushes only changed cells, scrolling the terminal first when whole
 /// rows moved; `force_redraw` triggers a full repaint.
+///
+/// [`Self::begin_present`] draws over a base grid. When the screen already
+/// shows that base, only the rows drawn over it are reverted, compared and
+/// written.
 #[derive(Clone)]
 pub struct Compositor {
     /// Grids handed back after a frame, reused so frames do not allocate.
     spare: Vec<Grid>,
     previous: Grid,
+    screen: Screen,
+    next_loan: u64,
+    /// Storage reused by every loan.
+    reverted: Reverted,
     width: u16,
     height: u16,
     force_redraw: bool,
     uploaded_images: HashSet<u32>,
+}
+
+/// What `previous` holds besides the last flushed frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Unknown,
+    /// Presented over this base: its unwritten rows equal the base.
+    Presented(u64),
+    /// Lent to the present frame with this loan, and replaced by a placeholder.
+    Lent(u64),
+}
+
+/// The rows a present reverted, and the cells they showed before, row by row.
+#[derive(Clone, Default)]
+struct Reverted {
+    rows: RowSet,
+    cells: Vec<Cell>,
+}
+
+/// A frame from [`Compositor::begin_present`], for [`Compositor::flush_present`].
+pub struct PresentFrame {
+    grid: Grid,
+    base: u64,
+    /// Set when `grid` is the lent screen grid rather than a copy of the base.
+    loan: Option<Loan>,
+}
+
+struct Loan {
+    id: u64,
+    reverted: Reverted,
+}
+
+impl PresentFrame {
+    pub fn grid_mut(&mut self) -> &mut Grid {
+        &mut self.grid
+    }
 }
 
 impl Compositor {
@@ -29,6 +73,9 @@ impl Compositor {
         Self {
             spare: Vec::new(),
             previous: Grid::new(width, height),
+            screen: Screen::Unknown,
+            next_loan: 0,
+            reverted: Reverted::default(),
             width,
             height,
             force_redraw: true,
@@ -75,8 +122,114 @@ impl Compositor {
         self.spare.pop().unwrap_or_else(|| Grid::new(0, 0))
     }
 
+    /// Start a frame drawn over `base`. Grids with the same `base_id` must be
+    /// equal.
+    pub fn begin_present(&mut self, base: &Grid, base_id: u64) -> PresentFrame {
+        let size = (self.width, self.height);
+        let incremental = self.screen == Screen::Presented(base_id)
+            && !self.force_redraw
+            && self.uploaded_images.is_empty()
+            && (base.width(), base.height()) == size
+            && (self.previous.width(), self.previous.height()) == size;
+        if !incremental {
+            return PresentFrame {
+                grid: self.begin_copy(base),
+                base: base_id,
+                loan: None,
+            };
+        }
+        let placeholder = self.take_spare();
+        let mut grid = std::mem::replace(&mut self.previous, placeholder);
+        let mut reverted = std::mem::take(&mut self.reverted);
+        grid.revert_written(base, &mut reverted.rows, &mut reverted.cells);
+        let id = self.next_loan;
+        self.next_loan = id.wrapping_add(1);
+        self.screen = Screen::Lent(id);
+        PresentFrame {
+            grid,
+            base: base_id,
+            loan: Some(Loan { id, reverted }),
+        }
+    }
+
+    /// Flush a frame from [`Self::begin_present`] drawn over `base`.
+    pub fn flush_present<W: Write>(
+        &mut self,
+        w: &mut W,
+        frame: PresentFrame,
+        base: &Grid,
+    ) -> std::io::Result<()> {
+        let PresentFrame {
+            grid,
+            base: base_id,
+            loan,
+        } = frame;
+        let Some(Loan { id, reverted }) = loan else {
+            return self.flush_presented(w, grid, base_id);
+        };
+        let mut rows = reverted.rows.clone();
+        rows.union_with(grid.written_rows());
+        let size = (self.width, self.height);
+        // A frame begun or flushed since, or an image to upload, needs a whole
+        // frame.
+        let incremental = self.screen == Screen::Lent(id)
+            && (grid.width(), grid.height()) == size
+            && (base.width(), base.height()) == size
+            && !rows
+                .iter()
+                .any(|y| grid.row(y).iter().any(|cell| cell.image.is_some()));
+        if !incremental {
+            self.reverted = reverted;
+            return self.flush_presented(w, grid, base_id);
+        }
+        let placeholder = std::mem::replace(&mut self.previous, grid);
+        self.recycle(placeholder);
+        let result = (|| {
+            w.queue(BeginSynchronizedUpdate)?;
+            let mut before = reverted.cells.chunks(usize::from(self.width).max(1));
+            let updates = rows.iter().flat_map(|y| {
+                let old = if reverted.rows.contains(y) {
+                    before.next().unwrap_or_default()
+                } else {
+                    base.row(y)
+                };
+                self.previous.row_diff(y, old)
+            });
+            flush_diff(w, updates)?;
+            if let Some((x, y)) = self.previous.terminal_cursor_position() {
+                w.queue(crossterm::cursor::MoveTo(x, y))?;
+            }
+            w.queue(EndSynchronizedUpdate)?;
+            w.flush()
+        })();
+        self.reverted = reverted;
+        if result.is_ok() {
+            self.screen = Screen::Presented(base_id);
+        } else {
+            self.screen = Screen::Unknown;
+            self.force_redraw = true;
+        }
+        result
+    }
+
+    fn flush_presented<W: Write>(
+        &mut self,
+        w: &mut W,
+        grid: Grid,
+        base_id: u64,
+    ) -> std::io::Result<()> {
+        let result = self.flush_frame(w, grid);
+        if result.is_ok() {
+            self.screen = Screen::Presented(base_id);
+        }
+        result
+    }
+
     /// Flush a frame from [`Self::begin_frame`] and recycle its grid.
     pub fn flush_frame<W: Write>(&mut self, w: &mut W, mut frame: Grid) -> std::io::Result<()> {
+        // A lent screen grid left a placeholder to diff against.
+        self.force_redraw |= matches!(self.screen, Screen::Lent(_));
+        self.screen = Screen::Unknown;
         let mut images = HashMap::new();
         for y in 0..frame.height() {
             for x in 0..frame.width() {
@@ -697,5 +850,234 @@ mod tests {
         assert!(!compositor.force_redraw);
         assert_eq!(compositor.previous().cell(0, 0).symbol, ' ');
         assert_eq!(compositor.previous().cell(1, 0).symbol, 'y');
+    }
+
+    /// A base grid with a numbered line on every row, some with wide glyphs.
+    fn base_grid(width: u16, height: u16, seed: u64) -> Grid {
+        let mut grid = Grid::new(width, height);
+        for y in 0..height {
+            let wide = if (seed + u64::from(y)) % 3 == 0 {
+                "界"
+            } else {
+                ""
+            };
+            let text = format!("b{seed}{wide} row{y}");
+            grid.as_mut_slice().put_str(0, y, &text, Style::default());
+        }
+        grid
+    }
+
+    /// The screen the terminal shows after `bytes`, as text and bold per cell.
+    fn screen_after(width: u16, height: u16, bytes: &[u8]) -> Vec<(String, bool)> {
+        let size = |n: u16| std::num::NonZeroU16::new(n).unwrap();
+        let mut terminal = vt100::Parser::new(size(height), size(width), 0);
+        terminal.process(bytes);
+        let screen = terminal.screen();
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (y, x)))
+            .map(|(y, x)| {
+                let cell = screen.cell(y, x).unwrap();
+                let text = Some(cell.contents()).filter(|t| !t.is_empty());
+                (text.unwrap_or(" ").to_owned(), cell.bold())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn presents_over_a_base_show_what_a_full_redraw_shows() {
+        let _lock = registry_test_lock();
+        let (width, height) = (12u16, 9u16);
+        let mut seed = 11u64;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let mut compositor = Compositor::new(width, height);
+        let mut output = Vec::new();
+        let (mut base, mut base_id) = (base_grid(width, height, 0), 0);
+        for frame in 0..300 {
+            if next(8) == 0 {
+                base_id += 1;
+                base = base_grid(width, height, base_id);
+            }
+            let marks: Vec<(u16, u16, char)> = (0..next(4))
+                .map(|_| {
+                    (
+                        next(u64::from(width)) as u16,
+                        next(u64::from(height)) as u16,
+                        if next(3) == 0 { '界' } else { '*' },
+                    )
+                })
+                .collect();
+            let paint = |grid: &mut Grid| {
+                for &(x, y, mark) in &marks {
+                    grid.as_mut_slice().set(x, y, mark, Style::new().bold());
+                }
+            };
+            let mut present = compositor.begin_present(&base, base_id);
+            paint(present.grid_mut());
+            compositor
+                .flush_present(&mut output, present, &base)
+                .unwrap();
+
+            let mut expected = base.clone();
+            paint(&mut expected);
+            let mut full = Vec::new();
+            Compositor::new(width, height)
+                .render_with(&mut full, |grid| grid.copy_from(&expected))
+                .unwrap();
+            assert_eq!(
+                screen_after(width, height, &output),
+                screen_after(width, height, &full),
+                "frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn present_over_the_same_base_writes_only_the_cells_drawn_over_it() {
+        let _lock = registry_test_lock();
+        let base = base_grid(12, 6, 0);
+        let mut compositor = Compositor::new(12, 6);
+        let mut present = |x: Option<u16>| {
+            let mut frame = compositor.begin_present(&base, 7);
+            if let Some(x) = x {
+                frame
+                    .grid_mut()
+                    .as_mut_slice()
+                    .set(x, 2, '*', Style::default());
+            }
+            let mut output = Vec::new();
+            compositor.flush_present(&mut output, frame, &base).unwrap();
+            String::from_utf8(output).unwrap()
+        };
+        assert!(
+            present(Some(0)).contains("row5"),
+            "the first present draws the base"
+        );
+
+        let moved = present(Some(4));
+        assert_eq!(moved.matches('*').count(), 1);
+        assert!(!moved.contains("row"), "{moved:?}");
+
+        let unchanged = present(Some(4));
+        assert!(!unchanged.contains('*'), "{unchanged:?}");
+    }
+
+    /// The screen a fresh terminal shows for `grid` drawn in full.
+    fn full_screen(grid: &Grid) -> Vec<(String, bool)> {
+        let mut full = Vec::new();
+        Compositor::new(grid.width(), grid.height())
+            .render_with(&mut full, |frame| frame.copy_from(grid))
+            .unwrap();
+        screen_after(grid.width(), grid.height(), &full)
+    }
+
+    /// `base` with a bold `*` at `(x, 0)`.
+    fn marked(base: &Grid, x: u16) -> Grid {
+        let mut grid = base.clone();
+        grid.as_mut_slice().set(x, 0, '*', Style::new().bold());
+        grid
+    }
+
+    fn present_mark(
+        compositor: &mut Compositor,
+        out: &mut impl Write,
+        base: &Grid,
+        x: u16,
+    ) -> std::io::Result<()> {
+        let mut frame = compositor.begin_present(base, 1);
+        frame
+            .grid_mut()
+            .as_mut_slice()
+            .set(x, 0, '*', Style::new().bold());
+        compositor.flush_present(out, frame, base)
+    }
+
+    #[test]
+    fn present_after_a_failed_write_redraws_in_full() {
+        let _lock = registry_test_lock();
+        let base = base_grid(12, 4, 0);
+        let mut compositor = Compositor::new(12, 4);
+        present_mark(&mut compositor, &mut Vec::new(), &base, 0).unwrap();
+        present_mark(&mut compositor, &mut Vec::new(), &base, 2).unwrap();
+        assert!(present_mark(&mut compositor, &mut FailingWriter, &base, 4).is_err());
+
+        let mut retry = Vec::new();
+        present_mark(&mut compositor, &mut retry, &base, 6).unwrap();
+        assert_eq!(screen_after(12, 4, &retry), full_screen(&marked(&base, 6)));
+    }
+
+    #[test]
+    fn present_whose_screen_changed_meanwhile_redraws_in_full() {
+        let _lock = registry_test_lock();
+        let base = base_grid(12, 4, 0);
+        let mut compositor = Compositor::new(12, 4);
+        let mut output = Vec::new();
+        present_mark(&mut compositor, &mut output, &base, 0).unwrap();
+        present_mark(&mut compositor, &mut output, &base, 2).unwrap();
+
+        let mut stale = compositor.begin_present(&base, 1);
+        stale
+            .grid_mut()
+            .as_mut_slice()
+            .set(4, 0, '*', Style::new().bold());
+        let other = base_grid(12, 4, 9);
+        compositor
+            .render_with(&mut output, |grid| grid.copy_from(&other))
+            .unwrap();
+        compositor.flush_present(&mut output, stale, &base).unwrap();
+        assert_eq!(screen_after(12, 4, &output), full_screen(&marked(&base, 4)));
+    }
+
+    #[test]
+    fn abandoned_present_leaves_the_next_frame_correct() {
+        let _lock = registry_test_lock();
+        let base = base_grid(12, 4, 0);
+        let mut compositor = Compositor::new(12, 4);
+        let mut output = Vec::new();
+        present_mark(&mut compositor, &mut output, &base, 0).unwrap();
+        present_mark(&mut compositor, &mut output, &base, 2).unwrap();
+
+        drop(compositor.begin_present(&base, 1));
+        present_mark(&mut compositor, &mut output, &base, 6).unwrap();
+        assert_eq!(screen_after(12, 4, &output), full_screen(&marked(&base, 6)));
+    }
+
+    #[test]
+    fn image_drawn_over_a_presented_base_is_uploaded_and_later_released() {
+        let _lock = registry_test_lock();
+        let id = 0x010205;
+        let image = kitty::register_image(id, "QUJDRA==".into(), 2, 2).unwrap();
+        let style = Style::new().fg(crate::Color::Rgb { r: 1, g: 2, b: 5 });
+        let base = base_grid(12, 4, 0);
+        let mut compositor = Compositor::new(12, 4);
+        let mut output = Vec::new();
+        present_mark(&mut compositor, &mut output, &base, 0).unwrap();
+        present_mark(&mut compositor, &mut output, &base, 2).unwrap();
+
+        let mut with_image = compositor.begin_present(&base, 1);
+        with_image.grid_mut().as_mut_slice().set_image_symbol(
+            0,
+            2,
+            "\u{10eeee}\u{030d}\u{0305}",
+            style,
+            Arc::clone(&image),
+        );
+        let mut uploaded = Vec::new();
+        compositor
+            .flush_present(&mut uploaded, with_image, &base)
+            .unwrap();
+        assert!(uploaded.windows(4).any(|window| window == b"a=T,"));
+        assert!(compositor.uploaded_images.contains(&id));
+
+        let mut released = Vec::new();
+        present_mark(&mut compositor, &mut released, &base, 6).unwrap();
+        assert!(compositor.uploaded_images.is_empty());
+        output.extend_from_slice(&uploaded);
+        output.extend_from_slice(&released);
+        assert_eq!(screen_after(12, 4, &output), full_screen(&marked(&base, 6)));
     }
 }

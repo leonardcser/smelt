@@ -15,7 +15,7 @@ pub mod snapshot;
 pub mod surface;
 
 pub use color_depth::{color_depth, detect_color_depth, ColorDepth, COLOR_ENV};
-pub use compositor::Compositor;
+pub use compositor::{Compositor, PresentFrame};
 pub use flush::{flush_diff, flush_diff_at};
 pub use geometry::Insets;
 pub use grid::{

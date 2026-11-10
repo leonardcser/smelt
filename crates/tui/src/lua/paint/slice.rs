@@ -192,7 +192,7 @@ fn with_window(
         ));
     }
     COMPOSED.with(|composed| {
-        let full = Rect::new(0, 0, composed.grid.width(), composed.grid.height());
+        let full = Rect::new(0, 0, composed.grid().width(), composed.grid().height());
         if screen.screen_rect() != Some(full) {
             return Err(LuaError::RuntimeError(
                 "slice:window: call it on the screen slice of a frame paint".into(),

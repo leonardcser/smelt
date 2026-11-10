@@ -33,8 +33,8 @@ pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 pub use smelt_term::{
     flush_diff, Border, Cell, CellSymbol, CellUpdate, Color, Compositor, Constraint, ContainerId,
-    Grid, GridSlice, HitRegistry, LayoutTree, Line, Natural, NaturalRef, PaintId, Rect,
-    SnapshotFrame, Span, StaticNatural, Style, Theme,
+    Grid, GridSlice, HitRegistry, LayoutTree, Line, Natural, NaturalRef, PaintId, PresentFrame,
+    Rect, SnapshotFrame, Span, StaticNatural, Style, Theme,
 };
 pub use smelt_term::{grid, layout};
 
@@ -269,7 +269,9 @@ impl ScreenOwners {
 /// window's text landed on it.
 #[derive(Clone)]
 pub struct ComposedFrame {
-    pub grid: Grid,
+    grid: Grid,
+    /// Names the grid, which never changes.
+    id: u64,
     windows: Vec<PaintedWindow>,
     owners: ScreenOwners,
 }
@@ -282,11 +284,22 @@ impl ComposedFrame {
         for (index, window) in windows.iter().enumerate() {
             owners.mark(window.text, index as u16);
         }
+        Self::with_owners(grid, windows, owners)
+    }
+
+    fn with_owners(grid: Grid, windows: Vec<PaintedWindow>, owners: ScreenOwners) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         Self {
             grid,
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             windows,
             owners,
         }
+    }
+
+    /// The screen as the UI painted it.
+    pub fn grid(&self) -> &Grid {
+        &self.grid
     }
 
     /// The windows painted, in painter order.
@@ -384,11 +397,7 @@ impl Frame {
     /// Finish the frame. Remaining commands are dropped; call
     /// [`Self::paint_to_next_leaf`] until it returns `None` first.
     pub fn finish(self) -> ComposedFrame {
-        ComposedFrame {
-            grid: self.grid,
-            windows: self.windows,
-            owners: self.owners,
-        }
+        ComposedFrame::with_owners(self.grid, self.windows, self.owners)
     }
 }
 
@@ -3027,10 +3036,24 @@ impl Ui {
         }
     }
 
-    /// A grid for presenting a frame composed earlier: a copy of `composed`
-    /// in the compositor's next buffer. Pass it to [`Self::flush_frame`].
-    pub fn begin_present(&mut self, composed: &Grid) -> Grid {
-        self.surface.compositor_mut().begin_copy(composed)
+    /// A frame for presenting `composed` again, with effects drawn over it.
+    /// Pass it to [`Self::flush_present`] with the same `composed`.
+    pub fn begin_present(&mut self, composed: &ComposedFrame) -> PresentFrame {
+        self.surface
+            .compositor_mut()
+            .begin_present(&composed.grid, composed.id)
+    }
+
+    /// Flush a frame from [`Self::begin_present`].
+    pub fn flush_present<W: std::io::Write>(
+        &mut self,
+        w: &mut W,
+        frame: PresentFrame,
+        composed: &ComposedFrame,
+    ) -> std::io::Result<()> {
+        self.surface
+            .compositor_mut()
+            .flush_present(w, frame, &composed.grid)
     }
 
     /// Hand a composed frame's grid back for reuse once it is replaced.
