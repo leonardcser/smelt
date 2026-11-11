@@ -625,6 +625,63 @@ fn complete_background_job(app: &mut TestApp) {
 }
 
 #[test]
+fn scheduled_limit_recovery_reports_waiting_until_resume_or_cancellation() {
+    use smelt_core::public_status::PublicState;
+
+    for kind in [
+        protocol::EngineAskErrorKind::Quota,
+        protocol::EngineAskErrorKind::RateLimited,
+    ] {
+        for cancel in [false, true] {
+            let mut app = isolated_app();
+            start_canonical_turn(&mut app);
+            let reset_at_ms = engine::clock::unix_time_ms(app.clock.as_ref()) + 5_000;
+            app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+                message: "limit reached".into(),
+                kind: Some(kind),
+                retry_at_ms: Some(reset_at_ms),
+            }));
+            app.wait_for_turn_dispatch();
+
+            assert_eq!(
+                app.public_status_state_reason(),
+                (PublicState::Waiting, None)
+            );
+            assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
+            assert_eq!(
+                app.public_status_state_reason(),
+                (PublicState::Waiting, None)
+            );
+
+            if cancel {
+                assert!(app.run_lua("smelt.engine.cancel()"));
+                assert_ne!(app.public_status_state_reason().0, PublicState::Waiting);
+                assert!(!has_started_turn(&run_due_timers(&mut app, 6000)));
+            } else {
+                assert!(has_started_turn(&run_due_timers(&mut app, 6000)));
+                assert_eq!(app.public_status_state_reason(), (PublicState::Busy, None));
+            }
+        }
+    }
+}
+
+#[test]
+fn quota_pause_without_scheduled_recovery_does_not_report_waiting() {
+    for auto_continue in ["off", "goal"] {
+        let mut app = isolated_app();
+        assert!(app.run_lua(&format!("smelt.settings.auto_continue = {auto_continue:?}")));
+        start_canonical_turn(&mut app);
+        quota_error(&mut app, (auto_continue == "off").then_some(0));
+
+        assert_ne!(
+            app.public_status_state_reason().0,
+            smelt_core::public_status::PublicState::Waiting
+        );
+        assert!(!has_started_turn(&run_due_timers(&mut app, 6000)));
+    }
+}
+
+#[test]
 fn quota_pause_blocks_idle_dispatch_and_keeps_both_queue_stages_visible() {
     let mut app = isolated_app();
     start_canonical_turn(&mut app);

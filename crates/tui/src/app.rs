@@ -2597,6 +2597,11 @@ impl TuiApp {
             WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
                 (PublicState::Busy, None)
             }
+            WorkState::Done | WorkState::Idle | WorkState::Interrupted
+                if self.conversation.turn_pause().is_some() && self.continuation_is_scheduled() =>
+            {
+                (PublicState::Waiting, None)
+            }
             WorkState::Done | WorkState::Idle
                 if self
                     .core
