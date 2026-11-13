@@ -2,6 +2,7 @@
 
 pub mod ansi;
 pub mod color_depth;
+pub mod colors;
 pub mod compositor;
 pub mod flush;
 pub mod geometry;
@@ -15,6 +16,7 @@ pub mod snapshot;
 pub mod surface;
 
 pub use color_depth::{color_depth, detect_color_depth, ColorDepth, COLOR_ENV};
+pub use colors::{ColorQuery, TerminalColors};
 pub use compositor::{Compositor, PresentFrame};
 pub use flush::{flush_diff, flush_diff_at};
 pub use geometry::Insets;

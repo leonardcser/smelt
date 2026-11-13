@@ -91,6 +91,7 @@ Full signatures are on [docs.rs](https://docs.rs/smelt-term). Start here:
 - `HitRegistry<P>`: map mouse positions back to your own payloads.
 - `SnapshotFrame`: text snapshots of a `Grid` for tests.
 - `kitty`: inline images through the Kitty graphics protocol.
+- `colors`: ask the terminal for its foreground, background, and ANSI colors.
 
 Writing cells: `set` / `put_str` / `put_line` overwrite the cell and its style,
 and the `put_*` calls return the clipped end column. `put_char` / `put_str_fg`
@@ -169,6 +170,24 @@ terminal output. It preserves SGR state across rows and graphemes across style
 boundaries. `put_str`, `put_padded`, `display_width`, and `truncate_width` use the
 same grapheme-aware cell-width policy. No separate ANSI/style dependency or
 character-by-character clipping loop is needed.
+
+## Terminal colors
+
+`colors::query` asks the terminal for its default foreground and background
+and its 16 ANSI colors in one round trip, and waits at most 200 ms. Call it
+before `TerminalSession` takes the terminal, then pick styles for a light or
+dark background:
+
+```rust,no_run
+let query = smelt_term::colors::query();
+let light = query.colors.light.unwrap_or(false);
+let palette = query.colors.palette(); // reported colors, xterm defaults in the gaps
+```
+
+`light` falls back to `$COLORFGBG` when the terminal does not report its
+background. Keys typed during the wait come back in `query.input`, without
+the replies. `TerminalSession::events` cannot replay them, so they are lost
+unless you parse input bytes yourself.
 
 ## Used by
 

@@ -22,6 +22,9 @@ crossterm = { workspace = true }
 unicode-width = "0.2"
 compact_str = "0.10.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 insta = { workspace = true }
 vt100 = "0.18.1"
