@@ -95,8 +95,8 @@ function gallery(user: string, step: number): Chunk[] | null {
     );
   if (/diagram of how a price is discounted/i.test(user))
     return text(
-      "Here is the flow:\n\n```mermaid\nflowchart LR\n  A[Price] --> B{Percent over 100?}\n  B -- yes --> C[Hold at 100]\n  B -- no --> D[Take percent off]\n  C --> D\n  D --> E[New price]\n```\n\n" +
-        "A percent over 100 is held at 100, so a price never goes below zero.",
+      "Here is the flow:\n\n```mermaid\nflowchart LR\n  A{Over 100%?} -- yes --> B[Cap at 100%]\n  A -- no --> C[Take % off]\n  B --> C\n  C --> D[New price]\n```\n\n" +
+        "A percent over 100% is capped at 100%, so a price never goes below zero.",
     );
   if (/what does apply_discount do\?/i.test(user)) return text("Takes a price in cents and a percent, and returns the price after the discount.");
   if (/money math/i.test(user)) {
