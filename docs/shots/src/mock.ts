@@ -93,6 +93,11 @@ function gallery(user: string, step: number): Chunk[] | null {
         "$$m_t = \\beta_1 m_{t-1} + (1-\\beta_1)\\,g_t,\\qquad v_t = \\beta_2 v_{t-1} + (1-\\beta_2)\\,g_t^2$$\n\n" +
         "$$\\theta_{t+1} = \\theta_t - \\eta\\,\\frac{\\hat m_t}{\\sqrt{\\hat v_t}+\\epsilon}$$\n\nOperations on $g_t$ are elementwise.",
     );
+  if (/diagram of how a price is discounted/i.test(user))
+    return text(
+      "Here is the flow:\n\n```mermaid\nflowchart LR\n  A[Price] --> B{Percent over 100?}\n  B -- yes --> C[Hold at 100]\n  B -- no --> D[Take percent off]\n  C --> D\n  D --> E[New price]\n```\n\n" +
+        "A percent over 100 is held at 100, so a price never goes below zero.",
+    );
   if (/what does apply_discount do\?/i.test(user)) return text("Takes a price in cents and a percent, and returns the price after the discount.");
   if (/money math/i.test(user)) {
     if (step === 0) return calls("", [{ name: "crate_info", args: { name: "rust_decimal" } }, { name: "crate_info", args: { name: "bigdecimal" } }]);

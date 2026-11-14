@@ -349,26 +349,33 @@ fn table_math_preparer(options: &InlineOptions) -> impl FnMut(&mut [InlineSpan],
     }
 }
 
-/// Builds the code block for a fence and reports whether it holds a drawn
-/// diagram. A closed `mermaid` fence that renders within the available width
-/// becomes a plain block holding the drawing. Anything else, including a
-/// fence still being streamed, keeps its source.
-fn markdown_code_block(
+/// Draws a closed `mermaid` fence that fits within `width`. Anything else,
+/// including a fence still being streamed, stays a code block.
+fn markdown_diagram(
     source: MarkdownSource<'_>,
     fence: &Range<usize>,
     lang: &str,
     code_lines: &[&str],
     width: usize,
-    bctx: Option<&smelt_transcript::content::BoxContext>,
-) -> (smelt_transcript::content::code_block::CodeBlock, bool) {
-    if lang.eq_ignore_ascii_case("mermaid") && fence_closed(&source.slice(fence.clone())) {
-        let inner = bctx.map_or(width, |b| b.inner_w);
-        if let Some(diagram) = mermaid_diagram(&code_lines.join("\n"), inner) {
-            let drawn: Vec<&str> = diagram.lines().collect();
-            return (parse_code_block(&drawn, ""), true);
-        }
+) -> Option<Rc<str>> {
+    if !lang.eq_ignore_ascii_case("mermaid") || !fence_closed(&source.slice(fence.clone())) {
+        return None;
     }
-    (parse_code_block(code_lines, lang), false)
+    mermaid_diagram(&code_lines.join("\n"), width)
+}
+
+/// Rows a fence takes: its drawn diagram, or else its code block.
+fn markdown_code_rows(
+    source: MarkdownSource<'_>,
+    fence: &Range<usize>,
+    lang: &str,
+    code_lines: &[&str],
+    width: usize,
+) -> usize {
+    match markdown_diagram(source, fence, lang, code_lines, width) {
+        Some(diagram) => diagram.lines().count(),
+        None => measure_code_block(&parse_code_block(code_lines, lang), width),
+    }
 }
 
 /// Whether a fenced block's source ends with its closing fence.
@@ -1561,10 +1568,29 @@ fn render_markdown_docs_from_state<'a>(
                     render_block_gap(out, state, clip);
                     let code_source = markdown_code_source(block.source, body);
                     let code_lines: Vec<&str> = code_source.lines().collect();
-                    let (code_block, diagram) =
-                        markdown_code_block(block.source, fence, lang, &code_lines, width, bctx);
-                    let first = out.line_count();
-                    if let Some(clip) = clip {
+                    if let Some(diagram) =
+                        markdown_diagram(block.source, fence, lang, &code_lines, width)
+                    {
+                        let first = out.line_count();
+                        for row in diagram.lines() {
+                            if should_emit(clip, state.rows) {
+                                out.save_style();
+                                if dim {
+                                    out.set_dim();
+                                }
+                                out.print(row);
+                                out.pop_style();
+                                out.newline();
+                            }
+                            state.rows = state.rows.saturating_add(1);
+                        }
+                        // Copying any part of a drawn diagram copies its source.
+                        out.stamp_atomic_copy_group(
+                            first,
+                            block.source.slice(fence.clone()).trim_end(),
+                        );
+                    } else if let Some(clip) = clip {
+                        let code_block = parse_code_block(&code_lines, lang);
                         let rows = measure_code_block(&code_block, width);
                         if clip.intersects(state.rows, rows) {
                             let inherited_style = out.current_style();
@@ -1584,7 +1610,7 @@ fn render_markdown_docs_from_state<'a>(
                                     width,
                                     dim,
                                     bctx,
-                                    !diagram,
+                                    true,
                                     start..end,
                                 );
                                 col.finish()
@@ -1604,21 +1630,15 @@ fn render_markdown_docs_from_state<'a>(
                         }
                         state.rows = state.rows.saturating_add(rows);
                     } else {
+                        let code_block = parse_code_block(&code_lines, lang);
                         state.rows = state.rows.saturating_add(usize::from(render_code_block(
                             out,
                             &code_block,
                             width,
                             dim,
                             bctx,
-                            !diagram,
+                            true,
                         )));
-                    }
-                    if diagram {
-                        // Copying any part of a drawn diagram copies its source.
-                        out.stamp_atomic_copy_group(
-                            first,
-                            block.source.slice(fence.clone()).trim_end(),
-                        );
                     }
                     state.last_content_was_heading = false;
                     state.prev_was_block = true;
@@ -1822,9 +1842,7 @@ fn markdown_block_range_has_visible_text(
                 measure_block_gap(&mut state);
                 let code_source = markdown_code_source(block.source, body);
                 let code_lines: Vec<&str> = code_source.lines().collect();
-                let (code_block, _) =
-                    markdown_code_block(block.source, fence, lang, &code_lines, width, bctx);
-                let rows = measure_code_block(&code_block, width);
+                let rows = markdown_code_rows(block.source, fence, lang, &code_lines, width);
                 if clip.intersects(state.rows, rows)
                     && code_lines.iter().any(|line| !line.trim().is_empty())
                 {
@@ -1965,11 +1983,13 @@ fn measure_markdown_doc(
                 measure_block_gap(state);
                 let code_source = markdown_code_source(block.source, body);
                 let code_lines: Vec<&str> = code_source.lines().collect();
-                let (code_block, _) =
-                    markdown_code_block(block.source, fence, lang, &code_lines, width, bctx);
-                state.rows = state
-                    .rows
-                    .saturating_add(measure_code_block(&code_block, width));
+                state.rows = state.rows.saturating_add(markdown_code_rows(
+                    block.source,
+                    fence,
+                    lang,
+                    &code_lines,
+                    width,
+                ));
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
@@ -3776,6 +3796,31 @@ mod tests {
             !rows.iter().any(|row| row.contains("-->")),
             "rows: {rows:?}"
         );
+    }
+
+    #[test]
+    fn markdown_mermaid_diagram_has_no_code_background() {
+        let mut theme = smelt_buffer::theme::Theme::default();
+        theme.set(
+            "SmeltCodeBlockBg",
+            smelt_buffer::style::Style::new().bg(smelt_buffer::style::Color::DarkGrey),
+        );
+        let fill_bgs = |md: &str| {
+            let (buf, outcome) =
+                smelt_transcript::content::builder::render_into_fresh(80, &theme, |out| {
+                    render_markdown_inner(out, md, 80, "", false, None);
+                });
+            (0..outcome.line_count)
+                .map(|row| buf.decoration_at(row).fill_bg)
+                .collect::<Vec<_>>()
+        };
+
+        let code = fill_bgs("```rust\nlet x = 1;\n```");
+        let diagram = fill_bgs("```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```");
+
+        assert!(code.iter().all(Option::is_some), "{code:?}");
+        assert!(!diagram.is_empty());
+        assert!(diagram.iter().all(Option::is_none), "{diagram:?}");
     }
 
     #[test]

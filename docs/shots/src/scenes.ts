@@ -270,6 +270,23 @@ export const scenes: Record<string, Scene> = {
     ],
   },
 
+  /** A Mermaid fence in an answer, drawn as a diagram in the transcript. */
+  diagram: {
+    mock: true,
+    fromSubmit: true,
+    realtime: true,
+    cols: 80,
+    rows: 24,
+    steps: [
+      { pause: 1200 },
+      { type: "draw a diagram of how a price is discounted" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /─ ● done/ },
+      { pause: 3000 },
+    ],
+  },
+
   /** Bundled dark themes, played in the dark scheme. */
   "themes-dark": themes("dark", ["catppuccin-mocha", "dracula", "gruvbox-dark", "nord", "solarized-dark", "one-half-dark"]),
 

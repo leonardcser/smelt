@@ -87,6 +87,18 @@ copies its path; copying an equation copies its LaTeX source. If graphics do
 not show, see
 [Troubleshooting](troubleshooting.md#images-or-math-show-as-blocks-or-text).
 
+## See diagrams
+
+A `mermaid` code block in an answer is drawn as a diagram, without the code
+background. Flowcharts, sequence, class, state and ER diagrams, pie charts and
+mind maps are supported:
+
+<figure class="term" data-replay="../../assets/replays/diagram.json" aria-label="An answer with a flowchart of how a price is discounted, drawn in the transcript" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+Diagrams are text, so they work in any terminal. A diagram that is still
+streaming, too wide for the screen or of an unsupported type stays as source.
+Copying any part of a diagram copies its Mermaid source.
+
 ## Run hands-off
 
 Pick how much to trust the agent:
