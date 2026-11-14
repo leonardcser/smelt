@@ -8036,6 +8036,7 @@ mod tests {
             source_char_to_display_char: vec![0, 1, 1, 1, 1, 1, 1],
             display_char_to_source_char: vec![0, 6],
             row_offsets: vec![0],
+            ..Default::default()
         });
         w.ensure_layout(&buf, 20);
 

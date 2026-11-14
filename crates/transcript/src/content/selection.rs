@@ -35,11 +35,12 @@ pub(crate) fn trim_sentence_punctuation(s: &str) -> &str {
     &s[..end]
 }
 
+pub fn at_token_start(chars: &[char], i: usize) -> bool {
+    chars.get(i) == Some(&'@') && (i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(')
+}
+
 pub fn scan_at_token(chars: &[char], i: usize) -> Option<(String, String, usize)> {
-    if chars[i] != '@' {
-        return None;
-    }
-    if i > 0 && !chars[i - 1].is_whitespace() && chars[i - 1] != '(' {
+    if !at_token_start(chars, i) {
         return None;
     }
 

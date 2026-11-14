@@ -66,6 +66,35 @@ fn main() {
                 });
             }
         }
+        Some("bench-paste") => {
+            let mut env = Vec::new();
+            match args.next().as_deref() {
+                None => {}
+                Some("--sizes") => match args.next() {
+                    Some(sizes) => env.push(("SMELT_PASTE_BENCH_SIZES".to_string(), sizes)),
+                    None => {
+                        eprintln!("bench-paste: --sizes requires a value");
+                        std::process::exit(2);
+                    }
+                },
+                Some(other) => {
+                    eprintln!("bench-paste: unknown argument `{other}`");
+                    std::process::exit(2);
+                }
+            }
+            if let Some(other) = args.next() {
+                eprintln!("bench-paste: unexpected argument `{other}`");
+                std::process::exit(2);
+            }
+            bench_support::run_cargo_test_benchmark(bench_support::CargoTestBenchmark {
+                package: "smelt-tui",
+                test_filter: "prompt_paste_benchmark",
+                features: &["harness"],
+                release: true,
+                env,
+                bench_name: "prompt_paste_benchmark",
+            });
+        }
         Some("bench-file-search") => bench_file_search::run(args.collect()),
         Some("bench-session-search") => bench_session_search::run(args.collect()),
         Some("bench-store") => bench_store::run(args.collect()),
@@ -96,6 +125,7 @@ fn print_usage() {
     eprintln!(
         "  bench-search                          benchmark typing a search in a large viewer"
     );
+    eprintln!("  bench-paste [--sizes CSV]             benchmark bracketed paste into the prompt");
     eprintln!("  bench-files                           benchmark file and code search previews");
     eprintln!(
         "  bench-file-search [--runs N] [--entries N] [--queries CSV] benchmark file fuzzy search"

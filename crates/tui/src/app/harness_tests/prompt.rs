@@ -2012,6 +2012,26 @@ fn text_changed_callbacks_do_not_repark_prompt_cursor() {
 }
 
 #[test]
+fn text_changed_callbacks_keep_explicit_source_edits() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    assert!(app.run_lua(
+        r#"
+            local edited = false
+            smelt.prompt.win:on("text_changed", function()
+                if not edited then
+                    edited = true
+                    smelt.prompt.set_text("changed")
+                    smelt.prompt.cursor(2)
+                end
+            end)
+        "#,
+    ));
+    app.type_char('x');
+    assert_eq!(app.state().prompt_text, "changed");
+    assert_eq!(app.prompt_cpos(), 2);
+}
+
+#[test]
 fn typing_after_unfinished_prompt_click_uses_clicked_caret() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -2530,4 +2550,199 @@ fn lua_steer_while_idle_starts_turn() {
 
     assert!(app.agent_running());
     assert_eq!(app.state().prompt_text, "");
+}
+
+#[test]
+fn unchanged_prompt_notifications_do_not_copy_source() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.feed_one(SourceEvent::Term(Event::Paste("x".repeat(1_048_576))));
+    let before = smelt_perf::alloc::thread_snapshot();
+    for _ in 0..3 {
+        assert!(app.tui.queue_prompt_text_changed_if_dirty().is_none());
+    }
+    let allocated = smelt_perf::alloc::thread_snapshot()
+        .1
+        .saturating_sub(before.1);
+    assert_eq!(allocated, 0);
+
+    let buf = app.tui.ui.buf_mut(crate::app::PROMPT_EDIT_BUF).unwrap();
+    let end = buf.source().len();
+    buf.text_mut().insert(end, 'x');
+    buf.text_mut().replace_range(end..end + 1, "");
+    assert!(app.tui.queue_prompt_text_changed_if_dirty().is_none());
+}
+
+#[test]
+fn prompt_tail_edit_has_bounded_projection_allocations() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(120, 40);
+    app.feed_one(SourceEvent::Term(Event::Paste(
+        "line of payload\n".repeat(65536),
+    )));
+    app.render_silent();
+    for _ in 0..3 {
+        app.type_char('x');
+        let before = smelt_perf::alloc::thread_snapshot();
+        app.render_silent();
+        let allocated = smelt_perf::alloc::thread_snapshot()
+            .1
+            .saturating_sub(before.1);
+        assert!(
+            allocated < 1_000_000,
+            "tail-edit frame allocated {allocated} bytes"
+        );
+        assert_eq!(app.prompt_cpos(), app.tui.prompt_buf().source().len());
+        assert_eq!(app.tui.prompt_buf().last_line_edit().unwrap().start, 65536);
+    }
+}
+
+/// Decoder-to-application paste workload, excluding OS reads and channels.
+/// Reports per-stage medians and growth exponents between payload sizes:
+/// about 1 is linear, about 2 is quadratic.
+#[test]
+#[ignore = "timed benchmark: cargo xtask bench-paste"]
+fn prompt_paste_benchmark() {
+    let sizes: Vec<usize> = std::env::var("SMELT_PASTE_BENCH_SIZES")
+        .unwrap_or_else(|_| "65536,262144,1048576".into())
+        .split(',')
+        .map(|size| size.trim().parse().expect("SMELT_PASTE_BENCH_SIZES"))
+        .collect();
+    assert!(
+        !sizes.is_empty()
+            && sizes.iter().all(|&size| size > 0)
+            && sizes.windows(2).all(|pair| pair[0] < pair[1]),
+        "SMELT_PASTE_BENCH_SIZES must contain positive, strictly increasing sizes"
+    );
+    const RUNS: usize = 5;
+    const STAGES: [&str; 8] = [
+        "parse",
+        "insert",
+        "frame",
+        "idle_frame",
+        "key",
+        "key_frame",
+        "submit",
+        "submit_frame",
+    ];
+    let mut rows: Vec<(usize, [std::time::Duration; STAGES.len()])> = Vec::new();
+    for &size in &sizes {
+        let mut payload = String::with_capacity(size + 64);
+        let mut line = 0;
+        while payload.len() < size {
+            payload.push_str(&format!(
+                "    let value_{line} = compute({line}, \"payload\"); // line {line}\n"
+            ));
+            line += 1;
+        }
+        payload.truncate(size);
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend_from_slice(payload.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+
+        let run = || {
+            let mut app = TestApp::builder().with_vim(false).build();
+            app.set_terminal_size(120, 40);
+            app.render_to_frame();
+
+            let start = std::time::Instant::now();
+            let mut parser = crate::term_input::Parser::new();
+            let mut events = Vec::new();
+            for chunk in bytes.chunks(1024) {
+                events.extend(parser.advance(chunk));
+            }
+            let parse = start.elapsed();
+            assert!(matches!(events.as_slice(), [Event::Paste(text)] if text == &payload));
+
+            let start = std::time::Instant::now();
+            for event in events {
+                app.feed_one(SourceEvent::Term(event));
+            }
+            let insert = start.elapsed();
+
+            let start = std::time::Instant::now();
+            app.render_to_frame();
+            let frame = start.elapsed();
+
+            let start = std::time::Instant::now();
+            app.render_to_frame();
+            let idle_frame = start.elapsed();
+
+            let start = std::time::Instant::now();
+            app.type_char('x');
+            let key = start.elapsed();
+
+            let start = std::time::Instant::now();
+            app.render_to_frame();
+            let key_frame = start.elapsed();
+
+            assert_eq!(app.prompt_cpos(), size + 1);
+
+            let start = std::time::Instant::now();
+            app.press(KeyCode::Enter);
+            let submit = start.elapsed();
+
+            let start = std::time::Instant::now();
+            app.render_to_frame();
+            let submit_frame = start.elapsed();
+            let submitted = app.actions().iter().find_map(|action| match action {
+                Action::EngineSend(command) => match command.as_ref() {
+                    protocol::UiCommand::StartTurn(turn) => match &turn.input {
+                        protocol::StartTurnInput::User { content, .. } => {
+                            Some(content.text_content())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            });
+            assert_eq!(submitted.as_deref(), Some(format!("{payload}x").as_str()));
+
+            [
+                parse,
+                insert,
+                frame,
+                idle_frame,
+                key,
+                key_frame,
+                submit,
+                submit_frame,
+            ]
+        };
+        run();
+        let samples: Vec<_> = (0..RUNS).map(|_| run()).collect();
+        let medians = std::array::from_fn(|stage| {
+            let mut times: Vec<_> = samples.iter().map(|sample| sample[stage]).collect();
+            times.sort_unstable();
+            times[RUNS / 2]
+        });
+        rows.push((size, medians));
+    }
+
+    for (size, times) in &rows {
+        let cells: Vec<String> = STAGES
+            .iter()
+            .zip(times)
+            .map(|(stage, time)| format!("{stage}={time:>9.2?}"))
+            .collect();
+        eprintln!("  paste {:>8} bytes  {}", size, cells.join("  "));
+    }
+    for pair in rows.windows(2) {
+        let (small, large) = (&pair[0], &pair[1]);
+        let ratio = (large.0 as f64 / small.0 as f64).ln();
+        let cells: Vec<String> = STAGES
+            .iter()
+            .enumerate()
+            .map(|(i, stage)| {
+                let grow = large.1[i].as_secs_f64().max(1e-7) / small.1[i].as_secs_f64().max(1e-7);
+                format!("{stage}={:>5.2}", grow.ln() / ratio)
+            })
+            .collect();
+        eprintln!(
+            "  exponent {:>8} -> {:>8}  {}",
+            small.0,
+            large.0,
+            cells.join("  ")
+        );
+    }
 }

@@ -726,62 +726,90 @@ mod platform {
 }
 
 #[cfg(any(unix, test))]
+const PASTE_START: &[u8] = b"\x1b[200~";
+#[cfg(any(unix, test))]
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// What the parser does with the next input byte.
+#[cfg(any(unix, test))]
 #[derive(Debug, Default)]
-struct Parser {
+enum Mode {
+    /// Accumulate bytes in `Parser::buf` until they form a complete sequence.
+    #[default]
+    Sequence,
+    /// Collect a bracketed-paste payload until `PASTE_END`.
+    Paste(Vec<u8>),
+    /// Discard bytes through the next CSI final byte.
+    DropCsiTail,
+    /// Discard bytes through the next BEL or ST terminator.
+    DropStringTail { prev_esc: bool },
+    /// Discard this many more bytes.
+    DropBytes(usize),
+}
+
+#[cfg(any(unix, test))]
+#[derive(Debug, Default)]
+pub(crate) struct Parser {
+    /// Pending bytes of an incomplete sequence. Empty outside `Mode::Sequence`.
     buf: Vec<u8>,
-    drop_csi_tail: bool,
-    drop_string_tail: bool,
-    drop_string_prev_esc: bool,
-    drop_bytes: usize,
+    mode: Mode,
     probe_response: Option<bool>,
     cell_geometry: Option<(u32, u32)>,
 }
 
 #[cfg(any(unix, test))]
 impl Parser {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             buf: Vec::with_capacity(128),
-            drop_csi_tail: false,
-            drop_string_tail: false,
-            drop_string_prev_esc: false,
-            drop_bytes: 0,
-            probe_response: None,
-            cell_geometry: None,
+            ..Self::default()
         }
     }
 
-    fn advance(&mut self, bytes: &[u8]) -> Vec<Event> {
+    pub(crate) fn advance(&mut self, mut bytes: &[u8]) -> Vec<Event> {
         let mut out = Vec::new();
-        for &b in bytes {
-            if self.drop_csi_tail {
-                if csi_final_byte(b) {
-                    self.drop_csi_tail = false;
+        while let Some((&b, rest)) = bytes.split_first() {
+            match &mut self.mode {
+                Mode::Paste(payload) => {
+                    let Some(consumed) = extend_paste(payload, bytes) else {
+                        break;
+                    };
+                    out.push(Event::Paste(lossy_utf8(std::mem::take(payload))));
+                    self.mode = Mode::Sequence;
+                    bytes = &bytes[consumed..];
+                    continue;
                 }
-                continue;
-            }
-            if self.drop_string_tail {
-                if b == 0x07 || (self.drop_string_prev_esc && b == b'\\') {
-                    self.drop_string_tail = false;
-                    self.drop_string_prev_esc = false;
-                } else {
-                    self.drop_string_prev_esc = b == 0x1b;
+                Mode::DropCsiTail => {
+                    if csi_final_byte(b) {
+                        self.mode = Mode::Sequence;
+                    }
                 }
-                continue;
+                Mode::DropStringTail { prev_esc } => {
+                    if b == 0x07 || (*prev_esc && b == b'\\') {
+                        self.mode = Mode::Sequence;
+                    } else {
+                        *prev_esc = b == 0x1b;
+                    }
+                }
+                Mode::DropBytes(remaining) => {
+                    *remaining -= 1;
+                    if *remaining == 0 {
+                        self.mode = Mode::Sequence;
+                    }
+                }
+                Mode::Sequence => {
+                    self.buf.push(b);
+                    self.drain_ready(&mut out);
+                }
             }
-            if self.drop_bytes > 0 {
-                self.drop_bytes -= 1;
-                continue;
-            }
-            self.buf.push(b);
-            self.drain_ready(&mut out);
+            bytes = rest;
         }
         out
     }
 
     #[cfg(unix)]
     fn awaiting_escape_tail(&self) -> bool {
-        self.buf.first() == Some(&0x1b) && !self.buf.starts_with(b"\x1b[200~")
+        self.buf.first() == Some(&0x1b)
     }
 
     fn flush_escape_timeout(&mut self) -> Vec<Event> {
@@ -791,14 +819,15 @@ impl Parser {
             out.push(key(KeyCode::Esc, KeyModifiers::empty()));
         } else if self.buf.starts_with(b"\x1b[") {
             self.buf.clear();
-            self.drop_csi_tail = true;
-        } else if self.buf.starts_with(b"\x1b]") || self.buf.starts_with(b"\x1b_") {
-            self.drop_string_prev_esc = self.buf.last() == Some(&0x1b);
+            self.mode = Mode::DropCsiTail;
+        } else if self.buf.starts_with(b"\x1b_") {
+            self.mode = Mode::DropStringTail {
+                prev_esc: self.buf.last() == Some(&0x1b),
+            };
             self.buf.clear();
-            self.drop_string_tail = true;
         } else if self.buf.starts_with(b"\x1bO") {
             self.buf.clear();
-            self.drop_bytes = 1;
+            self.mode = Mode::DropBytes(1);
         } else if self.buf.first() == Some(&0x1b) {
             self.buf.drain(..1);
             out.push(key(KeyCode::Esc, KeyModifiers::empty()));
@@ -815,6 +844,14 @@ impl Parser {
                     out.push(event);
                 }
                 ParseResult::NeedMore => break,
+                ParseResult::Enter { mode, consumed } => {
+                    // Sequence bytes arrive one at a time, so the mode prefix
+                    // completes before any payload reaches this buffer.
+                    debug_assert_eq!(self.buf.len(), consumed);
+                    self.buf.clear();
+                    self.mode = mode;
+                    break;
+                }
                 ParseResult::Probe {
                     supported,
                     consumed,
@@ -836,14 +873,35 @@ impl Parser {
                 }
                 ParseResult::Invalid { consumed } => {
                     if self.buf.starts_with(b"\x1b_") && self.buf.len() > 256 {
-                        self.drop_string_tail = true;
-                        self.drop_string_prev_esc = self.buf.last() == Some(&0x1b);
+                        self.mode = Mode::DropStringTail {
+                            prev_esc: self.buf.last() == Some(&0x1b),
+                        };
                     }
                     self.buf.drain(..consumed.clamp(1, self.buf.len()));
                 }
             }
         }
     }
+}
+
+/// Append `input` to a bracketed-paste payload. When the end marker completes,
+/// strip it and return how many bytes of `input` it consumed. Each call rescans
+/// only the marker-length tail it already saw, so a paste costs O(n) however
+/// the terminal chunks it.
+#[cfg(any(unix, test))]
+fn extend_paste(payload: &mut Vec<u8>, input: &[u8]) -> Option<usize> {
+    let seen = payload.len();
+    let scan_from = seen.saturating_sub(PASTE_END.len() - 1);
+    payload.extend_from_slice(input);
+    let end = scan_from + find_subslice(&payload[scan_from..], PASTE_END)?;
+    payload.truncate(end);
+    Some(end + PASTE_END.len() - seen)
+}
+
+#[cfg(any(unix, test))]
+fn lossy_utf8(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
 #[cfg(any(unix, test))]
@@ -854,6 +912,11 @@ enum ParseResult {
         consumed: usize,
     },
     NeedMore,
+    /// Switch the parser into a streaming mode after `consumed` bytes.
+    Enter {
+        mode: Mode,
+        consumed: usize,
+    },
     Probe {
         supported: bool,
         consumed: usize,
@@ -907,7 +970,10 @@ fn parse_escape(buf: &[u8]) -> ParseResult {
     }
     match buf[1] {
         b'[' => parse_csi(buf),
-        b']' => parse_string_control(buf),
+        b']' => ParseResult::Enter {
+            mode: Mode::DropStringTail { prev_esc: false },
+            consumed: 2,
+        },
         b'_' => parse_kitty_response(buf),
         b'O' => parse_ss3(buf),
         0x1b => event(key(KeyCode::Esc, KeyModifiers::empty()), 1),
@@ -926,7 +992,8 @@ fn parse_escape(buf: &[u8]) -> ParseResult {
             }
             ParseResult::NeedMore => ParseResult::NeedMore,
             ParseResult::Invalid { consumed } => invalid(consumed + 1),
-            ParseResult::Probe { consumed, .. }
+            ParseResult::Enter { consumed, .. }
+            | ParseResult::Probe { consumed, .. }
             | ParseResult::CellGeometry { consumed, .. }
             | ParseResult::DeviceAttributes { consumed } => invalid(consumed + 1),
         },
@@ -956,14 +1023,11 @@ fn parse_csi(buf: &[u8]) -> ParseResult {
     if buf.len() < 3 {
         return ParseResult::NeedMore;
     }
-    if buf.starts_with(b"\x1b[200~") {
-        if let Some(end) = find_subslice(&buf[6..], b"\x1b[201~") {
-            let start = 6;
-            let end_abs = start + end;
-            let paste = String::from_utf8_lossy(&buf[start..end_abs]).to_string();
-            return event(Event::Paste(paste), end_abs + 6);
-        }
-        return ParseResult::NeedMore;
+    if buf.starts_with(PASTE_START) {
+        return ParseResult::Enter {
+            mode: Mode::Paste(Vec::new()),
+            consumed: PASTE_START.len(),
+        };
     }
     if buf[2] == b'<' {
         return parse_sgr_mouse(buf);
@@ -1042,18 +1106,6 @@ fn parse_linux_console_fkey(buf: &[u8]) -> ParseResult {
         b'A'..=b'E' => event(key(KeyCode::F(1 + buf[3] - b'A'), KeyModifiers::empty()), 4),
         _ => invalid(4),
     }
-}
-
-#[cfg(any(unix, test))]
-fn parse_string_control(buf: &[u8]) -> ParseResult {
-    let mut prev_esc = false;
-    for (i, &b) in buf.iter().enumerate().skip(2) {
-        if b == 0x07 || (prev_esc && b == b'\\') {
-            return invalid(i + 1);
-        }
-        prev_esc = b == 0x1b;
-    }
-    ParseResult::NeedMore
 }
 
 #[cfg(any(unix, test))]
@@ -1800,6 +1852,62 @@ mod tests {
 
         assert!(p.advance(&input[..split]).is_empty());
         assert_eq!(p.advance(&input[split..]), vec![Event::Paste(text.into())]);
+    }
+
+    #[test]
+    fn bracketed_paste_survives_every_chunk_split() {
+        let payload = "a\x1b[A\x1b[201b\x1b";
+        let input = format!("\x1b[200~{payload}\x1b[201~z");
+        for split in 0..=input.len() {
+            let mut p = Parser::new();
+            let mut events = p.advance(&input.as_bytes()[..split]);
+            events.extend(p.advance(&input.as_bytes()[split..]));
+            assert_eq!(
+                events.first(),
+                Some(&Event::Paste(payload.into())),
+                "split {split}"
+            );
+            assert_eq!(keys_text(&events[1..]), "z", "split {split}");
+        }
+    }
+
+    #[test]
+    fn bracketed_paste_survives_byte_at_a_time_input() {
+        let payload = "e\u{301}中👩\u{200d}💻\x1b[201b\x1b";
+        let input = format!("\x1b[200~{payload}\x1b[201~z");
+        let mut p = Parser::new();
+        let mut events = Vec::new();
+        for byte in input.as_bytes() {
+            events.extend(p.advance(std::slice::from_ref(byte)));
+        }
+        assert_eq!(events[0], Event::Paste(payload.into()));
+        assert_eq!(keys_text(&events[1..]), "z");
+    }
+
+    #[test]
+    fn empty_and_consecutive_bracketed_pastes_stay_separate() {
+        let mut p = Parser::new();
+        assert_eq!(
+            p.advance(b"\x1b[200~\x1b[201~\x1b[200~hello\x1b[201~"),
+            vec![Event::Paste(String::new()), Event::Paste("hello".into())]
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_replaces_invalid_utf8() {
+        let mut p = Parser::new();
+        assert_eq!(
+            p.advance(b"\x1b[200~a\xff\xe4\xb8\x1b[201~"),
+            vec![Event::Paste("a\u{fffd}\u{fffd}".into())]
+        );
+        assert_eq!(keys_text(&p.advance(b"z")), "z");
+    }
+
+    #[test]
+    fn osc_split_across_chunks_is_swallowed() {
+        let mut p = Parser::new();
+        assert_eq!(keys_text(&p.advance(b"a\x1b]11;rgb:1e1e/")), "a");
+        assert_eq!(keys_text(&p.advance(b"1e1e/1e1e\x1b\\b")), "b");
     }
 
     #[test]

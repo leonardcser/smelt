@@ -47,6 +47,25 @@ pub trait BufferParser: Send + Sync {
     /// `source` at the given render `width`.
     fn parse(&self, buf: &mut Buffer, source: &str, width: u16);
 
+    /// Update an existing projection after source edits. Bytes before `start`
+    /// are unchanged since the last parse, and the width is unchanged. Return
+    /// false without mutating `buf` to request a full parse instead.
+    fn parse_incremental(
+        &self,
+        _buf: &mut Buffer,
+        _source: &str,
+        _width: u16,
+        _start: usize,
+    ) -> bool {
+        false
+    }
+
+    /// Key for external inputs that affect this source's projection. A changed
+    /// key forces a full parse, including when the source itself is unchanged.
+    fn dependency_key(&self, _source: &str) -> u64 {
+        0
+    }
+
     /// Called once when the parser is installed. Default no-op.
     fn on_attach(&self, _buf: &mut Buffer) {}
 }
@@ -850,8 +869,8 @@ pub struct Buffer {
     parser: Option<Arc<dyn BufferParser>>,
     copier: Option<Arc<dyn BufferCopy>>,
     source: String,
-    source_tick: u64,
-    last_render: Option<(u64, u16)>,
+    source_changes: crate::attached::SourceChanges,
+    last_render: Option<(u64, u16, u64)>,
     pub history: UndoHistory,
     pub attachment_ids: Vec<AttachmentId>,
     pub readonly: bool,
@@ -900,7 +919,7 @@ impl Buffer {
             parser: None,
             copier: None,
             source: String::new(),
-            source_tick: 0,
+            source_changes: crate::attached::SourceChanges::default(),
             last_render: None,
             history: UndoHistory::default(),
             attachment_ids: Vec::new(),
@@ -1020,29 +1039,36 @@ impl Buffer {
     /// Mutation counter for editable source and paired attachment ids.
     /// Rendering and decoration changes do not advance this counter.
     pub fn source_tick(&self) -> u64 {
-        self.source_tick
+        self.source_changes.revision
     }
 
     /// Mutable access to source + attachment ids as a single
     /// invariant-preserving wrapper. Use this instead of raw `&mut String`
     /// for any mutation that might add/remove attachment markers - the
-    /// wrapper drains/inserts ids automatically. Bumps `source_tick`.
+    /// wrapper drains/inserts ids automatically. Mutations advance `source_tick`.
     pub fn text_mut(&mut self) -> crate::attached::AttachedTextMut<'_> {
-        self.source_tick = self.source_tick.wrapping_add(1);
-        crate::attached::AttachedTextMut::new(&mut self.source, &mut self.attachment_ids)
+        crate::attached::AttachedTextMut::tracked(
+            &mut self.source,
+            &mut self.attachment_ids,
+            &mut self.source_changes,
+        )
     }
 
     /// Split-mutable refs for a single edit step: text wrapper + undo
-    /// history. Bumps `source_tick` (callers must follow with
+    /// history. Mutations advance `source_tick` (callers must follow with
     /// `sync_after_edit` to refresh `lines`). For buffers without a parser,
     /// lazily rebuilds `source` from `lines.join("\n")` on first call.
     pub fn edit_refs(&mut self) -> (crate::attached::AttachedTextMut<'_>, &mut UndoHistory) {
         if self.parser.is_none() && self.source.is_empty() && !self.lines_is_blank() {
             self.source = self.lines.join("\n");
+            self.source_changes.record(0);
         }
-        self.source_tick = self.source_tick.wrapping_add(1);
         (
-            crate::attached::AttachedTextMut::new(&mut self.source, &mut self.attachment_ids),
+            crate::attached::AttachedTextMut::tracked(
+                &mut self.source,
+                &mut self.attachment_ids,
+                &mut self.source_changes,
+            ),
             &mut self.history,
         )
     }
@@ -1057,7 +1083,7 @@ impl Buffer {
             return;
         }
         self.source = source;
-        self.source_tick = self.source_tick.wrapping_add(1);
+        self.source_changes.record(0);
     }
 
     /// Replace the full text. A buffer without a parser shows it as its lines
@@ -1083,22 +1109,27 @@ impl Buffer {
         let Some(parser) = self.parser.clone() else {
             return false;
         };
-        let fresh = match self.last_render {
-            Some((tick, w)) => tick == self.source_tick && w == width,
-            None => false,
-        };
-        if fresh {
+        let dependency_key = parser.dependency_key(&self.source);
+        if self.last_render == Some((self.source_changes.revision, width, dependency_key)) {
             return false;
         }
         let source = std::mem::take(&mut self.source);
-        // Reset to a single seed line; `set_all_lines` clears well-known
-        // namespaces across all rows so stale highlights don't leak.
-        // Maps cleared too - parser repopulates if it needs custom mapping.
-        self.set_all_lines(vec![String::new()]);
-        self.projection_maps = None;
-        parser.parse(self, &source, width);
+        let incremental = self
+            .last_render
+            .is_some_and(|(_, w, key)| w == width && key == dependency_key)
+            && self
+                .source_changes
+                .changed_from
+                .is_some_and(|start| parser.parse_incremental(self, &source, width, start));
+        if !incremental {
+            // Full parsers start with no stale rows, highlights or mappings.
+            self.set_all_lines(vec![String::new()]);
+            self.projection_maps = None;
+            parser.parse(self, &source, width);
+        }
         self.source = source;
-        self.last_render = Some((self.source_tick, width));
+        self.source_changes.changed_from = None;
+        self.last_render = Some((self.source_changes.revision, width, dependency_key));
         true
     }
 
@@ -1294,13 +1325,12 @@ impl Buffer {
 
     // ── Editable buffer API ──────────────────────────────────────────
 
-    /// Call after mutating `source` via `edit_refs()` / `source_mut()`.
-    /// Re-projects `source` into `lines` + extmarks:
-    ///   - With parser: invalidate cache, re-run `parser.parse(self, source, width)`.
+    /// Call after mutating source via [`Self::edit_refs`] or [`Self::text_mut`].
+    /// Re-projects source into lines and extmarks:
+    ///   - With parser: update the projection from the recorded source edits.
     ///   - Without parser: identity split of `source` into `lines`.
     pub fn sync_after_edit(&mut self, width: u16) {
         if self.parser.is_some() {
-            self.last_render = None;
             self.ensure_rendered_at(width);
         } else {
             self.install_source_lines();
@@ -1417,6 +1447,11 @@ impl Buffer {
     /// convert map character columns to terminal-cell columns.
     pub fn set_projection_maps(&mut self, maps: crate::coords::ProjectionMaps) {
         self.projection_maps = Some(maps);
+    }
+
+    /// Take parser-owned maps when replacing only a projection suffix.
+    pub fn take_projection_maps(&mut self) -> Option<crate::coords::ProjectionMaps> {
+        self.projection_maps.take()
     }
 
     /// Clear coord maps so subsequent cursor queries fall back to identity.
@@ -1872,6 +1907,43 @@ mod tests {
         buf.set_all_lines(vec!["painted".into()]);
         buf.set_text("first\nsecond".into());
         assert_eq!(buf.lines(), &["first", "second"]);
+    }
+
+    #[test]
+    fn incremental_parser_receives_coalesced_edits_only_for_valid_projections() {
+        struct RecordingParser(std::sync::Mutex<Vec<Option<usize>>>);
+        impl BufferParser for RecordingParser {
+            fn parse(&self, buf: &mut Buffer, source: &str, _: u16) {
+                self.0.lock().unwrap().push(None);
+                buf.set_all_lines(vec![source.into()]);
+            }
+            fn parse_incremental(
+                &self,
+                buf: &mut Buffer,
+                source: &str,
+                _: u16,
+                start: usize,
+            ) -> bool {
+                self.0.lock().unwrap().push(Some(start));
+                buf.set_all_lines(vec![source.into()]);
+                true
+            }
+        }
+        let parser = Arc::new(RecordingParser(std::sync::Mutex::new(Vec::new())));
+        let mut buf = make_buf().attach(parser.clone());
+        buf.set_source("abcdef".into());
+        buf.ensure_rendered_at(20);
+        let _ = buf.edit_refs();
+        assert!(!buf.ensure_rendered_at(20));
+        buf.text_mut().insert(6, 'x');
+        buf.text_mut().replace_range(2..3, "z");
+        buf.sync_after_edit(20);
+        buf.text_mut().insert(7, 'y');
+        buf.ensure_rendered_at(10);
+        buf.text_mut().insert(8, 'z');
+        buf.invalidate_render_cache();
+        buf.ensure_rendered_at(10);
+        assert_eq!(*parser.0.lock().unwrap(), [None, Some(2), None, None]);
     }
 
     #[test]
@@ -2339,6 +2411,9 @@ mod tests {
         let empty_tick = buf.source_tick();
         buf.set_source("abc".into());
         let text_tick = buf.source_tick();
+        assert_eq!(buf.text_mut().as_str(), "abc");
+        assert_eq!(buf.edit_refs().0.as_str(), "abc");
+        assert_eq!(buf.source_tick(), text_tick);
         assert_ne!(text_tick, empty_tick);
         buf.set_source("abc".into());
         assert_eq!(buf.source_tick(), text_tick);
@@ -2408,6 +2483,7 @@ mod tests {
             source_char_to_display_char: s2d,
             display_char_to_source_char: d2s,
             row_offsets: vec![0, 4],
+            ..Default::default()
         });
         // Click well past EOL on row 0 must land at end of "aaa", not in "bbb".
         assert_eq!(buf.byte_at_display_pos(0, 99), 3);
@@ -2448,6 +2524,7 @@ mod tests {
             source_char_to_display_char: s2d,
             display_char_to_source_char: d2s,
             row_offsets: vec![0],
+            ..Default::default()
         });
 
         assert_eq!(buf.display_cursor_pos(2), (0, 2));

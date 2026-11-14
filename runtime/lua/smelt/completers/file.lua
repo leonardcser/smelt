@@ -7,27 +7,19 @@ if not (smelt.prompt and smelt.prompt.register_completer and smelt.files) then r
 local path_format = require("smelt.completers.path_format")
 local file_row = require("smelt.widgets.file_row")
 
--- Returns the byte offset of the `@` anchor when the cursor sits inside an
--- `@…` zone. Mirrors the previous Rust `cursor_in_at_zone` helper: `@` must
--- be preceded by whitespace or the buffer start, and the bytes between the
--- anchor and the cursor must not contain whitespace.
+-- Only the token at the cursor can contain an active `@` anchor. Include
+-- the byte after the cursor so cursor-on-`@` also matches.
 local function cursor_in_at_zone(buf, cpos)
-  if cpos > #buf then cpos = #buf end
-  -- Include one byte past the cursor so cursor-on-`@` is matched.
-  local search_end = math.min(#buf, cpos + 1)
-  local at_pos = buf:sub(1, search_end):find("@[^@]*$")
-  if not at_pos then return nil end
-  -- 1-based Lua index → 0-based byte offset.
-  local at_byte = at_pos - 1
-  if at_byte > 0 then
-    local prev = buf:sub(at_byte, at_byte)
-    if not prev:match("%s") then return nil end
+  cpos = math.min(cpos, #buf)
+  for i = math.min(#buf, cpos + 1), 1, -1 do
+    local ch = buf:sub(i, i)
+    if ch == "@" then
+      if i == 1 or buf:sub(i - 1, i - 1):match("%s") then return i - 1 end
+      return nil
+    end
+    if i <= cpos and ch:match("%s") then return nil end
   end
-  if at_byte < cpos then
-    local between = buf:sub(at_byte + 2, cpos)
-    if between:find("%s") then return nil end
-  end
-  return at_byte
+  return nil
 end
 
 local function query_at(anchor, text, cpos)

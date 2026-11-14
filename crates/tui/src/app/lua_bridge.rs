@@ -60,11 +60,14 @@ impl TuiApp {
     /// The returned snapshot lets synchronous input dispatch preserve its cursor
     /// across observational callbacks. Lua-originated edits are pumped after the
     /// current Lua entry returns, when re-entering the runtime is safe.
-    pub(crate) fn queue_prompt_text_changed_if_dirty(&mut self) -> Option<(String, usize)> {
-        let current_text = self.prompt_buf().source().to_string();
-        if !self.prompt.publish_text_if_changed(&current_text) {
-            return None;
-        }
+    pub(crate) fn queue_prompt_text_changed_if_dirty(
+        &mut self,
+    ) -> Option<(std::sync::Arc<str>, usize)> {
+        let buf = self
+            .ui
+            .buf(crate::app::PROMPT_EDIT_BUF)
+            .expect("prompt buffer");
+        let current_text = self.prompt.publish_text_if_changed(buf)?;
         let cursor_before = self.prompt_win().cpos();
         let lua = &self.lua;
         let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
@@ -76,7 +79,7 @@ impl TuiApp {
             crate::app::PROMPT_WIN,
             crate::smelt_edit::WinEvent::TextChanged,
             crate::smelt_edit::Payload::Text {
-                content: current_text.clone(),
+                content: current_text.to_string(),
             },
             &mut lua_invoke,
         );
@@ -93,7 +96,9 @@ impl TuiApp {
         // `text_changed` is observational: filter/completer callbacks can edit
         // the prompt explicitly, but a callback that only moves the cursor must
         // not repark the insertion point after every typed character.
-        if self.prompt_buf().source() == current_text && self.prompt_win().cpos() != cursor_before {
+        if self.prompt_win().cpos() != cursor_before
+            && self.prompt_buf().source() == current_text.as_ref()
+        {
             let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
             pctx.win.set_cpos(smelt_buffer::text::snap_grapheme(
                 pctx.buf.source(),

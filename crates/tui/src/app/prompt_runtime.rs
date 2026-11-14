@@ -15,7 +15,8 @@ pub(crate) struct PromptRuntime {
     input: PromptState,
     queues: InputQueues,
     queue_revision: u64,
-    last_published_text: String,
+    last_published_text: std::sync::Arc<str>,
+    last_published_source: Option<(BufId, u64)>,
     height: PromptHeightState,
     placeholders: PlaceholderState,
 }
@@ -78,7 +79,8 @@ impl PromptRuntime {
             input,
             queues: InputQueues::default(),
             queue_revision: 0,
-            last_published_text: String::new(),
+            last_published_text: std::sync::Arc::from(""),
+            last_published_source: None,
             height: PromptHeightState::default(),
             placeholders,
         }
@@ -400,12 +402,17 @@ impl PromptRuntime {
         self.queues.display_kinds()
     }
 
-    pub(crate) fn publish_text_if_changed(&mut self, current: &str) -> bool {
-        if self.last_published_text == current {
-            return false;
+    pub(crate) fn publish_text_if_changed(&mut self, buf: &Buffer) -> Option<std::sync::Arc<str>> {
+        let source = (buf.id(), buf.source_tick());
+        if self.last_published_source == Some(source) {
+            return None;
         }
-        current.clone_into(&mut self.last_published_text);
-        true
+        self.last_published_source = Some(source);
+        if self.last_published_text.as_ref() == buf.source() {
+            return None;
+        }
+        self.last_published_text = std::sync::Arc::from(buf.source());
+        Some(std::sync::Arc::clone(&self.last_published_text))
     }
 
     pub(crate) fn resolve_height(&mut self, wrapped_rows: u16, terminal_height: u16) -> u16 {

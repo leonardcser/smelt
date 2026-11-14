@@ -11,10 +11,20 @@
 use crate::buffer::{Buffer, LineDecoration, SelectionRange, Span};
 use crate::{cell_width, text};
 
+/// A parser-certified restart boundary in source and display space.
+/// The prefix before this point can be retained when later source bytes change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProjectionCheckpoint {
+    pub source_byte: usize,
+    pub source_char: usize,
+    pub display_char: usize,
+    pub row: usize,
+}
+
 /// Bidirectional source↔display char maps + per-row offsets.
 /// Stored on [`Buffer`] after parse for buffers whose source-byte stream
 /// doesn't match their display rows 1:1.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectionMaps {
     /// `source_char_to_display_char[n] = display-char index of source char n`.
     /// Length = `source.chars().count() + 1`; final entry = total display chars.
@@ -24,9 +34,65 @@ pub struct ProjectionMaps {
     pub display_char_to_source_char: Vec<usize>,
     /// Display-char offset at the start of each wrapped row.
     pub row_offsets: Vec<usize>,
+    /// Ordered parser restart boundaries. Empty for projections that do not
+    /// support incremental updates.
+    pub checkpoints: Vec<ProjectionCheckpoint>,
 }
 
 impl ProjectionMaps {
+    pub fn checkpoint_at(&self, source_byte: usize) -> ProjectionCheckpoint {
+        self.checkpoints
+            .partition_point(|point| point.source_byte <= source_byte)
+            .checked_sub(1)
+            .and_then(|index| self.checkpoints.get(index))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Replace the projection suffix, retaining prefix allocations and indexes.
+    pub fn replace_suffix(&mut self, point: ProjectionCheckpoint, suffix: Self) {
+        self.source_char_to_display_char
+            .truncate(point.source_char + 1);
+        self.source_char_to_display_char.extend(
+            suffix
+                .source_char_to_display_char
+                .into_iter()
+                .skip(1)
+                .map(|offset| point.display_char + offset),
+        );
+        self.display_char_to_source_char
+            .truncate(point.display_char + 1);
+        self.display_char_to_source_char.extend(
+            suffix
+                .display_char_to_source_char
+                .into_iter()
+                .skip(1)
+                .map(|offset| point.source_char + offset),
+        );
+        self.row_offsets.truncate(point.row);
+        self.row_offsets.extend(
+            suffix
+                .row_offsets
+                .into_iter()
+                .map(|offset| point.display_char + offset),
+        );
+        self.checkpoints.truncate(
+            self.checkpoints
+                .partition_point(|old| old.source_byte < point.source_byte),
+        );
+        self.checkpoints.extend(
+            suffix
+                .checkpoints
+                .into_iter()
+                .map(|next| ProjectionCheckpoint {
+                    source_byte: point.source_byte + next.source_byte,
+                    source_char: point.source_char + next.source_char,
+                    display_char: point.display_char + next.display_char,
+                    row: point.row + next.row,
+                }),
+        );
+    }
+
     /// Map a source byte offset to a display `(row, col)` pair. `col` is in
     /// display chars; `Buffer::display_cursor_pos` converts it to cells for
     /// callers.
@@ -34,7 +100,13 @@ impl ProjectionMaps {
         if self.row_offsets.is_empty() {
             return (0, 0);
         }
-        let src_char = text::char_pos(source, src_byte);
+        let src_byte = text::snap(source, src_byte);
+        let point = self.checkpoint_at(src_byte);
+        let src_char = point.source_char
+            + text::char_pos(
+                text::slice(source, point.source_byte..source.len()),
+                src_byte.saturating_sub(point.source_byte),
+            );
         let display_char = self
             .source_char_to_display_char
             .get(src_char)
@@ -63,7 +135,20 @@ impl ProjectionMaps {
             .copied()
             .or_else(|| self.display_char_to_source_char.last().copied())
             .unwrap_or(0);
-        text::byte_of_char(source, src_char)
+        let point = self
+            .checkpoints
+            .partition_point(|point| point.source_char <= src_char)
+            .checked_sub(1)
+            .and_then(|index| self.checkpoints.get(index))
+            .copied()
+            .unwrap_or_default();
+        text::snap(
+            source,
+            point.source_byte.saturating_add(text::byte_of_char(
+                text::slice(source, point.source_byte..source.len()),
+                src_char.saturating_sub(point.source_char),
+            )),
+        )
     }
 }
 
@@ -930,6 +1015,7 @@ mod tests {
             source_char_to_display_char: vec![0, 1, 4, 5],
             display_char_to_source_char: vec![0, 1, 1, 1, 2, 3],
             row_offsets: vec![0],
+            ..Default::default()
         };
         let source = "a\u{FFFC}b";
         // Cursor at start of "b" (source byte after the marker).

@@ -30,6 +30,39 @@ fn wait_for_frame(app: &mut TestApp, text: &str) -> String {
 }
 
 #[test]
+fn file_completion_detects_only_the_token_at_the_cursor() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        local register = smelt.prompt.register_completer
+        local detect
+        smelt.prompt.register_completer = function(spec) detect = spec.detect end
+        package.loaded["smelt.completers.file"] = nil
+        require("smelt.completers.file")
+        smelt.prompt.register_completer = register
+        local cases = {
+          { "", 0, false },
+          { "@", 0, 0 },
+          { "@", 1, 0 },
+          { "x @file", 2, 2 },
+          { "@file tail", 5, 0 },
+          { "@file tail", 6, false },
+          { "@file tail", 10, false },
+          { "x@file", 6, false },
+          { "@@file", 6, false },
+          { "@old\nplain", 10, false },
+          { "α @中", 7, 3 },
+          { string.rep("old text\n", 100000) .. "@file", 900005, 900000 },
+        }
+        for _, case in ipairs(cases) do
+          assert((detect(case[1], case[2]) or false) == case[3], case[1]:sub(-40))
+        end
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn file_finder_search_preview_accept_and_dismiss() {
     let (dir, mut app) = fixture_app();
     std::fs::write(dir.path().join("beta.txt"), "beta preview\n".repeat(318)).unwrap();

@@ -10,7 +10,7 @@ use smelt_buffer::buffer::{
     Buffer, BufferCopy, BufferParser, CopyOutput, LineCursorPolicy, LineDecoration, SpanMeta,
 };
 use smelt_buffer::cell_width;
-use smelt_buffer::coords::ProjectionMaps;
+use smelt_buffer::coords::{ProjectionCheckpoint, ProjectionMaps};
 use smelt_buffer::theme::intern;
 use std::sync::{Arc, Mutex};
 
@@ -102,9 +102,8 @@ impl PromptCopier {
     }
 }
 
-/// Build source-char ↔ display-char maps from a span stream.
-/// Returns `(source_char_to_display_char, display_char_to_source_char)`.
-fn build_coord_maps(spans: &[Span]) -> (Vec<usize>, Vec<usize>) {
+/// Build coordinate maps and restart points outside multi-line tokens.
+fn build_coord_maps(source: &str, spans: &[Span], row_offsets: Vec<usize>) -> ProjectionMaps {
     fn map_expanded_source_char(
         s2d: &mut Vec<usize>,
         d2s: &mut Vec<usize>,
@@ -131,33 +130,65 @@ fn build_coord_maps(spans: &[Span]) -> (Vec<usize>, Vec<usize>) {
     let mut d2s = vec![0usize];
     let mut s_cur = 0usize;
     let mut d_cur = 0usize;
+    let mut source_chars = source.chars();
+    let mut restart_safe = true;
+    let mut source_byte = 0;
+    let mut row = 0;
+    let mut checkpoints = vec![ProjectionCheckpoint::default()];
     for span in spans {
+        if matches!(span, Span::AtQuoteStart(_)) {
+            restart_safe = false;
+        }
         match span {
-            Span::Plain(t) | Span::AtRef(t) => {
-                for _ in t.chars() {
+            Span::Plain(t) | Span::AtRef(t) | Span::AtToken(t) | Span::AtQuoteStart(t) => {
+                for ch in t.chars() {
+                    source_byte += source_chars
+                        .next()
+                        .expect("prompt span source character")
+                        .len_utf8();
                     s_cur += 1;
                     d_cur += 1;
                     s2d.push(d_cur);
                     d2s.push(s_cur);
+                    if ch == '\n' {
+                        row += 1;
+                        if restart_safe && matches!(span, Span::Plain(_)) {
+                            checkpoints.push(ProjectionCheckpoint {
+                                source_byte,
+                                source_char: s_cur,
+                                display_char: d_cur,
+                                row,
+                            });
+                        }
+                    }
                 }
             }
-            Span::Tab => map_expanded_source_char(
-                &mut s2d,
-                &mut d2s,
-                &mut s_cur,
-                &mut d_cur,
-                TAB_DISPLAY.chars().count(),
-            ),
-            Span::Attachment(label) => map_expanded_source_char(
-                &mut s2d,
-                &mut d2s,
-                &mut s_cur,
-                &mut d_cur,
-                label.chars().count(),
-            ),
+            Span::Tab | Span::Attachment(_) => {
+                source_byte += source_chars
+                    .next()
+                    .expect("prompt span source character")
+                    .len_utf8();
+                let label = match span {
+                    Span::Attachment(label) => label.as_str(),
+                    _ => TAB_DISPLAY,
+                };
+                map_expanded_source_char(
+                    &mut s2d,
+                    &mut d2s,
+                    &mut s_cur,
+                    &mut d_cur,
+                    label.chars().count(),
+                );
+                row += label.bytes().filter(|&byte| byte == b'\n').count();
+            }
         }
     }
-    (s2d, d2s)
+    ProjectionMaps {
+        source_char_to_display_char: s2d,
+        display_char_to_source_char: d2s,
+        row_offsets,
+        checkpoints,
+    }
 }
 
 /// Split the flat display buffer into logical display rows while carrying the
@@ -227,7 +258,38 @@ fn build_prompt_display_rows(
 }
 
 impl BufferParser for PromptBufferParser {
+    fn dependency_key(&self, source: &str) -> u64 {
+        u64::from(
+            self.commands
+                .command_token(smelt_buffer::text::trim_whitespace(source))
+                .is_some(),
+        )
+    }
+
     fn parse(&self, buf: &mut Buffer, source: &str, _width: u16) {
+        self.parse_from(buf, source, ProjectionCheckpoint::default());
+    }
+
+    fn parse_incremental(&self, buf: &mut Buffer, source: &str, _width: u16, start: usize) -> bool {
+        let Some(maps) = buf.projection_maps() else {
+            return false;
+        };
+        let point = maps.checkpoint_at(start);
+        if point.row == 0 {
+            return false;
+        }
+        self.parse_from(buf, source, point);
+        true
+    }
+}
+
+impl PromptBufferParser {
+    fn parse_from(&self, buf: &mut Buffer, source: &str, point: ProjectionCheckpoint) {
+        let suffix = smelt_buffer::text::slice(source, point.source_byte..source.len());
+        smelt_perf::perf::record_value("prompt:projected_source_bytes", suffix.len() as u64);
+        let attachment_start = smelt_buffer::text::slice(source, 0..point.source_byte)
+            .matches(ATTACHMENT_MARKER)
+            .count();
         let placeholder = self.placeholder.lock().unwrap().clone();
         let store = self.store.lock().unwrap();
         let PromptDisplayRows {
@@ -235,26 +297,37 @@ impl BufferParser for PromptBufferParser {
             visual_lines,
             row_offsets,
             ghost,
-        } = build_prompt_display_rows(source, &buf.attachment_ids, &store, placeholder.as_deref());
+        } = build_prompt_display_rows(
+            suffix,
+            buf.attachment_ids
+                .get(attachment_start..)
+                .unwrap_or_default(),
+            &store,
+            placeholder.as_deref().filter(|_| point.row == 0),
+        );
         drop(store);
 
         let lines: Vec<String> = visual_lines.iter().map(|(l, _)| l.clone()).collect();
 
         // Determine if we need special command/exec styling on the first line.
-        let command_token_end = self
-            .commands
-            .command_token(smelt_buffer::text::trim_whitespace(source))
-            .map(|token| token.chars().count())
-            .unwrap_or(0);
-        let single_line = !source.contains('\n');
+        let command_token_end = if point.row == 0 {
+            self.commands
+                .command_token(smelt_buffer::text::trim_whitespace(source))
+                .map(|token| token.chars().count())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let single_line = point.row == 0 && !source.contains('\n');
         let is_exec =
             single_line && matches!(source.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = single_line && source == "!";
 
-        // Set lines and clear old highlights.
-        buf.set_all_lines(lines);
-        let line_count = buf.line_count();
-        buf.clear_highlights(0, line_count.max(1));
+        if point.row == 0 {
+            buf.set_all_lines(lines);
+        } else {
+            buf.set_lines(point.row, buf.line_count(), lines);
+        }
 
         if ghost {
             let ghost_group = intern("GhostText");
@@ -286,6 +359,7 @@ impl BufferParser for PromptBufferParser {
                 source_char_to_display_char: vec![0],
                 display_char_to_source_char: vec![0; display_chars + 1],
                 row_offsets,
+                checkpoints: Vec::new(),
             });
             return;
         }
@@ -295,7 +369,8 @@ impl BufferParser for PromptBufferParser {
         let accent_group = intern("SmeltAccent");
         let exec_group = intern("SmeltExecPrefix");
 
-        for (li, (line, kinds)) in visual_lines.iter().enumerate() {
+        for (offset, (line, kinds)) in visual_lines.iter().enumerate() {
+            let li = point.row + offset;
             let mut col = 0u16;
             let mut char_index = 0usize;
             for grapheme in cell_width::graphemes(line) {
@@ -344,12 +419,16 @@ impl BufferParser for PromptBufferParser {
             }
         }
 
-        let (s2d, d2s) = build_coord_maps(&spans);
-        buf.set_projection_maps(ProjectionMaps {
-            source_char_to_display_char: s2d,
-            display_char_to_source_char: d2s,
-            row_offsets,
-        });
+        let maps = build_coord_maps(suffix, &spans, row_offsets);
+        if point.row == 0 {
+            buf.set_projection_maps(maps);
+        } else {
+            let mut retained = buf
+                .take_projection_maps()
+                .expect("incremental prompt projection");
+            retained.replace_suffix(point, maps);
+            buf.set_projection_maps(retained);
+        }
     }
 }
 
@@ -366,6 +445,154 @@ mod tests {
 
     fn empty_commands() -> Arc<smelt_core::commands::CommandCatalog> {
         Arc::new(smelt_core::commands::CommandCatalog::default())
+    }
+
+    fn assert_matches_full_projection(buf: &Buffer, width: u16) {
+        let mut full = buf.clone();
+        full.invalidate_render_cache();
+        full.ensure_rendered_at(width);
+        assert_eq!(buf.lines(), full.lines(), "source: {:?}", buf.source());
+        assert_eq!(buf.projection_maps(), full.projection_maps());
+        for row in 0..buf.line_count() {
+            assert_eq!(buf.highlights_at(row), full.highlights_at(row));
+            assert_eq!(buf.decoration_at(row), full.decoration_at(row));
+            for col in 0..=cell_width::text_width(buf.get_line(row).unwrap()) + 1 {
+                assert_eq!(
+                    buf.byte_at_display_pos(row, col),
+                    full.byte_at_display_pos(row, col)
+                );
+            }
+        }
+        for byte in 0..=buf.source().len() + 1 {
+            assert_eq!(buf.display_cursor_pos(byte), full.display_cursor_pos(byte));
+        }
+    }
+
+    #[test]
+    fn command_catalog_changes_refresh_cached_and_retained_rows() {
+        let names = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let commands = Arc::new(smelt_core::commands::CommandCatalog::new(names.clone()));
+        let parser = Arc::new(PromptBufferParser::with_placeholder(
+            Arc::new(Mutex::new(AttachmentStore::new())),
+            Arc::new(Mutex::new(None)),
+            commands.clone(),
+        ));
+        let mut buf = make_buf_with_parser(parser);
+        buf.set_source("/dynamic args\nlast".into());
+        buf.ensure_rendered_at(80);
+        assert!(buf.highlights_at(0).is_empty());
+
+        names.lock().unwrap().insert("dynamic".into());
+        assert!(buf.ensure_rendered_at(80));
+        assert!(!buf.highlights_at(0).is_empty());
+        assert!(!buf.ensure_rendered_at(80));
+
+        names.lock().unwrap().remove("dynamic");
+        let end = buf.source().len();
+        buf.text_mut().insert(end, 'x');
+        assert!(buf.ensure_rendered_at(80));
+        assert!(buf.highlights_at(0).is_empty());
+        assert_matches_full_projection(&buf, 80);
+
+        commands.activate(Arc::new(Mutex::new(std::collections::HashSet::from([
+            "dynamic".into(),
+        ]))));
+        assert!(buf.ensure_rendered_at(80));
+        assert!(!buf.highlights_at(0).is_empty());
+    }
+
+    #[test]
+    fn unchanged_file_references_refresh_on_full_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.txt");
+        std::fs::write(&path, "reference").unwrap();
+        let parser = Arc::new(PromptBufferParser::new(Arc::new(Mutex::new(
+            AttachmentStore::new(),
+        ))));
+        let mut buf = make_buf_with_parser(parser);
+        buf.set_source(format!("@\"{}\"\nlast", path.display()));
+        buf.ensure_rendered_at(80);
+        let highlights = buf.highlights_at(0).to_vec();
+        assert!(!highlights.is_empty());
+        std::fs::remove_file(&path).unwrap();
+
+        let end = buf.source().len();
+        buf.text_mut().insert(end, 'x');
+        buf.ensure_rendered_at(80);
+        assert_eq!(buf.highlights_at(0), highlights);
+
+        buf.invalidate_render_cache();
+        buf.ensure_rendered_at(80);
+        assert!(buf.highlights_at(0).is_empty());
+        std::fs::write(&path, "reference").unwrap();
+        buf.ensure_rendered_at(79);
+        assert!(!buf.highlights_at(0).is_empty());
+    }
+
+    #[test]
+    fn incremental_prompt_projection_matches_full_parse() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let id = store
+            .lock()
+            .unwrap()
+            .insert_image("中.png".into(), "data:x".into());
+        let second_id = store
+            .lock()
+            .unwrap()
+            .insert_image("other.png".into(), "data:y".into());
+        let parser = Arc::new(PromptBufferParser::new(store));
+        for source in [
+            "first\nsecond\nlast".to_string(),
+            format!("first\n@\"{}\"\nlast", env!("CARGO_MANIFEST_DIR")),
+            "first\ne\u{301}中👩\u{200d}💻\tlast".to_string(),
+            "!ls\nlast".to_string(),
+            "first\n@\"missing\n@nested\"\nlast".to_string(),
+            "first\n@\"missing\nlast".to_string(),
+            "first\r\ncontrol\0\nlast".to_string(),
+            format!("{ATTACHMENT_MARKER}\nrow\t{ATTACHMENT_MARKER}\nlast"),
+            format!("first\n@\"missing{ATTACHMENT_MARKER}\"\n{ATTACHMENT_MARKER} last"),
+        ] {
+            let ids = [id, second_id]
+                .into_iter()
+                .cycle()
+                .take(source.matches(ATTACHMENT_MARKER).count())
+                .collect();
+            let mut initial = make_buf_with_parser(parser.clone());
+            initial.text_mut().install(source.clone(), ids);
+            initial.ensure_rendered_at(20);
+            for byte in 0..=source.len() {
+                for replacement in ["", "x", "\n", "\t", "\u{301}", "\""] {
+                    let mut buf = initial.clone();
+                    buf.text_mut()
+                        .replace_range(byte..(byte + 1).min(source.len()), replacement);
+                    buf.ensure_rendered_at(20);
+                    assert_matches_full_projection(&buf, 20);
+                    let end = buf.source().len();
+                    buf.text_mut().insert_str(end, "\nnext");
+                    buf.text_mut().insert_str(end.saturating_sub(2), "中");
+                    buf.ensure_rendered_at(20);
+                    assert_matches_full_projection(&buf, 20);
+                    buf.ensure_rendered_at(9);
+                    assert_matches_full_projection(&buf, 9);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn projection_positions_stay_bounded_before_reparsing_a_shrunk_source() {
+        let parser = Arc::new(PromptBufferParser::new(Arc::new(Mutex::new(
+            AttachmentStore::new(),
+        ))));
+        let mut buf = make_buf_with_parser(parser);
+        buf.set_source("first\n中\nlast".into());
+        buf.ensure_rendered_at(20);
+        buf.text_mut().clear();
+        for row in 0..buf.line_count() {
+            assert_eq!(buf.byte_at_display_pos(row, 100), 0);
+        }
+        buf.ensure_rendered_at(20);
+        assert_matches_full_projection(&buf, 20);
     }
 
     #[test]

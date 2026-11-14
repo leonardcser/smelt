@@ -18,17 +18,54 @@ use crate::attachment::ATTACHMENT_MARKER;
 use crate::text;
 use core::ops::{Deref, Range};
 
+#[derive(Clone, Default)]
+pub(crate) struct SourceChanges {
+    pub revision: u64,
+    pub changed_from: Option<usize>,
+}
+
+impl SourceChanges {
+    pub fn record(&mut self, start: usize) {
+        self.revision = self.revision.wrapping_add(1);
+        self.changed_from = Some(
+            self.changed_from
+                .map_or(start, |previous| previous.min(start)),
+        );
+    }
+}
+
 pub struct AttachedTextMut<'a> {
     source: &'a mut String,
     ids: &'a mut Vec<AttachmentId>,
+    changes: Option<&'a mut SourceChanges>,
 }
 
 impl<'a> AttachedTextMut<'a> {
     /// Build a borrowing wrapper. Debug-asserts the paired invariant.
     pub fn new(source: &'a mut String, ids: &'a mut Vec<AttachmentId>) -> Self {
-        let out = Self { source, ids };
+        let out = Self {
+            source,
+            ids,
+            changes: None,
+        };
         out.check();
         out
+    }
+
+    pub(crate) fn tracked(
+        source: &'a mut String,
+        ids: &'a mut Vec<AttachmentId>,
+        changes: &'a mut SourceChanges,
+    ) -> Self {
+        let mut out = Self::new(source, ids);
+        out.changes = Some(changes);
+        out
+    }
+
+    fn record_change(&mut self, start: usize) {
+        if let Some(changes) = self.changes.as_mut() {
+            changes.record(start);
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -52,12 +89,20 @@ impl<'a> AttachedTextMut<'a> {
     }
 
     pub fn clear(&mut self) {
+        if self.is_empty_overall() {
+            return;
+        }
+        self.record_change(0);
         self.source.clear();
         self.ids.clear();
     }
 
     /// Wholesale swap. The caller asserts `source` and `ids` are paired.
     pub fn install(&mut self, source: String, ids: Vec<AttachmentId>) {
+        if *self.source == source && *self.ids == ids {
+            return;
+        }
+        self.record_change(0);
         *self.source = source;
         *self.ids = ids;
         self.check();
@@ -68,6 +113,10 @@ impl<'a> AttachedTextMut<'a> {
     /// `install_source`) and the snapshot's id list needs to be re-bound.
     /// Debug-asserts the marker count matches.
     pub fn set_ids(&mut self, ids: Vec<AttachmentId>) {
+        if *self.ids == ids {
+            return;
+        }
+        self.record_change(0);
         *self.ids = ids;
         self.check();
     }
@@ -79,6 +128,10 @@ impl<'a> AttachedTextMut<'a> {
     pub fn replace_range(&mut self, range: Range<usize>, new: &str) {
         let start = text::snap(self.source, range.start);
         let end = text::snap(self.source, range.end).max(start);
+        if &self.source[start..end] == new {
+            return;
+        }
+        self.record_change(start);
         let before = self.source[..start].matches(ATTACHMENT_MARKER).count();
         let removed = self.source[start..end].matches(ATTACHMENT_MARKER).count();
         let kept = new.matches(ATTACHMENT_MARKER).count();
@@ -97,7 +150,10 @@ impl<'a> AttachedTextMut<'a> {
             "AttachedTextMut::insert_str: input contains attachment marker; use insert_marker"
         );
         let p = text::snap(self.source, pos);
-        self.source.insert_str(p, s);
+        if !s.is_empty() {
+            self.record_change(p);
+            self.source.insert_str(p, s);
+        }
         p
     }
 
@@ -109,6 +165,7 @@ impl<'a> AttachedTextMut<'a> {
             "AttachedTextMut::insert: char is attachment marker; use insert_marker"
         );
         let p = text::snap(self.source, pos);
+        self.record_change(p);
         self.source.insert(p, c);
         p
     }
@@ -117,6 +174,7 @@ impl<'a> AttachedTextMut<'a> {
     /// ordinal position. Returns the snapped offset of the marker.
     pub fn insert_marker(&mut self, pos: usize, id: AttachmentId) -> usize {
         let p = text::snap(self.source, pos);
+        self.record_change(p);
         let idx = self.source[..p].matches(ATTACHMENT_MARKER).count();
         self.ids.insert(idx, id);
         self.source.insert(p, ATTACHMENT_MARKER);
@@ -127,6 +185,10 @@ impl<'a> AttachedTextMut<'a> {
     /// Strip every `ATTACHMENT_MARKER` from `source` and drop every id.
     /// Returns the previous id list so callers can re-bind ids elsewhere.
     pub fn strip_attachments(&mut self) -> Vec<AttachmentId> {
+        if self.ids.is_empty() {
+            return Vec::new();
+        }
+        self.record_change(0);
         let drained = core::mem::take(self.ids);
         *self.source = self.source.replace(ATTACHMENT_MARKER, "");
         drained
@@ -154,6 +216,46 @@ mod tests {
 
     fn id(n: u64) -> AttachmentId {
         n
+    }
+
+    #[test]
+    fn tracked_edits_record_the_earliest_changed_byte() {
+        let mut source = "a中bc".to_string();
+        let mut ids = Vec::new();
+        let mut changed = SourceChanges::default();
+        {
+            let mut text = AttachedTextMut::tracked(&mut source, &mut ids, &mut changed);
+            text.insert(6, 'x');
+            text.replace_range(4..5, "yy");
+            text.insert_str(2, "z");
+        }
+        assert_eq!(changed.changed_from, Some(1));
+        assert_eq!(changed.revision, 3);
+        assert!(source.starts_with('a'));
+    }
+
+    #[test]
+    fn unchanged_mutations_preserve_revision() {
+        let mut source = "a中bc".to_string();
+        let mut ids = Vec::new();
+        let mut changes = SourceChanges::default();
+        {
+            let mut text = AttachedTextMut::tracked(&mut source, &mut ids, &mut changes);
+            text.insert_str(2, "");
+            text.replace_range(1..4, "中");
+            text.set_ids(Vec::new());
+            assert!(text.strip_attachments().is_empty());
+            text.install("a中bc".into(), Vec::new());
+        }
+        assert_eq!(changes.revision, 0);
+        assert_eq!(changes.changed_from, None);
+        {
+            let mut text = AttachedTextMut::tracked(&mut source, &mut ids, &mut changes);
+            text.clear();
+            text.clear();
+        }
+        assert_eq!(changes.revision, 1);
+        assert_eq!(changes.changed_from, Some(0));
     }
 
     #[test]

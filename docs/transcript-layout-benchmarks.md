@@ -279,6 +279,22 @@ the standard suite. Do not add these acceptance runs to commit/push hooks.
 - `cargo xtask bench-diff`: indexed core access, real Git loading, virtualized
   viewer frames, and stage/unstage interaction.
 - `cargo xtask bench-search`: incremental viewer search with distant/absent matches.
+- `cargo xtask bench-paste [--sizes CSV]`: decoder-to-application harness workload
+  for bracketed paste, the first frame, an unchanged frame, one key afterwards,
+  and submit. Key handling and submission are measured separately from their
+  following frames, so edit cost is not confused with projection/render cost.
+  Reports per-stage medians from five runs after one warmup per size, with growth
+  exponents between sizes. Sizes must be positive and strictly increasing;
+  defaults are 65536,262144,1048576 bytes. Does not measure OS reads, polling,
+  or channel delivery. The normal test suite guards the allocation cost of
+  frames after edits at the end of a large, multi-line prompt. Those edits
+  retain the projected prefix and reproject/reflow the changed suffix. Initial
+  paste, edits near the start, very long individual lines, and width changes
+  can still require work proportional to the affected text. Changed-text
+  notifications still copy full prompt snapshots, but unchanged revision checks
+  do not. Command registration/removal refreshes cached prompt styling. Filesystem
+  references are checked in reparsed text; unchanged prefixes refresh on a full
+  parse (for example, resize or explicit invalidation), not by filesystem polling.
 - `cargo xtask bench-file-search --help`: fuzzy ranking over a generated path tree.
 - `cargo run --release -p xtask -- bench-session-search --help`: saved transcript
   search latency and peak memory over a state directory, including a full-scan miss.
