@@ -22,9 +22,7 @@ pub fn is_api_base(api_base: &str) -> bool {
 fn cred_store() -> &'static CredStore {
     static STORE: OnceLock<CredStore> = OnceLock::new();
 
-    STORE.get_or_init(|| {
-        CredStore::production("smelt-kimi-code-auth", "default", token_path(), TOKENS_ENV)
-    })
+    STORE.get_or_init(|| CredStore::new(token_path(), TOKENS_ENV))
 }
 
 #[derive(Clone)]
@@ -63,9 +61,8 @@ pub(crate) fn account_scope(tokens: &KimiCodeTokens) -> String {
     })
 }
 
-pub(crate) fn load_tokens_passive() -> Option<KimiCodeTokens> {
-    let json = cred_store().load_passive()?;
-    serde_json::from_str(&json).ok()
+pub(crate) fn load_tokens() -> Option<KimiCodeTokens> {
+    load_tokens_from(cred_store())
 }
 
 fn load_tokens_from(store: &CredStore) -> Option<KimiCodeTokens> {
@@ -78,7 +75,7 @@ fn delete_tokens() {
 }
 
 pub fn is_logged_in() -> bool {
-    load_tokens_passive().is_some()
+    load_tokens().is_some()
 }
 
 pub fn logout() {

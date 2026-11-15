@@ -41,11 +41,10 @@ the originals.
 
 ## Credentials
 
-OAuth providers read credentials from, in order, an environment override, a
-private file in the state directory (mode `0600` on Unix), then the operating
-system keyring. `smelt auth` writes both the file and the keyring, and logout
-removes both. Background checks never touch the keyring, so they cannot trigger an
-OS credential prompt.
+OAuth providers keep credentials in a private file in the state directory,
+`auth/<provider>.json` (mode `0600` on Unix). An environment override, when set,
+takes precedence over the file. `smelt auth` writes the file and logout deletes
+it.
 
 ## Environment variables
 

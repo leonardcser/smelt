@@ -13,14 +13,7 @@ use super::{auth_storage::CredStore, LoginCallbacks};
 fn cred_store() -> &'static CredStore {
     static STORE: OnceLock<CredStore> = OnceLock::new();
 
-    STORE.get_or_init(|| {
-        CredStore::production(
-            "smelt-codex-auth",
-            "default",
-            smelt_paths::auth_path("codex.json"),
-            CODEX_TOKENS_ENV,
-        )
-    })
+    STORE.get_or_init(|| CredStore::new(smelt_paths::auth_path("codex.json"), CODEX_TOKENS_ENV))
 }
 
 #[derive(Clone)]
@@ -45,9 +38,8 @@ fn save_tokens_to(tokens: &CodexTokens, store: &CredStore) -> Result<(), String>
     store.save(&json)
 }
 
-pub(crate) fn load_tokens_passive() -> Option<CodexTokens> {
-    let json = cred_store().load_passive()?;
-    serde_json::from_str(&json).ok()
+pub(crate) fn load_tokens() -> Option<CodexTokens> {
+    load_tokens_from(cred_store())
 }
 
 fn load_tokens_from(store: &CredStore) -> Option<CodexTokens> {

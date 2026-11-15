@@ -61,17 +61,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "apple-native-keyring-store"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b350bfd03649e07aa05c0a81b3e15934374e585c98204a57e20b9d49f49bb9a"
-dependencies = [
- "keyring-core",
- "log",
- "security-framework",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,12 +222,6 @@ name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "byteorder-lite"
@@ -1510,15 +1493,6 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "keyring-core"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29fbf4b551298c67925f38cf341a1ada797a75f1837bdf8ae1fc8e2ebc6efb59"
-dependencies = [
- "log",
 ]
 
 [[package]]
@@ -3079,11 +3053,9 @@ dependencies = [
 name = "smelt-engine"
 version = "0.0.0-dev"
 dependencies = [
- "apple-native-keyring-store",
  "base64 0.22.1",
  "futures-util",
  "image",
- "keyring-core",
  "libc",
  "rand 0.10.3",
  "reqwest",
@@ -3100,7 +3072,6 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
- "windows-native-keyring-store",
 ]
 
 [[package]]
@@ -4237,18 +4208,6 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
-
-[[package]]
-name = "windows-native-keyring-store"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8"
-dependencies = [
- "byteorder",
- "keyring-core",
- "windows-sys 0.61.2",
- "zeroize",
-]
 
 [[package]]
 name = "windows-numerics"

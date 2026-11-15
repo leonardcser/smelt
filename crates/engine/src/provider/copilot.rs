@@ -16,14 +16,7 @@ const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 fn cred_store() -> &'static CredStore {
     static STORE: OnceLock<CredStore> = OnceLock::new();
 
-    STORE.get_or_init(|| {
-        CredStore::production(
-            "smelt-copilot-auth",
-            "default",
-            smelt_paths::auth_path("copilot.json"),
-            COPILOT_TOKENS_ENV,
-        )
-    })
+    STORE.get_or_init(|| CredStore::new(smelt_paths::auth_path("copilot.json"), COPILOT_TOKENS_ENV))
 }
 
 #[derive(Clone)]
@@ -51,9 +44,8 @@ fn load_tokens_from(store: &CredStore) -> Option<CopilotTokens> {
     serde_json::from_str(&json).ok()
 }
 
-pub(crate) fn load_tokens_passive() -> Option<CopilotTokens> {
-    let json = cred_store().load_passive()?;
-    serde_json::from_str(&json).ok()
+pub(crate) fn load_tokens() -> Option<CopilotTokens> {
+    load_tokens_from(cred_store())
 }
 
 pub(crate) fn delete_tokens() {

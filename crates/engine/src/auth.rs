@@ -200,15 +200,14 @@ fn short_fingerprint(fingerprint: &str) -> Option<u64> {
     u64::from_str_radix(fingerprint.get(..16)?, 16).ok()
 }
 
-/// Reads only passive credential sources because this runs in background auth polling.
 pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<String> {
     match provider {
         AuthProvider::Codex => {
-            let tokens = provider::codex::load_tokens_passive()?;
+            let tokens = provider::codex::load_tokens()?;
             Some(codex_account_scope(&tokens))
         }
         AuthProvider::Copilot => {
-            let tokens = provider::copilot::load_tokens_passive()?;
+            let tokens = provider::copilot::load_tokens()?;
             Some(model_cache_fingerprint(
                 provider,
                 "refresh_token",
@@ -216,7 +215,7 @@ pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<
             ))
         }
         AuthProvider::KimiCode => {
-            let tokens = provider::kimi_code::load_tokens_passive()?;
+            let tokens = provider::kimi_code::load_tokens()?;
             Some(model_cache_fingerprint(
                 provider,
                 "refresh_token",
@@ -229,7 +228,7 @@ pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<
 /// Login identity for usage reports, independent of routine token rotation.
 pub fn usage_scope(provider: AuthProvider) -> Option<String> {
     match provider {
-        AuthProvider::KimiCode => provider::kimi_code::load_tokens_passive()
+        AuthProvider::KimiCode => provider::kimi_code::load_tokens()
             .map(|tokens| provider::kimi_code::account_scope(&tokens)),
         _ => model_cache_account_fingerprint(provider),
     }

@@ -25,15 +25,11 @@ thiserror = "2"
 futures-util = { workspace = true }
 rand = "0.10"
 smelt-perf = { version = "0.3.0", path = "../perf" }
-keyring-core = "1.0.0"
 smelt-text = { workspace = true }
 uuid = { version = "1.29.0", features = ["v4"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [features]
-# Linux credential storage over the D-Bus secret service. Fuzz builds leave it
-# out: they never reach a keyring and the dependency tree is large.
-secret-service = ["dep:zbus-secret-service-keyring-store"]
 # Exposes `fuzz_build_anthropic_body` / `fuzz_build_openai_body` for the
 # `cache_invariance` fuzz target. Not for production use - these bypass
 # the network layer and let fuzzers byte-compare cached prefixes.
@@ -45,12 +41,3 @@ smelt-store = { workspace = true }
 smelt-test-support = { workspace = true }
 serial_test = "4.0.1"
 tempfile.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1.0.1", features = ["keychain"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-native-keyring-store = { version = "1.1.0", default-features = false }
-
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
-zbus-secret-service-keyring-store = { version = "1.0.0", default-features = false, features = ["crypto-rust"], optional = true }
