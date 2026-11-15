@@ -611,6 +611,17 @@ impl HeadlessApp {
             .unwrap_or(self.core.config.settings.fast_mode);
 
         self.session.history = history.clone();
+        let form =
+            crate::session_runtime::TurnHistoryForm::for_provider(&model_target.provider_type);
+        let history = match crate::session_runtime::ModelHistoryRead::loaded(history, None, 0)
+            .read_turn(form)
+        {
+            Ok(history) => history,
+            Err(error) => {
+                self.report_turn_error(&error);
+                return HeadlessExit::Error;
+            }
+        };
         self.core
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
@@ -622,7 +633,7 @@ impl HeadlessApp {
                 reasoning_effort: self.core.config.reasoning_effort.clone(),
                 fast_mode,
                 control_env: self.core.session_control.agent_env(),
-                history: protocol::ModelHistorySource::items(history),
+                history,
                 session_id: self.session.id.clone(),
                 artifact_dir: self.core.sessions.artifact_dir_for(&self.session),
                 // One-shot headless history is not persisted.
@@ -724,6 +735,19 @@ impl HeadlessApp {
                         protocol::ToolEvaluation::deny()
                     };
                     let _ = reply.send(evaluation);
+                    continue;
+                }
+                engine::EngineOutput::HostCall(engine::HostCall::ModelHistory {
+                    identity,
+                    reply,
+                    ..
+                }) => {
+                    let history = crate::session_runtime::ModelHistoryRead::loaded(
+                        self.session.history.clone(),
+                        None,
+                        0,
+                    );
+                    let _ = reply.send(history.read_matching(&identity));
                     continue;
                 }
                 engine::EngineOutput::HostCall(call) => {

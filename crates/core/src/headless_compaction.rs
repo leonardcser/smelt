@@ -244,6 +244,8 @@ impl HeadlessCompaction {
                 let _ = reply.send(evaluation);
                 return Ok(());
             }
+            // The headless app answers it before compaction sees host calls.
+            HostCall::ModelHistory { .. } => return Ok(()),
             HostCall::PrepareRequest {
                 messages,
                 estimated_tokens,

@@ -86,6 +86,11 @@ impl Drop for Fixture {
     }
 }
 
+fn identity(history: &[HistoryItem]) -> protocol::HistoryIdentity {
+    protocol::HistoryIdentity::of(history)
+}
+
+/// Starts a turn as smelt does for Claude Code: by the identity of `history`.
 fn payload(root: &Path, turn: u64, history: Vec<HistoryItem>) -> UiCommand {
     UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: turn,
@@ -103,7 +108,7 @@ fn payload(root: &Path, turn: u64, history: Vec<HistoryItem>) -> UiCommand {
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
         control_env: Default::default(),
-        history: protocol::ModelHistorySource::items(history),
+        history: protocol::TurnHistory::Identity(identity(&history)),
         session_id: "test-session".into(),
         artifact_dir: root.join("artifacts/test-session"),
         ephemeral: false,
@@ -146,6 +151,13 @@ async fn finish(
                     decision: Decision::Allow,
                     metadata: Default::default(),
                 });
+            }
+            EngineOutput::HostCall(crate::HostCall::ModelHistory {
+                identity, reply, ..
+            }) => {
+                let items = history[..identity.len].to_vec();
+                assert_eq!(self::identity(&items), identity);
+                let _ = reply.send(Ok(protocol::ModelHistorySource::items(items)));
             }
             _ => {}
         }
@@ -359,7 +371,7 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
         session::load(
             &fixture.root.path().join("artifacts/test-session"),
             fixture.root.path(),
-            &history
+            &identity(&history)
         )
         .is_some(),
         "the settled native session must be resumable with its wake history"
@@ -1616,7 +1628,7 @@ async fn workspace_change_moves_claude_code_and_continues_the_turn() {
     assert!(session::load(
         &fixture.root.path().join("artifacts/test-session"),
         &destination,
-        &history
+        &identity(&history)
     )
     .is_some());
     handle.send(request(2, history.clone()));

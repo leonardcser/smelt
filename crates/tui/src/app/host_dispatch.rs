@@ -127,8 +127,10 @@ struct DeferredHostReply {
 }
 
 fn current_model_history_decision(app: &mut TuiApp) -> HostRequestDecision {
-    let source = app.model_history_source();
-    HostRequestDecision::replace_model_history(source.items, source.coordinates)
+    match app.model_history_source() {
+        Ok(source) => HostRequestDecision::replace_model_history(source.items, source.coordinates),
+        Err(error) => HostRequestDecision::Abort(error),
+    }
 }
 
 fn request_decision_from_lua(
@@ -411,6 +413,23 @@ impl TuiApp {
                 };
                 let _ = reply.send(evaluation);
             }
+            HostCall::ModelHistory {
+                turn_id,
+                identity,
+                reply,
+            } => {
+                if self.active_agent_turn_id() != Some(turn_id) {
+                    let _ = reply.send(Err("the turn is no longer active".into()));
+                    return;
+                }
+                let read = self.conversation.model_history_read();
+                // A failed spawn drops `reply`, which fails the import.
+                let _ = std::thread::Builder::new()
+                    .name("smelt-model-history".into())
+                    .spawn(move || {
+                        let _ = reply.send(read.read_matching(&identity));
+                    });
+            }
             HostCall::ProviderResponse {
                 turn_id,
                 message,
@@ -618,7 +637,13 @@ impl TuiApp {
             return;
         };
         let messages = if context_changed {
-            PreparedRequestMessages::model_only(self.model_history_messages())
+            match self.model_history_messages() {
+                Ok(messages) => PreparedRequestMessages::model_only(messages),
+                Err(error) => {
+                    let _ = reply.send(HostRequestDecision::Abort(error));
+                    return;
+                }
+            }
         } else {
             messages
         };

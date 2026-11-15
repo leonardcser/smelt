@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/quit_scaling.rs"]
+mod quit_scaling;
+
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -2472,6 +2475,7 @@ struct LifecycleSample {
     first_frame: Option<Duration>,
     ready: Duration,
     shutdown: Duration,
+    terminal_restored: Option<Duration>,
     peak_rss_kib: u64,
 }
 
@@ -2612,8 +2616,10 @@ impl LifecycleBenchmark<'_> {
         command.args([
             "--config",
             self.config.to_str().expect("UTF-8 benchmark config path"),
-            "--bench",
         ]);
+        if std::env::var_os("SMELT_LIFECYCLE_BENCH_PROFILE").is_some() {
+            command.arg("--bench");
+        }
         if let Some(session_id) = self.session_id {
             command.args(["--resume", session_id]);
         }
@@ -2670,10 +2676,15 @@ impl LifecycleBenchmark<'_> {
             std::thread::sleep(Duration::from_millis(1));
         }
 
+        let quit_offset = captured.len();
         let quit_started = Instant::now();
+        let mut terminal_restored = None;
         master.write_all(b"\x03\x03").expect("send Ctrl-C to smelt");
         let status = loop {
             drain_pty(&mut master, &mut captured);
+            if terminal_restored.is_none() && contains(&captured[quit_offset..], b"\x1b[?1049l") {
+                terminal_restored = Some(quit_started.elapsed());
+            }
             peak_rss_kib = peak_rss_kib.max(process_rss_kib(process.child.id()));
             if let Some(status) = process.child.try_wait().expect("inspect smelt shutdown") {
                 break status;
@@ -2685,11 +2696,15 @@ impl LifecycleBenchmark<'_> {
             );
             std::thread::sleep(Duration::from_millis(1));
         };
+        let shutdown = quit_started.elapsed();
         assert!(
             status.success(),
             "smelt lifecycle benchmark exited {status}"
         );
         drain_pty(&mut master, &mut captured);
+        if terminal_restored.is_none() && contains(&captured[quit_offset..], b"\x1b[?1049l") {
+            terminal_restored = Some(shutdown);
+        }
         if let Some(capture_dir) = std::env::var_os("SMELT_LIFECYCLE_BENCH_CAPTURE_DIR") {
             let capture_dir = std::path::PathBuf::from(capture_dir);
             std::fs::create_dir_all(&capture_dir).expect("create lifecycle capture directory");
@@ -2704,7 +2719,8 @@ impl LifecycleBenchmark<'_> {
         LifecycleSample {
             first_frame,
             ready,
-            shutdown: quit_started.elapsed(),
+            shutdown,
+            terminal_restored,
             peak_rss_kib,
         }
     }
@@ -2807,6 +2823,10 @@ smelt.provider.register("local", {
     }
     print_duration_summary("ready", samples.iter().map(|sample| sample.ready));
     print_duration_summary("shutdown", samples.iter().map(|sample| sample.shutdown));
+    print_duration_summary(
+        "terminal_restored",
+        samples.iter().filter_map(|sample| sample.terminal_restored),
+    );
     print_sample_summary(
         "peak_rss",
         "kib",

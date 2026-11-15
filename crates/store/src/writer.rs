@@ -328,11 +328,12 @@ fn write_history(
         tx.prepare_cached("SELECT users FROM history WHERE sid = ?1 AND idx = ?2")?
             .query_row(params![sid, start - 1], |row| row.get(0))?
     };
+    let mut chain = crate::history::chain_before(tx, sid, start)?;
     let mut added = 0_i64;
     let mut insert = tx.prepare_cached(
         "INSERT INTO history (sid, idx, users, user_turn, visible, note_kind, context, mode,
-             base_mode, text_bytes, body)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             base_mode, text_bytes, body, chain)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )?;
     let mut insert_text =
         tx.prepare_cached("INSERT INTO search_text (sid, idx, text) VALUES (?1, ?2, ?3)")?;
@@ -341,6 +342,7 @@ fn write_history(
         let json = serde_json::to_vec(item)?;
         let row = HistoryRow::of(item);
         users += i64::from(row.user_turn);
+        chain = chain.extend_encoded(item, &json);
         let bytes = json.len() as i64;
         added += bytes;
         let body = document::store(
@@ -364,6 +366,7 @@ fn write_history(
             row.base_mode,
             bytes,
             body,
+            chain.as_bytes().as_slice(),
         ])?;
         if let Some(text) = crate::history::conversation_text(item).filter(|text| !text.is_empty())
         {
@@ -529,9 +532,9 @@ pub(crate) fn fork(
         "INSERT INTO session_values (sid, name, value)
          SELECT ?2, name, value FROM session_values WHERE sid = ?1",
         "INSERT INTO history (sid, idx, users, user_turn, visible, note_kind, context, mode,
-             base_mode, text_bytes, body)
+             base_mode, text_bytes, body, chain)
          SELECT ?2, idx, users, user_turn, visible, note_kind, context, mode, base_mode,
-             text_bytes, body FROM history WHERE sid = ?1",
+             text_bytes, body, chain FROM history WHERE sid = ?1",
         "INSERT INTO side_rows (sid, tbl, key, value)
          SELECT ?2, tbl, key, value FROM side_rows WHERE sid = ?1",
         "INSERT INTO search_text (sid, idx, text)
@@ -657,6 +660,61 @@ mod tests {
 
         store.delete("b").unwrap();
         assert_eq!(blobs(&store), 0);
+    }
+
+    #[test]
+    fn history_chain_covers_every_prefix_through_rewrites_forks_and_legacy_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let items = vec![
+            HistoryItem::user(Content::text("question")),
+            HistoryItem::note(protocol::HistoryNote::context("cwd")),
+            reply("answer", "thinking"),
+        ];
+        let chain_of = |items: &[HistoryItem]| protocol::HistoryChain::of(items);
+        let mut writer = store.writer("a").unwrap();
+        writer
+            .commit(&identity("a"), &history(0, items.clone()))
+            .unwrap();
+        let reader = store.reader("a").unwrap();
+        for end in 0..=items.len() {
+            assert_eq!(
+                reader.history_chain_before(end as u64).unwrap(),
+                chain_of(&items[..end])
+            );
+        }
+
+        let rewritten = vec![items[0].clone(), reply("other", "")];
+        writer
+            .commit(&identity("a"), &history(1, rewritten[1..].to_vec()))
+            .unwrap();
+        assert_eq!(
+            reader.history_chain_before(2).unwrap(),
+            chain_of(&rewritten)
+        );
+        writer.fork_to("b", 1, &store).unwrap();
+        assert_eq!(
+            store.reader("b").unwrap().history_chain_before(2).unwrap(),
+            chain_of(&rewritten)
+        );
+
+        // Rows from earlier releases have no chain until a later row covers them.
+        store
+            .connect()
+            .unwrap()
+            .execute("UPDATE history SET chain = NULL", [])
+            .unwrap();
+        assert_eq!(
+            reader.history_chain_before(2).unwrap(),
+            chain_of(&rewritten)
+        );
+        let appended = reply("more", "");
+        writer
+            .commit(&identity("a"), &history(2, vec![appended.clone()]))
+            .unwrap();
+        let mut all = rewritten.clone();
+        all.push(appended);
+        assert_eq!(reader.history_chain_before(3).unwrap(), chain_of(&all));
     }
 
     #[test]

@@ -398,8 +398,6 @@ pub(super) fn prepare_session_load(
         session,
         address,
         head,
-        context_start,
-        context,
         user_turn_count,
         transcript_record_tail,
         ..
@@ -413,10 +411,9 @@ pub(super) fn prepare_session_load(
         )
         .ok_or_else(|| format!("session {id:?} has no stored transcript records"))?
     };
-    let live_session = smelt_core::session_runtime::LiveSession::from_resume(
+    let live_session = smelt_core::session_runtime::LiveSession::from_store(
         address,
-        context_start,
-        context,
+        head.history_len.as_usize(),
         user_turn_count,
     );
     Ok(PreparedSessionLoad {

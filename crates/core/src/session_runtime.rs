@@ -53,6 +53,10 @@ impl LiveStoreReader {
     fn history_any_transcript_visible_before(&self, end: usize) -> smelt_store::Result<bool> {
         self.0.history_any_transcript_visible_before(end as u64)
     }
+
+    fn history_chain_before(&self, end: usize) -> smelt_store::Result<protocol::HistoryChain> {
+        self.0.history_chain_before(end as u64)
+    }
 }
 
 /// A lightweight navigation row, maintained when history changes.
@@ -270,9 +274,8 @@ impl HistoryNavigation {
     }
 }
 
-/// The history of an open session. The model context since the last checkpoint
-/// stays in memory, so requests never read storage; older history is read from
-/// the store when the user looks at it.
+/// The history of an open session: a durable stored prefix and an unsaved suffix.
+/// Model context and navigation read stored ranges without retaining the archive.
 #[derive(Clone, Debug)]
 pub struct LiveSession {
     id: String,
@@ -285,26 +288,6 @@ pub struct LiveSession {
 }
 
 impl LiveSession {
-    /// A resumed session holding `context`, the history from `context_start` on.
-    pub fn from_resume(
-        store: SessionStoreAddress,
-        context_start: usize,
-        context: Vec<HistoryItem>,
-        user_turn_count: usize,
-    ) -> Self {
-        let mut live = Self::from_parts(
-            store.session_id.clone(),
-            store.artifact_dir(),
-            Some(store),
-            context_start,
-            user_turn_count,
-        );
-        for item in context {
-            live.append_history(item);
-        }
-        live
-    }
-
     /// A session whose first `history_len` items, holding `user_turn_count`
     /// user turns, are only in the store.
     pub fn from_parts(
@@ -325,6 +308,21 @@ impl LiveSession {
                 ..Default::default()
             },
         }
+    }
+
+    /// A session whose first `history_len` items are durable in `address`.
+    pub fn from_store(
+        address: SessionStoreAddress,
+        history_len: usize,
+        user_turn_count: usize,
+    ) -> Self {
+        Self::from_parts(
+            address.session_id.clone(),
+            address.artifact_dir(),
+            Some(address),
+            history_len,
+            user_turn_count,
+        )
     }
 
     pub fn id(&self) -> &str {
@@ -418,42 +416,6 @@ impl LiveSession {
         self.live_start = index;
     }
 
-    /// Reads stored items so that memory holds history from `index` on.
-    pub fn load_from(&mut self, index: usize) -> Result<(), String> {
-        if index >= self.live_start {
-            return Ok(());
-        }
-        let _perf = smelt_perf::perf::begin("session:live:load_from");
-        let store = self.open_store()?;
-        let (count, mut items) = store
-            .0
-            .read_snapshot(|reader| {
-                Ok((
-                    reader.history_user_turn_count_before(index as u64)?,
-                    reader.history_range(index as u64, self.live_start as u64)?,
-                ))
-            })
-            .map_err(|err| format!("read session history: {err}"))?;
-        if items.len() != self.live_start - index {
-            return Err(format!(
-                "read session history {index}..{}: found {} items",
-                self.live_start,
-                items.len()
-            ));
-        }
-        items.append(&mut self.live_history);
-        self.live_start = index;
-        self.navigation = HistoryNavigation {
-            stored_user_count: count as usize,
-            ..Default::default()
-        };
-        for (offset, item) in items.iter().enumerate() {
-            self.navigation.append(index + offset, item);
-        }
-        self.live_history = items;
-        Ok(())
-    }
-
     pub fn history_range(&self, range: Range<usize>) -> Result<Vec<HistoryItem>, String> {
         self.history_range_read(range).read()
     }
@@ -529,7 +491,7 @@ impl LiveSession {
         };
         HistoryRead {
             stored: (start < stored_end)
-                .then(|| self.stored_read(StoredHistory::Range(start..stored_end))),
+                .then(|| (self.stored(), StoredHistory::Range(start..stored_end))),
             live,
         }
     }
@@ -548,11 +510,14 @@ impl LiveSession {
         let live = select_history_tail(&self.live_history, max_items, max_bytes)?;
         read.live = self.live_history[live.start..].to_vec();
         if !live.budget.limit_reached() && read.live.len() < max_items && self.live_start > 0 {
-            read.stored = Some(self.stored_read(StoredHistory::Tail {
-                end: self.live_start,
-                max_items: max_items - read.live.len(),
-                max_bytes: live.budget.remaining_bytes(),
-            }));
+            read.stored = Some((
+                self.stored(),
+                StoredHistory::Tail {
+                    end: self.live_start,
+                    max_items: max_items - read.live.len(),
+                    max_bytes: live.budget.remaining_bytes(),
+                },
+            ));
         }
         Ok(read)
     }
@@ -643,28 +608,22 @@ impl LiveSession {
             .min(self.history_len())
     }
 
-    /// The provider history: the checkpoint summary, then the history since it.
-    /// Context not in memory is read from storage.
+    /// Captures provider history without reading the durable prefix on the caller.
+    pub fn model_history_read(&self, checkpoint: Option<&ContextCheckpoint>) -> ModelHistoryRead {
+        ModelHistoryRead {
+            stored: (self.live_start > 0).then(|| self.stored()),
+            live_start: self.live_start,
+            live: self.live_history.clone(),
+            start: self.model_context_start(checkpoint),
+            summary: checkpoint.map(|checkpoint| checkpoint.summary.clone()),
+        }
+    }
+
     pub fn model_history_source(
         &self,
         checkpoint: Option<&ContextCheckpoint>,
     ) -> Result<protocol::ModelHistorySource, String> {
-        let first_live_index = self.model_context_start(checkpoint);
-        if first_live_index < self.live_start {
-            smelt_perf::perf::record_value("live_session:context_storage_read", 1);
-        }
-        let mut items = Vec::new();
-        if let Some(checkpoint) = checkpoint {
-            items.push(HistoryItem::user(protocol::compaction_summary_content(
-                &checkpoint.summary,
-            )));
-        }
-        let prefix_len = items.len();
-        items.extend(self.history_range(first_live_index..self.history_len())?);
-        Ok(protocol::ModelHistorySource::projected_items(
-            items,
-            protocol::ModelHistoryCoordinates::projected(prefix_len, first_live_index),
-        ))
+        self.model_history_read(checkpoint).read()
     }
 
     pub fn first_live_history_index_for_model_message(
@@ -727,11 +686,10 @@ impl LiveSession {
         open_store(self.store_address.as_ref(), self.id())
     }
 
-    fn stored_read(&self, part: StoredHistory) -> StoredRead {
-        StoredRead {
+    fn stored(&self) -> StoredSession {
+        StoredSession {
             session_id: self.id().to_owned(),
             store: self.store_address.clone(),
-            part,
         }
     }
 }
@@ -748,15 +706,21 @@ fn open_store(store: Option<&SessionStoreAddress>, id: &str) -> Result<LiveStore
 /// A history read captured from a live session. Rows still in memory are
 /// copied, so the rest can be read from storage on any thread.
 pub struct HistoryRead {
-    stored: Option<StoredRead>,
+    /// The part that precedes the rows in memory.
+    stored: Option<(StoredSession, StoredHistory)>,
     live: Vec<HistoryItem>,
 }
 
-/// The part of a `HistoryRead` that precedes the rows in memory.
-struct StoredRead {
+/// The store of a live session, to open on another thread.
+struct StoredSession {
     session_id: String,
     store: Option<SessionStoreAddress>,
-    part: StoredHistory,
+}
+
+impl StoredSession {
+    fn open(&self) -> Result<LiveStoreReader, String> {
+        open_store(self.store.as_ref(), &self.session_id)
+    }
 }
 
 enum StoredHistory {
@@ -781,11 +745,11 @@ impl HistoryRead {
     }
 
     pub fn read(self) -> Result<Vec<HistoryItem>, String> {
-        let Some(stored) = self.stored else {
+        let Some((stored, part)) = self.stored else {
             return Ok(self.live);
         };
-        let db = open_store(stored.store.as_ref(), &stored.session_id)?;
-        let mut items = match stored.part {
+        let db = stored.open()?;
+        let mut items = match part {
             StoredHistory::Range(range) => {
                 let items = db
                     .read_history_items_range(range.clone())
@@ -812,6 +776,154 @@ impl HistoryRead {
         items.extend(self.live);
         Ok(items)
     }
+}
+
+/// How a backend receives a turn's history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnHistoryForm {
+    Items,
+    /// For backends that keep their own conversation.
+    Identity,
+}
+
+impl TurnHistoryForm {
+    pub fn for_provider(provider_type: &str) -> Self {
+        if smelt_provider::BackendKind::is_claude_code(provider_type) {
+            Self::Identity
+        } else {
+            Self::Items
+        }
+    }
+}
+
+/// A turn's model history, captured from a live session. Rows still in memory
+/// are copied, so stored rows and their chain can be read on any thread.
+pub struct ModelHistoryRead {
+    /// Holds rows `[0, live_start)`, which are not in memory.
+    stored: Option<StoredSession>,
+    live_start: usize,
+    /// Rows `[live_start, len)`.
+    live: Vec<HistoryItem>,
+    /// The history index where the model context starts.
+    start: usize,
+    /// The compaction summary that stands in for rows `[0, start)`.
+    summary: Option<std::sync::Arc<str>>,
+}
+
+impl ModelHistoryRead {
+    /// The model history of `history` from `start`, after `summary`.
+    pub fn loaded(
+        history: Vec<HistoryItem>,
+        summary: Option<std::sync::Arc<str>>,
+        start: usize,
+    ) -> Self {
+        Self {
+            stored: None,
+            live_start: 0,
+            start: start.min(history.len()),
+            live: history,
+            summary,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.live_start + self.live.len()
+    }
+
+    pub fn needs_storage(&self, form: TurnHistoryForm) -> bool {
+        self.stored.is_some() && (form == TurnHistoryForm::Identity || self.start < self.live_start)
+    }
+
+    /// Keeps the history `[0, len)`.
+    fn truncate(&mut self, len: usize) {
+        if len < self.live_start {
+            self.live.clear();
+            self.live_start = len;
+            if len == 0 {
+                self.stored = None;
+            }
+        } else {
+            self.live.truncate(len - self.live_start);
+        }
+        self.start = self.start.min(len);
+    }
+
+    pub fn read_turn(self, form: TurnHistoryForm) -> Result<protocol::TurnHistory, String> {
+        Ok(match form {
+            TurnHistoryForm::Items => protocol::TurnHistory::Items(self.read()?),
+            TurnHistoryForm::Identity => protocol::TurnHistory::Identity(self.identity()?),
+        })
+    }
+
+    pub fn read(self) -> Result<protocol::ModelHistorySource, String> {
+        let prefix_len = usize::from(self.summary.is_some());
+        let mut items = Vec::new();
+        if let Some(summary) = &self.summary {
+            items.push(summary_item(summary));
+        }
+        let canonical = HistoryRead {
+            stored: self
+                .stored
+                .filter(|_| self.start < self.live_start)
+                .map(|stored| (stored, StoredHistory::Range(self.start..self.live_start))),
+            live: self
+                .live
+                .into_iter()
+                .skip(self.start.saturating_sub(self.live_start))
+                .collect(),
+        };
+        items.extend(canonical.read()?);
+        Ok(protocol::ModelHistorySource::projected_items(
+            items,
+            protocol::ModelHistoryCoordinates::projected(prefix_len, self.start),
+        ))
+    }
+
+    /// The identity of the model history. Its chain comes from the store and
+    /// the rows in memory, so no stored row is read.
+    pub fn identity(&self) -> Result<protocol::HistoryIdentity, String> {
+        let stored = match &self.stored {
+            Some(stored) => stored
+                .open()?
+                .history_chain_before(self.live_start)
+                .map_err(|err| format!("read session history chain: {err}"))?,
+            None => protocol::HistoryChain::default(),
+        };
+        Ok(protocol::HistoryIdentity {
+            len: self.len(),
+            chain: self
+                .live
+                .iter()
+                .fold(stored, protocol::HistoryChain::extend),
+            checkpoint: self
+                .summary
+                .as_ref()
+                .map(|summary| protocol::CheckpointIdentity {
+                    start: self.start,
+                    summary: protocol::HistoryChain::of([&summary_item(summary)]),
+                }),
+        })
+    }
+
+    /// The model history `identity` names, or an error once the history no
+    /// longer starts with it.
+    pub fn read_matching(
+        mut self,
+        identity: &protocol::HistoryIdentity,
+    ) -> Result<protocol::ModelHistorySource, String> {
+        if identity.len > self.len() {
+            return Err("the session history no longer holds the turn's history".into());
+        }
+        self.truncate(identity.len);
+        if self.identity()?.key() != identity.key() {
+            return Err("the session history changed since the turn started".into());
+        }
+        self.read()
+    }
+}
+
+fn summary_item(summary: &str) -> HistoryItem {
+    HistoryItem::user(protocol::compaction_summary_content(summary))
 }
 
 impl protocol::HistoryAppendView for LiveSession {
@@ -979,13 +1091,7 @@ mod tests {
     }
 
     fn stored_live(address: SessionStoreAddress, history_len: usize, users: usize) -> LiveSession {
-        LiveSession::from_parts(
-            SESSION_ID.into(),
-            address.artifact_dir(),
-            Some(address),
-            history_len,
-            users,
-        )
+        LiveSession::from_store(address, history_len, users)
     }
 
     fn apply_planned_append(
@@ -1060,10 +1166,13 @@ mod tests {
         let source = live.model_history_source(None).unwrap();
         assert_eq!(source.items, live.history_range(0..3).unwrap());
         assert_eq!(live.live_start, 2);
-        live.load_from(live.model_context_start(None)).unwrap();
-        assert_eq!(live.live_start, 0);
         assert_eq!(live.model_history_source(None).unwrap().items, source.items);
-        assert_eq!(live.local_user_turn_count_before(1), Some(1));
+        assert_eq!(
+            live.live_start, 2,
+            "reading context does not retain the archive"
+        );
+        assert_eq!(live.local_user_turn_count_before(1), None);
+        assert_eq!(live.user_turn_count_before(1).unwrap(), 1);
         assert_eq!(live.navigation().user_turn_count(), 3);
 
         live.release_before(2);

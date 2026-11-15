@@ -479,6 +479,7 @@ fn auto_continuation_keeps_work_signals_and_status_busy() {
         ));
         app.clock.advance(std::time::Duration::from_millis(1));
         app.tui.tick_runtime();
+        app.wait_for_turn_dispatch();
         assert!(has_started_turn(&app.drain_engine_sends()));
         release.send(()).unwrap();
         app.tui.tick_runtime();
@@ -778,6 +779,7 @@ fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
             let retry_token = app.tui.conversation.continuation_token().unwrap();
 
             app.rewind_to_history_index(if to_start { None } else { history_idx }, false);
+            app.wait_for_rewind();
 
             assert_eq!(app.state().queued_inputs, queued);
             assert_eq!(

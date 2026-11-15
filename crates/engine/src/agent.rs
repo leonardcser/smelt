@@ -200,6 +200,14 @@ pub(crate) async fn engine_task(
                     tool_visibility,
                     tools,
                 } = *payload;
+                let protocol::TurnHistory::Items(history) = history else {
+                    let _ = event_tx.send(EngineEvent::TurnError {
+                        message: "this backend needs the model history items".into(),
+                        kind: None,
+                        retry_at_ms: None,
+                    });
+                    continue;
+                };
                 let tools = tools
                     .into_iter()
                     .filter(|tool| tool_visibility.includes(tool.headless))
@@ -4106,7 +4114,8 @@ mod tests {
                     prior.clone(),
                 ],
                 protocol::ModelHistoryCoordinates::projected(1, 24),
-            ),
+            )
+            .into(),
             session_id: "s".into(),
             artifact_dir: std::path::PathBuf::from("/tmp"),
             ephemeral: false,

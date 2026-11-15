@@ -4744,7 +4744,7 @@ fn run_provider_history_hot_path(
     let first_live = history_len.saturating_sub(32);
     let app = saved_hot_path_app("provider-history", history_len, Some(first_live));
     let (sample, snapshot) = capture_hot_path_sample("provider_history_read", history_len, || {
-        let history = app.tui.model_history_source().items;
+        let history = app.tui.model_history_source().unwrap().items;
         assert_eq!(history.len(), history_len - first_live + 1);
     });
     assert_hot_path_at_most(&snapshot, sample.operation, "store:history:rows_read", 0);
@@ -4758,7 +4758,7 @@ fn run_uncheckpointed_provider_history_hot_path(
     let app = saved_hot_path_app("provider-history-uncheckpointed", history_len, None);
     let (sample, snapshot) =
         capture_hot_path_sample("provider_history_uncheckpointed_read", history_len, || {
-            let history = app.tui.model_history_source().items;
+            let history = app.tui.model_history_source().unwrap().items;
             assert_eq!(history.len(), history_len);
         });
     assert_hot_path_at_most(&snapshot, sample.operation, "store:history:rows_read", 0);
@@ -4772,7 +4772,7 @@ fn run_engine_request_materialization_hot_path(
     let app = saved_hot_path_app("engine-request-materialization", history_len, None);
     let (sample, snapshot) =
         capture_hot_path_sample("engine_request_materialization", history_len, || {
-            let history = app.tui.model_history_source().items;
+            let history = app.tui.model_history_source().unwrap().items;
             let mut engine_history = {
                 let _perf = smelt_perf::perf::begin("bench:engine_request:install_history");
                 let mut installed = Vec::with_capacity(history.len() + 1);
@@ -4851,7 +4851,10 @@ fn run_submit_hot_paths(
             app.actions().len()
         );
     };
-    assert_eq!(started.history.items.len(), history_len + 1);
+    assert_eq!(
+        started.history.items().unwrap().items.len(),
+        history_len + 1
+    );
     assert_eq!(
         app.actions()
             .iter()

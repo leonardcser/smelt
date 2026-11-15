@@ -2565,6 +2565,7 @@ mod tests {
         assert!(app.state().queued_inputs.is_empty());
         app.press(KeyCode::Esc);
         app.press(KeyCode::Esc);
+        app.wait_for_rewind();
         assert_eq!(
             app.state().prompt_text,
             format!("inspect {0} then {0}", crate::input::ATTACHMENT_MARKER)
@@ -2624,6 +2625,7 @@ mod tests {
         )));
         app.press(KeyCode::Esc);
         app.press(KeyCode::Esc);
+        app.wait_for_rewind();
         assert_eq!(
             app.state().prompt_text,
             format!("retry with {}", crate::input::ATTACHMENT_MARKER)
@@ -2777,6 +2779,7 @@ mod tests {
         let release_persistence = app.pause_persistence();
         app.type_text("next request");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_dispatch();
 
         assert!(app.agent_running());
         assert!(!app.tui.turn_submission_is_pending());
@@ -2806,6 +2809,7 @@ mod tests {
             "background process finished",
         ));
         assert!(app.tui.start_queued_input(queued).is_ok());
+        app.wait_for_turn_dispatch();
         assert!(app.agent_running());
         assert!(!app.tui.turn_submission_is_pending());
         release_persistence
@@ -2829,6 +2833,7 @@ mod tests {
             app.drain_engine_sends();
             app.type_text("follow-up");
             app.press(KeyCode::Enter);
+            app.wait_for_turn_dispatch();
             assert!(queue_stages(&app).is_empty());
             assert!(app.agent_running());
             assert!(app.state().queued_inputs.is_empty());
@@ -2945,6 +2950,7 @@ mod tests {
             app.discard_turn(crate::app::TurnEnd::Cancelled);
             app.type_text("/follow-up");
             app.press_mod(KeyCode::Enter, modifiers);
+            app.wait_for_turn_dispatch();
             assert!(queue_stages(&app).is_empty());
             assert!(app.agent_running(), "command stayed paused: {busy}");
             assert!(app.state().queued_inputs.is_empty());
@@ -2978,6 +2984,7 @@ mod tests {
         let release_persistence = app.pause_persistence();
 
         app.press(KeyCode::Enter);
+        app.wait_for_turn_dispatch();
         assert!(app.agent_running(), "queued request did not start");
         assert!(app.state().queued_inputs.is_empty());
 

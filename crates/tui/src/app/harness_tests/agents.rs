@@ -560,3 +560,66 @@ fn rewinding_drops_a_reply_claude_code_is_streaming_on_its_own() {
     assert!(!frame.contains("WAKE_REPLY"), "{frame}");
     assert!(!frame.contains("still streaming"), "{frame}");
 }
+
+fn use_claude_code(app: &mut TestApp) {
+    let current = app.core_probe().config.available_models[0].clone();
+    let mut opus = current.clone();
+    opus.key = "claude-code/opus".into();
+    opus.provider_name = "claude-code".into();
+    opus.model_name = "opus".into();
+    opus.provider_type = "claude-code".into();
+    opus.api_base = String::new();
+    opus.api_key_env = String::new();
+    app.set_available_models(vec![current, opus]);
+    app.apply_model("claude-code/opus", false);
+}
+
+fn model_history(
+    app: &mut TestApp,
+    turn_id: u64,
+    identity: protocol::HistoryIdentity,
+) -> Result<protocol::ModelHistorySource, String> {
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    app.dispatch_host_call(engine::HostCall::ModelHistory {
+        turn_id,
+        identity,
+        reply,
+    });
+    rx.blocking_recv().expect("the host replies")
+}
+
+#[test]
+fn claude_code_turns_carry_the_history_identity_and_the_host_serves_its_items() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.start_submitted_turn("first");
+    assert!(app.finish_turn());
+    use_claude_code(&mut app);
+    let _ = app.drain_engine_sends();
+
+    app.start_submitted_turn("second");
+    let payload = app
+        .drain_engine_sends()
+        .into_iter()
+        .find_map(|command| match command {
+            protocol::UiCommand::StartTurn(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("turn dispatched");
+    let protocol::TurnHistory::Identity(identity) = payload.history else {
+        panic!("a Claude Code turn carries the history identity");
+    };
+    let history = app.session_history();
+    assert_eq!(identity.len, history.len() - 1);
+
+    let items = model_history(&mut app, payload.turn_id, identity.clone()).unwrap();
+    assert_eq!(items.items, history[..identity.len]);
+    assert_eq!(protocol::HistoryIdentity::of(&items.items), identity);
+
+    let mut changed = identity.clone();
+    changed.extend(&protocol::HistoryItem::user(protocol::Content::text(
+        "unseen",
+    )));
+    changed.len -= 1;
+    assert!(model_history(&mut app, payload.turn_id, changed).is_err());
+    assert!(model_history(&mut app, payload.turn_id + 1, identity).is_err());
+}

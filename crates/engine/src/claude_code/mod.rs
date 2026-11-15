@@ -231,8 +231,8 @@ struct Runtime<'a> {
     policy_revision: u64,
     turn: Option<OpenTurn>,
     dispatcher_turn: Option<u64>,
-    /// The conversation Claude Code holds, as smelt history.
-    history: Vec<HistoryItem>,
+    /// The conversation Claude Code holds.
+    history: protocol::HistoryIdentity,
     transcript: Transcript,
     side_results: FuturesUnordered<BoxFuture<'a, (u64, crate::tools::ToolResult)>>,
     /// Steers waiting for the turn's prompt to be sent.
@@ -278,7 +278,7 @@ pub(crate) async fn run_session(
         policy_revision: 0,
         turn: None,
         dispatcher_turn: None,
-        history: Vec::new(),
+        history: protocol::HistoryIdentity::default(),
         side_results: FuturesUnordered::new(),
         deferred: Vec::new(),
         steers: Vec::new(),
@@ -372,12 +372,10 @@ impl Runtime<'_> {
             started: self.config.clock.instant_now(),
             stage: Stage::Preparing,
         });
-        let loaded = std::mem::take(&mut self.payload.history);
-        let history = loaded.items;
-        let index = loaded
-            .coordinates
-            .canonical_index(protocol::ModelHistoryIndex::new(history.len()))
-            .get();
+        let protocol::TurnHistory::Identity(history) = std::mem::take(&mut self.payload.history)
+        else {
+            return Err("Claude Code needs the history identity".into());
+        };
         let setup = (|| {
             Ok::<_, String>((
                 prompt_content(&self.payload.input)?,
@@ -415,10 +413,10 @@ impl Runtime<'_> {
             "api_key": !target.api_key.is_empty(),
             "smelt_tools": self.tool_list(),
         });
-        self.history.append(&mut self.transcript.committed);
+        self.absorb_committed();
         let reuse = self.native.process.is_some()
             && launch == self.native.launch
-            && session::history_digest(&history) == session::history_digest(&self.history);
+            && history.key() == self.history.key();
         if !reuse {
             self.retire(None).await;
         }
@@ -427,13 +425,25 @@ impl Runtime<'_> {
             self.dispatcher.end_turn(previous);
         }
         if !reuse {
-            let link = (!self.payload.ephemeral)
-                .then(|| session::load(&self.payload.artifact_dir, &self.config.cwd, &history))
+            let dir = &self.payload.artifact_dir;
+            let mut link = (!self.payload.ephemeral)
+                .then(|| session::load(dir, &self.config.cwd, &history))
                 .flatten();
+            let mut items = None;
+            // COMPAT(claude-code-link-v1): a legacy link matches the items.
+            if link.is_none() && !self.payload.ephemeral && session::has_legacy(dir) {
+                let fetched =
+                    items.insert(history_items(self.host, self.payload.turn_id, &history).await?);
+                link = session::take_legacy(dir, &self.config.cwd, fetched);
+            }
             // A provider switch or edited history cannot reuse a native
             // transcript. Import its readable context into a fresh native session.
             if link.is_none() && !history.is_empty() {
-                content.insert(0, json!({"type":"text", "text":imported_history(&history)}));
+                let items = match items {
+                    Some(items) => items,
+                    None => history_items(self.host, self.payload.turn_id, &history).await?,
+                };
+                content.insert(0, json!({"type":"text", "text":imported_history(&items)}));
             }
             let target = &self.payload.model_target;
             self.native.process = Some(Process::spawn(transport::LaunchOptions {
@@ -470,6 +480,7 @@ impl Runtime<'_> {
             ))
             .await?;
         }
+        let index = history.len;
         self.history = history;
         self.transcript
             .retarget(self.tx.clone(), self.payload.turn_id, index);
@@ -477,6 +488,13 @@ impl Runtime<'_> {
             turn.stage = Stage::Queued(content);
         }
         Ok(true)
+    }
+
+    /// Adds the items Claude Code acknowledged to the conversation it holds.
+    fn absorb_committed(&mut self) {
+        for item in self.transcript.committed.drain(..) {
+            self.history.extend(&item);
+        }
     }
 
     fn background(&self, command: UiCommand) {
@@ -630,7 +648,7 @@ impl Runtime<'_> {
             *resume = false;
         }
         self.transcript.abandon();
-        self.history.append(&mut self.transcript.committed);
+        self.absorb_committed();
         if self.turn.as_ref().is_some_and(|turn| turn.stage.prompted()) && !self.payload.ephemeral {
             // It may have done more than smelt saw, so it is never resumed past.
             session::invalidate(&self.payload.artifact_dir);
@@ -730,7 +748,7 @@ impl Runtime<'_> {
     /// Records the conversation Claude Code acknowledged and links the native
     /// session to it, so a later process can resume it.
     fn commit(&mut self) {
-        self.history.append(&mut self.transcript.committed);
+        self.absorb_committed();
         if self.payload.ephemeral || self.native.moving.is_some() {
             return;
         }
@@ -1985,6 +2003,24 @@ fn input_history(input: &StartTurnInput) -> HistoryItem {
 const IMPORT_LIMIT: usize = 200_000;
 /// Characters kept from each tool call's arguments and result.
 const IMPORT_TOOL_CHARS: usize = 2_000;
+
+/// The items of `history`, from the host.
+async fn history_items(
+    host: &HostCallSender,
+    turn_id: u64,
+    history: &protocol::HistoryIdentity,
+) -> Result<Vec<HistoryItem>, String> {
+    let (reply, rx) = oneshot::channel();
+    let _ = host.send(crate::HostCall::ModelHistory {
+        turn_id,
+        identity: history.clone(),
+        reply,
+    });
+    let source = rx
+        .await
+        .map_err(|_| "the host did not provide the history to import".to_owned())??;
+    Ok(source.items)
+}
 
 /// The conversation as a readable transcript for a native session that cannot
 /// resume it, keeping its most recent part.

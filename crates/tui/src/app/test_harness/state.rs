@@ -1230,7 +1230,9 @@ impl TestApp {
     }
 
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
-        self.tui.model_history_messages()
+        self.tui
+            .model_history_messages()
+            .expect("read model history")
     }
 
     pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {

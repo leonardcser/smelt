@@ -1,4 +1,8 @@
-use protocol::{HistoryItem, HistoryNote, HistoryNoteKind, HistoryNoteProjection};
+use protocol::{HistoryChain, HistoryItem, HistoryNote, HistoryNoteKind, HistoryNoteProjection};
+use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::document;
+use crate::error::{Result, StoreError};
 
 /// The columns that describe a history item next to its body.
 pub(crate) struct HistoryRow<'a> {
@@ -76,4 +80,43 @@ pub(crate) fn conversation_text(item: &HistoryItem) -> Option<std::borrow::Cow<'
         HistoryItem::Note(HistoryNote::Compaction { text }) => Some(text.as_str().into()),
         HistoryItem::System { .. } | HistoryItem::Note(_) => None,
     }
+}
+
+/// The chain over the conversation in history `[0, end)` of session `sid`.
+pub(crate) fn chain_before(conn: &Connection, sid: i64, end: i64) -> Result<HistoryChain> {
+    if end <= 0 {
+        return Ok(HistoryChain::default());
+    }
+    let latest: Option<(i64, Vec<u8>)> = conn
+        .prepare_cached(
+            "SELECT idx, chain FROM history
+             WHERE sid = ?1 AND idx < ?2 AND chain IS NOT NULL ORDER BY idx DESC LIMIT 1",
+        )?
+        .query_row(params![sid, end], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?;
+    let (from, chain) = match latest {
+        Some((idx, bytes)) => (
+            idx + 1,
+            HistoryChain::from_bytes(&bytes).ok_or_else(|| {
+                StoreError::Integrity(format!("history row {idx} has a bad chain"))
+            })?,
+        ),
+        None => (0, HistoryChain::default()),
+    };
+    if from >= end {
+        return Ok(chain);
+    }
+    // COMPAT(history-chain-column): rows from before the column, or from
+    // earlier 0.8 releases, have no chain.
+    let _perf = smelt_perf::perf::begin("store:history:legacy_chain");
+    let mut statement = conn.prepare_cached(
+        "SELECT body FROM history WHERE sid = ?1 AND idx >= ?2 AND idx < ?3 ORDER BY idx",
+    )?;
+    let mut rows = statement.query(params![sid, from, end])?;
+    let mut chain = chain;
+    while let Some(row) = rows.next()? {
+        let item: HistoryItem = document::load_json(conn, &row.get::<_, Vec<u8>>(0)?)?;
+        chain = chain.extend(&item);
+    }
+    Ok(chain)
 }

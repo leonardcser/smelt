@@ -1,4 +1,4 @@
-use protocol::HistoryItem;
+use protocol::{HistoryIdentity, HistoryItem};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -9,10 +9,10 @@ const MAX_CHECKPOINTS: usize = 256;
 #[derive(Serialize, Deserialize)]
 struct SessionLink {
     native_id: String,
-    /// The history the whole native session matches, or `None` once it may
-    /// hold more than smelt saw.
+    /// Key of the history the whole native session matches, or `None` once it
+    /// may hold more than smelt saw.
     #[serde(default)]
-    history_digest: Option<String>,
+    history: Option<String>,
     cwd: PathBuf,
     config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,14 +26,14 @@ struct SessionLink {
 /// in sessions forked after them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Checkpoint {
-    history_digest: String,
+    history: String,
     message: String,
 }
 
 impl Checkpoint {
-    pub(super) fn new(history: &[HistoryItem], message: String) -> Self {
+    pub(super) fn new(history: &HistoryIdentity, message: String) -> Self {
         Self {
-            history_digest: history_digest(history),
+            history: history.key(),
             message,
         }
     }
@@ -49,30 +49,13 @@ pub(super) struct Resume {
     pub(super) checkpoints: Vec<Checkpoint>,
 }
 
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-pub(super) fn history_digest(history: &[HistoryItem]) -> String {
-    // Mode and environment notes do not alter the native conversation. The cwd
-    // and config directory are checked separately before reusing a native session.
-    let conversation: Vec<_> = history
-        .iter()
-        .filter(|item| !matches!(item, HistoryItem::Note(_) | HistoryItem::System { .. }))
-        .collect();
-    digest(&serde_json::to_vec(&conversation).expect("history is JSON serializable"))
-}
-
 /// The link lives with the session's other files, so it goes when the session does.
 fn link_path(artifact_dir: &Path) -> PathBuf {
-    artifact_dir.join("claude-code.json")
+    artifact_dir.join("claude-code-session.json")
 }
 
-fn read(artifact_dir: &Path) -> Option<SessionLink> {
-    let bytes = std::fs::read(link_path(artifact_dir)).ok()?;
+fn read(path: &Path) -> Option<SessionLink> {
+    let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -84,16 +67,18 @@ fn write(artifact_dir: &Path, link: &SessionLink) -> Result<(), String> {
 
 /// Resumes the whole native session when it matches `history`, or forks it at
 /// the checkpoint that does, as after a rewind.
-pub(super) fn load(artifact_dir: &Path, cwd: &Path, history: &[HistoryItem]) -> Option<Resume> {
-    let mut link = read(artifact_dir)?;
+pub(super) fn load(artifact_dir: &Path, cwd: &Path, history: &HistoryIdentity) -> Option<Resume> {
+    resume(read(&link_path(artifact_dir))?, cwd, &history.key())
+}
+
+fn resume(mut link: SessionLink, cwd: &Path, key: &str) -> Option<Resume> {
     if link.cwd != cwd
         || link.config_dir != std::env::var("CLAUDE_CONFIG_DIR").ok()
         || !valid_native_id(&link.native_id)
     {
         return None;
     }
-    let digest = history_digest(history);
-    if link.history_digest.as_ref() == Some(&digest) {
+    if link.history.as_deref() == Some(key) {
         return Some(Resume {
             native_id: link.native_id,
             at: None,
@@ -104,7 +89,7 @@ pub(super) fn load(artifact_dir: &Path, cwd: &Path, history: &[HistoryItem]) -> 
     let index = link
         .checkpoints
         .iter()
-        .rposition(|checkpoint| checkpoint.history_digest == digest)?;
+        .rposition(|checkpoint| checkpoint.history == key)?;
     link.checkpoints.truncate(index + 1);
     Some(Resume {
         native_id: link.native_id,
@@ -118,7 +103,7 @@ pub(super) fn save(
     artifact_dir: &Path,
     native_id: &str,
     cwd: &Path,
-    history: &[HistoryItem],
+    history: &HistoryIdentity,
     plan_path: Option<&Path>,
     checkpoints: &[Checkpoint],
 ) -> Result<(), String> {
@@ -129,7 +114,7 @@ pub(super) fn save(
         artifact_dir,
         &SessionLink {
             native_id: native_id.into(),
-            history_digest: Some(history_digest(history)),
+            history: Some(history.key()),
             cwd: cwd.into(),
             config_dir: std::env::var("CLAUDE_CONFIG_DIR").ok(),
             plan_path: plan_path.map(Path::to_path_buf),
@@ -142,9 +127,9 @@ pub(super) fn save(
 /// mirror. Never blindly resume it and resurrect unseen tool execution; only
 /// its checkpoints, which predate that work, stay usable.
 pub(super) fn invalidate(artifact_dir: &Path) {
-    match read(artifact_dir) {
+    match read(&link_path(artifact_dir)) {
         Some(mut link) if !link.checkpoints.is_empty() => {
-            link.history_digest = None;
+            link.history = None;
             if write(artifact_dir, &link).is_err() {
                 let _ = std::fs::remove_file(link_path(artifact_dir));
             }
@@ -153,6 +138,59 @@ pub(super) fn invalidate(artifact_dir: &Path) {
             let _ = std::fs::remove_file(link_path(artifact_dir));
         }
     }
+}
+
+/// COMPAT(claude-code-link-v1): the link of earlier 0.8 releases, which names
+/// a history by a digest of its JSON.
+#[derive(Deserialize)]
+struct LegacyLink {
+    native_id: String,
+    history_digest: Option<String>,
+    cwd: PathBuf,
+    config_dir: Option<String>,
+    #[serde(default)]
+    plan_path: Option<PathBuf>,
+}
+
+/// COMPAT(claude-code-link-v1)
+fn legacy_link_path(artifact_dir: &Path) -> PathBuf {
+    artifact_dir.join("claude-code.json")
+}
+
+/// COMPAT(claude-code-link-v1)
+pub(super) fn has_legacy(artifact_dir: &Path) -> bool {
+    legacy_link_path(artifact_dir).exists()
+}
+
+/// COMPAT(claude-code-link-v1): resumes the native session of a legacy link
+/// whose history is `items`, and removes the link, which is read only once.
+/// Its checkpoints name histories by digest, so they are dropped.
+pub(super) fn take_legacy(
+    artifact_dir: &Path,
+    cwd: &Path,
+    items: &[HistoryItem],
+) -> Option<Resume> {
+    let path = legacy_link_path(artifact_dir);
+    let bytes = std::fs::read(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    let legacy: LegacyLink = serde_json::from_slice(&bytes?).ok()?;
+    let link = SessionLink {
+        native_id: legacy.native_id,
+        history: legacy.history_digest,
+        cwd: legacy.cwd,
+        config_dir: legacy.config_dir,
+        plan_path: legacy.plan_path,
+        checkpoints: Vec::new(),
+    };
+    let conversation: Vec<_> = items
+        .iter()
+        .filter(|item| !matches!(item, HistoryItem::Note(_) | HistoryItem::System { .. }))
+        .collect();
+    let digest: String = Sha256::digest(serde_json::to_vec(&conversation).ok()?)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    resume(link, cwd, &digest)
 }
 
 fn valid_native_id(id: &str) -> bool {
@@ -172,10 +210,14 @@ mod tests {
 
     const NATIVE: &str = "12345678-1234-1234-1234-123456789abc";
 
+    fn identity(items: &[HistoryItem]) -> HistoryIdentity {
+        HistoryIdentity::of(items)
+    }
+
     #[test]
     fn links_are_bound_to_history_and_workspace() {
         let root = tempfile::tempdir().unwrap();
-        let history = vec![HistoryItem::user(protocol::Content::text("one"))];
+        let history = identity(&[HistoryItem::user(protocol::Content::text("one"))]);
         save(
             root.path(),
             NATIVE,
@@ -189,7 +231,7 @@ mod tests {
         assert_eq!(resume.plan_path.as_deref(), Some(Path::new("active.md")));
         assert_eq!(resume.at, None);
         assert!(load(root.path(), Path::new("/different"), &history).is_none());
-        assert!(load(root.path(), root.path(), &[]).is_none());
+        assert!(load(root.path(), root.path(), &identity(&[])).is_none());
         invalidate(root.path());
         assert!(load(root.path(), root.path(), &history).is_none());
     }
@@ -201,17 +243,59 @@ mod tests {
         let mut two = one.clone();
         two.push(HistoryItem::user(protocol::Content::text("two")));
         let checkpoints = [
-            Checkpoint::new(&one, "first-answer".into()),
-            Checkpoint::new(&two, "second-answer".into()),
+            Checkpoint::new(&identity(&one), "first-answer".into()),
+            Checkpoint::new(&identity(&two), "second-answer".into()),
         ];
-        save(root.path(), NATIVE, root.path(), &two, None, &checkpoints).unwrap();
+        save(
+            root.path(),
+            NATIVE,
+            root.path(),
+            &identity(&two),
+            None,
+            &checkpoints,
+        )
+        .unwrap();
         invalidate(root.path());
-        assert!(load(root.path(), root.path(), &two)
+        assert!(load(root.path(), root.path(), &identity(&two))
             .is_some_and(|resume| resume.at.as_deref() == Some("second-answer")));
-        let resume = load(root.path(), root.path(), &one).unwrap();
+        let resume = load(root.path(), root.path(), &identity(&one)).unwrap();
         assert_eq!(resume.native_id, NATIVE);
         assert_eq!(resume.at.as_deref(), Some("first-answer"));
         assert_eq!(resume.checkpoints, checkpoints[..1]);
-        assert!(load(root.path(), root.path(), &[]).is_none());
+        assert!(load(root.path(), root.path(), &identity(&[])).is_none());
+    }
+
+    #[test]
+    fn legacy_links_resume_a_matching_history_once() {
+        let root = tempfile::tempdir().unwrap();
+        let items = vec![
+            HistoryItem::user(protocol::Content::text("one")),
+            HistoryItem::note(protocol::HistoryNote::context("cwd")),
+        ];
+        let write_legacy = |digest_of: &[HistoryItem]| {
+            let conversation = &digest_of[..1];
+            let digest: String = Sha256::digest(serde_json::to_vec(conversation).unwrap())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let link = serde_json::json!({
+                "native_id": NATIVE,
+                "history_digest": digest,
+                "cwd": root.path(),
+                "config_dir": std::env::var("CLAUDE_CONFIG_DIR").ok(),
+                "checkpoints": [{"history_digest": "old", "message": "answer"}],
+            });
+            std::fs::write(legacy_link_path(root.path()), link.to_string()).unwrap();
+        };
+        write_legacy(&items);
+        assert!(has_legacy(root.path()));
+        let resume = take_legacy(root.path(), root.path(), &items).unwrap();
+        assert_eq!((resume.native_id.as_str(), resume.at), (NATIVE, None));
+        assert!(resume.checkpoints.is_empty());
+        assert!(!has_legacy(root.path()));
+
+        write_legacy(&[HistoryItem::user(protocol::Content::text("other"))]);
+        assert!(take_legacy(root.path(), root.path(), &items).is_none());
+        assert!(!has_legacy(root.path()));
     }
 }

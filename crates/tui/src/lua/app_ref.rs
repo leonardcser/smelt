@@ -788,7 +788,7 @@ impl AgentLuaHost<'_> {
         mut request: smelt_core::lua::ask::AskRequest,
     ) -> Result<(), String> {
         if request.messages.is_empty() {
-            request.messages = self.app.model_history_messages();
+            request.messages = self.app.model_history_messages()?;
         }
         let context = smelt_core::lua::ask::AskContext {
             system: self.app.assemble_system_prompt(),
@@ -1540,7 +1540,7 @@ impl SessionLuaHost<'_> {
         self.app.assemble_system_prompt()
     }
 
-    pub(crate) fn context_breakdown(&self) -> serde_json::Value {
+    pub(crate) fn context_breakdown(&self) -> Result<serde_json::Value, String> {
         let app = &*self.app;
         let model = app.core.config.active_model();
         let native =
@@ -1671,9 +1671,9 @@ impl SessionLuaHost<'_> {
                 serde_json::json!({ "name": tool.function.name, "bytes": bytes })
             })
             .collect();
-        let messages = app.model_history_messages();
+        let messages = app.model_history_messages()?;
         let history_bytes = engine::serialized_json_len(&messages);
-        serde_json::json!({
+        Ok(serde_json::json!({
             "sections": sections,
             "system_bytes": system_bytes,
             "tools": tool_rows,
@@ -1681,7 +1681,7 @@ impl SessionLuaHost<'_> {
             "history_bytes": history_bytes,
             "message_count": messages.len(),
             "native": native,
-        })
+        }))
     }
 
     pub(crate) fn session_cost(&self) -> f64 {
@@ -1855,7 +1855,7 @@ impl SessionLuaHost<'_> {
             .history_tail_read(max_items, max_bytes)
     }
 
-    pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
+    pub(crate) fn model_history_messages(&self) -> Result<Vec<protocol::Message>, String> {
         self.app.model_history_messages()
     }
 

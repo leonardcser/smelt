@@ -179,6 +179,7 @@ fn interrupted_tool_turn_in_a_sparse_transcript_saves_after_hydration() {
     assert_eq!(app.state().queued_inputs, vec!["next turn"]);
 
     app.press(KeyCode::Enter);
+    app.wait_for_turn_dispatch();
     assert!(app.agent_running());
     assert!(!app.session_is_read_only());
     assert!(app.state().queued_inputs.is_empty());

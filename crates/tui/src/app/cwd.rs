@@ -749,6 +749,7 @@ mod tests {
         assert!(app
             .tui
             .model_history_messages()
+            .unwrap()
             .iter()
             .any(
                 |message| message.content.as_ref().is_some_and(|content| content

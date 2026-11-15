@@ -129,7 +129,7 @@ async fn run_responses(
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
         control_env: Default::default(),
-        history: protocol::ModelHistorySource::items(Vec::new()),
+        history: Default::default(),
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,

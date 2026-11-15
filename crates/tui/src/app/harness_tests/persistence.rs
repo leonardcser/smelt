@@ -91,7 +91,7 @@ fn enter_dispatches_and_repaints_while_the_writer_is_paused() {
     app.type_text("submitted request α");
     let started = std::time::Instant::now();
     app.press(KeyCode::Enter);
-    // Storage stays paused, so any wait on it would run to the persistence deadline.
+    // Waiting for the paused writer would run to the persistence deadline.
     assert!(started.elapsed() < crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
     assert!(app.agent_running());
     assert_eq!(app.state().prompt_text, "");
@@ -122,7 +122,7 @@ fn enter_dispatches_and_repaints_while_the_writer_is_paused() {
 }
 
 #[test]
-fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
+fn enter_prepares_history_without_waiting_for_the_writer() {
     for retained in [0, 128, 4096] {
         let mut app = TestApp::builder().with_vim(false).build();
         if retained > 0 {
@@ -155,6 +155,7 @@ fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
             let entered = std::time::Instant::now();
             app.press(KeyCode::Enter);
             enters.push(entered.elapsed().as_micros());
+            app.wait_for_turn_dispatch();
             assert_eq!(
                 app.drain_engine_sends()
                     .iter()
@@ -167,10 +168,95 @@ fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
             app.save_session_and_flush();
         }
         eprintln!("dispatch retained={retained} Enter_us={enters:?}");
-        // Storage stays paused, so any wait on it would run to the persistence deadline.
+        // Waiting for the paused writer would run to the persistence deadline.
         assert!(enters
             .iter()
             .all(|elapsed| *elapsed < crate::persist::DEFAULT_PERSISTENCE_DEADLINE.as_micros()));
+    }
+}
+
+#[test]
+fn stored_history_preparation_is_responsive_and_rejects_invalid_results() {
+    for outcome in ["ready", "cancelled", "changed", "compacted", "missing"] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        let baseline = HistoryItem::note(protocol::HistoryNote::named_context(
+            "baseline",
+            "durable request context",
+        ));
+        app.session_append_history(baseline.clone());
+        app.save_session_and_flush();
+        assert_eq!(
+            app.tui
+                .conversation
+                .live_session()
+                .unwrap()
+                .live_suffix_len(),
+            0
+        );
+        let identity = smelt_core::session::store_identity(&app.session_snapshot());
+        let (input_started, release) = app.tui.conversation.submissions.pause_input();
+        app.drain_engine_sends();
+        app.type_text("read stored context");
+        let started = std::time::Instant::now();
+        app.press(KeyCode::Enter);
+        assert!(started.elapsed() < Duration::from_millis(250));
+        input_started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(app.tui.turn_submission_is_pending());
+        assert!(!app.agent_running());
+        assert!(app
+            .render_unsettled_silent()
+            .text()
+            .contains("read stored context"));
+        match outcome {
+            "ready" => app.type_text("new draft"),
+            "cancelled" => {
+                app.press(KeyCode::Esc);
+                app.press(KeyCode::Esc);
+                assert_eq!(app.state().prompt_text, "read stored context");
+            }
+            "changed" => app.session_append_history(HistoryItem::note(
+                protocol::HistoryNote::named_context("later", "retain later context"),
+            )),
+            "compacted" => app.session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
+                summary: "compacted baseline".into(),
+                first_live_index: 1,
+                ..Default::default()
+            })),
+            "missing" => {
+                // Keep the advertised head intact to simulate a missing durable row.
+                let connection =
+                    rusqlite::Connection::open(app.tui.core.sessions.store().database_path())
+                        .unwrap();
+                assert_eq!(connection.execute(
+                    "DELETE FROM history WHERE sid = (SELECT sid FROM sessions WHERE id = ?1) AND idx = 0",
+                    [&identity.id],
+                ).unwrap(), 1);
+            }
+            _ => unreachable!(),
+        }
+        release.send(()).unwrap();
+        app.wait_for_turn_dispatch();
+        let requests: Vec<_> = app
+            .drain_engine_sends()
+            .into_iter()
+            .filter_map(|command| match command {
+                protocol::UiCommand::StartTurn(payload) => Some(payload),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), usize::from(outcome == "ready"), "{outcome}");
+        if outcome == "ready" {
+            assert!(requests[0]
+                .history
+                .items()
+                .unwrap()
+                .items
+                .contains(&baseline));
+            assert_eq!(app.state().prompt_text, "new draft");
+        } else {
+            assert!(!app.agent_running(), "{outcome}");
+            assert_eq!(app.state().prompt_text, "read stored context", "{outcome}");
+        }
     }
 }
 
@@ -258,7 +344,7 @@ fn file_expansion_includes_turn_start_context_changes() {
             _ => None,
         })
         .unwrap();
-    let history = &payload.history.items;
+    let history = &payload.history.items().unwrap().items;
     assert!(history.iter().any(|item| matches!(item,
         HistoryItem::Note(protocol::HistoryNote::Context { name, text })
             if name == "acceptance-hook" && text == "request context from hook"
@@ -1330,6 +1416,7 @@ fn rewind_truncates_the_stored_suffix_across_restart() {
     assert!(session_reader(&session_id).head().unwrap().history_len > retained.head.history_len);
 
     app.rewind_to_history_index(Some(retained_history_len), false);
+    app.wait_for_rewind();
     app.save_session_and_flush();
 
     let rewound_reader = session_reader(&session_id);
@@ -1433,6 +1520,7 @@ fn turn_submitted_after_a_failed_save_saves_everything_once() {
     app.drain_engine_sends();
     app.type_text("submit after freeing space");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_dispatch();
 
     assert!(app.agent_running());
     assert!(!app.session_is_read_only());
@@ -1518,6 +1606,7 @@ fn failed_submit_save_is_written_once_after_explicit_retry() {
     app.drain_engine_sends();
     app.type_text("retry this exact turn");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_dispatch();
     let submitted = |app: &mut TestApp| {
         app.drain_engine_sends()
             .into_iter()
@@ -2610,6 +2699,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
         }));
 
         app.rewind_to_history_index(Some(second_prompt_history_idx), false);
+        app.wait_for_rewind();
         app.save_session_and_flush();
         assert_eq!(app.session_message_count(), 2);
         assert_eq!(app.session_snapshot().display_context_tokens(), Some(100));
@@ -3536,7 +3626,7 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
 }
 
 #[test]
-fn saved_new_session_keeps_only_model_context_in_memory() {
+fn saved_new_session_keeps_only_unsaved_history_in_memory() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     for idx in 0..4 {
@@ -3560,7 +3650,8 @@ fn saved_new_session_keeps_only_model_context_in_memory() {
         .conversation_probe()
         .live_session()
         .expect("saved session reads history from the store");
-    assert_eq!((live.live_start, live.history_len()), (3, 4));
+    assert_eq!((live.live_start, live.history_len()), (4, 4));
+    assert_eq!(live.live_suffix_len(), 0);
     let rows: Vec<_> = app
         .session_history()
         .into_iter()
@@ -3597,8 +3688,8 @@ fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
         .conversation_probe()
         .live_session()
         .expect("store-backed session");
-    // Without a checkpoint the whole history is model context, so it stays in memory.
-    assert_eq!(live.live_suffix_len(), live.history_len());
+    assert_eq!(live.live_suffix_len(), 0);
+    assert_eq!(live.live_start, stored_len + 1);
 
     let loaded = loaded_session(&resumed, &session_id);
     assert_eq!(loaded.history.len(), stored_len + 1);

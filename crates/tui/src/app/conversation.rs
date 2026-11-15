@@ -846,20 +846,21 @@ impl ConversationRuntime {
         self.document.records_persisted()
     }
 
-    /// The history the model sees: the checkpoint summary, then the history since it.
-    pub(crate) fn model_history_source(&self) -> Result<protocol::ModelHistorySource, String> {
+    /// Captures model context; stored rows are read by request preparation.
+    pub(crate) fn model_history_read(&self) -> smelt_core::session_runtime::ModelHistoryRead {
         let checkpoint = self.session.checkpoint.as_ref();
         if let Some(live) = self.document.live_session.as_ref() {
-            return live.model_history_source(checkpoint);
+            return live.model_history_read(checkpoint);
         }
-        let (mut items, first_live_index, end_index) = self.session.model_history_range();
-        let coordinates =
-            protocol::ModelHistoryCoordinates::projected(items.len(), first_live_index);
-        items.extend_from_slice(&self.session.history[first_live_index..end_index]);
-        Ok(protocol::ModelHistorySource::projected_items(
-            items,
-            coordinates,
-        ))
+        smelt_core::session_runtime::ModelHistoryRead::loaded(
+            self.session.history.clone(),
+            checkpoint.map(|checkpoint| checkpoint.summary.clone()),
+            checkpoint.map_or(0, |checkpoint| checkpoint.first_live_index),
+        )
+    }
+
+    pub(crate) fn model_history_source(&self) -> Result<protocol::ModelHistorySource, String> {
+        self.model_history_read().read()
     }
 
     /// The commit that copies this session's unsaved changes into `forked`.
@@ -931,25 +932,7 @@ impl ConversationRuntime {
         &mut self,
         mutation: super::session_document::HistoryMutation,
     ) -> super::session_document::DocumentChange {
-        let change = self.document.apply_history(&mut self.session, mutation);
-        self.load_model_context();
-        change
-    }
-
-    /// Keeps the model context in memory, so requests do not read storage.
-    /// After a rewind or a checkpoint change it may start before the memory
-    /// window. A failed read leaves it in storage, where requests read it.
-    fn load_model_context(&mut self) {
-        let checkpoint = self.session.checkpoint.as_ref();
-        let Some(live) = self.document.live_session.as_mut() else {
-            return;
-        };
-        if live
-            .load_from(live.model_context_start(checkpoint))
-            .is_err()
-        {
-            smelt_perf::perf::record_value("live_session:context_load_error", 1);
-        }
+        self.document.apply_history(&mut self.session, mutation)
     }
 
     fn apply_transcript_mutation(
@@ -984,9 +967,7 @@ impl ConversationRuntime {
         &mut self,
         mutation: super::session_document::TurnStateMutation,
     ) -> super::session_document::DocumentChange {
-        let change = self.document.apply_turn_state(&mut self.session, mutation);
-        self.load_model_context();
-        change
+        self.document.apply_turn_state(&mut self.session, mutation)
     }
 
     fn plan_history_append(

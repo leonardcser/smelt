@@ -197,12 +197,21 @@ impl StoredRewindRequest {
     }
 }
 
+/// Identifies the history a background preparation read. Destructive changes
+/// bump the epoch, appends change the length, and compaction moves the
+/// checkpoint start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct HistoryStamp {
+    epoch: u64,
+    len: usize,
+    checkpoint_start: Option<usize>,
+}
+
 pub(super) struct PendingRewind {
     request_id: u64,
     busy: super::BusyToken,
     session_id: String,
-    history_epoch: u64,
-    history_len: usize,
+    history: HistoryStamp,
     cancel_generation: u64,
     prompt_id: smelt_buffer::buffer::BufId,
     prompt_tick: u64,
@@ -345,10 +354,8 @@ pub(crate) fn store_backed_live_session_for_test(
         .reader()
         .and_then(|reader| reader.history_user_turn_count_before(history_len as u64))
         .expect("count fixture user turns");
-    smelt_core::session_runtime::LiveSession::from_parts(
-        store_address.session_id.clone(),
-        store_address.artifact_dir(),
-        Some(store_address),
+    smelt_core::session_runtime::LiveSession::from_store(
+        store_address,
         history_len,
         user_turn_count as usize,
     )
@@ -2679,11 +2686,14 @@ impl TuiApp {
             self.notify("nothing old enough to compact".to_string());
             return false;
         }
-        let tokens_after_estimate =
-            smelt_core::session::estimate_message_tokens(&self.model_history_messages());
-        let history_len = self.session_history_len();
-        self.conversation
-            .set_checkpoint_tokens_after_estimate(tokens_after_estimate, history_len);
+        // The estimate is advisory: without it, the next request reports real usage.
+        if let Ok(messages) = self.model_history_messages() {
+            let history_len = self.session_history_len();
+            self.conversation.set_checkpoint_tokens_after_estimate(
+                smelt_core::session::estimate_message_tokens(&messages),
+                history_len,
+            );
+        }
         self.session_set_checkpoint(self.conversation.session().checkpoint.clone());
         let follow_tail = self.transcript_win().is_following_tail();
         self.clear_compaction_preview();
@@ -2698,25 +2708,20 @@ impl TuiApp {
     }
 
     /// The history the model sees: the checkpoint summary, then the history since it.
-    pub(crate) fn model_history_source(&self) -> protocol::ModelHistorySource {
-        self.conversation
-            .model_history_source()
-            .unwrap_or_else(|err| {
-                smelt_perf::perf::record_value("live_session:history_range_error", 1);
-                smelt_perf::perf::record_value(
-                    "live_session:history_range_error_bytes",
-                    err.len() as u64,
-                );
-                protocol::ModelHistorySource::items(Vec::new())
-            })
+    pub(crate) fn model_history_source(&self) -> Result<protocol::ModelHistorySource, String> {
+        self.conversation.model_history_source()
     }
 
+    pub(crate) fn model_history_messages(&self) -> Result<Vec<protocol::Message>, String> {
+        self.model_history_source()
+            .map(|source| protocol::history_to_messages(&source.items))
+    }
+
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn model_history(&self) -> Vec<HistoryItem> {
-        self.model_history_source().items
-    }
-
-    pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
-        protocol::history_to_messages(&self.model_history())
+        self.model_history_source()
+            .expect("read model history")
+            .items
     }
 
     fn loaded_transcript_rewind_block(&self, history_idx: usize) -> Option<usize> {
@@ -2865,18 +2870,30 @@ impl TuiApp {
             request_id,
             busy,
             session_id: self.conversation.session().id.clone(),
-            history_epoch: self
-                .core
-                .signals
-                .get::<u64>("history_epoch")
-                .unwrap_or_default(),
-            history_len: self.session_history_len(),
+            history: self.history_stamp(),
             cancel_generation: self.conversation.cancel_generation(),
             prompt_id: self.prompt_buf().id(),
             prompt_tick: self.prompt_buf().source_tick(),
             restore_vim_insert,
         });
         self.request_urgent_render();
+    }
+
+    pub(super) fn history_stamp(&self) -> HistoryStamp {
+        HistoryStamp {
+            epoch: self
+                .core
+                .signals
+                .get::<u64>("history_epoch")
+                .unwrap_or_default(),
+            len: self.session_history_len(),
+            checkpoint_start: self
+                .conversation
+                .session()
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.first_live_index),
+        }
     }
 
     pub(super) fn handle_rewind_worker_result(&mut self, result: RewindWorkerResult) {
@@ -2890,13 +2907,7 @@ impl TuiApp {
         let pending = self.pending_rewind.take().expect("matching rewind request");
         let current = pending.busy.is_active()
             && pending.session_id == self.conversation.session().id
-            && pending.history_epoch
-                == self
-                    .core
-                    .signals
-                    .get::<u64>("history_epoch")
-                    .unwrap_or_default()
-            && pending.history_len == self.session_history_len()
+            && pending.history == self.history_stamp()
             && pending.cancel_generation == self.conversation.cancel_generation()
             && pending.prompt_id == self.prompt_buf().id()
             && pending.prompt_tick == self.prompt_buf().source_tick()
@@ -2993,7 +3004,7 @@ impl TuiApp {
         &mut self,
         item: HistoryItem,
         block: Option<Block>,
-    ) -> protocol::ModelHistorySource {
+    ) -> smelt_core::session_runtime::ModelHistoryRead {
         self.stage_request_history_item_with_first_user(item, block, None)
     }
 
@@ -3002,16 +3013,16 @@ impl TuiApp {
         item: HistoryItem,
         block: Option<Block>,
         first_user_message: Option<String>,
-    ) -> protocol::ModelHistorySource {
+    ) -> smelt_core::session_runtime::ModelHistoryRead {
         let _perf = smelt_perf::perf::begin("agent:stage_request_history");
-        let history = self.model_history_source();
+        let history = self.conversation.model_history_read();
         self.commit_request_history_item_to_document(item, block, first_user_message);
         self.sync_session_snapshot();
         self.publish_history_delta(HistoryDeltaKind::Request);
         history
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn commit_request_history_item(
         &mut self,
         item: HistoryItem,
@@ -3020,7 +3031,7 @@ impl TuiApp {
         self.commit_request_history_item_with_first_user(item, block, None)
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn commit_request_history_item_with_first_user(
         &mut self,
         item: HistoryItem,
@@ -3029,6 +3040,7 @@ impl TuiApp {
     ) -> protocol::ModelHistorySource {
         let history =
             self.stage_request_history_item_with_first_user(item, block, first_user_message);
+        let history = history.read().expect("prepare fixture request history");
         self.save_session_and_flush();
         history
     }
@@ -3470,10 +3482,9 @@ mod checkpoint_tests {
             .sessions
             .load_resume(&id, 80, 24)
             .expect("stored session resume should load");
-        let live = smelt_core::session_runtime::LiveSession::from_resume(
+        let live = smelt_core::session_runtime::LiveSession::from_store(
             resume.address,
-            resume.context_start,
-            resume.context,
+            resume.head.history_len.as_usize(),
             resume.user_turn_count,
         );
         let document = crate::app::session_document::SessionDocument::from_store(
@@ -3802,7 +3813,7 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn rewind_before_checkpoint_keeps_model_context_in_memory() {
+    fn rewind_before_checkpoint_preserves_stored_model_context() {
         let mut app = compacted_saved_session_app(128);
         let id = app.session_id();
         assert!(app.load_session_by_id(&id));
@@ -3812,13 +3823,21 @@ mod checkpoint_tests {
             RewindPreparation::Ready(_) => panic!("stored target requires worker preparation"),
         };
         app.tui.apply_prepared_rewind(prepared);
-        smelt_perf::perf::clear();
-        smelt_perf::perf::set_enabled(true);
-        let history = app.model_history();
-        smelt_perf::perf::set_enabled(false);
+        let read = app.tui.conversation.model_history_read();
+        assert!(read.needs_storage(smelt_core::session_runtime::TurnHistoryForm::Items));
+        let identity = read.identity().unwrap();
+        let history = read.read().unwrap().items;
         assert_eq!(history.len(), 64);
+        assert_eq!(identity, protocol::HistoryIdentity::of(&history));
         assert_eq!(history[0], user("old user 0"));
-        assert_perf_value_absent("live_session:context_storage_read");
+        assert_eq!(
+            app.tui
+                .conversation
+                .live_session()
+                .unwrap()
+                .live_suffix_len(),
+            0
+        );
     }
 
     #[test]
@@ -4326,7 +4345,7 @@ mod checkpoint_tests {
         assert_eq!(app.tui.conversation.session().history.len(), 0);
         let checkpoint = app.tui.conversation.session().checkpoint.as_ref().unwrap();
         assert_eq!(checkpoint.first_live_index, 4);
-        let source = app.tui.model_history_source();
+        let source = app.tui.model_history_source().unwrap();
         assert_eq!(
             source.coordinates,
             protocol::ModelHistoryCoordinates::projected(1, 4)

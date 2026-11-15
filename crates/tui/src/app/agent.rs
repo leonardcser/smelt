@@ -394,7 +394,6 @@ struct StagedTurnRollback {
 
 struct PreparedTurn {
     input: protocol::StartTurnInput,
-    history: protocol::ModelHistorySource,
     submitted_history_idx: usize,
     model_target: protocol::ModelTarget,
     request_config: protocol::RequestRuntimeConfig,
@@ -413,15 +412,29 @@ enum PendingTurnSubmitState {
     },
     Input {
         request_id: u64,
-        block_id: smelt_transcript::transcript_model::BlockId,
-        history_epoch: u64,
+        block_id: Option<smelt_transcript::transcript_model::BlockId>,
+        history: super::history::HistoryStamp,
     },
+}
+
+impl PendingTurnSubmitState {
+    fn provisional(self) -> Option<smelt_transcript::transcript_model::BlockId> {
+        match self {
+            Self::Context { provisional } => provisional,
+            Self::Input { block_id, .. } => block_id,
+        }
+    }
+}
+
+struct PreparedRequestInput {
+    history: protocol::TurnHistory,
+    content: Content,
+    observations: Vec<(String, smelt_core::fs::FileState)>,
 }
 
 pub struct TurnInputPrepared {
     request_id: u64,
-    content: Content,
-    observations: Vec<(String, smelt_core::fs::FileState)>,
+    outcome: Result<PreparedRequestInput, String>,
 }
 
 impl std::fmt::Debug for TurnInputPrepared {
@@ -621,7 +634,6 @@ impl TuiApp {
         };
         let turn = PreparedTurn {
             input: input.with_sent_at_ms(sent_at_ms),
-            history: self.model_history_source(),
             submitted_history_idx: history_len,
             model_target,
             request_config: self.core.config.request_runtime_config(),
@@ -633,10 +645,31 @@ impl TuiApp {
             rollback: None,
         };
         let mut dispatch = self.prepare_turn_dispatch(turn, Some(block_id))?;
-        dispatch.turn.history = self.model_history_source();
         dispatch.turn.submitted_history_idx = self.session_history_len();
-        if !expand_files {
-            return self.stage_accepted_input(dispatch, block_id, content, Vec::new());
+        let history = self.conversation.model_history_read();
+        self.prepare_request_input(dispatch, history, Some(block_id), expand_files)
+    }
+
+    /// Reads stored history and expands file references off the UI thread when
+    /// needed, then sends the turn.
+    fn prepare_request_input(
+        &mut self,
+        dispatch: PreparedTurnDispatch,
+        history: smelt_core::session_runtime::ModelHistoryRead,
+        block_id: Option<smelt_transcript::transcript_model::BlockId>,
+        expand_files: bool,
+    ) -> Option<TurnState> {
+        let content = dispatch.turn.input.provider_content();
+        let form = smelt_core::session_runtime::TurnHistoryForm::for_provider(
+            &dispatch.turn.model_target.provider_type,
+        );
+        if !expand_files && !history.needs_storage(form) {
+            let prepared = history.read_turn(form).map(|history| PreparedRequestInput {
+                history,
+                content,
+                observations: Vec::new(),
+            });
+            return self.finish_request_input(dispatch, block_id, prepared);
         }
         let cwd = self.workspace.cwd().to_owned();
         let events = self.platform.app_event_sender();
@@ -661,28 +694,36 @@ impl TuiApp {
                     observations.extend(expanded.observations);
                     expanded.text
                 };
-                let content = match content {
-                    Content::Text(text) => Content::Text(expand(&text)),
-                    Content::Parts(parts) => Content::Parts(
-                        parts
-                            .into_iter()
-                            .map(|part| match part {
-                                ContentPart::Text { text } if !token.cancelled() => {
-                                    ContentPart::Text {
-                                        text: expand(&text),
+                let content = if !expand_files {
+                    content
+                } else {
+                    match content {
+                        Content::Text(text) => Content::Text(expand(&text)),
+                        Content::Parts(parts) => Content::Parts(
+                            parts
+                                .into_iter()
+                                .map(|part| match part {
+                                    ContentPart::Text { text } if !token.cancelled() => {
+                                        ContentPart::Text {
+                                            text: expand(&text),
+                                        }
                                     }
-                                }
-                                other => other,
-                            })
-                            .collect(),
-                    ),
+                                    other => other,
+                                })
+                                .collect(),
+                        ),
+                    }
                 };
+                let outcome = history.read_turn(form).map(|history| PreparedRequestInput {
+                    history,
+                    content,
+                    observations,
+                });
                 if !token.cancelled() {
                     let _ = events.send(super::AppEvent::TurnInputPrepared(Box::new(
                         TurnInputPrepared {
                             request_id: token.generation,
-                            content,
-                            observations,
+                            outcome,
                         },
                     )));
                 }
@@ -694,13 +735,12 @@ impl TuiApp {
                     submit_state: PendingTurnSubmitState::Input {
                         request_id,
                         block_id,
-                        history_epoch: self.core.signals.get::<u64>("history_epoch").unwrap_or(0),
+                        history: self.history_stamp(),
                     },
                 });
             }
             Err(message) => {
-                self.conversation.remove_accepted_block(block_id);
-                self.fail_prepared_turn_dispatch(dispatch, message);
+                self.finish_request_input(dispatch, block_id, Err(message));
             }
         }
         self.request_urgent_render();
@@ -708,21 +748,27 @@ impl TuiApp {
     }
 
     pub(super) fn handle_turn_input_prepared(&mut self, result: TurnInputPrepared) {
-        let current = self.conversation.submissions.accepted.as_ref().is_some_and(|pending| {
-            matches!(pending.submit_state, PendingTurnSubmitState::Input { request_id, .. }
-                if request_id == result.request_id && self.conversation.submissions.input_operations.is_current(request_id))
-        });
-        if !current {
+        let Some(pending) = self.conversation.submissions.accepted.as_ref() else {
+            return;
+        };
+        let PendingTurnSubmitState::Input {
+            request_id,
+            history,
+            block_id,
+        } = pending.submit_state
+        else {
+            return;
+        };
+        if request_id != result.request_id
+            || !self
+                .conversation
+                .submissions
+                .input_operations
+                .is_current(request_id)
+        {
             return;
         }
-        let matches = self.conversation.submissions.accepted.as_ref().is_some_and(|pending| {
-            matches!(pending.submit_state, PendingTurnSubmitState::Input { request_id, history_epoch, .. }
-                if request_id == result.request_id
-                    && self.conversation.submissions.input_operations.is_current(request_id)
-                    && history_epoch == self.core.signals.get::<u64>("history_epoch").unwrap_or(0)
-                    && pending.dispatch.turn.submitted_history_idx == self.session_history_len())
-        });
-        if !matches {
+        if history != self.history_stamp() {
             self.fail_pending_turn_submission("session history changed during request preparation");
             return;
         }
@@ -732,26 +778,43 @@ impl TuiApp {
             .accepted
             .take()
             .expect("matching accepted input");
-        let PendingTurnSubmitState::Input { block_id, .. } = pending.submit_state else {
-            unreachable!()
-        };
-        let turn = self.stage_accepted_input(
-            pending.dispatch,
-            block_id,
-            result.content,
-            result.observations,
-        );
+        let turn = self.finish_request_input(pending.dispatch, block_id, result.outcome);
         self.conversation.set_active(turn);
         self.request_urgent_render();
+    }
+
+    fn finish_request_input(
+        &mut self,
+        dispatch: PreparedTurnDispatch,
+        block_id: Option<smelt_transcript::transcript_model::BlockId>,
+        prepared: Result<PreparedRequestInput, String>,
+    ) -> Option<TurnState> {
+        match (prepared, block_id) {
+            (Ok(prepared), Some(block_id)) => {
+                self.stage_accepted_input(dispatch, block_id, prepared)
+            }
+            (Ok(prepared), None) => self.send_prepared_turn(dispatch, prepared.history),
+            (Err(message), block_id) => {
+                if let Some(block_id) = block_id {
+                    self.conversation.remove_accepted_block(block_id);
+                }
+                self.fail_prepared_turn_dispatch(dispatch, message);
+                None
+            }
+        }
     }
 
     fn stage_accepted_input(
         &mut self,
         mut dispatch: PreparedTurnDispatch,
         block_id: smelt_transcript::transcript_model::BlockId,
-        prepared_content: Content,
-        observations: Vec<(String, smelt_core::fs::FileState)>,
+        prepared: PreparedRequestInput,
     ) -> Option<TurnState> {
+        let PreparedRequestInput {
+            content: prepared_content,
+            history,
+            observations,
+        } = prepared;
         let protocol::StartTurnInput::User {
             content,
             display,
@@ -796,7 +859,7 @@ impl TuiApp {
         for (path, state) in observations {
             self.core.files.set(&path, state);
         }
-        self.start_prepared_turn(dispatch)
+        self.send_prepared_turn(dispatch, history)
     }
 
     pub(crate) fn begin_agent_turn(
@@ -831,21 +894,23 @@ impl TuiApp {
             }
             self.prepare_user_visible_turn();
             self.publish_turn_input(submitted);
-            let history = self.model_history_source();
+            let history = self.conversation.model_history_read();
             let submitted_history_idx = self.session_history_len().checked_sub(1)?;
-            return self.dispatch_prepared_turn(PreparedTurn {
-                input: protocol::StartTurnInput::user(content),
+            return self.dispatch_prepared_turn(
+                PreparedTurn {
+                    input: protocol::StartTurnInput::user(content),
+                    submitted_history_idx,
+                    model_target,
+                    request_config: self.core.config.request_runtime_config(),
+                    reasoning_effort: self.core.config.reasoning_effort.clone(),
+                    permission_overrides: None,
+                    permissions: self.core.permissions.snapshot(),
+                    command: CommandScope::default(),
+                    rewind_history_idx: None,
+                    rollback: None,
+                },
                 history,
-                submitted_history_idx,
-                model_target,
-                request_config: self.core.config.request_runtime_config(),
-                reasoning_effort: self.core.config.reasoning_effort.clone(),
-                permission_overrides: None,
-                permissions: self.core.permissions.snapshot(),
-                command: CommandScope::default(),
-                rewind_history_idx: None,
-                rollback: None,
-            });
+            );
         }
         self.accept_user_input(display, content, sent_at_ms, placement, model_target)
     }
@@ -938,9 +1003,13 @@ impl TuiApp {
         Some(pending.dispatch)
     }
 
-    fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> Option<TurnState> {
+    fn dispatch_prepared_turn(
+        &mut self,
+        turn: PreparedTurn,
+        history: smelt_core::session_runtime::ModelHistoryRead,
+    ) -> Option<TurnState> {
         let dispatch = self.prepare_turn_dispatch(turn, None)?;
-        self.start_prepared_turn(dispatch)
+        self.prepare_request_input(dispatch, history, None, false)
     }
 
     pub(super) fn preserve_pending_prompt_submission(
@@ -966,8 +1035,12 @@ impl TuiApp {
         self.notify_turn_error_sticky(message);
     }
 
-    /// Sends the prepared turn to the engine and saves its request.
-    fn start_prepared_turn(&mut self, dispatch: PreparedTurnDispatch) -> Option<TurnState> {
+    /// Sends a materialized request snapshot to the engine.
+    fn send_prepared_turn(
+        &mut self,
+        dispatch: PreparedTurnDispatch,
+        history: protocol::TurnHistory,
+    ) -> Option<TurnState> {
         let turn_id = self.conversation.next_turn_id();
         let PreparedTurnDispatch {
             turn,
@@ -1006,7 +1079,7 @@ impl TuiApp {
             reasoning_effort: turn.reasoning_effort,
             fast_mode,
             control_env: self.core.session_control.agent_env(),
-            history: turn.history,
+            history,
             session_id: self.conversation.session().id.clone(),
             artifact_dir: self
                 .core
@@ -1059,15 +1132,7 @@ impl TuiApp {
 
     pub(super) fn preparing_input_for_rewind(&self) -> Option<super::history::RewindInput> {
         let pending = self.conversation.submissions.accepted.as_ref()?;
-        if !matches!(
-            pending.submit_state,
-            PendingTurnSubmitState::Input { .. }
-                | PendingTurnSubmitState::Context {
-                    provisional: Some(_)
-                }
-        ) {
-            return None;
-        }
+        pending.submit_state.provisional()?;
         let protocol::StartTurnInput::User {
             content,
             display,
@@ -1101,12 +1166,8 @@ impl TuiApp {
     pub(super) fn abandon_pending_turn_submission(&mut self) {
         self.conversation.submissions.input_operations.cancel();
         if let Some(pending) = self.conversation.submissions.accepted.take() {
-            match pending.submit_state {
-                PendingTurnSubmitState::Input { block_id, .. }
-                | PendingTurnSubmitState::Context {
-                    provisional: Some(block_id),
-                } => self.conversation.remove_accepted_block(block_id),
-                PendingTurnSubmitState::Context { provisional: None } => {}
+            if let Some(block_id) = pending.submit_state.provisional() {
+                self.conversation.remove_accepted_block(block_id);
             }
         }
     }
@@ -1115,19 +1176,11 @@ impl TuiApp {
         let Some(pending) = self.conversation.submissions.accepted.take() else {
             return;
         };
-        match pending.submit_state {
-            PendingTurnSubmitState::Context { provisional: None } => {
-                if let Some(rollback) = pending.dispatch.turn.rollback.as_ref() {
-                    self.rollback_staged_turn(rollback);
-                }
-            }
-            PendingTurnSubmitState::Input { block_id, .. }
-            | PendingTurnSubmitState::Context {
-                provisional: Some(block_id),
-            } => {
-                self.conversation.submissions.input_operations.cancel();
-                self.conversation.remove_accepted_block(block_id);
-            }
+        self.conversation.submissions.input_operations.cancel();
+        if let Some(block_id) = pending.submit_state.provisional() {
+            self.conversation.remove_accepted_block(block_id);
+        } else if let Some(rollback) = pending.dispatch.turn.rollback.as_ref() {
+            self.rollback_staged_turn(rollback);
         }
     }
 
@@ -1136,16 +1189,10 @@ impl TuiApp {
         let Some(mut pending) = self.conversation.submissions.accepted.take() else {
             return false;
         };
-        match pending.submit_state {
-            PendingTurnSubmitState::Context { provisional: None } => {}
-            PendingTurnSubmitState::Input { block_id, .. }
-            | PendingTurnSubmitState::Context {
-                provisional: Some(block_id),
-            } => {
-                self.conversation.submissions.input_operations.cancel();
-                self.conversation.remove_accepted_block(block_id);
-                pending.dispatch.turn.rollback = None;
-            }
+        self.conversation.submissions.input_operations.cancel();
+        if let Some(block_id) = pending.submit_state.provisional() {
+            self.conversation.remove_accepted_block(block_id);
+            pending.dispatch.turn.rollback = None;
         }
         self.fail_prepared_turn_dispatch(pending.dispatch, message.to_owned());
         true
@@ -1183,23 +1230,25 @@ impl TuiApp {
             if let Some(block) = block {
                 self.push_block(block);
             }
-            self.model_history_source()
+            self.conversation.model_history_read()
         };
         let submitted_history_idx = self.session_history_len().checked_sub(1)?;
         let request_config = self.core.config.request_runtime_config();
-        self.dispatch_prepared_turn(PreparedTurn {
-            input: protocol::StartTurnInput::note(history_note),
+        self.dispatch_prepared_turn(
+            PreparedTurn {
+                input: protocol::StartTurnInput::note(history_note),
+                submitted_history_idx,
+                model_target,
+                request_config,
+                reasoning_effort: self.core.config.reasoning_effort.clone(),
+                permission_overrides: None,
+                permissions: self.core.permissions.snapshot(),
+                command: CommandScope::default(),
+                rewind_history_idx: None,
+                rollback: (adds_history || adds_block).then_some(rollback),
+            },
             history,
-            submitted_history_idx,
-            model_target,
-            request_config,
-            reasoning_effort: self.core.config.reasoning_effort.clone(),
-            permission_overrides: None,
-            permissions: self.core.permissions.snapshot(),
-            command: CommandScope::default(),
-            rewind_history_idx: None,
-            rollback: (adds_history || adds_block).then_some(rollback),
-        })
+        )
     }
 
     fn custom_command_parts(
@@ -1367,7 +1416,7 @@ impl TuiApp {
                     sent_at_ms: Some(sent_at_ms),
                 });
             }
-            self.model_history_source()
+            self.conversation.model_history_read()
         };
         self.publish_turn_input(submitted);
 
@@ -1433,20 +1482,22 @@ impl TuiApp {
         let submitted_history_idx = self.session_history_len().checked_sub(1)?;
         let rewind_history_idx = (!evaluated.is_empty()).then_some(submitted_history_idx);
         let request_config = self.core.config.request_runtime_config();
-        self.dispatch_prepared_turn(PreparedTurn {
-            input: protocol::StartTurnInput::user_command(Content::text(evaluated), display)
-                .with_sent_at_ms(sent_at_ms),
+        self.dispatch_prepared_turn(
+            PreparedTurn {
+                input: protocol::StartTurnInput::user_command(Content::text(evaluated), display)
+                    .with_sent_at_ms(sent_at_ms),
+                submitted_history_idx,
+                model_target,
+                request_config,
+                reasoning_effort: reasoning,
+                permission_overrides,
+                permissions,
+                command: CommandScope { name, overrides },
+                rewind_history_idx,
+                rollback: Some(rollback),
+            },
             history,
-            submitted_history_idx,
-            model_target,
-            request_config,
-            reasoning_effort: reasoning,
-            permission_overrides,
-            permissions,
-            command: CommandScope { name, overrides },
-            rewind_history_idx,
-            rollback: Some(rollback),
-        })
+        )
     }
 
     fn record_finished_turn_state(&mut self, ui_meta: protocol::TurnMeta) {
@@ -2878,7 +2929,7 @@ mod tests {
             })
             .expect("turn dispatched");
         assert_eq!(
-            payload.history.items.len(),
+            payload.history.items().unwrap().items.len(),
             app.tui.conversation.session().history.len() - 1
         );
         assert_eq!(
@@ -2965,6 +3016,7 @@ mod tests {
                 } else {
                     app.press(crossterm::event::KeyCode::Esc);
                     app.press(crossterm::event::KeyCode::Esc);
+                    app.wait_for_rewind();
                 }
                 assert!(!app.agent_running());
                 assert_eq!(app.state().prompt_text, "first request");
@@ -3709,10 +3761,13 @@ mod tests {
             })
             .expect("turn dispatched");
         assert_eq!(
-            payload.history.coordinates,
+            payload.history.items().unwrap().coordinates,
             protocol::ModelHistoryCoordinates::canonical()
         );
-        assert_eq!(payload.history.items.len(), old_history_len);
+        assert_eq!(
+            payload.history.items().unwrap().items.len(),
+            old_history_len
+        );
         assert_eq!(
             payload.input.provider_content().text_content(),
             "new request"

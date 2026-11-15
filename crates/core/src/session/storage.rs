@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use protocol::{HistoryItem, ReasoningEffort};
+#[cfg(test)]
+use protocol::HistoryItem;
+use protocol::ReasoningEffort;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -38,19 +40,16 @@ impl SessionStoreAddress {
     }
 }
 
-/// What resuming a session loads: its state, the model context since the last
-/// checkpoint, and the transcript records that fill the first screen.
+/// What resuming needs: session state and the transcript records for the first screen.
+/// Durable provider history remains in the store until a request needs it.
 #[derive(Clone, Debug)]
 pub struct SessionStoreResume {
     pub meta: SessionMeta,
-    /// The session without history; `context` holds the part in memory.
+    /// Current session state without history.
     pub session: Session,
     pub address: SessionStoreAddress,
     pub head: smelt_store::StoreHead,
-    /// History index of `context[0]`.
-    pub context_start: usize,
-    pub context: Vec<HistoryItem>,
-    /// Plain user turns before `context_start`.
+    /// Plain user turns in the durable history.
     pub user_turn_count: usize,
     pub transcript_record_tail: smelt_store::TranscriptRecordSlice,
 }
@@ -223,8 +222,8 @@ impl SessionStorage {
         Ok(session)
     }
 
-    /// Loads what resuming needs: state, model context and the transcript tail
-    /// that fills `record_target_rows` rows at `record_width`.
+    /// Loads current state and the transcript tail that fills `record_target_rows`
+    /// rows at `record_width`. Provider history stays in the store.
     pub fn load_resume(
         &self,
         id_or_prefix: &str,
@@ -234,25 +233,17 @@ impl SessionStorage {
         let _perf = smelt_perf::perf::begin("session:load_resume");
         let address = self.resolve(id_or_prefix)?;
         let reader = address.reader().context("open session")?;
-        let (state, context_start, context, user_turn_count, transcript_record_tail) = reader
+        let (state, user_turn_count, transcript_record_tail) = reader
             .read_snapshot(|reader| {
                 let state = reader.state()?;
                 let history_len = state.head.history_len.get();
-                let context_start = state
-                    .checkpoint
-                    .as_ref()
-                    .and_then(|value| value.get("first_live_index"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    .min(history_len);
-                let context = reader.history_range(context_start, history_len)?;
-                let user_turn_count = reader.history_user_turn_count_before(context_start)?;
+                let user_turn_count = reader.history_user_turn_count_before(history_len)?;
                 let tail = reader.transcript_tail_for_rows_with_total(
                     state.head.transcript_record_count.as_usize(),
                     record_width,
                     record_target_rows,
                 )?;
-                Ok((state, context_start, context, user_turn_count, tail))
+                Ok((state, user_turn_count, tail))
             })
             .context("read session")?;
         let head = state.head;
@@ -262,8 +253,6 @@ impl SessionStorage {
             session,
             address,
             head,
-            context_start: context_start as usize,
-            context,
             user_turn_count: user_turn_count as usize,
             transcript_record_tail,
         })
@@ -844,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_loads_only_the_context_after_the_checkpoint() {
+    fn resume_leaves_provider_history_in_the_store() {
         let (_root, storage) = storage();
         let mut saved = session((0..5).map(|i| user(&i.to_string())).collect());
         saved.checkpoint = Some(ContextCheckpoint {
@@ -855,9 +844,17 @@ mod tests {
         storage.save(&saved).unwrap();
 
         let resume = storage.load_resume(&saved.id, 80, 24).unwrap();
-        assert_eq!(resume.context_start, 3);
-        assert_eq!(resume.context, saved.history[3..]);
-        assert_eq!(resume.user_turn_count, 3);
+        assert_eq!(resume.user_turn_count, 5);
+        let live = crate::session_runtime::LiveSession::from_store(
+            resume.address,
+            resume.head.history_len.as_usize(),
+            resume.user_turn_count,
+        );
+        assert_eq!(live.live_suffix_len(), 0);
+        let history = live
+            .model_history_source(resume.session.checkpoint.as_ref())
+            .unwrap();
+        assert_eq!(&history.items[1..], &saved.history[3..]);
         assert!(resume.session.history.is_empty());
         assert_eq!(resume.session.last_turn_id, 7);
         assert_eq!(resume.head.history_len.get(), 5);

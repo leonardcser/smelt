@@ -239,12 +239,37 @@ cargo test --profile release-fast --test startup \
 ```
 
 Launches Cargo's built executable in a PTY against a fresh copy per run and
-reports launch to first frame, launch to visible tail, Ctrl-C to exit, and RSS.
+reports launch to first frame, launch to visible tail, Ctrl-C to exit, Ctrl-C to
+terminal restoration (leaving the alternate screen), and RSS. Timings include
+PTY polling, with approximately 1 ms resolution. The profiler is off by default;
+set `SMELT_LIFECYCLE_BENCH_PROFILE=1` to enable it for diagnostic runs, not timing
+comparisons.
 `SMELT_LIFECYCLE_BENCH_TARGET=/absolute/path/to/smelt` selects another binary.
 `SMELT_LIFECYCLE_BENCH_FIRST_FRAME_TEXT` and
 `SMELT_LIFECYCLE_BENCH_TIMEOUT_SECS` override the first-frame marker and phase
 timeout. Resume must stay bounded by the loaded tail, not history length or
 database size.
+
+### Generated quit scaling
+
+```bash
+cargo test --profile release-fast --test startup \
+  interactive_quit_scaling_benchmark -- --ignored --nocapture
+```
+
+Generates synthetic sessions in an isolated temporary store. It measures three
+workloads separately: full logical model context, archived history with four
+context items, and archived history with per-turn metadata and context snapshots.
+No provider requests or live session data are used. Default sizes are 4,096,
+65,536, and 262,144 records, with one warmup plus five measured runs per case.
+Results report shutdown and terminal-restoration distributions plus peak RSS.
+Compare medians across sizes for each workload. The snapshot workload exposes
+resident timeline costs independently of model-context retention.
+
+`SMELT_QUIT_BENCH_SIZES=4096,65536,262144` overrides the strictly increasing positive
+sizes. `SMELT_LIFECYCLE_BENCH_RUNS` sets the positive measured run count. The target
+binary and profiler variables above also apply. Keep profiler mode and machine
+load unchanged when comparing binaries.
 
 ## Direct suites
 

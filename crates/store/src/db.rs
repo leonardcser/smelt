@@ -33,7 +33,7 @@ pub(crate) fn open(store: &Store) -> Result<Connection> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.set_prepared_statement_cache_capacity(64);
     match schema_of(&conn)? {
-        (APPLICATION_ID, SCHEMA_VERSION) => {}
+        (APPLICATION_ID, SCHEMA_VERSION) => add_history_chain(&conn)?,
         (0, 0) => create(&conn)?,
         (application_id, version) => {
             return Err(StoreError::UnsupportedSchema {
@@ -62,6 +62,37 @@ fn schema_of(conn: &Connection) -> Result<(i32, i32)> {
         conn.query_row("PRAGMA application_id", [], |row| row.get(0))?,
         conn.query_row("PRAGMA user_version", [], |row| row.get(0))?,
     ))
+}
+
+/// COMPAT(history-chain-column): adds `history.chain` to databases from
+/// before it, without a new schema version, so earlier 0.8 releases still open
+/// them. Their rows keep NULL; see `history::chain_before`.
+fn add_history_chain(conn: &Connection) -> Result<()> {
+    let present = |conn: &Connection| -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('history') WHERE name = 'chain'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? > 0)
+    };
+    if present(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        if !present(conn)? {
+            conn.execute_batch("ALTER TABLE history ADD COLUMN chain BLOB")?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 /// Creates the schema in a new database, unless another process did while this
@@ -261,6 +292,51 @@ mod tests {
                 "{setup}"
             );
             assert_eq!(fs::read(store.database_path()).unwrap(), before, "{setup}");
+        }
+    }
+
+    #[test]
+    fn databases_without_the_history_chain_gain_it_and_keep_their_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let items = [
+            protocol::HistoryItem::user(protocol::Content::text("one")),
+            protocol::HistoryItem::note(protocol::HistoryNote::context("cwd")),
+            protocol::HistoryItem::user(protocol::Content::text("two")),
+        ];
+        for id in ["a", "b"] {
+            let identity = crate::SessionIdentity {
+                id: id.into(),
+                created_at: 0,
+                parent_id: None,
+            };
+            let commit = crate::SessionCommit {
+                history: Some(crate::HistorySuffix {
+                    start: 0,
+                    items: items.to_vec(),
+                }),
+                ..Default::default()
+            };
+            store
+                .writer(id)
+                .unwrap()
+                .commit(&identity, &commit)
+                .unwrap();
+        }
+        open(&store)
+            .unwrap()
+            .execute_batch("ALTER TABLE history DROP COLUMN chain")
+            .unwrap();
+        let conn = open(&store).unwrap();
+        assert_eq!(schema_of(&conn).unwrap(), (APPLICATION_ID, SCHEMA_VERSION));
+        for id in ["a", "b"] {
+            let reader = store.reader(id).unwrap();
+            for end in 0..=items.len() {
+                assert_eq!(
+                    reader.history_chain_before(end as u64).unwrap(),
+                    protocol::HistoryChain::of(&items[..end])
+                );
+            }
         }
     }
 

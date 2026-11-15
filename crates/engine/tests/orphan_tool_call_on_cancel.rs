@@ -139,7 +139,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
         control_env: Default::default(),
-        history: protocol::ModelHistorySource::items(Vec::new()),
+        history: Default::default(),
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,

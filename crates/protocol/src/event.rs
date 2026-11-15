@@ -771,7 +771,7 @@ impl StartTurnInput {
 }
 
 /// Provider-visible history for a turn: the live context since the last
-/// compaction, which the frontend keeps in memory.
+/// compaction.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelHistorySource {
     pub items: Vec<crate::history::HistoryItem>,
@@ -834,7 +834,7 @@ pub struct StartTurnPayload {
     /// call `smelt session complete`. Captured at dispatch like a smelt shell's.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub control_env: HashMap<String, String>,
-    pub history: ModelHistorySource,
+    pub history: crate::TurnHistory,
     /// Stable identity for storage and provider cache routing.
     pub session_id: String,
     /// Directory for this session's files, such as native plans.
@@ -1235,7 +1235,7 @@ mod tests {
             reasoning_effort: ReasoningEffort::Off,
             fast_mode: false,
             control_env: Default::default(),
-            history: ModelHistorySource::default(),
+            history: crate::TurnHistory::default(),
             session_id: "s".into(),
             artifact_dir: std::path::PathBuf::from("/tmp"),
             ephemeral: false,

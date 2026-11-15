@@ -225,6 +225,11 @@ impl SessionReader {
         Ok(items)
     }
 
+    /// The chain over the conversation in history `[0, end)`.
+    pub fn history_chain_before(&self, end: u64) -> Result<protocol::HistoryChain> {
+        crate::history::chain_before(&self.conn, self.sid, signed(end))
+    }
+
     /// The newest items before `end` that fit `max_items` and `max_bytes`.
     pub fn history_tail(
         &self,

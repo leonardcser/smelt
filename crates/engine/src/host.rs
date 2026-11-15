@@ -95,6 +95,15 @@ pub enum HostCall {
         reply: oneshot::Sender<protocol::ToolEvaluation>,
     },
 
+    /// A native backend must import the turn's history, which it received
+    /// only as `identity`. The host replies with the items of that history,
+    /// or an error once its history no longer matches `identity`.
+    ModelHistory {
+        turn_id: u64,
+        identity: protocol::HistoryIdentity,
+        reply: oneshot::Sender<Result<protocol::ModelHistorySource, String>>,
+    },
+
     /// Run `smelt.provider.middleware{on_response=...}` hooks against
     /// the assembled assistant message. `Some(msg)` replaces it before
     /// it's pushed to history; `None` keeps the original.

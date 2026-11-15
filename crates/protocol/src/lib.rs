@@ -13,6 +13,7 @@ pub use agents::{AgentCapabilities, AgentInfo, AgentOwner, AgentStatus};
 pub mod content;
 pub mod event;
 pub mod history;
+pub mod history_identity;
 pub mod message;
 pub mod mode;
 pub mod model;
@@ -39,6 +40,7 @@ pub use history::{
     HistoryTailBudget, JobTermination, ProcessStatusEvent, ToolInvocation, UserHistoryContent,
     COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
+pub use history_identity::{CheckpointIdentity, HistoryChain, HistoryIdentity, TurnHistory};
 pub use message::{
     json_value_dynamic_retained_bytes, json_value_retained_bytes,
     supports_image_tool_attachment_mime, supports_tool_attachment_mime,

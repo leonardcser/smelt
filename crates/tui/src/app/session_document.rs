@@ -479,7 +479,7 @@ impl TuiSessionDocument {
     }
 
     /// Applies the store's report that every save through `durable.seq` is durable.
-    /// Memory then keeps only the model context and what is not saved yet.
+    /// Memory then keeps only history that is not durable yet.
     pub(crate) fn acknowledge(
         &mut self,
         durable: crate::persist::DurableSave,
@@ -516,9 +516,10 @@ impl TuiSessionDocument {
             .schedule_durable_compaction(record_len, records);
         self.adopt_stored_history(session);
         if let Some(live) = self.live_session.as_mut() {
-            let keep_from = live
-                .model_context_start(session.checkpoint.as_ref())
-                .min(durable.head.history_len.as_usize())
+            let keep_from = durable
+                .head
+                .history_len
+                .as_usize()
                 .min(self.changes.history_dirty_from.unwrap_or(usize::MAX));
             live.release_before(keep_from);
         }
@@ -539,13 +540,7 @@ impl TuiSessionDocument {
         else {
             return;
         };
-        let mut live = LiveSession::from_parts(
-            address.session_id.clone(),
-            address.artifact_dir(),
-            Some(address),
-            0,
-            0,
-        );
+        let mut live = LiveSession::from_store(address, 0, 0);
         for item in std::mem::take(&mut session.history) {
             live.append_history(item);
         }
