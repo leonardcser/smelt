@@ -127,6 +127,7 @@ fn ctrl_c_quits_from_interrupted_and_interrupted_paused() {
         assert!(!app.quit_requested(), "Ctrl-C should first clear the draft");
         assert!(app.state().prompt_text.is_empty());
 
+        app.clock.advance(std::time::Duration::from_secs(1));
         app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(
             app.quit_requested(),

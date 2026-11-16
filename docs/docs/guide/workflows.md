@@ -381,6 +381,8 @@ top bar up to read the rest before you approve.
 - `Ctrl+R` fuzzy-searches your input history.
 - `Ctrl+X Ctrl+E` opens your external editor (`$VISUAL`, then `$EDITOR`).
 - `Ctrl+C` clears the input, cancels the agent, or quits, depending on context.
+  A second press right after a clear does nothing, so a double tap never quits
+  or cancels by accident. Undo brings the cleared input back.
 - `Enter` submits; on an empty prompt it continues the turn when there is history.
 - `F1` opens help; `F3` and `F12` toggle the debug and performance panels.
 - **Stash a draft:** `Ctrl+S` saves your input and gives you a blank prompt, and

@@ -1648,17 +1648,6 @@ fn ctrl_c_with_text_in_buffer_clears_buffer_without_quitting() {
 }
 
 #[test]
-fn ctrl_c_twice_clears_then_quits() {
-    let mut app = TestApp::builder().build();
-    app.type_text("hi");
-    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(!app.quit_requested(), "first Ctrl-C clears, doesn't quit");
-
-    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(app.quit_requested(), "second Ctrl-C on empty buffer quits");
-}
-
-#[test]
 fn fresh_vim_prompt_starts_in_insert_mode() {
     // Chat input ergonomics: even with vim enabled, the prompt starts
     // in Insert so the first keystroke types instead of navigating.

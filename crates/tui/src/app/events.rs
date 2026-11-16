@@ -9,6 +9,8 @@ use crate::smelt_edit::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const ESC_TOKEN: &str = "<Esc>";
+/// How long a second Ctrl+C after a prompt clear counts as the same press.
+const CTRL_C_REPEAT_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GlobalLuaKeymapRoute {
@@ -764,13 +766,10 @@ impl TuiApp {
 
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
-                    KeyAction::Quit => {
-                        return EventOutcome::Quit;
-                    }
+                    KeyAction::Quit if self.ctrl_c_repeats_clear() => return EventOutcome::Noop,
+                    KeyAction::Quit => return EventOutcome::Quit,
                     KeyAction::ClearBuffer => {
-                        self.timers.last_ctrlc = Some(self.core.clock.instant_now());
-                        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.prompt.clear_with_undo(&mut pctx);
+                        self.clear_prompt_on_ctrl_c();
                         return EventOutcome::Redraw;
                     }
                     _ => {}
@@ -784,6 +783,24 @@ impl TuiApp {
             .prompt
             .handle_event(&mut pctx, ev, true, &mut self.core.clipboard, now);
         self.dispatch_input_action(action)
+    }
+
+    fn clear_prompt_on_ctrl_c(&mut self) {
+        self.timers.last_prompt_clear = Some(self.core.clock.instant_now());
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        self.prompt.clear_with_undo(&mut pctx);
+    }
+
+    /// A Ctrl+C this soon after the one that cleared the prompt is a repeated
+    /// press: it must not also quit or cancel the turn.
+    fn ctrl_c_repeats_clear(&self) -> bool {
+        self.timers.last_prompt_clear.is_some_and(|cleared| {
+            self.core
+                .clock
+                .instant_now()
+                .saturating_duration_since(cleared)
+                < CTRL_C_REPEAT_GRACE
+        })
     }
 
     // ── Running event handler ────────────────────────────────────────────
@@ -808,14 +825,13 @@ impl TuiApp {
             let ctx = self.prompt.key_context(pctx_ref, cancellable);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
-                    KeyAction::Quit => return EventOutcome::Quit,
-                    KeyAction::CancelAgent => {
-                        return EventOutcome::CancelAgent;
+                    KeyAction::Quit | KeyAction::CancelAgent if self.ctrl_c_repeats_clear() => {
+                        return EventOutcome::Noop;
                     }
+                    KeyAction::Quit => return EventOutcome::Quit,
+                    KeyAction::CancelAgent => return EventOutcome::CancelAgent,
                     KeyAction::ClearBuffer => {
-                        self.timers.last_ctrlc = Some(self.core.clock.instant_now());
-                        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.prompt.clear_with_undo(&mut pctx);
+                        self.clear_prompt_on_ctrl_c();
                         return EventOutcome::Noop;
                     }
                     _ => {}
@@ -2245,6 +2261,30 @@ mod tests {
 
         app.press_mod(KeyCode::Char('_'), KeyModifiers::ALT);
         assert_eq!(app.state().prompt_text, "");
+    }
+
+    #[test]
+    fn ctrl_c_right_after_a_clear_neither_quits_nor_cancels() {
+        let ctrl_c = |app: &mut TestApp| app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        let mut app = TestApp::builder().build();
+        app.type_text("draft");
+        ctrl_c(&mut app);
+        ctrl_c(&mut app);
+        assert!(!app.quit_requested());
+        app.clock.advance(super::CTRL_C_REPEAT_GRACE);
+        ctrl_c(&mut app);
+        assert!(app.quit_requested());
+
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.type_text("draft");
+        ctrl_c(&mut app);
+        ctrl_c(&mut app);
+        assert!(app.agent_running());
+        app.clock.advance(super::CTRL_C_REPEAT_GRACE);
+        ctrl_c(&mut app);
+        assert!(!app.agent_running());
     }
 
     #[test]

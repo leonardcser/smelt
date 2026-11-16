@@ -974,7 +974,8 @@ pub(crate) enum InputOutcome {
 
 /// Mutable timer state shared across event handlers.
 pub(crate) struct Timers {
-    pub(crate) last_ctrlc: Option<Instant>,
+    /// When Ctrl+C last cleared the prompt.
+    pub(crate) last_prompt_clear: Option<Instant>,
     pub(crate) last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord; next key navigates panes instead of flowing to input.
     pub(crate) pending_pane_chord: Option<Instant>,
@@ -2167,7 +2168,7 @@ impl TuiApp {
             ui,
             well_known,
             timers: Timers {
-                last_ctrlc: None,
+                last_prompt_clear: None,
                 last_keypress: None,
                 pending_pane_chord: None,
                 pending_transcript_fold_chord: None,
