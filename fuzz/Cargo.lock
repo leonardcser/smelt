@@ -3160,6 +3160,7 @@ version = "0.0.0-dev"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "smelt-text",
 ]
 
