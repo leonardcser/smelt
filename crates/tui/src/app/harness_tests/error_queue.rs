@@ -1089,6 +1089,7 @@ fn quota_retry_starts_at_its_deadline_while_the_writer_is_paused() {
     app.feed_one(SourceEvent::Tick(1));
     app.tick_timers();
     assert!(app.working_probe().is_animating());
+    app.wait_for_turn_dispatch();
     let commands = app.drain_engine_sends();
     assert_eq!(
         commands
