@@ -253,7 +253,7 @@ Inside smelt, `/resume` does the same:
 When a conversation takes a wrong turn, press `Esc Esc` while idle (or run
 `/rewind`). The picker lists your messages; pick one and the conversation rolls
 back to just before it, with that message back in the prompt to edit and send
-again.
+again. Text you had in the prompt stays, below the message.
 
 <figure class="term" data-replay="../../assets/replays/rewind.json" aria-label="Pressing Esc Esc, picking an earlier turn and getting its message back in the prompt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
@@ -386,8 +386,9 @@ top bar up to read the rest before you approve.
 - `Enter` submits; on an empty prompt it continues the turn when there is history.
 - `F1` opens help; `F3` and `F12` toggle the debug and performance panels.
 - **Stash a draft:** `Ctrl+S` saves your input and gives you a blank prompt, and
-  `Ctrl+S` again restores it. Handy for a quick side question mid-prompt. In vim
-  visual mode, `Ctrl+S` stashes only the selection.
+  `Ctrl+S` again restores it, with its own undo history. Handy for a quick side
+  question mid-prompt. In vim visual mode, `Ctrl+S` stashes only the selection.
+  Restoring into a prompt that is not empty puts the stashed text above it.
 - **Predictions:** after each turn the agent may suggest your next message as dim
   ghost text. `Tab` accepts it and typing dismisses it. Turn it off with
   `smelt.settings.show_prediction = false`.

@@ -121,8 +121,13 @@ impl PromptRuntime {
         self.input.apply_cut(ctx, cut);
     }
 
-    pub(crate) fn prepend_attached(&mut self, ctx: &mut PromptCtx<'_>, prefix: AttachedText) {
-        self.input.prepend_attached(ctx, prefix);
+    pub(crate) fn restore_attached(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        text: AttachedText,
+        cpos: usize,
+    ) {
+        self.input.restore_attached(ctx, text, cpos);
     }
 
     pub(super) fn prepare_submission_recovery(
@@ -159,11 +164,9 @@ impl PromptRuntime {
             self.input
                 .restore_removed_range(ctx, removed.start, removed.text);
         } else {
-            let mut text = recovery.replay.into_attached();
-            if !ctx.buf.source().is_empty() {
-                text.push_str("\n");
-            }
-            self.input.prepend_attached(ctx, text);
+            let text = recovery.replay.into_attached();
+            let cpos = text.text().len();
+            self.input.restore_attached(ctx, text, cpos);
         }
         self.input.from_paste = skip_shell_escape;
     }

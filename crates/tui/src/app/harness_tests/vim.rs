@@ -701,6 +701,48 @@ fn vim_visual_line_ctrl_s_stashes_selected_lines_with_their_attachments() {
 }
 
 #[test]
+fn stashed_draft_keeps_its_undo_history_apart_from_the_side_prompt() {
+    let ctrl_s = |app: &mut TestApp| app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("draft");
+    app.press(KeyCode::Esc);
+    app.type_char('x');
+    ctrl_s(&mut app);
+
+    app.type_char('u');
+    assert_eq!(
+        app.state().prompt_text,
+        "",
+        "the side prompt has no history"
+    );
+
+    app.type_char('i');
+    app.type_text("side");
+    app.press(KeyCode::Esc);
+    app.type_char('d');
+    app.type_char('d');
+    ctrl_s(&mut app);
+    assert_eq!(app.state().prompt_text, "draf");
+
+    app.type_char('u');
+    assert_eq!(app.state().prompt_text, "draft");
+}
+
+#[test]
+fn rewind_keeps_the_draft_below_the_rewound_prompt() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.start_submitted_turn("wrong prompt");
+    app.type_text("my draft");
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    app.render_silent();
+
+    assert!(!app.agent_running());
+    assert_eq!(app.state().prompt_text, "wrong prompt\nmy draft");
+}
+
+#[test]
 fn vim_full_cycle_normal_insert_normal_visual_normal() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.press(KeyCode::Esc);

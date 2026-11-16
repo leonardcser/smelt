@@ -66,12 +66,15 @@ pub(crate) fn prompt_ctx_ref(ui: &crate::smelt_edit::Ui) -> PromptCtxRef<'_> {
 /// Prompt text set aside with Ctrl+S: the vim visual selection or the
 /// whole prompt. Owns its attachments so it survives store clears across
 /// sessions.
-#[derive(Clone, Debug)]
 struct Stash {
     text: AttachedText,
     /// Cursor offset into `text`.
     cpos: usize,
     from_paste: bool,
+    /// The prompt's undo history, when the stash took the whole prompt. It
+    /// returns with the text, so undo never mixes the draft with what was
+    /// typed while it was stashed.
+    history: Option<crate::smelt_edit::UndoHistory>,
 }
 
 /// The part of the prompt that a submit or a stash takes.
@@ -410,12 +413,32 @@ impl PromptState {
         self.install_source(ctx, text, cpos, Vec::new());
     }
 
-    /// Prepend `prefix` with its attachments, snapshot undo, and shift the
-    /// cursor.
-    pub(crate) fn prepend_attached(&mut self, ctx: &mut PromptCtx<'_>, prefix: AttachedText) {
-        if prefix.is_empty() {
+    /// Bring `text` back without losing what the prompt holds. An empty
+    /// prompt takes it with the cursor at `cpos`; otherwise it goes above the
+    /// current text. Either way it is one step that can be undone.
+    pub(crate) fn restore_attached(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        mut text: AttachedText,
+        cpos: usize,
+    ) {
+        if text.is_empty() {
             return;
         }
+        if ctx.buf.source().is_empty() {
+            self.save_undo(ctx);
+            let (text, attachments) = text.into_parts();
+            self.install_source(ctx, text, cpos, attachments);
+            self.from_paste = false;
+        } else {
+            text.push_str("\n");
+            self.prepend_attached(ctx, text);
+        }
+    }
+
+    /// Prepend `prefix` with its attachments, snapshot undo, and shift the
+    /// cursor.
+    fn prepend_attached(&mut self, ctx: &mut PromptCtx<'_>, prefix: AttachedText) {
         self.save_undo(ctx);
         let inserted = ctx.buf.text_mut().insert_attached(0, &prefix).len();
         let cpos = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), ctx.win.cpos() + inserted);
@@ -477,32 +500,35 @@ impl PromptState {
             .cpos()
             .saturating_sub(scope.taken.start)
             .min(text.text().len());
+        let history = matches!(scope.cut, PromptCut::Clear).then(|| ctx.buf.history.take());
         self.stash = Some(Stash {
             text,
             cpos,
             from_paste: self.from_paste,
+            history,
         });
         self.apply_cut(ctx, scope.cut);
     }
 
     /// Put the stash back. Text already in the prompt stays, below the
-    /// stashed text.
+    /// stashed text. Into an empty prompt, the stashed draft returns whole,
+    /// with its undo history.
     pub(crate) fn restore_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         let Some(stash) = self.stash.take() else {
             return;
         };
-        let mut text = stash.text;
-        if ctx.buf.source().is_empty() {
-            let (text, attachments) = text.into_parts();
-            self.install_source(ctx, text, stash.cpos, attachments);
+        let whole = ctx.buf.source().is_empty();
+        self.restore_attached(ctx, stash.text, stash.cpos);
+        if whole {
             self.from_paste = stash.from_paste;
-        } else {
-            text.push_str("\n");
-            self.prepend_attached(ctx, text);
+            if let Some(history) = stash.history {
+                ctx.buf.history = history;
+            }
         }
     }
 
-    /// Restore rewind text by turning visible attachment labels back into prompt markers.
+    /// Restore rewound text, with visible attachment labels turned back into
+    /// prompt markers. Text already in the prompt stays, below it.
     pub(crate) fn restore_from_rewind(
         &mut self,
         ctx: &mut PromptCtx<'_>,
@@ -530,7 +556,7 @@ impl PromptState {
         let (text, attachments) =
             exact.unwrap_or_else(|| rewind_source_and_attachments(text, images));
         let cpos = text.len();
-        self.install_source(ctx, text, cpos, attachments);
+        self.restore_attached(ctx, AttachedText::new(text, attachments), cpos);
     }
 
     fn submission_from_range(
@@ -3026,7 +3052,7 @@ mod tests {
             None,
         );
         assert_eq!(input.win.selection_anchor(), None);
-        assert_eq!(input.buf.source(), "hi");
+        assert_eq!(input.buf.source(), "hi\nlong buffer");
     }
 
     #[test]

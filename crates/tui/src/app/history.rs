@@ -4152,7 +4152,8 @@ mod checkpoint_tests {
 
         assert_eq!(
             app.prompt_source(),
-            format!("old user {PREVIOUS_USER_INDEX}")
+            format!("old user {PREVIOUS_USER_INDEX}\nold user {TARGET_HISTORY_INDEX}"),
+            "the second rewind keeps the first rewound prompt below"
         );
         assert!(
             app.tui.overlays.notification().is_none(),

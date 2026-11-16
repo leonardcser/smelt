@@ -50,6 +50,11 @@ impl UndoHistory {
         }
     }
 
+    /// Move the history out, leaving an empty one with the same cap.
+    pub fn take(&mut self) -> Self {
+        std::mem::replace(self, Self::new(self.cap))
+    }
+
     /// Push a snapshot, clearing redo.
     pub fn save(&mut self, entry: UndoEntry) {
         self.redo.clear();

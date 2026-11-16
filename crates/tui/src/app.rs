@@ -1498,17 +1498,15 @@ impl TuiApp {
         }
 
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        let mut prefix = crate::smelt_edit::AttachedText::default();
+        let mut text = crate::smelt_edit::AttachedText::default();
         for (index, input) in queued.into_iter().enumerate() {
             if index > 0 {
-                prefix.push_str("\n");
+                text.push_str("\n");
             }
-            prefix.push(&input.prompt_replay().into_attached());
+            text.push(&input.prompt_replay().into_attached());
         }
-        if !prefix.is_empty() && !pctx.buf.source().is_empty() {
-            prefix.push_str("\n");
-        }
-        self.prompt.prepend_attached(&mut pctx, prefix);
+        let cpos = text.text().len();
+        self.prompt.restore_attached(&mut pctx, text, cpos);
         true
     }
 
