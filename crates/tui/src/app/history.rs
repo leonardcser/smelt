@@ -2479,10 +2479,12 @@ impl TuiApp {
     }
 
     /// Saves every change and waits until it is durable.
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn save_session_and_flush(&mut self) {
         self.save_session_and_flush_with_timeout(crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn save_session_and_flush_with_timeout(&mut self, timeout: std::time::Duration) {
         self.save_session();
         if self.conversation.has_persistence() {
@@ -2498,6 +2500,7 @@ impl TuiApp {
         )
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn flush_persist_until(
         &mut self,
         deadline: std::time::Instant,

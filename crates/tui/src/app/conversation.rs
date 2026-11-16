@@ -2851,6 +2851,7 @@ impl ConversationRuntime {
 
     /// Waits until every submitted save is durable. A save that failed before
     /// reaching the writer fails the flush too.
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn flush_persistence_until(
         &mut self,
         deadline: std::time::Instant,
