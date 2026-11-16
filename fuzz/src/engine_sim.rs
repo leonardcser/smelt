@@ -15,7 +15,7 @@ use protocol::{
     AgentMode, Content, Decision, EngineEvent, HistoryItem, InvocationId, ModelConfig,
     ModelHistorySource, ModelTarget, ReasoningEffort, RequestRuntimeConfig, StartTurnInput,
     StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
-    ToolVisibility, UiCommand,
+    ToolVisibility, TurnHistory, UiCommand,
 };
 use serde_json::{json, Value};
 use smelt_provider::ChatTransport;
@@ -606,7 +606,7 @@ impl Sim {
                 reasoning_effort: ReasoningEffort::Off,
                 fast_mode: false,
                 control_env: Default::default(),
-                history: ModelHistorySource::items(self.history.clone()),
+                history: TurnHistory::Items(ModelHistorySource::items(self.history.clone())),
                 session_id: "sim-session".into(),
                 artifact_dir: std::env::temp_dir(),
                 ephemeral: false,
