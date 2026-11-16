@@ -120,6 +120,9 @@ function gallery(user: string, step: number): Chunk[] | null {
     }
     return text("`cart.rs` is the biggest; `lib.rs` only declares the modules.");
   }
+  if (/what does this chart show\?/i.test(user)) {
+    return text("10% off takes the whole $50: `apply_discount` divides by `10`, not `100`.");
+  }
   if (/plot of the lamp discount/i.test(user)) {
     if (step === 0) return calls("", [{ name: "show_image", args: { file_path: `${PROJECT}/plots/lamp.png` } }]);
     return text("The `/ 10` bug charges nothing for a 10% discount on a $50 lamp.");

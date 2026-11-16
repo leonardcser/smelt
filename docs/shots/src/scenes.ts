@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { PROJECT } from "./paths";
 import type { Scheme, Step } from "./session";
 
 /** Still screens embedded in the docs: a one-frame replay per `shot`. */
@@ -264,6 +265,29 @@ export const scenes: Record<string, Scene> = {
       { photos: true },
       { type: "show me the plot of the lamp discount" },
       { pause: 400 },
+      { key: "Enter" },
+      { until: /─ ● done/ },
+      { pause: 3000 },
+    ],
+  },
+
+  /** A pasted image becomes a label in the prompt: the cursor on it shows the picture, and cut and paste moves it. */
+  attachments: {
+    mock: true,
+    realtime: true,
+    kitty: true,
+    projectFiles: { "plots/lamp.png": "lamp.png" },
+    steps: [
+      { pause: 1200 },
+      { photos: true },
+      { type: "what does this chart show? " },
+      { pause: 500 },
+      { paste: `${PROJECT}/plots/lamp.png` },
+      { wait: /\[lamp\.png\]/ },
+      { pause: 1200 },
+      // Onto the label: it turns into the cursor and the picture floats above it.
+      { press: ["Left"], gap: 400 },
+      { pause: 2500 },
       { key: "Enter" },
       { until: /─ ● done/ },
       { pause: 3000 },

@@ -56,7 +56,7 @@
   }
 
   // Applies one SGR sequence to the pen. Recordings use only reset, bold, dim,
-  // italic, and default, 256-color or truecolor foreground and background.
+  // italic, reverse, and default, 256-color or truecolor foreground and background.
   // `flipped` mirrors the lightness of a dark recording shown in the light scheme.
   // A vivid color (a bubble, a tile, a snake) is an accent, not a surface: flipped, it keeps its
   // own color, and so does text on a vivid background, so white on blue stays white on blue.
@@ -66,12 +66,14 @@
     var p = params === "" ? [0] : params.split(";").map(Number);
     for (var i = 0; i < p.length; i++) {
       var c = p[i];
-      if (c === 0) (pen.fgs = pen.bgs = null), (pen.bold = pen.dim = pen.italic = false);
+      if (c === 0) (pen.fgs = pen.bgs = null), (pen.bold = pen.dim = pen.italic = pen.reverse = false);
       else if (c === 1) pen.bold = true;
       else if (c === 2) pen.dim = true;
       else if (c === 3) pen.italic = true;
       else if (c === 22) pen.bold = pen.dim = false;
       else if (c === 23) pen.italic = false;
+      else if (c === 7) pen.reverse = true;
+      else if (c === 27) pen.reverse = false;
       else if (c === 39) pen.fgs = null;
       else if (c === 49) pen.bgs = null;
       else if (c >= 30 && c <= 37) pen.fgs = [base[c - 30]];
@@ -97,6 +99,14 @@
     pen.bg = pen.bgs ? own(pen.bgs) : null;
     pen.fill = pen.fgs ? own(pen.fgs) : null;
     pen.fg = pen.fgs ? pen.fgs[flipped && pen.bgs && pen.bgs[2] && pen.fgs[1] ? 1 : 0] : null;
+    if (pen.reverse) {
+      // The text color becomes the background and the background the text color. Text on a
+      // vivid background keeps the dark recording's color, so black on orange stays black.
+      var vividBg = pen.fgs && pen.fgs[2] && flipped;
+      pen.bg = pen.fgs ? own(pen.fgs) : FG;
+      pen.fg = pen.bgs ? pen.bgs[vividBg ? 1 : 0] : vividBg ? BASE16[0] : BG;
+      pen.fill = pen.fg;
+    }
   }
 
   // Whether a color is saturated and far from gray.
@@ -232,7 +242,7 @@
 
   function renderLine(line, light, flipped, images) {
     var row = document.createElement("div");
-    var pen = { fg: null, bg: null, fill: null, fgs: null, bgs: null, bold: false, dim: false, italic: false };
+    var pen = { fg: null, bg: null, fill: null, fgs: null, bgs: null, bold: false, dim: false, italic: false, reverse: false };
     var run = "";
     var runStyle = "";
     // Every span is sized in whole cells, so columns line up across rows

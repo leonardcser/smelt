@@ -86,7 +86,7 @@ Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain. The `files` scene also 
   (`keys: false` turns it off). Text typed into the prompt and anything pressed in vim's insert
   mode is left out. The home page hides the overlay, except for the vim and cursor replays, which keep it in
   the window's top-right corner (`data-keys="corner"`), and the README GIF has none.
-- `kitty: true` (the `graphics` scene) attaches a client to the tmux session, as Ghostty,
+- `kitty: true` (the `graphics` and `attachments` scenes) attaches a client to the tmux session, as Ghostty,
   that answers smelt's Kitty graphics probes through passthrough and keeps the images smelt sends. The replay stores
   them under `img`, and `replay.js` draws them over their Unicode placeholder cells.
   The light scheme inverts them like text, except a photo: a `{ photos: true }` step marks the images that follow

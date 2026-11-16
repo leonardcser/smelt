@@ -20,9 +20,18 @@ explain @src/main.rs
 Use as many `@` references as you like. Attaching the same file twice won't send
 it twice.
 
-Paste with `Cmd+V` (or your terminal's paste). Images are attached inline, which
-is handy for screenshots of UI bugs or design mock-ups. Pasted text lands in the
-prompt as ordinary text you can scroll through and edit before sending.
+Paste with `Cmd+V` (or your terminal's paste). Pasted text lands in the prompt
+as ordinary text you can scroll through and edit before sending.
+
+### Attach images
+
+Paste an image, or the path of an image file, and it lands in the prompt as a
+`[name.png]` label. This is handy for screenshots of UI bugs or design mock-ups.
+Put the cursor on the label to see the picture above it. The label edits like a
+single character: `Delete` (or `x` in vim) removes it, and cut and paste moves
+it with its image, with `Ctrl+K` and `Ctrl+Y` or vim's `d`, `y` and `p`.
+
+<figure class="term" data-replay="../../assets/replays/attachments.json" aria-label="Pasting a chart into the prompt, moving the cursor onto its label to preview the picture, then sending the message" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 For rules the agent should always follow in a project, put them in an
 [`AGENTS.md`](../customize/agent.md#instructions-agentsmd).
