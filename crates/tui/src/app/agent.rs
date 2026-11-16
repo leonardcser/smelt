@@ -2897,22 +2897,17 @@ mod tests {
         app.tui
             .notify_turn_error_sticky("quota exceeded".to_string());
         assert!(app.tui.notification_win().is_some());
-        eprintln!(
-            "DIAG terminal={:?} hist={} model={:?} active={}",
-            app.tui.conversation.last_terminal_turn_id(),
-            app.tui.session_history_len(),
-            app.tui.resolve_model_target().is_some(),
-            app.tui.conversation.is_active(),
-        );
 
-        let turn = app.tui.begin_command_request_turn(
+        // Stored history is read off-thread, so the turn may be returned
+        // only once the read finishes.
+        let _turn = app.tui.begin_command_request_turn(
             "continue".into(),
             String::new(),
             crate::app::CommandScope::default(),
             crate::app::CommandTurnStart::ContinueFromLast,
             0,
         );
-        assert!(turn.is_some());
+        app.wait_for_turn_dispatch();
 
         assert!(app.tui.notification_win().is_none());
     }
