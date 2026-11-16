@@ -1,16 +1,16 @@
 //! Undo/redo history for the input buffer and vim motions.
 
-use crate::attachment::AttachmentId;
+use crate::attachment::Attachment;
 
 #[derive(Clone)]
 pub struct UndoEntry {
     pub buf: String,
     pub cpos: usize,
-    pub attachments: Vec<AttachmentId>,
+    pub attachments: Vec<Attachment>,
 }
 
 impl UndoEntry {
-    pub fn snapshot(buf: &str, cpos: usize, attachments: &[AttachmentId]) -> Self {
+    pub fn snapshot(buf: &str, cpos: usize, attachments: &[Attachment]) -> Self {
         Self {
             buf: buf.to_string(),
             cpos,
@@ -175,7 +175,10 @@ mod tests {
 
     #[test]
     fn entry_snapshot_captures_all_three_fields() {
-        let atts = vec![42, 99];
+        let atts = vec![
+            Attachment::image("a.png".into(), "data:a".into()),
+            Attachment::image("b.png".into(), "data:b".into()),
+        ];
         let e = UndoEntry::snapshot("hello", 3, &atts);
         assert_eq!(e.buf, "hello");
         assert_eq!(e.cpos, 3);

@@ -4819,10 +4819,10 @@ pub mod tests {
         );
 
         let counters = projection.counters();
-        assert!(out.kill_ring.contains("copy-token-050"));
-        assert!(out.kill_ring.contains("copy-token-100"));
-        assert!(!out.kill_ring.contains("copy-token-001"));
-        assert!(!out.kill_ring.contains("copy-token-250"));
+        assert!(out.kill_ring.text().contains("copy-token-050"));
+        assert!(out.kill_ring.text().contains("copy-token-100"));
+        assert!(!out.kill_ring.text().contains("copy-token-001"));
+        assert!(!out.kill_ring.text().contains("copy-token-250"));
         assert_eq!(counters.full_row_builds, 0);
         assert!(counters.range_materialized_blocks > COPY_CHUNK_NODES);
         assert!(counters.range_materialized_blocks < 300);
@@ -7059,7 +7059,7 @@ pub mod tests {
         );
 
         assert_eq!(copied.clipboard, "beta");
-        assert_eq!(copied.kill_ring, "beta");
+        assert_eq!(copied.kill_ring.text(), "beta");
     }
 
     #[test]
@@ -7096,7 +7096,7 @@ pub mod tests {
         );
 
         assert_eq!(copied.clipboard, "line 75");
-        assert_eq!(copied.kill_ring, "line 75");
+        assert_eq!(copied.kill_ring.text(), "line 75");
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
         assert_eq!(counters.layout_cache, 0);
@@ -7142,7 +7142,7 @@ pub mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_eq!(copied.clipboard, expected);
-        assert_eq!(copied.kill_ring, expected);
+        assert_eq!(copied.kill_ring.text(), expected);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
         assert!(

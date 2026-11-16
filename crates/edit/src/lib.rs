@@ -23,7 +23,8 @@ pub(crate) mod window;
 pub use jumplist::{JumpList, JumpMove};
 pub use named::NamedSlots;
 
-pub use smelt_buffer::attachment::AttachmentId;
+pub use smelt_buffer::attached::AttachedText;
+pub use smelt_buffer::attachment::Attachment;
 pub use smelt_buffer::buffer::{
     BufCreateOpts, BufId, Buffer, BufferCopy, BufferParser, CopyOutput, ExtmarkOpts,
     ExtmarkPayload, RangeLayer, SelectionRange, SpanAction, SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
@@ -463,6 +464,9 @@ pub struct Ui {
     last_click: Option<(std::time::Instant, u16, u16, u8)>,
     /// Global cursor shape; only the focused window honours it.
     cursor_shape: CursorShape,
+    /// Screen `(row, col)` of the caret in a split window as of the last
+    /// prepared frame. `Anchor::Cursor` overlays resolve against it.
+    caret: Option<(u16, u16)>,
     /// Host time source for time-based paint such as yank flashes.
     clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
     /// Timestamp when edge-drag autoscroll last engaged; drives host tick-rate ramp.
@@ -604,6 +608,7 @@ impl Ui {
             capture: None,
             last_click: None,
             cursor_shape: CursorShape::Hidden,
+            caret: None,
             clock: std::sync::Arc::new(std::time::Instant::now),
             drag_autoscroll_since: None,
             drag_autoscroll: None,
@@ -644,6 +649,7 @@ impl Ui {
             capture: self.capture,
             last_click: self.last_click,
             cursor_shape: self.cursor_shape,
+            caret: self.caret,
             clock: std::sync::Arc::clone(&self.clock),
             drag_autoscroll_since: self.drag_autoscroll_since,
             drag_autoscroll: self.drag_autoscroll,
@@ -994,7 +1000,7 @@ impl Ui {
     /// Resolve mounted windows' content widths and heights in one layout pass.
     /// The snapshot is valid until layout, content measurements, or gutters change.
     pub fn resolved_win_sizes(&self) -> HashMap<WinId, (u16, u16)> {
-        self.resolve_scene(None)
+        self.resolve_scene()
             .layouts()
             .flat_map(|layout| layout.leaves())
             .filter_map(|(id, rect)| {
@@ -1891,13 +1897,13 @@ impl Ui {
     /// Hit-test a screen position. Checks overlays (topmost-z first, modal-aware)
     /// then splits leaves. Scrollbar column returns `HitTarget::Scrollbar`.
     pub fn hit_test(&self, x: u16, y: u16) -> Option<HitTarget> {
-        self.hit_test_in(&self.resolve_scene(None), x, y)
+        self.hit_test_in(&self.resolve_scene(), x, y)
     }
 
     /// Window whose border title span with an id lies at `(x, y)`, and that id.
     /// Only the topmost layout at the point is considered, as in [`Self::hit_test`].
     pub fn title_target_at(&self, x: u16, y: u16) -> Option<(WinId, std::sync::Arc<str>)> {
-        let scene = self.resolve_scene(None);
+        let scene = self.resolve_scene();
         let layout = match self.overlay_hit_test_in(&scene, x, y) {
             Some((id, _)) => {
                 &scene
@@ -1988,25 +1994,24 @@ impl Ui {
 
     #[cfg(test)]
     fn overlay_hit_test(&self, x: u16, y: u16) -> Option<(OverlayId, HitTarget)> {
-        self.overlay_hit_test_in(&self.resolve_scene(None), x, y)
+        self.overlay_hit_test_in(&self.resolve_scene(), x, y)
     }
 
     /// Returns z-ordered (lowest first) overlay rects. Overlays whose anchor
     /// cannot resolve (missing cursor / missing Win target) are silently skipped.
-    fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
-        self.resolve_overlays_with_rects(cursor, &self.resolve_splits())
+    fn resolve_overlays(&self) -> Vec<(OverlayId, Rect, &Overlay)> {
+        self.resolve_overlays_with_rects(&self.resolve_splits())
     }
 
     fn resolve_overlays_with_rects(
         &self,
-        cursor: Option<(u16, u16)>,
         split_rects: &HashMap<WinId, Rect>,
     ) -> Vec<(OverlayId, Rect, &Overlay)> {
         let (term_w, term_h) = self.surface.terminal_size();
         let ctx = overlay::AnchorContext {
             term_width: term_w,
             term_height: term_h,
-            cursor,
+            cursor: self.caret,
             win_rects: split_rects,
         };
         let mut out = Vec::with_capacity(self.overlays.len());
@@ -2350,6 +2355,19 @@ impl Ui {
         self.wins.get(&self.focus()?)
     }
 
+    /// Screen `(row, col)` of the caret this frame paints, when it is in a split window.
+    fn split_caret(&self, root: &layout::ResolvedLayout) -> Option<(u16, u16)> {
+        if matches!(self.cursor_shape, CursorShape::Hidden) {
+            return None;
+        }
+        let win_id = self.active_cursor_leaf()?;
+        let win = self.wins.get(&win_id).filter(|win| !win.hide_cursor)?;
+        let buf = self.bufs.get(&win.buf)?;
+        let rect = root.leaf_rect(win_id.into())?;
+        let (row, col) = win.caret_position(buf, rect.width, rect.height)?;
+        Some((rect.y + row, rect.x + col))
+    }
+
     /// Leaf that currently drives the single visible terminal cursor. During a mouse
     /// drag-select the cursor temporarily moves to the dragging leaf (so the user sees
     /// feedback at the drag end even on a non-focusable leaf like a notification);
@@ -2436,7 +2454,7 @@ impl Ui {
     /// the active modal. `Next`/`Prev` cycle in layout order; directions pick
     /// the nearest window on that side. Returns `false` when there is none.
     pub fn focus_move(&mut self, step: FocusMove) -> bool {
-        let scene = self.resolve_scene(None);
+        let scene = self.resolve_scene();
         let group: Vec<WinId> = match self.active_modal().and_then(|id| self.modal(id)) {
             Some(modal) => modal.leaves.clone(),
             None => {
@@ -2707,13 +2725,13 @@ impl Ui {
     /// here lets Lua resize callbacks and tail-follow calculations see the real
     /// overlay rect before anything is drawn.
     pub fn prime_overlay_viewports(&mut self) {
-        for overlay in &self.resolve_scene(None).overlays {
+        for overlay in &self.resolve_scene().overlays {
             self.prepare_layout_windows(&overlay.layout, &mut |_, _| {});
         }
     }
 
     pub fn prime_decoration_viewports(&mut self) {
-        for decoration in &self.resolve_scene(None).decorations {
+        for decoration in &self.resolve_scene().decorations {
             self.prepare_layout_windows(&decoration.layout, &mut |_, _| {});
         }
     }
@@ -2940,7 +2958,7 @@ impl Ui {
             .into_iter()
             .map(|request| (request.win, request))
             .collect();
-        let scene = self.resolve_scene(None);
+        let scene = self.resolve_scene();
         for window in self.wins.values().filter(|win| win.row_source().is_some()) {
             if !scene
                 .layouts()
@@ -2950,14 +2968,6 @@ impl Ui {
             }
         }
         let mut prepared_windows = Vec::new();
-        for layout in scene.overlays.iter().map(|overlay| &overlay.layout).chain(
-            scene
-                .decorations
-                .iter()
-                .map(|decoration| &decoration.layout),
-        ) {
-            prepared_windows.extend(self.prepare_layout_windows(layout, &mut prepare));
-        }
         for (paint_id, rect) in scene.root.leaves() {
             let win_id = WinId(paint_id.0);
             let prepared = prepared_splits
@@ -2968,6 +2978,23 @@ impl Ui {
             {
                 prepared_windows.push(request);
             }
+        }
+        // Split windows are laid out now, so cursor-anchored overlays can
+        // resolve against this frame's caret.
+        let caret = self.split_caret(&scene.root);
+        let scene = if caret == self.caret {
+            scene
+        } else {
+            self.caret = caret;
+            self.resolve_scene()
+        };
+        for layout in scene.overlays.iter().map(|overlay| &overlay.layout).chain(
+            scene
+                .decorations
+                .iter()
+                .map(|decoration| &decoration.layout),
+        ) {
+            prepared_windows.extend(self.prepare_layout_windows(layout, &mut prepare));
         }
         self.resolve_tail_scrolls();
         for request in prepared_windows {
@@ -3093,7 +3120,7 @@ impl Ui {
         if let Some(rect) = self.splits().resolve(area, &sizer).leaf_rect(id) {
             return Some(rect);
         }
-        for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
+        for (_oid, ov_rect, ov) in self.resolve_overlays() {
             if let Some(rect) = ov.layout.resolve(ov_rect, &sizer).leaf_rect(id) {
                 return Some(rect);
             }
@@ -3191,7 +3218,7 @@ impl Ui {
             Event::Mouse(me) => {
                 match me.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        let scene = self.resolve_scene(None);
+                        let scene = self.resolve_scene();
                         let hit = self.hit_test_in(&scene, me.column, me.row);
                         if let Some(HitTarget::Scrollbar { owner }) = hit {
                             self.set_capture(HitTarget::Scrollbar { owner });
@@ -3389,7 +3416,7 @@ impl Ui {
     }
 
     pub fn resolved_overlay_rect(&self, id: OverlayId) -> Option<Rect> {
-        self.resolve_overlays(None)
+        self.resolve_overlays()
             .into_iter()
             .find_map(|(oid, rect, _)| if oid == id { Some(rect) } else { None })
     }
@@ -3402,7 +3429,7 @@ impl Ui {
         let Some(viewport) = self.split_rect(window) else {
             return 0;
         };
-        self.resolve_overlays(None)
+        self.resolve_overlays()
             .into_iter()
             .filter_map(|(_, rect, overlay)| {
                 if !overlay.reserve
@@ -5250,7 +5277,7 @@ mod tests {
     fn resolve_overlays_centers_screen_center_anchor() {
         let mut ui = make_ui();
         let id = ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter));
-        let resolved = ui.resolve_overlays(None);
+        let resolved = ui.resolve_overlays();
         assert_eq!(resolved.len(), 1);
         let (got_id, rect, _) = &resolved[0];
         assert_eq!(*got_id, id);
@@ -5270,11 +5297,55 @@ mod tests {
                 col_offset: 0,
             },
         ));
-        // No cursor supplied → overlay drops out of the resolved set.
-        assert!(ui.resolve_overlays(None).is_empty());
-        // With a cursor, it resolves.
-        let resolved = ui.resolve_overlays(Some((4, 6)));
+        // No caret → overlay drops out of the resolved set.
+        assert!(ui.resolve_overlays().is_empty());
+        // With a caret, it resolves.
+        ui.caret = Some((4, 6));
+        let resolved = ui.resolve_overlays();
         assert_eq!(resolved.len(), 1);
+    }
+
+    #[test]
+    fn cursor_anchored_overlay_follows_the_caret_painted_this_frame() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        ui.buf_mut(buf)
+            .unwrap()
+            .set_all_lines(vec!["one".into(), "two".into(), "three".into()]);
+        let win = open_split(&mut ui, buf);
+        ui.set_layout(LayoutTree::leaf(win));
+        assert!(ui.set_focus(win));
+        ui.set_cursor_shape(CursorShape::Block {
+            glyph: ' ',
+            style: Style::default(),
+        });
+        register_window(&mut ui, WinId(99));
+        let id = ui.overlay_open(sized_overlay(
+            4,
+            1,
+            crate::Anchor::Cursor {
+                corner: Corner::SW,
+                row_offset: -1,
+                col_offset: 0,
+            },
+        ));
+        let rect = |ui: &Ui| {
+            ui.resolve_overlays()
+                .into_iter()
+                .find(|(overlay, _, _)| *overlay == id)
+                .map(|(_, rect, _)| rect)
+        };
+
+        // "one\ntwo\nthr|ee": the caret sits on row 2, column 3.
+        ui.win_mut(win).unwrap().set_cpos(11);
+        let _ = ui.snapshot();
+        assert_eq!(rect(&ui), Some(Rect::new(3, 1, 4, 1)));
+        assert_eq!(ui.paint_rect(WinId(99).into()), rect(&ui));
+
+        // Moving the caret moves the overlay on the next frame.
+        ui.win_mut(win).unwrap().set_cpos(5);
+        let _ = ui.snapshot();
+        assert_eq!(rect(&ui), Some(Rect::new(1, 0, 4, 1)));
     }
 
     #[test]
@@ -5290,7 +5361,7 @@ mod tests {
                 col_offset: 0,
             },
         ));
-        assert!(ui.resolve_overlays(None).is_empty());
+        assert!(ui.resolve_overlays().is_empty());
         // Once the target lands as a splits leaf with a known rect,
         // the overlay resolves anchored to it. Build a tree that
         // produces rect (top=5, left=10, width=30, height=8) on an
@@ -5320,7 +5391,7 @@ mod tests {
         ]);
         ui.set_layout(tree);
         assert_eq!(ui.split_rect(target), Some(Rect::new(10, 5, 30, 8)));
-        let resolved = ui.resolve_overlays(None);
+        let resolved = ui.resolve_overlays();
         assert_eq!(resolved.len(), 1);
         let (_, rect, _) = &resolved[0];
         assert_eq!(*rect, Rect::new(10, 5, 10, 5));
@@ -5353,7 +5424,7 @@ mod tests {
                 .with_width(Constraint::Percentage(100))
                 .with_anchor_width(anchor_width)
         };
-        let width_of = |ui: &Ui| ui.resolve_overlays(None)[0].1.width;
+        let width_of = |ui: &Ui| ui.resolve_overlays()[0].1.width;
 
         let wide = ui.overlay_open(full(false));
         assert_eq!(width_of(&ui), 80);
@@ -6386,7 +6457,7 @@ mod tests {
         let mut ui = make_ui();
         let high = ui.overlay_open(sized_overlay(20, 5, crate::Anchor::ScreenCenter).with_z(100));
         let low = ui.overlay_open(sized_overlay(10, 4, crate::Anchor::ScreenCenter).with_z(10));
-        let resolved = ui.resolve_overlays(None);
+        let resolved = ui.resolve_overlays();
         let ids: Vec<OverlayId> = resolved.iter().map(|(id, _, _)| *id).collect();
         assert_eq!(ids, vec![low, high]);
     }

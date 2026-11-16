@@ -218,7 +218,7 @@ impl TestApp {
     /// Side-channel: insert a synthetic image attachment at the prompt
     /// cursor. Mirrors clipboard-image paste / `:image` paths without
     /// needing a real terminal clipboard. Exercises the
-    /// attachment_ids ↔ marker invariant under interleaved mutations.
+    /// attachments ↔ marker invariant under interleaved mutations.
     pub fn insert_attachment(&mut self, label: String) {
         self.insert_image_attachment(label, "data:image/png;base64,FUZZ-0".to_string());
     }

@@ -1940,7 +1940,7 @@ fn prompt_triple_click_event_pipeline_yanks_clicked_source_line() {
     }
 
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "second line"
     );
 }
@@ -2247,6 +2247,121 @@ fn dropping_multiple_image_files_creates_multiple_attachments() {
 }
 
 #[test]
+fn cursor_on_attachment_turns_its_label_into_the_cursor() {
+    for vim in [false, true] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.type_text("ab");
+        app.insert_attachment("img.png".into());
+        app.type_text("cd");
+        if vim {
+            app.press(KeyCode::Esc);
+        }
+        // The pill is the attachment's accent, reversed.
+        let accent = app.tui.ui.theme().get("SmeltAccent").fg;
+        assert!(accent.is_some());
+        let label_is_cursor = |app: &mut TestApp| {
+            let (x, y) = app.screen_position("[img.png]").expect("label on screen");
+            let frame = app.tui.ui.flushed_snapshot();
+            let styles: Vec<_> = (x..x + 9).map(|col| frame.style_at(col, y)).collect();
+            let pill = |style: &Option<_>| {
+                style.is_some_and(|style: crate::smelt_edit::Style| {
+                    style.reverse && style.fg == accent
+                })
+            };
+            let all = styles.iter().all(pill);
+            let none = !styles.iter().any(pill);
+            assert!(all || none, "vim {vim}: label is one unit: {styles:?}");
+            all
+        };
+
+        // Insert mode parks past "d"; Normal mode sits on it.
+        let to_c = if vim { 1 } else { 2 };
+        for _ in 0..to_c {
+            app.press(KeyCode::Left);
+        }
+        assert!(!label_is_cursor(&mut app), "vim {vim}: cursor on c");
+        app.press(KeyCode::Left);
+        assert!(label_is_cursor(&mut app), "vim {vim}: cursor on label");
+        app.press(KeyCode::Left);
+        assert!(!label_is_cursor(&mut app), "vim {vim}: cursor on b");
+        app.press(KeyCode::Right);
+        assert!(label_is_cursor(&mut app), "vim {vim}: back on label");
+        app.press(KeyCode::Right);
+        assert!(!label_is_cursor(&mut app), "vim {vim}: past the label");
+    }
+}
+
+#[test]
+fn cursor_on_image_attachment_floats_its_picture_above_the_label() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let mut png = Vec::new();
+    // 32x32 px covers 4x2 cells at the nominal 8x16 px cell.
+    image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 0, 0, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    app.type_text("see ");
+    app.insert_image_attachment(
+        "red.png".into(),
+        engine::image::data_url_from_bytes(&png, "image/png"),
+    );
+    app.type_text(" ok");
+    app.render_silent();
+    let baseline = app.tui.ui.overlay_count();
+    let red = Some(crate::smelt_edit::Color::Rgb { r: 255, g: 0, b: 0 });
+    // The picture fills the two rows right above the label, from its column.
+    let picture_above_label = |app: &mut TestApp| {
+        let (x, y) = app.screen_position("[red.png]").expect("label on screen");
+        let frame = app.tui.ui.flushed_snapshot();
+        (y - 2..y).all(|row| {
+            frame.rows[usize::from(row)]
+                .chars()
+                .skip(usize::from(x))
+                .take(4)
+                .collect::<String>()
+                == "▀▀▀▀"
+                && (x..x + 4).all(|col| frame.style_at(col, row).is_some_and(|s| s.fg == red))
+        })
+    };
+
+    for _ in 0..3 {
+        app.press(KeyCode::Left);
+    }
+    app.render_silent();
+    assert_eq!(
+        app.tui.ui.overlay_count(),
+        baseline,
+        "cursor past the label"
+    );
+    assert!(!picture_above_label(&mut app));
+
+    app.press(KeyCode::Left);
+    app.render_silent();
+    assert_eq!(app.tui.ui.overlay_count(), baseline + 1);
+    assert!(picture_above_label(&mut app), "preview sits on the label");
+
+    app.press(KeyCode::Left);
+    app.render_silent();
+    assert_eq!(
+        app.tui.ui.overlay_count(),
+        baseline,
+        "cursor left the label"
+    );
+    assert!(!picture_above_label(&mut app));
+
+    // Pressing the mouse elsewhere closes it at once, not on release.
+    app.press(KeyCode::Right);
+    app.render_silent();
+    assert!(picture_above_label(&mut app));
+    let (x, y) = app.screen_position("[red.png]").unwrap();
+    let left = crossterm::event::MouseButton::Left;
+    app.mouse(crossterm::event::MouseEventKind::Down(left), (x + 10, y));
+    assert_eq!(app.tui.ui.overlay_count(), baseline, "closed on press");
+    assert!(!picture_above_label(&mut app));
+    app.mouse(crossterm::event::MouseEventKind::Up(left), (x + 10, y));
+    assert_eq!(app.tui.ui.overlay_count(), baseline);
+}
+
+#[test]
 fn pasted_missing_image_path_stays_text() {
     let mut app = TestApp::builder().with_vim(false).build();
     let dir = tempfile::tempdir().unwrap();
@@ -2259,7 +2374,7 @@ fn pasted_missing_image_path_stays_text() {
 
     assert_eq!(app.state().prompt_text, text);
     let prompt = app.ui_probe().buf(crate::app::PROMPT_EDIT_BUF).unwrap();
-    assert!(prompt.attachment_ids.is_empty());
+    assert!(prompt.attachments.is_empty());
 }
 
 #[test]
@@ -2274,7 +2389,7 @@ fn pasted_http_image_url_stays_text() {
 
     assert_eq!(app.state().prompt_text, url);
     let prompt = app.ui_probe().buf(crate::app::PROMPT_EDIT_BUF).unwrap();
-    assert!(prompt.attachment_ids.is_empty());
+    assert!(prompt.attachments.is_empty());
 }
 
 #[test]
@@ -2745,4 +2860,59 @@ fn prompt_paste_benchmark() {
             cells.join("  ")
         );
     }
+}
+
+#[test]
+fn delete_on_attachment_label_removes_the_attachment() {
+    for vim in [false, true] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.type_text("ab");
+        app.insert_attachment("img.png".into());
+        app.type_text("cd");
+        if vim {
+            app.press(KeyCode::Esc);
+        }
+        let to_label = if vim { 2 } else { 3 };
+        for _ in 0..to_label {
+            app.press(KeyCode::Left);
+        }
+        app.press(KeyCode::Delete);
+        assert_eq!(app.prompt_source(), "abcd", "vim {vim}");
+        assert_eq!(app.prompt_attachment_count(), 0, "vim {vim}");
+        assert_eq!(app.prompt_cpos(), 2, "vim {vim}");
+    }
+}
+
+#[test]
+fn cut_attachment_pastes_back_as_an_attachment() {
+    let marker = smelt_buffer::ATTACHMENT_MARKER;
+    // Vim: `x` on the label, then `$p` puts the image at the end.
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("ab");
+    app.insert_attachment("img.png".into());
+    app.type_text("cd");
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Left);
+    app.press(KeyCode::Left);
+    app.type_text("x");
+    assert_eq!(app.prompt_source(), "abcd");
+    app.type_text("$p");
+    assert_eq!(app.prompt_source(), format!("abcd{marker}"));
+    assert_eq!(app.prompt_attachment_count(), 1);
+    assert!(app.render_to_frame().text().contains("abcd[img.png]"));
+
+    // Emacs: `C-k` from the label, then `C-y` at the start.
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.type_text("ab");
+    app.insert_attachment("img.png".into());
+    app.type_text("cd");
+    for _ in 0..3 {
+        app.press(KeyCode::Left);
+    }
+    app.press_mod(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(app.prompt_source(), "ab");
+    app.press_mod(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    app.press_mod(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert_eq!(app.prompt_source(), format!("{marker}cdab"));
+    assert_eq!(app.prompt_attachment_count(), 1);
 }

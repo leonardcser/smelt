@@ -7658,7 +7658,7 @@ mod document_tests {
         );
         document.unpin_operation_blocks(&[id]);
 
-        assert!(copy.kill_ring.contains("block 0"));
+        assert!(copy.kill_ring.text().contains("block 0"));
         assert!(!document.history().is_materialized(id));
         assert_eq!(document.memory_snapshot().hydration_reads, 1);
 

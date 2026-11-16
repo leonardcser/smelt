@@ -92,7 +92,7 @@ mod tests {
             crate::smelt_edit::BufCreateOpts::default(),
         );
         input_buf.set_parser(std::sync::Arc::new(
-            smelt_view::prompt_parser::PromptBufferParser::new(input_state.store.clone()),
+            smelt_view::prompt_parser::PromptBufferParser::default(),
         ));
         input_buf.ensure_rendered_at(78);
         sync_prompt_overlays(&inp, &mut input_buf);
@@ -133,7 +133,6 @@ mod tests {
             cursor_shape: CursorShape::Block {
                 glyph: '█',
                 style: crate::smelt_edit::grid::Style::default(),
-                pos: None,
             },
             theme,
             vim_mode: crate::smelt_edit::VimMode::Insert,

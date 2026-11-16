@@ -1,4 +1,5 @@
 pub(crate) mod agent;
+pub(crate) mod attachment_preview;
 pub(crate) use agent::CommandScope;
 pub(crate) mod cmdline;
 pub(crate) mod cmdline_edit;
@@ -1497,19 +1498,19 @@ impl TuiApp {
 
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         let mut prefix = String::new();
-        let mut ids = Vec::new();
+        let mut attachments = Vec::new();
         for (index, input) in queued.into_iter().enumerate() {
             if index > 0 {
                 prefix.push('\n');
             }
             let replay = input.prompt_replay();
             prefix.push_str(&replay.source);
-            ids.extend(replay.ids);
+            attachments.extend(replay.attachments);
         }
         if !prefix.is_empty() && !pctx.buf.source().is_empty() {
             prefix.push('\n');
         }
-        self.prompt.prepend_attached(&mut pctx, prefix, ids);
+        self.prompt.prepend_attached(&mut pctx, prefix, attachments);
         true
     }
 
@@ -1961,17 +1962,13 @@ impl TuiApp {
                 .expect("PROMPT_EDIT_BUF slot is free");
             let parser: std::sync::Arc<dyn crate::smelt_edit::BufferParser> = std::sync::Arc::new(
                 smelt_view::prompt_parser::PromptBufferParser::with_placeholder(
-                    input.store.clone(),
                     prompt_placeholder_display.clone(),
                     Arc::clone(&command_catalog),
                 ),
             );
-            let copier: std::sync::Arc<dyn crate::smelt_edit::BufferCopy> = std::sync::Arc::new(
-                smelt_view::prompt_parser::PromptCopier::new(input.store.clone()),
-            );
             if let Some(b) = ui.buf_mut(input_display_buf) {
                 b.set_parser(parser);
-                b.set_copier(copier);
+                b.hold_attachments();
                 b.history = crate::smelt_edit::UndoHistory::new(Some(100));
             }
             let transcript_display_buf = ui.buf_create(crate::smelt_edit::BufCreateOpts::default());

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::attachment_preview::AttachmentPreview;
 use super::cmdline::{CmdlineCompleter, CmdlineCompletionItem, CmdlineMode, CmdlineState};
 use super::cmdline_history::CommandHistoryKind;
 use super::search::{SearchBackend, SearchSession, SearchState};
@@ -24,6 +25,7 @@ pub(crate) struct OverlayRuntime {
     search: SearchState,
     pickers: HashMap<WinId, PickerState>,
     deferred_dialogs: DeferredDialogs,
+    attachment_preview: Option<AttachmentPreview>,
 }
 
 impl OverlayRuntime {
@@ -67,6 +69,18 @@ impl OverlayRuntime {
 
     pub(crate) fn finish_execution(&mut self) {
         self.execution = None;
+    }
+
+    pub(crate) fn attachment_preview(&self) -> Option<&AttachmentPreview> {
+        self.attachment_preview.as_ref()
+    }
+
+    pub(crate) fn install_attachment_preview(&mut self, preview: AttachmentPreview) {
+        self.attachment_preview = Some(preview);
+    }
+
+    pub(crate) fn take_attachment_preview(&mut self) -> Option<AttachmentPreview> {
+        self.attachment_preview.take()
     }
 
     pub(crate) fn shell_panel(&self) -> Option<ShellPanel> {

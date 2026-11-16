@@ -1,6 +1,6 @@
 //! Bridge between `PromptState` and the vim state machine.
 //!
-//! Vim borrows the input's live `buf`/`cpos`/`attachment_ids` plus the
+//! Vim borrows the input's live `buf`/`cpos`/`attachments` plus the
 //! `UndoHistory` owned by `PromptState`, the prompt `Window`'s per-window
 //! `vim_mode`, `curswant`, and `VimWindowState` (Visual anchor, last `f`/`t`,
 //! pending operator, count accumulators), and the single global `Clipboard`

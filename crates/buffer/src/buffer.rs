@@ -4,7 +4,8 @@
 //! `Extmark`s grouped into namespaces. Highlights, decorations, and
 //! virtual text are all extmarks queried per-line at render time.
 
-use crate::attachment::{AttachmentId, ATTACHMENT_MARKER};
+use crate::attached::AttachedText;
+use crate::attachment::{Attachment, ATTACHMENT_MARKER};
 use crate::undo::UndoHistory;
 use smelt_style::style::{Color, Style};
 use smelt_style::theme::{intern_anonymous_style, HlGroup};
@@ -70,25 +71,29 @@ pub trait BufferParser: Send + Sync {
     fn on_attach(&self, _buf: &mut Buffer) {}
 }
 
-/// Two outputs from a single yank: the kill-ring text (paste-back fidelity,
-/// e.g. raw `\u{FFFC}` attachment markers survive `y`/`p`) and the system
-/// clipboard text (human-readable, e.g. markers expand to `[label]`).
-///
-/// Buffers without a [`BufferCopy`] impl produce identical outputs equal to
-/// the raw source slice.
+/// Two outputs from a single yank: the kill-ring text (paste-back fidelity:
+/// attachments travel with their markers through `y`/`p`) and the system
+/// clipboard text (human-readable: markers expand to `[label]`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CopyOutput {
-    pub kill_ring: String,
+    pub kill_ring: AttachedText,
     pub clipboard: String,
 }
 
 impl CopyOutput {
-    /// Both outputs equal `s`. The default identity case for buffers without
-    /// a [`BufferCopy`] installed.
+    /// Both outputs equal `s`, which carries no attachments.
     pub fn same(s: String) -> Self {
         Self {
-            kill_ring: s.clone(),
+            kill_ring: AttachedText::plain(s.clone()),
             clipboard: s,
+        }
+    }
+
+    /// `text` for the kill ring and its labelled form for the clipboard.
+    pub fn attached(text: AttachedText) -> Self {
+        Self {
+            clipboard: text.labelled().into_owned(),
+            kill_ring: text,
         }
     }
 
@@ -99,7 +104,7 @@ impl CopyOutput {
 
     /// `(kill_ring, clipboard)`. Useful when both halves need to be moved
     /// into different sinks without intermediate clones.
-    pub fn into_parts(self) -> (String, String) {
+    pub fn into_parts(self) -> (AttachedText, String) {
         (self.kill_ring, self.clipboard)
     }
 }
@@ -109,7 +114,7 @@ impl CopyOutput {
 /// `src` is the resolved base string [`Buffer::copy_range`] picked (`source`
 /// when non-empty, else `text()`); `range` is in-bounds, on grapheme boundaries,
 /// and addresses bytes in `src`. The buffer is passed alongside so impls can
-/// read sidecar state (attachment ids, decorations).
+/// read sidecar state (attachments, decorations).
 pub trait BufferCopy: Send + Sync {
     fn copy(&self, buf: &Buffer, src: &str, range: std::ops::Range<usize>) -> CopyOutput;
 }
@@ -205,6 +210,9 @@ pub struct SpanMeta {
     pub copy_as: Option<String>,
     pub action: Option<SpanAction>,
     pub atomic: Option<AtomicSpan>,
+    /// When the window cursor rests on any cell of this span, the whole span
+    /// stands in for the caret: this group layers over the span's own style.
+    pub cursor_hl: Option<HlGroup>,
 }
 
 impl Default for SpanMeta {
@@ -214,6 +222,7 @@ impl Default for SpanMeta {
             copy_as: None,
             action: None,
             atomic: None,
+            cursor_hl: None,
         }
     }
 }
@@ -236,6 +245,13 @@ impl SpanMeta {
     pub fn action(action: SpanAction) -> Self {
         Self {
             action: Some(action),
+            ..Default::default()
+        }
+    }
+
+    pub fn cursor_hl(hl: HlGroup) -> Self {
+        Self {
+            cursor_hl: Some(hl),
             ..Default::default()
         }
     }
@@ -872,7 +888,10 @@ pub struct Buffer {
     source_changes: crate::attached::SourceChanges,
     last_render: Option<(u64, u16, u64)>,
     pub history: UndoHistory,
-    pub attachment_ids: Vec<AttachmentId>,
+    /// One per `ATTACHMENT_MARKER` in `source`, in order.
+    pub attachments: Vec<Attachment>,
+    /// Whether pastes keep their attachments; otherwise they arrive as text.
+    holds_attachments: bool,
     pub readonly: bool,
     range_layers: [Vec<SelectionRange>; RangeLayer::COUNT],
     /// Source↔display coord maps. Written by parsers in `parse()` when source
@@ -896,7 +915,7 @@ impl Buffer {
             + self.rendered_rows.retained_bytes()
             + self.extmarks.retained_bytes()
             + self.source.capacity()
-            + vec_bytes(&self.attachment_ids)
+            + vec_bytes(&self.attachments)
             + self.range_layers.iter().map(vec_bytes).sum::<usize>()
     }
 
@@ -922,7 +941,8 @@ impl Buffer {
             source_changes: crate::attached::SourceChanges::default(),
             last_render: None,
             history: UndoHistory::default(),
-            attachment_ids: Vec::new(),
+            attachments: Vec::new(),
+            holds_attachments: false,
             readonly: false,
             range_layers: std::array::from_fn(|_| Vec::new()),
             projection_maps: None,
@@ -979,6 +999,11 @@ impl Buffer {
         self.copier.is_some()
     }
 
+    /// Let pastes into this buffer keep their attachments.
+    pub fn hold_attachments(&mut self) {
+        self.holds_attachments = true;
+    }
+
     /// Push the most recent kill-ring source range to the system clipboard,
     /// transformed by this buffer's [`BufferCopy`]. Idempotent; no-op when
     /// the kill ring lacks a source range or yields empty output. Records
@@ -995,10 +1020,10 @@ impl Buffer {
         // source_range no longer matches what was captured. Fall back to the
         // kill-ring text so we copy the actual deleted/yanked text, not whatever
         // shifted into its place.
-        let clipboard_text = if out.kill_ring.replace(ATTACHMENT_MARKER, "") == kill_text {
+        let clipboard_text = if out.kill_ring == *kill_text {
             out.clipboard
         } else {
-            kill_text.to_string()
+            kill_text.labelled().into_owned()
         };
 
         if clipboard_text.is_empty() {
@@ -1012,7 +1037,7 @@ impl Buffer {
     /// Snapshot a byte range as a [`CopyOutput`]. The range is in the buffer's
     /// editable-byte space - `source` when the parser writes it, otherwise
     /// `lines.join("\n")`. Endpoints are snapped to grapheme boundaries and
-    /// clamped; buffers without a copier fall through to identity.
+    /// clamped; buffers without a copier copy the source with its attachments.
     pub fn copy_range(&self, range: std::ops::Range<usize>) -> CopyOutput {
         let owned;
         let src: &str = if self.source.is_empty() {
@@ -1027,7 +1052,8 @@ impl Buffer {
         }
         match self.copier.clone() {
             Some(c) => c.copy(self, src, clamped),
-            None => CopyOutput::same(src[clamped].to_string()),
+            None if self.source.is_empty() => CopyOutput::same(src[clamped].to_string()),
+            None => CopyOutput::attached(AttachedText::slice_of(src, &self.attachments, clamped)),
         }
     }
 
@@ -1046,11 +1072,25 @@ impl Buffer {
     /// invariant-preserving wrapper. Use this instead of raw `&mut String`
     /// for any mutation that might add/remove attachment markers - the
     /// wrapper drains/inserts ids automatically. Mutations advance `source_tick`.
+    /// The attachment whose marker starts at source byte `pos`.
+    pub fn attachment_at(&self, pos: usize) -> Option<&Attachment> {
+        let pos = crate::text::snap(&self.source, pos);
+        if !crate::text::slice(&self.source, pos..self.source.len()).starts_with(ATTACHMENT_MARKER)
+        {
+            return None;
+        }
+        let index = crate::text::slice(&self.source, 0..pos)
+            .matches(ATTACHMENT_MARKER)
+            .count();
+        self.attachments.get(index)
+    }
+
     pub fn text_mut(&mut self) -> crate::attached::AttachedTextMut<'_> {
         crate::attached::AttachedTextMut::tracked(
             &mut self.source,
-            &mut self.attachment_ids,
+            &mut self.attachments,
             &mut self.source_changes,
+            self.holds_attachments,
         )
     }
 
@@ -1066,8 +1106,9 @@ impl Buffer {
         (
             crate::attached::AttachedTextMut::tracked(
                 &mut self.source,
-                &mut self.attachment_ids,
+                &mut self.attachments,
                 &mut self.source_changes,
+                self.holds_attachments,
             ),
             &mut self.history,
         )
@@ -2117,7 +2158,7 @@ mod tests {
         let mut buf = make_buf();
         buf.set_source("hello world".into());
         let out = buf.copy_range(0..5);
-        assert_eq!(out.kill_ring, "hello");
+        assert_eq!(out.kill_ring.text(), "hello");
         assert_eq!(out.clipboard, "hello");
     }
 
@@ -2129,7 +2170,7 @@ mod tests {
         let out = buf.copy_range(100..200);
         assert!(out.is_empty());
         let out = buf.copy_range(0..2);
-        assert_eq!(out.kill_ring, "ab");
+        assert_eq!(out.kill_ring.text(), "ab");
     }
 
     #[test]
@@ -2139,12 +2180,34 @@ mod tests {
             buf.set_source(format!("a{grapheme}b"));
             let inside = 1 + grapheme.chars().next().unwrap().len_utf8();
 
-            assert_eq!(buf.copy_range(0..inside).kill_ring, "a", "{grapheme:?}");
             assert_eq!(
-                buf.copy_range(inside..buf.source().len()).kill_ring,
+                buf.copy_range(0..inside).kill_ring.text(),
+                "a",
+                "{grapheme:?}"
+            );
+            assert_eq!(
+                buf.copy_range(inside..buf.source().len()).kill_ring.text(),
                 format!("{grapheme}b")
             );
         }
+    }
+
+    #[test]
+    fn copied_attachments_keep_their_markers_and_show_labels_on_the_clipboard() {
+        let image = Attachment::image("photo.png".into(), "data:xx".into());
+        let mut buf = make_buf();
+        let source = format!("xy{ATTACHMENT_MARKER}z");
+        buf.text_mut().install(source.clone(), vec![image.clone()]);
+
+        let out = buf.copy_range(0..source.len());
+        assert_eq!(out.kill_ring.text(), source);
+        assert_eq!(out.kill_ring.attachments(), std::slice::from_ref(&image));
+        assert_eq!(out.clipboard, "xy[photo.png]z");
+
+        let marker = 2..2 + ATTACHMENT_MARKER.len_utf8();
+        let out = buf.copy_range(marker);
+        assert_eq!(out.kill_ring.attachments(), [image]);
+        assert_eq!(out.clipboard, "[photo.png]");
     }
 
     #[test]
@@ -2155,7 +2218,7 @@ mod tests {
                 let raw = src[range].to_string();
                 CopyOutput {
                     clipboard: raw.to_uppercase(),
-                    kill_ring: raw,
+                    kill_ring: AttachedText::plain(raw),
                 }
             }
         }
@@ -2163,7 +2226,7 @@ mod tests {
         buf.set_source("hello".into());
         buf.set_copier(std::sync::Arc::new(UpperCopier));
         let out = buf.copy_range(0..5);
-        assert_eq!(out.kill_ring, "hello");
+        assert_eq!(out.kill_ring.text(), "hello");
         assert_eq!(out.clipboard, "HELLO");
     }
 
@@ -2175,7 +2238,7 @@ mod tests {
                 let raw = src[range].to_string();
                 CopyOutput {
                     clipboard: raw.to_uppercase(),
-                    kill_ring: raw,
+                    kill_ring: AttachedText::plain(raw),
                 }
             }
         }
@@ -2186,7 +2249,7 @@ mod tests {
         let mut clipboard = crate::Clipboard::null();
         clipboard
             .kill_ring
-            .set_with_source("hello".into(), false, 0, 5);
+            .set_with_source(AttachedText::plain("hello"), false, 0, 5);
         buf.sync_clipboard_from_kill_ring(&mut clipboard);
         assert_eq!(clipboard.kill_ring.last_clipboard_write(), Some("HELLO"));
     }
@@ -2199,7 +2262,7 @@ mod tests {
                 let raw = src[range].to_string();
                 CopyOutput {
                     clipboard: raw.to_uppercase(),
-                    kill_ring: raw,
+                    kill_ring: AttachedText::plain(raw),
                 }
             }
         }
@@ -2209,7 +2272,9 @@ mod tests {
 
         let mut clipboard = crate::Clipboard::null();
         // Simulate vim x on the last char: yank "o" at 4..5 then delete it.
-        clipboard.kill_ring.set_with_source("o".into(), false, 4, 5);
+        clipboard
+            .kill_ring
+            .set_with_source(AttachedText::plain("o"), false, 4, 5);
         // Mutate buffer so the range no longer contains "o".
         buf.set_source("hell".into());
         buf.sync_clipboard_from_kill_ring(&mut clipboard);
@@ -2223,7 +2288,9 @@ mod tests {
         buf.set_source("hello".into());
 
         let mut clipboard = crate::Clipboard::null();
-        clipboard.kill_ring.set_with_source("o".into(), false, 4, 5);
+        clipboard
+            .kill_ring
+            .set_with_source(AttachedText::plain("o"), false, 4, 5);
         // Delete the last character: buffer shrinks so range 4..5 is empty.
         buf.set_source("hell".into());
         buf.sync_clipboard_from_kill_ring(&mut clipboard);
@@ -2277,9 +2344,9 @@ mod tests {
                     crate::text::replace_range(&mut s, a..b, "X");
 
                     let mut kr = crate::kill_ring::KillRing::new();
-                    kr.kill("seed".into());
-                    kr.kill("seed2".into());
-                    kr.set_with_source("payload".into(), false, a, b);
+                    kr.kill(AttachedText::plain("seed"));
+                    kr.kill(AttachedText::plain("seed2"));
+                    kr.set_with_source(AttachedText::plain("payload"), false, a, b);
                     let mut bs = buf.source().to_string();
                     let mut ids = Vec::new();
                     let mut bsmut = crate::attached::AttachedTextMut::new(&mut bs, &mut ids);
@@ -2427,19 +2494,42 @@ mod tests {
             ExtmarkOpts::highlight(1, SpanStyle::new().bold(), SpanMeta::default()),
         );
         assert_eq!(buf.source_tick(), text_tick);
-        buf.text_mut().insert_marker(1, 7);
+        let image = Attachment::image("7.png".into(), "data:7".into());
+        buf.text_mut().insert_marker(1, image.clone());
         let attachment_tick = buf.source_tick();
         assert_ne!(attachment_tick, text_tick);
-        assert_eq!(buf.attachment_ids, vec![7]);
+        assert_eq!(buf.attachments, vec![image]);
         buf.text_mut()
             .replace_range(1..1 + ATTACHMENT_MARKER.len_utf8(), "");
         assert_ne!(buf.source_tick(), attachment_tick);
-        assert!(buf.attachment_ids.is_empty());
+        assert!(buf.attachments.is_empty());
         assert_eq!(buf.source(), "abc");
         let edit_tick = buf.source_tick();
         let (mut source, _) = buf.edit_refs();
         source.insert_str(0, "界");
         assert_ne!(buf.source_tick(), edit_tick);
+    }
+
+    #[test]
+    fn attachment_at_finds_the_marker_starting_at_a_byte() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.text_mut().insert_str(0, "a界b");
+        let (seven, nine) = (
+            Attachment::image("7.png".into(), "data:7".into()),
+            Attachment::image("9.png".into(), "data:9".into()),
+        );
+        buf.text_mut().insert_marker(1, seven.clone());
+        let second = 1 + ATTACHMENT_MARKER.len_utf8() + "界".len();
+        buf.text_mut().insert_marker(second, nine.clone());
+        assert_eq!(buf.attachment_at(1), Some(&seven));
+        assert_eq!(buf.attachment_at(second), Some(&nine));
+        assert_eq!(buf.attachment_at(0), None);
+        assert_eq!(
+            buf.attachment_at(2),
+            Some(&seven),
+            "mid-marker bytes snap back"
+        );
+        assert_eq!(buf.attachment_at(buf.source().len()), None);
     }
 
     #[test]

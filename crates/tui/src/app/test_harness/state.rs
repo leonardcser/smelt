@@ -766,7 +766,7 @@ impl TestApp {
         self.tui
             .ui
             .buf(crate::app::PROMPT_EDIT_BUF)
-            .map_or(0, |buf| buf.attachment_ids.len())
+            .map_or(0, |buf| buf.attachments.len())
     }
 
     pub(crate) fn configure_prompt_inputs_for_harness(

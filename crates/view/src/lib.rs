@@ -9,6 +9,7 @@ static ALLOCATOR: smelt_core::allocator::Allocator = smelt_core::allocator::ALLO
 
 pub mod display_layout;
 pub mod display_renderers;
+pub mod picture;
 pub mod prompt_parser;
 pub mod prompt_spans;
 pub mod source_view;

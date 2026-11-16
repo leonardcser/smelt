@@ -175,12 +175,22 @@ pub fn display_snapshot(path: &str) -> Result<DisplaySnapshot, String> {
     })
 }
 
-/// Decode a [`DisplaySnapshot::data`] payload.
-pub fn decode_display_snapshot(data: &str) -> Option<image::RgbaImage> {
+/// Decode a base64 image, such as a [`DisplaySnapshot::data`] payload.
+pub fn decode_base64_image(data: &str) -> Option<image::RgbaImage> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
         .ok()?;
     Some(image::load_from_memory(&bytes).ok()?.to_rgba8())
+}
+
+/// The `(mime, payload)` of a `data:<mime>;base64,<payload>` URL.
+pub fn split_data_url(url: &str) -> Option<(&str, &str)> {
+    url.strip_prefix("data:")?.split_once(";base64,")
+}
+
+/// Decode a `data:<mime>;base64,<payload>` image URL.
+pub fn decode_data_url(url: &str) -> Option<image::RgbaImage> {
+    decode_base64_image(split_data_url(url)?.1)
 }
 
 pub fn image_label_from_path(path: &str) -> String {
@@ -338,7 +348,7 @@ mod tests {
             .unwrap();
         let snapshot = display_snapshot(path.to_str().unwrap()).unwrap();
         assert_eq!((snapshot.width, snapshot.height), (2048, 512));
-        let decoded = decode_display_snapshot(&snapshot.data).unwrap();
+        let decoded = decode_base64_image(&snapshot.data).unwrap();
         assert_eq!(decoded.dimensions(), (1024, 256));
     }
 
@@ -350,7 +360,7 @@ mod tests {
             .save(&path)
             .unwrap();
         let snapshot = display_snapshot(path.to_str().unwrap()).unwrap();
-        let decoded = decode_display_snapshot(&snapshot.data).unwrap();
+        let decoded = decode_base64_image(&snapshot.data).unwrap();
         assert_eq!(decoded.get_pixel(0, 0).0[3], 0);
     }
 

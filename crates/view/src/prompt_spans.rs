@@ -1,6 +1,6 @@
 //! Prompt text spans and styled source token detection.
 
-use smelt_core::attachment::{AttachmentId, AttachmentStore};
+use smelt_core::attachment::Attachment;
 use smelt_text::ATTACHMENT_MARKER;
 use smelt_transcript::content::selection::at_token_start;
 pub use smelt_transcript::content::selection::{scan_at_token, try_at_ref};
@@ -20,34 +20,7 @@ pub enum Span {
     AtQuoteStart(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SpanKind {
-    Plain,
-    Attachment,
-    AtRef,
-}
-
-pub fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
-    let mut kinds = Vec::new();
-    for span in spans {
-        let (text, kind) = match span {
-            Span::Plain(t) | Span::AtToken(t) | Span::AtQuoteStart(t) => {
-                (t.as_str(), SpanKind::Plain)
-            }
-            Span::Tab => (TAB_DISPLAY, SpanKind::Plain),
-            Span::Attachment(t) => (t.as_str(), SpanKind::Attachment),
-            Span::AtRef(t) => (t.as_str(), SpanKind::AtRef),
-        };
-        kinds.extend(std::iter::repeat_n(kind, text.chars().count()));
-    }
-    kinds
-}
-
-pub fn build_display_spans(
-    buf: &str,
-    att_ids: &[AttachmentId],
-    store: &AttachmentStore,
-) -> Vec<Span> {
+pub fn build_display_spans(buf: &str, attachments: &[Attachment]) -> Vec<Span> {
     let _perf = smelt_perf::perf::begin("render:display_spans");
     let mut spans = Vec::new();
     let mut plain = String::new();
@@ -60,9 +33,9 @@ pub fn build_display_spans(
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            let label = att_ids
+            let label = attachments
                 .get(att_idx)
-                .map(|&id| store.display_label(id))
+                .map(Attachment::display_label)
                 .unwrap_or_else(|| "[?]".into());
             spans.push(Span::Attachment(label));
             att_idx += 1;
@@ -130,11 +103,10 @@ mod tests {
 
     #[test]
     fn quoted_tokens_do_not_consume_attachment_markers() {
-        let mut store = AttachmentStore::new();
-        let first = store.insert_image("first.png".into(), "data:first".into());
-        let second = store.insert_image("second.png".into(), "data:second".into());
+        let first = Attachment::image("first.png".into(), "data:first".into());
+        let second = Attachment::image("second.png".into(), "data:second".into());
         let source = format!("@\"missing{ATTACHMENT_MARKER}\" {ATTACHMENT_MARKER}");
-        let spans = build_display_spans(&source, &[first, second], &store);
+        let spans = build_display_spans(&source, &[first, second]);
         assert_eq!(
             spans_to_string(&spans),
             "@\"missing[first.png]\" [second.png]"
@@ -143,8 +115,7 @@ mod tests {
 
     #[test]
     fn display_spans_sanitize_plain_controls_but_keep_newlines() {
-        let store = AttachmentStore::new();
-        let spans = build_display_spans("a\0\tb\nc", &[], &store);
+        let spans = build_display_spans("a\0\tb\nc", &[]);
         assert_eq!(spans_to_string(&spans), "a\u{FFFD}    b\nc");
     }
 }

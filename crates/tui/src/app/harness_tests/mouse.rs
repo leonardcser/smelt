@@ -216,7 +216,7 @@ fn transcript_shift_selection_copy_copies_document_range() {
     }
     app.press_mod(KeyCode::Char('c'), KeyModifiers::SUPER);
 
-    let yank = app.core_probe().clipboard.kill_ring.current();
+    let yank = app.core_probe().clipboard.kill_ring.current().text();
     assert!(yank.contains("row 000 alpha beta"), "yank was {yank:?}");
     assert!(yank.contains("row 014 alpha beta"), "yank was {yank:?}");
 }
@@ -271,7 +271,10 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
         })));
     }
 
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), expected);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        expected
+    );
 }
 
 #[test]
@@ -293,7 +296,7 @@ fn decorative_copy_owner_does_not_exclude_adjacent_content() {
     app.render_silent();
     drag_transcript_text(&mut app, "Keep", "message.");
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "Keep this selectable message."
     );
 }
@@ -312,7 +315,10 @@ fn user_timestamp_is_excluded_from_drag_copy_without_changing_wrapping() {
 
     let selected_rows = drag_transcript_text(&mut app, "14:37:03", "end.");
     assert!(selected_rows.count() >= 4);
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), message);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        message
+    );
     assert_eq!(
         app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some(message)
@@ -343,7 +349,10 @@ fn transcript_drag_copy_preserves_bash_command_hard_newlines_only() {
         app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some(command)
     );
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), command);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        command
+    );
 }
 
 #[test]
@@ -416,7 +425,7 @@ fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
         })));
     }
 
-    let copied = app.core_probe().clipboard.kill_ring.current();
+    let copied = app.core_probe().clipboard.kill_ring.current().text();
     assert_eq!(copied, expected);
     assert_eq!(
         app.core_probe().clipboard.kill_ring.last_clipboard_write(),
@@ -615,7 +624,7 @@ fn transcript_click_drag_in_vim_survives_multiple_drag_events() {
     })));
 
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "hello",
         "vim drag selection should stay active across every Drag event"
     );

@@ -1227,7 +1227,7 @@ mod tests {
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
         assert_eq!(app.ui.capture(), None);
-        assert!(app.core.clipboard.kill_ring.current().is_empty());
+        assert!(app.core.clipboard.kill_ring.current().text().is_empty());
     }
 
     #[test]
@@ -1259,7 +1259,7 @@ mod tests {
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
         assert_eq!(app.prompt.manual_prompt_rows_for_harness(), None);
-        assert_eq!(app.core.clipboard.kill_ring.current(), "abc");
+        assert_eq!(app.core.clipboard.kill_ring.current().text(), "abc");
     }
 
     fn prompt_resize_handle_cell(app: &mut crate::app::TuiApp) -> (u16, u16) {
@@ -1476,7 +1476,7 @@ mod tests {
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
         assert_eq!(app.ui.capture(), None);
-        assert!(app.core.clipboard.kill_ring.current().is_empty());
+        assert!(app.core.clipboard.kill_ring.current().text().is_empty());
     }
 
     #[test]
@@ -1852,7 +1852,7 @@ mod tests {
         app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(up);
 
-        let yanked = app.core.clipboard.kill_ring.current();
+        let yanked = app.core.clipboard.kill_ring.current().text();
         assert!(
             yanked.starts_with(&expected_start),
             "selection should start at clicked row {expected_start:?}, got {yanked:?}"
@@ -1969,7 +1969,7 @@ mod tests {
         app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(up);
 
-        let yanked = app.core.clipboard.kill_ring.current();
+        let yanked = app.core.clipboard.kill_ring.current().text();
         assert!(
             yanked.starts_with(&expected_start),
             "streaming during drag should keep selection anchored at clicked row {expected_start:?}, got {yanked:?}"
@@ -2128,7 +2128,7 @@ mod tests {
                 3,
             );
 
-            assert_eq!(app.core.clipboard.kill_ring.current(), expected);
+            assert_eq!(app.core.clipboard.kill_ring.current().text(), expected);
         }
     }
 }

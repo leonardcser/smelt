@@ -1180,6 +1180,7 @@ impl TuiApp {
         }
 
         self.finalize_layer_rects();
+        self.sync_attachment_preview(has_prompt_cursor);
 
         // Late cursor-shape fill-ins. Each sync layer above sets `cursor_shape` for
         // the focus context it owns (transcript / prompt). Two cross-cutting cases
@@ -1797,7 +1798,6 @@ fn prompt_block_cursor(theme: &crate::smelt_edit::Theme) -> crate::smelt_edit::C
             bg: Some(bg),
             ..Default::default()
         },
-        pos: None,
     }
 }
 

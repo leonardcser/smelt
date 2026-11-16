@@ -60,6 +60,7 @@ fn parse_keys(keys: &str) -> Vec<KeyEvent> {
                     "Esc" => Some(key_event(KeyCode::Esc, KeyModifiers::empty())),
                     "CR" => Some(key_event(KeyCode::Enter, KeyModifiers::empty())),
                     "BS" => Some(key_event(KeyCode::Backspace, KeyModifiers::empty())),
+                    "Del" => Some(key_event(KeyCode::Delete, KeyModifiers::empty())),
                     "Tab" => Some(key_event(KeyCode::Tab, KeyModifiers::empty())),
                     "lt" => Some(key_event(KeyCode::Char('<'), KeyModifiers::empty())),
                     _ => name
@@ -88,7 +89,7 @@ fn parse_keys(keys: &str) -> Vec<KeyEvent> {
 struct Session {
     buf: String,
     cpos: usize,
-    attachments: Vec<smelt_buffer::attachment::AttachmentId>,
+    attachments: Vec<smelt_buffer::attachment::Attachment>,
     clipboard: Clipboard,
     history: UndoHistory,
     mode: VimMode,
@@ -205,7 +206,7 @@ fn run_case(line: &str) -> String {
     // A linewise register holds its lines without a final newline; vim's
     // holds the newline, and keeps an empty line.
     let linewise = session.clipboard.kill_ring.is_linewise();
-    let mut register = session.clipboard.kill_ring.current().to_string();
+    let mut register = session.clipboard.kill_ring.current().text().to_string();
     if linewise {
         register.push('\n');
     }
@@ -266,6 +267,19 @@ mod pinned {
             ("a b", "ix<Esc>.", "xxa b"),
             ("one two three", "cwab<Esc>", "ab two three"),
             ("one two three", "cwab<Esc>w.", "ab ab three"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
+    }
+
+    #[test]
+    fn del_deletes_like_x_in_normal_and_visual() {
+        for (text, keys, expected) in [
+            ("abc", "<Del>", "bc"),
+            ("abc", "2<Del>", "abc"),
+            ("abc", "12<Del>x", "bc"),
+            ("abc", "<Del>.", "c"),
+            ("abc", "vl<Del>", "c"),
         ] {
             assert_eq!(text_after(text, keys), expected, "{keys}");
         }

@@ -40,14 +40,14 @@ impl ResolvedUiLayout {
 }
 
 impl Ui {
-    pub(super) fn resolve_scene(&self, cursor: Option<(u16, u16)>) -> ResolvedUiLayout {
+    pub(super) fn resolve_scene(&self) -> ResolvedUiLayout {
         let root = self.splits().resolve(self.surface.area(), self);
         let rects = root
             .leaves()
             .map(|(id, rect)| (WinId(id.0), rect))
             .collect();
         let overlays = self
-            .resolve_overlays_with_rects(cursor, &rects)
+            .resolve_overlays_with_rects(&rects)
             .into_iter()
             .map(|(id, rect, overlay)| ResolvedOverlay {
                 id,
@@ -77,7 +77,7 @@ impl Ui {
     /// Current geometry for a mounted split. Resolve again after changing sizes,
     /// content measurements, or the layout, just as with `LayoutTree::resolve`.
     pub fn resolved_split(&self, id: SplitId) -> Option<ResolvedSplit> {
-        self.resolve_scene(None).split(id).cloned()
+        self.resolve_scene().split(id).cloned()
     }
 
     pub(super) fn layout_hit_test(
@@ -121,7 +121,7 @@ impl Ui {
             return false;
         }
         let delta = delta.clamp(-i32::from(u16::MAX), i32::from(u16::MAX));
-        let scene = self.resolve_scene(None);
+        let scene = self.resolve_scene();
         let target = scene
             .layouts()
             .rev()
@@ -174,7 +174,7 @@ impl Ui {
             return false;
         }
         let mut found = false;
-        for layout in self.resolve_scene(None).layouts() {
+        for layout in self.resolve_scene().layouts() {
             for resolved in layout.splits() {
                 if resolved.pane_for_leaf(win.into()).is_some() {
                     resolved.equalize();

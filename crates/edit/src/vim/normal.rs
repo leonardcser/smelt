@@ -173,6 +173,14 @@ pub(super) fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
+        // While a count is typed, Delete erases its last digit.
+        KeyCode::Delete => match ctx.vim_state.count1 {
+            Some(count) => {
+                ctx.vim_state.count1 = Some(count / 10).filter(|&count| count > 0);
+                Action::Consumed
+            }
+            None => handle_normal_char('x', ctx),
+        },
         _ => Action::Consumed,
     }
 }
@@ -572,30 +580,35 @@ pub(super) fn paste(ctx: &mut VimContext<'_>, after: bool, count: usize) {
     }
     ctx.save_undo();
     if linewise {
-        let lines = vec![text.as_str(); count].join("\n");
-        let first_line = if after {
-            let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
-            ctx.insert_str(eol, &format!("\n{lines}")) + 1
+        let lines = text.repeat(count, "\n");
+        let mut put = AttachedText::default();
+        let at = if after {
+            put.push_str("\n");
+            put.push(&lines);
+            line_end(ctx.buf.as_str(), *ctx.cpos)
         } else {
-            let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
-            ctx.insert_str(sol, &format!("{lines}\n"))
+            put.push(&lines);
+            put.push_str("\n");
+            line_start(ctx.buf.as_str(), *ctx.cpos)
         };
+        let inserted = ctx.replace_attached(at..at, &put);
+        let first_line = inserted.start + usize::from(after);
         *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), first_line);
         return;
     }
-    let text = text.repeat(count);
+    let text = text.repeat(count, "");
     let at = if after {
         advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(line_end(ctx.buf.as_str(), *ctx.cpos))
     } else {
         *ctx.cpos
     };
-    let start = ctx.insert_str(at, &text);
+    let inserted = ctx.replace_attached(at..at, &text);
     // The cursor ends on the last pasted character, or at the start of text
     // that spans lines.
-    *ctx.cpos = if text.contains('\n') {
-        start
+    *ctx.cpos = if text.text().contains('\n') {
+        inserted.start
     } else {
-        prev_grapheme_boundary(ctx.buf.as_str(), start + text.len()).max(start)
+        prev_grapheme_boundary(ctx.buf.as_str(), inserted.end).max(inserted.start)
     };
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }

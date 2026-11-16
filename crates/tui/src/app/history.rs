@@ -1946,7 +1946,7 @@ impl TuiApp {
         self.clear_transcript();
         self.app_focus = crate::app::AppFocus::Prompt;
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        self.prompt.clear_for_session_change(&mut pctx);
+        self.prompt.clear(&mut pctx);
         let old_id = self
             .conversation
             .reset(self.core.env.pid(), self.core.env.cwd());
@@ -2152,7 +2152,7 @@ impl TuiApp {
         self.clear_session_scoped_permissions_for_session_boundary();
         self.prompt.clear_queue();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        self.prompt.clear_for_session_change(&mut pctx);
+        self.prompt.clear(&mut pctx);
         self.conversation.clear_stream_parser();
         self.sync_session_snapshot();
         self.core
@@ -2245,7 +2245,7 @@ impl TuiApp {
         if !preserve_prompt {
             self.prompt.clear_queue();
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-            self.prompt.clear_for_session_change(&mut pctx);
+            self.prompt.clear(&mut pctx);
         }
         self.clear_transcript();
         self.conversation

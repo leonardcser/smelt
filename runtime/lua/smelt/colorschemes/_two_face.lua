@@ -123,6 +123,7 @@ local function build(p)
     SmeltModeYolo       = { fg = color(p.warn), bg = surface },
     SmeltModeDefault    = { fg = color(p.muted), bg = surface },
     SmeltExecPrefix     = fg(color(p.error), { bold = true }),
+    SmeltAttachmentCursor = { reverse = true },
 
     SmeltDiffAddCount       = fg(mix(p.success, p.muted, 0.2)),
     SmeltDiffDeleteCount    = fg(mix(p.error, p.muted, 0.2)),

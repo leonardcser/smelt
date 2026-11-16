@@ -316,7 +316,7 @@ pub enum FuzzOp {
     },
     /// Side-channel: insert a synthetic image attachment at the prompt
     /// cursor through the real `Input::insert_image` path. Exercises the
-    /// attachment_ids ↔ marker invariant under interleaved key + paste
+    /// attachments ↔ marker invariant under interleaved key + paste
     /// events.
     InsertAttachment {
         label: String,

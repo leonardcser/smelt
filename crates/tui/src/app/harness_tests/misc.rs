@@ -4098,7 +4098,7 @@ fn assert_visible_word_direct_copy_round_trip(app: &mut TestApp, target: &Visibl
                 },
             },
         )
-        .map(|out| out.kill_ring)
+        .map(|out| out.kill_ring.text().to_string())
         .unwrap_or_default();
     assert_eq!(
         direct, target.text,
@@ -4159,7 +4159,7 @@ fn resumed_sparse_transcript_double_click_copies_visible_word_after_scroll() {
         click_visible_transcript_word(&mut app, &target);
     }
 
-    let copied = app.core_probe().clipboard.kill_ring.current();
+    let copied = app.core_probe().clipboard.kill_ring.current().text();
     assert_eq!(
         copied, target.text,
         "visible_lines={:?}",
@@ -4187,7 +4187,7 @@ fn resumed_sparse_transcript_vim_iw_copies_visible_word_after_scroll() {
         app.type_char(key);
     }
 
-    let copied = app.core_probe().clipboard.kill_ring.current();
+    let copied = app.core_probe().clipboard.kill_ring.current().text();
     assert_eq!(
         copied,
         expected_vim_inner_word(&target),
@@ -8244,7 +8244,7 @@ fn transcript_vim_visual_yank_copies_document_range() {
     app.type_char('G');
     app.type_char('y');
 
-    let yank = app.core_probe().clipboard.kill_ring.current();
+    let yank = app.core_probe().clipboard.kill_ring.current().text();
     assert!(yank.contains("row 000 alpha beta"), "yank was {yank:?}");
     assert!(yank.contains("row 029 alpha beta"), "yank was {yank:?}");
     let now = app.core_probe().clock.instant_now();
@@ -8690,7 +8690,13 @@ fn block_motions_ignore_unbound_kinds() {
 fn block_motions_compose_with_yank() {
     let mut app = block_nav_app(true);
     block_nav(&mut app, "ggy]u");
-    let copied = app.core_probe().clipboard.kill_ring.current().to_string();
+    let copied = app
+        .core_probe()
+        .clipboard
+        .kill_ring
+        .current()
+        .text()
+        .to_string();
     assert!(copied.contains("first question"), "{copied:?}");
     assert!(!copied.contains("second question"), "{copied:?}");
 }
@@ -9381,7 +9387,7 @@ fn resume_preview_mouse_drag_paints_selection_and_copies() {
 
     app.mouse(MouseEventKind::Up(MouseButton::Left), end);
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "selectable line 17\n\nresume selectable"
     );
 }

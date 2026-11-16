@@ -2106,7 +2106,7 @@ fn user_content(content: &Content) -> Result<Vec<Value>, String> {
         Content::Parts(parts) => parts.iter().map(|part| match part {
             protocol::ContentPart::Text { text } => Ok(json!({"type":"text","text":text})),
             protocol::ContentPart::ImageUrl { url, .. } => {
-                let (mime, data) = url.strip_prefix("data:").and_then(|s| s.split_once(";base64,")).ok_or("Claude Code requires image attachments as base64 data URLs")?;
+                let (mime, data) = crate::image::split_data_url(url).ok_or("Claude Code requires image attachments as base64 data URLs")?;
                 Ok(json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}}))
             }
         }).collect(),

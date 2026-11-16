@@ -3,11 +3,11 @@
 use super::{PromptCtx, PromptCtxRef, PromptState, ATTACHMENT_MARKER};
 use crate::smelt_edit::VimMode;
 use smelt_buffer::text::{next_grapheme_boundary, prev_grapheme_boundary, slice};
-use smelt_core::attachment::AttachmentId;
+use smelt_core::attachment::Attachment;
 
 impl PromptState {
     /// Shrink prompt source over `range` and keep every byte-offset
-    /// anchor valid: drop attachment_ids whose markers lived in the range,
+    /// anchor valid: drop attachments whose markers lived in the range,
     /// remove the source bytes, then clamp cpos / selection_anchor /
     /// visual_anchor onto the new source. Use this whenever the range is
     /// computed from offsets that might also live in other anchors.
@@ -28,14 +28,14 @@ impl PromptState {
         ctx.buf.history.save(crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
             ctx.win.cpos(),
-            &ctx.buf.attachment_ids,
+            &ctx.buf.attachments,
         ));
     }
 
     pub(super) fn insert_char(&mut self, ctx: &mut PromptCtx<'_>, c: char) {
         // ATTACHMENT_MARKER is a private sentinel that must only enter the
-        // buffer through `insert_attachment_id`, which keeps source markers
-        // and `attachment_ids` in 1:1 sync. A raw keystroke or paste of the
+        // buffer through `insert_attachment`, which keeps source markers
+        // and `attachments` in 1:1 sync. A raw keystroke or paste of the
         // sentinel char would desync the two and break every downstream
         // attachment indexing path.
         // Control characters do not have a stable prompt glyph model when
@@ -266,7 +266,7 @@ impl PromptState {
         let current = crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
             ctx.win.cpos(),
-            &ctx.buf.attachment_ids,
+            &ctx.buf.attachments,
         );
         if let Some(entry) = ctx.buf.history.undo(current) {
             self.install_source(ctx, entry.buf, entry.cpos, entry.attachments);
@@ -277,7 +277,7 @@ impl PromptState {
         let current = crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
             ctx.win.cpos(),
-            &ctx.buf.attachment_ids,
+            &ctx.buf.attachments,
         );
         if let Some(entry) = ctx.buf.history.redo(current) {
             self.install_source(ctx, entry.buf, entry.cpos, entry.attachments);
@@ -321,8 +321,8 @@ impl PromptState {
     pub(super) fn insert_paste(&mut self, ctx: &mut PromptCtx<'_>, data: String) {
         // Normalize `\r\n` and lone `\r` to `\n` (terminals in bracketed-paste mode send `\r`).
         // Also strip ATTACHMENT_MARKER - that sentinel must only enter the
-        // buffer through `insert_attachment_id` so source markers and
-        // `attachment_ids` stay in 1:1 sync.
+        // buffer through `insert_attachment` so source markers and
+        // `attachments` stay in 1:1 sync.
         let data = data
             .replace("\r\n", "\n")
             .replace('\r', "\n")
@@ -347,8 +347,8 @@ impl PromptState {
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
-    pub(super) fn insert_attachment_id(&mut self, ctx: &mut PromptCtx<'_>, id: AttachmentId) {
-        let p = ctx.buf.text_mut().insert_marker(ctx.win.cpos(), id);
+    pub(super) fn insert_attachment(&mut self, ctx: &mut PromptCtx<'_>, attachment: Attachment) {
+        let p = ctx.buf.text_mut().insert_marker(ctx.win.cpos(), attachment);
         let cursor =
             smelt_buffer::text::ceil_grapheme(ctx.buf.source(), p + ATTACHMENT_MARKER.len_utf8());
         ctx.win.set_cpos(cursor);

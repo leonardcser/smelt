@@ -1,191 +1,96 @@
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+//! Attachments: content a prompt carries alongside its text.
+//!
+//! A buffer marks each attachment with one `ATTACHMENT_MARKER` char and keeps
+//! the [`Attachment`] at the same ordinal in its attachment list. Attachments
+//! are values: undo snapshots, the kill ring and the stash hold them directly,
+//! so they outlive the buffer they came from.
 
-pub type AttachmentId = u64;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 pub use smelt_text::ATTACHMENT_MARKER;
 
-/// A single attachment (currently images only).
+/// An attached image. Clones share the content; equality is identity, so two
+/// pastes of the same picture are two attachments. Use [`content_key`] where
+/// equal bytes must count as one image, such as caches and the request
+/// payload.
+///
+/// [`content_key`]: Attachment::content_key
 #[derive(Clone, Debug)]
-pub enum Attachment {
-    Image { label: String, data_url: String },
+pub struct Attachment(Arc<Image>);
+
+#[derive(Debug)]
+struct Image {
+    label: String,
+    data_url: String,
+    content_key: u64,
 }
 
 impl Attachment {
+    pub fn image(label: String, data_url: String) -> Self {
+        let digest = Sha256::new()
+            .chain_update(b"image:")
+            .chain_update(data_url.as_bytes())
+            .finalize();
+        let content_key = u64::from_le_bytes(digest[..8].try_into().expect("8 digest bytes"));
+        Self(Arc::new(Image {
+            label,
+            data_url,
+            content_key,
+        }))
+    }
+
+    pub fn label(&self) -> &str {
+        &self.0.label
+    }
+
+    pub fn data_url(&self) -> &str {
+        &self.0.data_url
+    }
+
+    /// A key for caches of derived data, equal for equal content.
+    pub fn content_key(&self) -> u64 {
+        self.0.content_key
+    }
+
+    /// The `[label]` the prompt shows, with control chars made visible.
     pub fn display_label(&self) -> String {
-        match self {
-            Attachment::Image { label, .. } => format!("[{}]", display_safe_label(label)),
-        }
-    }
-
-    pub fn expanded_text(&self) -> &str {
-        match self {
-            Attachment::Image { .. } => "",
-        }
-    }
-
-    fn content_hash(&self) -> String {
-        let mut hasher = Sha256::new();
-        match self {
-            Attachment::Image { data_url, .. } => {
-                hasher.update(b"image:");
-                hasher.update(data_url.as_bytes());
-            }
-        }
-        smelt_text::hex_lower(&hasher.finalize())
+        let label: String = self
+            .0
+            .label
+            .chars()
+            .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
+            .collect();
+        format!("[{label}]")
     }
 }
 
-fn display_safe_label(label: &str) -> String {
-    label
-        .chars()
-        .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
-        .collect()
-}
-
-// ── Store ────────────────────────────────────────────────────────────────────
-
-/// Session-global attachment registry.
-pub struct AttachmentStore {
-    entries: HashMap<AttachmentId, Attachment>,
-    next_id: AttachmentId,
-    hash_to_id: HashMap<String, AttachmentId>,
-}
-
-impl Default for AttachmentStore {
-    fn default() -> Self {
-        Self::new()
+impl PartialEq for Attachment {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl AttachmentStore {
-    pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            next_id: 1,
-            hash_to_id: HashMap::new(),
-        }
-    }
-
-    /// Insert an attachment, deduplicating by content hash. Returns the id.
-    pub fn insert(&mut self, att: Attachment) -> AttachmentId {
-        let hash = att.content_hash();
-        if let Some(&existing) = self.hash_to_id.get(&hash) {
-            return existing;
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.hash_to_id.insert(hash, id);
-        self.entries.insert(id, att);
-        id
-    }
-
-    pub fn get(&self, id: AttachmentId) -> Option<&Attachment> {
-        self.entries.get(&id)
-    }
-
-    pub fn display_label(&self, id: AttachmentId) -> String {
-        self.entries
-            .get(&id)
-            .map(|a| a.display_label())
-            .unwrap_or_else(|| "[?]".into())
-    }
-
-    pub fn expanded_text(&self, id: AttachmentId) -> &str {
-        self.entries
-            .get(&id)
-            .map(|a| a.expanded_text())
-            .unwrap_or("")
-    }
-
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.hash_to_id.clear();
-        self.next_id = 1;
-    }
-
-    pub fn insert_image(&mut self, label: String, data_url: String) -> AttachmentId {
-        self.insert(Attachment::Image { label, data_url })
-    }
-}
+impl Eq for Attachment {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn insert_deduplicates() {
-        let mut store = AttachmentStore::new();
-        let id1 = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        let id2 = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        assert_eq!(id1, id2);
-        assert_eq!(store.entries.len(), 1);
+    fn equal_content_shares_a_content_key_but_not_identity() {
+        let a = Attachment::image("a.png".into(), "data:image/png;base64,AAA".into());
+        let b = Attachment::image("b.png".into(), "data:image/png;base64,AAA".into());
+        let c = Attachment::image("a.png".into(), "data:image/png;base64,CCC".into());
+        assert_eq!(a.content_key(), b.content_key());
+        assert_ne!(a.content_key(), c.content_key());
+        assert_ne!(a, b);
+        assert_eq!(a, a.clone());
     }
 
     #[test]
-    fn different_content_different_ids() {
-        let mut store = AttachmentStore::new();
-        let id1 = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        let id2 = store.insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        assert_ne!(id1, id2);
-        assert_eq!(store.entries.len(), 2);
-    }
-
-    #[test]
-    fn display_label() {
-        let mut store = AttachmentStore::new();
-        let id = store.insert_image("screenshot.png".into(), "data:...".into());
-        assert_eq!(store.display_label(id), "[screenshot.png]");
-    }
-
-    #[test]
-    fn expanded_text_image() {
-        let mut store = AttachmentStore::new();
-        let id = store.insert_image("img.png".into(), "data:...".into());
-        assert_eq!(store.expanded_text(id), "");
-    }
-
-    // ── id lookup ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn get_returns_attachment_for_known_id() {
-        let mut store = AttachmentStore::new();
-        let id = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        let att = store.get(id).expect("known id resolves");
-        match att {
-            Attachment::Image { label, .. } => assert_eq!(label, "a.png"),
-        }
-    }
-
-    #[test]
-    fn get_returns_none_for_unknown_id() {
-        let store = AttachmentStore::new();
-        assert!(store.get(99999).is_none());
-    }
-
-    #[test]
-    fn display_label_for_unknown_id_returns_question_mark_placeholder() {
-        let store = AttachmentStore::new();
-        assert_eq!(store.display_label(99999), "[?]");
-    }
-
-    #[test]
-    fn expanded_text_for_unknown_id_returns_empty() {
-        let store = AttachmentStore::new();
-        assert_eq!(store.expanded_text(99999), "");
-    }
-
-    // ── clear ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn clear_removes_all_entries_and_resets_id_minting() {
-        let mut store = AttachmentStore::new();
-        let id1 = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        store.insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        store.clear();
-        assert!(store.get(id1).is_none(), "old ids are gone after clear");
-        // Re-inserting the same content gets id 1 again - counter was reset.
-        let new_id = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        assert_eq!(new_id, 1);
+    fn display_label_brackets_the_label_and_hides_control_chars() {
+        let a = Attachment::image("shot\n1.png".into(), "data:".into());
+        assert_eq!(a.display_label(), "[shot\u{FFFD}1.png]");
     }
 }

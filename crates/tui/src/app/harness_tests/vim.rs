@@ -346,7 +346,10 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
     app.type_char('e');
     app.type_char('y');
 
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "alpha"
+    );
     assert_eq!(
         app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some("alpha")
@@ -391,7 +394,10 @@ fn keyboard_yank_in_readonly_viewer_preserves_grapheme_clusters() {
     app.type_char('$');
     app.type_char('y');
 
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), expected);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        expected
+    );
     assert_eq!(
         app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some(expected)
@@ -812,7 +818,10 @@ fn vim_yiw_in_viewer_flashes_and_keeps_the_cursor_at_the_word_start() {
     app.type_text("wl");
     app.type_text("yiw");
 
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "beta");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "beta"
+    );
     let win = app.ui_probe().win(leaf).expect("overlay window");
     assert_eq!(win.cpos(), 6, "yiw leaves the cursor at the word start");
     assert!(win.byte_yank_flash_until().is_some());
@@ -835,7 +844,10 @@ fn transcript_yiw_flashes_and_keeps_the_cursor_at_the_word_start() {
     app.type_text("yiw");
     app.render_silent();
 
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "alpha"
+    );
     let cursor = app.transcript_window().row_cursor.unwrap();
     assert_eq!(cursor.row as usize, row);
     assert_eq!(cursor.byte_col, word_start);
@@ -987,12 +999,21 @@ fn transcript_find_motions_repeat_with_semicolon_and_comma() {
 fn transcript_yank_to_a_found_character() {
     let (mut app, row) = transcript_at(100, "row 003 alpha beta");
     app.type_text("0yfa");
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "row 003 a");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "row 003 a"
+    );
     assert_eq!(transcript_cursor(&app), (row, 0));
     app.type_text("yta");
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "row 003 ");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "row 003 "
+    );
     app.type_text("$yFl");
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "lpha bet");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "lpha bet"
+    );
 }
 
 #[test]
@@ -1017,7 +1038,7 @@ fn transcript_percent_jumps_between_brackets_across_rows() {
 
     app.type_text("0f(y%");
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "(one, [two])"
     );
 
@@ -1171,7 +1192,10 @@ fn prompt_gv_reselects_the_last_visual_selection() {
     app.type_text("0viw");
     app.press(KeyCode::Esc);
     app.type_text("$gvy");
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "alpha"
+    );
     assert_eq!(app.prompt_cpos(), 0);
 }
 
@@ -1192,7 +1216,10 @@ fn transcript_gv_reselects_the_last_visual_selection() {
     app.type_text("jgvy");
     app.render_silent();
 
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "alpha"
+    );
 }
 
 #[test]
@@ -1205,7 +1232,10 @@ fn viewer_gv_reselects_the_last_visual_selection() {
     app.press(KeyCode::Esc);
     app.type_text("$gvy");
 
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "beta");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "beta"
+    );
 }
 
 fn transcript_with_code_block() -> (TestApp, usize) {
@@ -1229,7 +1259,7 @@ fn transcript_yank_in_code_block_copies_the_code() {
     let (mut app, _) = transcript_with_code_block();
     app.type_text("yic");
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "fn main() {}\nlet x = 1;"
     );
 }
@@ -1238,7 +1268,13 @@ fn transcript_yank_in_code_block_copies_the_code() {
 fn transcript_yank_around_code_block_copies_fenced_markdown() {
     let (mut app, _) = transcript_with_code_block();
     app.type_text("yac");
-    let copied = app.core_probe().clipboard.kill_ring.current().to_string();
+    let copied = app
+        .core_probe()
+        .clipboard
+        .kill_ring
+        .current()
+        .text()
+        .to_string();
     assert!(
         copied.starts_with("```rust\nfn main() {}\nlet x = 1;\n```"),
         "{copied:?}"
@@ -1252,7 +1288,7 @@ fn transcript_visual_code_block_selects_only_the_code() {
     assert_eq!(app.transcript_window().vim_mode, VimMode::Visual);
     app.type_text("y");
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "fn main() {}\nlet x = 1;"
     );
     assert_eq!(transcript_cursor(&app).0, row);
@@ -1265,7 +1301,7 @@ fn transcript_code_block_object_looks_ahead_from_prose() {
     move_transcript_cursor_to_row(&mut app, intro as crate::smelt_edit::RowIndex);
     app.type_text("yic");
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "fn main() {}\nlet x = 1;"
     );
     assert_eq!(transcript_cursor(&app).0, row);
@@ -1277,7 +1313,7 @@ fn transcript_code_block_object_finds_nothing_after_the_last_block() {
     let outro = transcript_row_of(&app, "outro");
     move_transcript_cursor_to_row(&mut app, outro as crate::smelt_edit::RowIndex);
     app.type_text("yic");
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current().text(), "");
 }
 
 #[test]
@@ -1296,7 +1332,7 @@ fn transcript_pair_object_looks_ahead_on_the_line() {
     move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
     app.type_text("0yi(");
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "chapter two"
     );
     let cursor = transcript_cursor(&app);
@@ -1314,12 +1350,13 @@ fn transcript_yank_into_a_named_register_keeps_the_clipboard() {
     );
     app.type_text("w\"ayiw");
     let ring = &app.core_probe().clipboard.kill_ring;
-    assert_eq!(ring.register('a'), Some(("003", false)));
-    assert_eq!(ring.current(), "003");
+    let register = |name| ring.register(name).map(|(text, lw)| (text.text(), lw));
+    assert_eq!(register('a'), Some(("003", false)));
+    assert_eq!(ring.current().text(), "003");
     assert_eq!(ring.last_clipboard_write(), Some("row"));
-    assert_eq!(ring.register('0'), Some(("row", false)));
+    assert_eq!(register('0'), Some(("row", false)));
     app.type_text("w\"_yiw");
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "003");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current().text(), "003");
 }
 
 #[test]

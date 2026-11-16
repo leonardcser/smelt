@@ -304,7 +304,7 @@ impl TuiApp {
                                     let replay = submission.replay.take().unwrap_or_else(|| {
                                         crate::input::PromptReplay {
                                             source: submission.display.clone(),
-                                            ids: Vec::new(),
+                                            attachments: Vec::new(),
                                             image_indices: Vec::new(),
                                         }
                                     });
@@ -406,7 +406,7 @@ impl TuiApp {
             return;
         }
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        if pctx.buf.source().is_empty() && pctx.buf.attachment_ids.is_empty() {
+        if pctx.buf.source().is_empty() && pctx.buf.attachments.is_empty() {
             self.prompt.restore_stash(&mut pctx);
         }
     }
@@ -1790,8 +1790,10 @@ impl TuiApp {
             Some(name) if name.is_ascii_alphabetic() => {
                 let ring = &mut self.core.clipboard.kill_ring;
                 ring.store(name, out.kill_ring, false);
-                let (text, linewise) = ring.register(name).unwrap_or_default();
-                let text = text.to_owned();
+                let (text, linewise) = ring
+                    .register(name)
+                    .map(|(text, linewise)| (text.clone(), linewise))
+                    .unwrap_or_default();
                 ring.set_with_linewise(text, linewise);
             }
             _ => {
@@ -2453,15 +2455,13 @@ mod tests {
             format!("first {marker}\nsecond {marker}\ndraft{marker}")
         );
         let pctx = crate::input::prompt_ctx_ref(&app.tui.ui);
-        let store = app.tui.prompt.attachment_store();
-        let store = store.lock().unwrap();
-        assert_eq!(pctx.buf.attachment_ids.len(), 3);
-        assert_eq!(store.display_label(pctx.buf.attachment_ids[0]), "[one.png]");
-        assert_eq!(store.display_label(pctx.buf.attachment_ids[1]), "[two.png]");
-        assert_eq!(
-            store.display_label(pctx.buf.attachment_ids[2]),
-            "[draft.png]"
-        );
+        let labels: Vec<_> = pctx
+            .buf
+            .attachments
+            .iter()
+            .map(|attachment| attachment.display_label())
+            .collect();
+        assert_eq!(labels, ["[one.png]", "[two.png]", "[draft.png]"]);
     }
 
     #[test]
@@ -2509,7 +2509,7 @@ mod tests {
         let _ = app.flush_persist();
         app.type_text("literal [pic.png] before ");
         insert_prompt_image(&mut app, "pic.png");
-        let id = app.tui.prompt_buf().attachment_ids[0];
+        let id = app.tui.prompt_buf().attachments[0].clone();
         app.type_text(" between ");
         {
             let pctx = crate::input::prompt_ctx_mut(&mut app.tui.ui);
@@ -2527,8 +2527,8 @@ mod tests {
 
         assert_eq!(app.state().prompt_text, expected);
         let pctx = crate::input::prompt_ctx_ref(&app.tui.ui);
-        assert_eq!(pctx.buf.attachment_ids.len(), 2);
-        assert_eq!(pctx.buf.attachment_ids[0], pctx.buf.attachment_ids[1]);
+        assert_eq!(pctx.buf.attachments.len(), 2);
+        assert_eq!(pctx.buf.attachments[0], pctx.buf.attachments[1]);
         assert_eq!(
             app.tui
                 .prompt

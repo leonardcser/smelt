@@ -16,7 +16,7 @@ use super::window::{
 };
 use super::{Clipboard, UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use smelt_buffer::attached::AttachedTextMut;
+use smelt_buffer::attached::{AttachedText, AttachedTextMut};
 use smelt_buffer::attachment::ATTACHMENT_MARKER;
 
 mod normal;
@@ -187,7 +187,7 @@ impl VimContext<'_> {
         self.history.save(UndoEntry::snapshot(
             self.buf.as_str(),
             *self.cpos,
-            self.buf.ids(),
+            self.buf.attachments(),
         ));
     }
 
@@ -204,7 +204,7 @@ impl VimContext<'_> {
 
     /// Undo: pop the most recent snapshot, stash current state for redo.
     fn undo(&mut self) {
-        let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.ids());
+        let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.attachments());
         if let Some(entry) = self.history.undo(current) {
             self.restore(entry);
         }
@@ -212,7 +212,7 @@ impl VimContext<'_> {
 
     /// Redo: pop the most recent redo, stash current state for undo.
     fn redo(&mut self) {
-        let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.ids());
+        let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.attachments());
         if let Some(entry) = self.history.redo(current) {
             self.restore(entry);
         }
@@ -223,23 +223,21 @@ impl VimContext<'_> {
     /// clipboard is **not** written here - `Window::handle_key`'s caller
     /// observes the kill ring's `yank_tick` change and pushes the rendered
     /// (`BufferCopy::copy`) form to the system clipboard. Keeping vim out of
-    /// the system clipboard means raw markers stay in the kill ring for
+    /// the system clipboard means attachments stay in the kill ring for
     /// paste-back fidelity, while the clipboard gets `[label]` etc. A named
     /// register keeps the clipboard as it was; `"_` stores nothing.
     fn yank_range(&mut self, op: Op, start: usize, end: usize, linewise: bool) {
-        // The kill ring carries plain text only; an attachment id has no
-        // representation here. If the yanked range covers an
-        // ATTACHMENT_MARKER, dropping the marker is the only way to keep
-        // a later `p`/`P` from producing orphan marker bytes in source.
-        let text = self.buf.as_str()[start..end].replace(ATTACHMENT_MARKER, "");
+        let text = self.buf.slice(start..end);
         let ring = &mut self.clipboard.kill_ring;
         match self.vim_state.register {
             Some('_') => {}
             Some(name) if name.is_ascii_alphabetic() => {
                 ring.store(name, text, linewise);
                 // The unnamed register follows the last write, as in vim.
-                let (text, linewise) = ring.register(name).unwrap_or_default();
-                let (text, linewise) = (text.to_owned(), linewise);
+                let (text, linewise) = ring
+                    .register(name)
+                    .map(|(text, linewise)| (text.clone(), linewise))
+                    .unwrap_or_default();
                 ring.set_quietly(text, linewise, start, end);
             }
             _ => {
@@ -254,19 +252,22 @@ impl VimContext<'_> {
     /// The text `p` puts from the pending register, and whether it is
     /// linewise. The unnamed register first takes the system clipboard when
     /// something else changed it.
-    fn put_text(&mut self) -> (String, bool) {
+    fn put_text(&mut self) -> (AttachedText, bool) {
         let ring = &self.clipboard.kill_ring;
         match self.vim_state.register {
-            Some('_') => (String::new(), false),
-            Some('.') => (ring.last_insert().unwrap_or_default().to_owned(), false),
+            Some('_') => (AttachedText::default(), false),
+            Some('.') => (
+                AttachedText::plain(ring.last_insert().unwrap_or_default()),
+                false,
+            ),
             Some(name) if name == '0' || name.is_ascii_alphabetic() => ring
                 .register(name)
-                .map(|(text, linewise)| (text.to_owned(), linewise))
+                .map(|(text, linewise)| (text.clone(), linewise))
                 .unwrap_or_default(),
             _ => {
                 self.sync_paste_from_clipboard();
                 let ring = &self.clipboard.kill_ring;
-                (ring.current().to_owned(), ring.is_linewise())
+                (ring.current().clone(), ring.is_linewise())
             }
         }
     }
@@ -286,7 +287,7 @@ impl VimContext<'_> {
         }
         self.clipboard
             .kill_ring
-            .set_with_linewise(text.clone(), false);
+            .set_with_linewise(AttachedText::plain(text.clone()), false);
         self.clipboard.kill_ring.record_clipboard_write(text);
     }
 
@@ -314,6 +315,18 @@ impl VimContext<'_> {
         let p = self.buf.insert_str(at, text);
         self.vim_state.clamp_visual_anchor(self.buf.as_str());
         p
+    }
+
+    /// Replace `range` with register text, attachments included, returning
+    /// the inserted byte range. Clamps the visual anchor like `insert_str`.
+    fn replace_attached(
+        &mut self,
+        range: std::ops::Range<usize>,
+        text: &AttachedText,
+    ) -> std::ops::Range<usize> {
+        let range = self.buf.replace_attached(range, text);
+        self.vim_state.clamp_visual_anchor(self.buf.as_str());
+        range
     }
 }
 

@@ -2410,7 +2410,7 @@ fn diff_visual_copy_crosses_materialized_rows_and_esc_leaves_selection_first() {
     assert_eq!(app.ui_probe().win(win).unwrap().scroll_top(), scroll);
     app.type_char('y');
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         (0..48)
             .map(|_| "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789")
             .collect::<Vec<_>>()
@@ -3162,7 +3162,7 @@ fn native_view_demand_tracks_mounts_and_copy_uses_each_window_width() {
             }))
             .unwrap();
         assert_eq!(
-            copy.kill_ring,
+            copy.kill_ring.text(),
             vec![format!("width {width}"); 700].join("\n")
         );
     }
@@ -4095,7 +4095,7 @@ fn diff_preview_mouse_drag_paints_selection_and_copies() {
 
     app.mouse(MouseEventKind::Up(MouseButton::Left), end);
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         format!("{}\n{line}\n{}", &line[2..], &line[..11])
     );
 }

@@ -89,6 +89,9 @@ local groups = {
   -- stays unfilled and the transcript block can show `SmeltUserBg`
   -- underneath.
   SmeltExecPrefix     = fg(197, { bold = true }),
+  -- Layers over the attachment's accent, so the label under the cursor
+  -- reads as one accent pill whatever the accent is.
+  SmeltAttachmentCursor = { reverse = true },
 
   -- Diff renderer row fills and inline change fills. Override these like any other group.
   SmeltDiffAddCount       = fg({ dark = { 113, 192, 117 }, light = { 50, 123, 61 } }),

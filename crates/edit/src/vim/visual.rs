@@ -105,6 +105,7 @@ pub(super) fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             *ctx.cpos = line_end_normal(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
+        KeyCode::Delete => handle_visual_char('x', ctx),
         _ => Action::Consumed,
     }
 }
@@ -346,17 +347,20 @@ pub(super) fn visual_put(keep_register: bool, ctx: &mut VimContext<'_>) -> Actio
         span;
     let selected_lines = matches!(span, Span::Lines(..));
     let end = end.min(ctx.buf.len());
-    let replaced = ctx.buf.as_str()[start..end].to_string();
+    let replaced = ctx.buf.slice(start..end);
     // Lines put into a charwise selection split it; text put into whole lines
     // takes their place.
     let put = if put_lines && !selected_lines {
-        format!("\n{text}\n")
+        let mut put = AttachedText::plain("\n");
+        put.push(&text);
+        put.push_str("\n");
+        put
     } else {
         text
     };
     *ctx.cpos = start;
     ctx.save_undo();
-    ctx.replace_range(start, end, &put);
+    let inserted = ctx.replace_attached(start..end, &put);
     let first = if put_lines && !selected_lines {
         start + 1
     } else {
@@ -364,18 +368,19 @@ pub(super) fn visual_put(keep_register: bool, ctx: &mut VimContext<'_>) -> Actio
     };
     *ctx.cpos = if put_lines || selected_lines {
         first_non_blank_at(ctx.buf.as_str(), first)
-    } else if put.contains('\n') {
+    } else if put.text().contains('\n') {
         start
     } else {
-        prev_grapheme_boundary(ctx.buf.as_str(), start + put.len()).max(start)
+        prev_grapheme_boundary(ctx.buf.as_str(), inserted.end).max(start)
     };
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
     if !keep_register {
+        let labelled = replaced.labelled().into_owned();
         ctx.clipboard
             .kill_ring
-            .set_with_linewise(replaced.clone(), selected_lines);
-        if ctx.clipboard.write(&replaced).is_ok() {
-            ctx.clipboard.kill_ring.record_clipboard_write(replaced);
+            .set_with_linewise(replaced, selected_lines);
+        if ctx.clipboard.write(&labelled).is_ok() {
+            ctx.clipboard.kill_ring.record_clipboard_write(labelled);
         }
     }
     Action::Consumed

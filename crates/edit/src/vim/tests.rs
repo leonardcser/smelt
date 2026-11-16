@@ -94,7 +94,7 @@ fn mem_sink(initial: Option<&str>) -> std::rc::Rc<std::cell::RefCell<MemSinkInne
 struct TestHarness {
     buf: String,
     cpos: usize,
-    attachments: Vec<smelt_buffer::attachment::AttachmentId>,
+    attachments: Vec<smelt_buffer::attachment::Attachment>,
     clipboard: Clipboard,
     history: UndoHistory,
     mode: VimMode,
@@ -502,7 +502,7 @@ fn dot_repeats_paste() {
     let mut h = TestHarness::new("ab");
     h.clipboard
         .kill_ring
-        .set_with_linewise("X".to_string(), false);
+        .set_with_linewise(AttachedText::plain("X"), false);
     h.handle(key('p'));
     assert_eq!(h.buf, "aXb");
 
@@ -836,7 +836,7 @@ fn test_paste() {
     let mut h = TestHarness::new("hello");
     h.clipboard
         .kill_ring
-        .set_with_linewise(" world".to_string(), false);
+        .set_with_linewise(AttachedText::plain(" world"), false);
     h.cpos = 4;
     h.handle(key('p'));
     assert_eq!(h.buf, "hello world");
@@ -848,7 +848,7 @@ fn paste_cursor_stays_on_a_grapheme_boundary_after_resegmentation() {
     after
         .clipboard
         .kill_ring
-        .set_with_linewise("\u{301}".to_string(), false);
+        .set_with_linewise(AttachedText::plain("\u{301}"), false);
     after.handle(key('p'));
     assert_eq!(after.buf, "a\u{301}");
     assert_eq!(after.cpos, 0);
@@ -857,7 +857,7 @@ fn paste_cursor_stays_on_a_grapheme_boundary_after_resegmentation() {
     before
         .clipboard
         .kill_ring
-        .set_with_linewise("🇧".to_string(), false);
+        .set_with_linewise(AttachedText::plain("🇧"), false);
     before.handle(key('P'));
     assert_eq!(before.buf, "🇧🇨🇦");
     assert_eq!(before.cpos, 0);
@@ -1051,6 +1051,56 @@ fn test_yank_paste() {
     assert_eq!(h.buf, "hello worldhello ");
 }
 
+/// `a`, an image and `b`, with the cursor on the image.
+fn harness_with_image() -> (TestHarness, smelt_buffer::attachment::Attachment) {
+    use smelt_buffer::attachment::{Attachment, ATTACHMENT_MARKER};
+    let image = Attachment::image("cat.png".into(), "data:cat".into());
+    let mut h = TestHarness::new(&format!("a{ATTACHMENT_MARKER}b"));
+    h.attachments.push(image.clone());
+    h.cpos = 1;
+    (h, image)
+}
+
+#[test]
+fn cut_attachment_pastes_back_as_the_same_attachment() {
+    use smelt_buffer::attachment::ATTACHMENT_MARKER;
+    let (mut h, image) = harness_with_image();
+    h.handle(key('x'));
+    assert_eq!(h.buf, "ab");
+    assert!(h.attachments.is_empty());
+    h.handle(key('p'));
+    assert_eq!(h.buf, format!("ab{ATTACHMENT_MARKER}"));
+    assert_eq!(h.attachments, vec![image.clone()]);
+    assert_eq!(h.cpos, 2, "cursor sits on the pasted attachment");
+    h.handle(key('P'));
+    assert_eq!(h.attachments, vec![image.clone(), image]);
+}
+
+#[test]
+fn yanked_attachment_fills_every_count_and_register() {
+    use smelt_buffer::attachment::ATTACHMENT_MARKER;
+    let (mut h, image) = harness_with_image();
+    for k in ['"', 'q', 'y', 'l', '0', '2', '"', 'q', 'P'] {
+        h.handle(key(k));
+    }
+    assert_eq!(
+        h.buf,
+        format!("{ATTACHMENT_MARKER}{ATTACHMENT_MARKER}a{ATTACHMENT_MARKER}b")
+    );
+    assert_eq!(h.attachments, vec![image.clone(), image.clone(), image]);
+}
+
+#[test]
+fn undoing_a_paste_drops_only_the_pasted_attachment() {
+    let (mut h, image) = harness_with_image();
+    h.handle(key('y'));
+    h.handle(key('l'));
+    h.handle(key('p'));
+    assert_eq!(h.attachments.len(), 2);
+    h.handle(key('u'));
+    assert_eq!(h.attachments, vec![image]);
+}
+
 #[test]
 fn yank_stages_in_kill_ring_with_source_range() {
     // Vim deliberately does NOT push to the system clipboard - the host
@@ -1063,7 +1113,7 @@ fn yank_stages_in_kill_ring_with_source_range() {
     let tick_before = h.clipboard.kill_ring.yank_tick();
     h.handle(key('y'));
     h.handle(key('w'));
-    assert_eq!(h.clipboard.kill_ring.current(), "hello ");
+    assert_eq!(h.clipboard.kill_ring.current().text(), "hello ");
     assert_eq!(h.clipboard.kill_ring.source_range(), Some((0, 6)));
     assert!(h.clipboard.kill_ring.yank_tick() > tick_before);
     // System clipboard was not touched by vim.
@@ -1080,7 +1130,7 @@ fn paste_prefers_external_clipboard_when_updated() {
     let mut h = TestHarness::with_clipboard("abc", clipboard);
     h.clipboard
         .kill_ring
-        .set_with_linewise("stale".to_string(), false);
+        .set_with_linewise(AttachedText::plain("stale"), false);
     // Move cursor to end so `p` inserts after.
     h.handle(key('$'));
     h.handle(key('p'));
@@ -1097,7 +1147,7 @@ fn paste_keeps_kill_ring_when_clipboard_matches_last_write() {
     // Simulate a prior `yy`: linewise + clipboard mirror.
     h.clipboard
         .kill_ring
-        .set_with_linewise("line\n".to_string(), true);
+        .set_with_linewise(AttachedText::plain("line\n"), true);
     h.clipboard
         .kill_ring
         .record_clipboard_write("line\n".to_string());
@@ -1121,7 +1171,7 @@ fn test_yy_keeps_cursor_in_place() {
     h.handle(key('y'));
     h.handle(key('y'));
     assert_eq!(h.cpos, before, "yy must not move cursor");
-    assert_eq!(h.clipboard.kill_ring.current(), "hello world");
+    assert_eq!(h.clipboard.kill_ring.current().text(), "hello world");
 }
 
 #[test]
@@ -1525,7 +1575,7 @@ fn capital_y_yanks_to_the_end_of_the_line() {
     let mut h = TestHarness::new("one two\nthree");
     h.cpos = 4;
     keys(&mut h, "Y");
-    assert_eq!(h.clipboard.kill_ring.current(), "two");
+    assert_eq!(h.clipboard.kill_ring.current().text(), "two");
     assert!(!h.clipboard.kill_ring.is_linewise());
 }
 
@@ -1564,7 +1614,7 @@ fn cc_keeps_the_indent_and_the_surrounding_lines() {
     h.cpos = 4;
     keys(&mut h, "cc");
     assert_eq!(h.buf, "a\n  \nc");
-    assert_eq!(h.clipboard.kill_ring.current(), "  bb");
+    assert_eq!(h.clipboard.kill_ring.current().text(), "  bb");
     assert!(h.clipboard.kill_ring.is_linewise());
 }
 
@@ -2001,7 +2051,7 @@ fn test_capital_p_cursor_on_last_pasted_char() {
     let mut h = TestHarness::new("world");
     h.clipboard
         .kill_ring
-        .set_with_linewise("hello".to_string(), false);
+        .set_with_linewise(AttachedText::plain("hello"), false);
     h.handle(key('P'));
     assert_eq!(h.buf, "helloworld");
     assert_eq!(h.cpos, 4);
@@ -2095,18 +2145,33 @@ fn named_registers_hold_text_apart_from_the_unnamed_one() {
         tick,
         "a named yank leaves the system clipboard alone"
     );
-    assert_eq!(h.clipboard.kill_ring.register('b'), Some(("one ", false)));
+    assert_eq!(
+        h.clipboard
+            .kill_ring
+            .register('b')
+            .map(|(text, linewise)| (text.text(), linewise)),
+        Some(("one ", false))
+    );
 }
 
 #[test]
 fn uppercase_registers_append() {
     let mut h = TestHarness::new("one two");
     keys(&mut h, "\"ayiww\"Ayiw");
-    assert_eq!(h.clipboard.kill_ring.register('a'), Some(("onetwo", false)));
+    assert_eq!(
+        h.clipboard
+            .kill_ring
+            .register('a')
+            .map(|(text, linewise)| (text.text(), linewise)),
+        Some(("onetwo", false))
+    );
     let mut h = TestHarness::new("one\ntwo");
     keys(&mut h, "\"ayyj\"Ayy");
     assert_eq!(
-        h.clipboard.kill_ring.register('a'),
+        h.clipboard
+            .kill_ring
+            .register('a')
+            .map(|(text, linewise)| (text.text(), linewise)),
         Some(("one\ntwo", true))
     );
 }
@@ -2127,7 +2192,7 @@ fn black_hole_register_deletes_without_storing() {
     let mut h = TestHarness::new("a b c");
     keys(&mut h, "yl\"_x.");
     assert_eq!(h.buf, "b c");
-    assert_eq!(h.clipboard.kill_ring.current(), "a");
+    assert_eq!(h.clipboard.kill_ring.current().text(), "a");
 }
 
 #[test]
@@ -2154,7 +2219,13 @@ fn dot_register_puts_the_last_insert() {
 fn visual_yank_and_put_use_the_named_register() {
     let mut h = TestHarness::new("one two");
     keys(&mut h, "ve\"cy");
-    assert_eq!(h.clipboard.kill_ring.register('c'), Some(("one", false)));
+    assert_eq!(
+        h.clipboard
+            .kill_ring
+            .register('c')
+            .map(|(text, linewise)| (text.text(), linewise)),
+        Some(("one", false))
+    );
     keys(&mut h, "wviw\"cp");
     assert_eq!(h.buf, "one one");
 }
@@ -2264,7 +2335,10 @@ fn code_block_objects_take_the_fenced_lines() {
     let mut h = TestHarness::new(text);
     h.cpos = 20;
     keys(&mut h, "yic");
-    assert_eq!(h.clipboard.kill_ring.current(), "fn a() {}\nfn b() {}");
+    assert_eq!(
+        h.clipboard.kill_ring.current().text(),
+        "fn a() {}\nfn b() {}"
+    );
     assert!(h.clipboard.kill_ring.is_linewise());
 }
 
@@ -2274,11 +2348,11 @@ fn code_block_objects_take_the_next_block_after_the_cursor() {
     let mut h = TestHarness::new(text);
     h.cpos = text.find("prose").unwrap();
     keys(&mut h, "yic");
-    assert_eq!(h.clipboard.kill_ring.current(), "two");
+    assert_eq!(h.clipboard.kill_ring.current().text(), "two");
     assert_eq!(h.cpos, text.find("two").unwrap(), "the cursor moves to it");
     keys(&mut h, "gg");
     keys(&mut h, "yac");
-    assert_eq!(h.clipboard.kill_ring.current(), "```\none\n```");
+    assert_eq!(h.clipboard.kill_ring.current().text(), "```\none\n```");
     h.cpos = text.find("end").unwrap();
     keys(&mut h, "dac");
     assert_eq!(h.buf, text, "no block after the last one");

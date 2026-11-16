@@ -1287,7 +1287,10 @@ fn vim_readonly_dialog_visual_modes_copy_character_and_whole_buffer() {
         VimMode::Visual
     );
     app.type_char('y');
-    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().text(),
+        "alpha"
+    );
     assert_eq!(
         app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some("alpha")
@@ -1308,7 +1311,7 @@ fn vim_readonly_dialog_visual_modes_copy_character_and_whole_buffer() {
     app.type_char('y');
 
     assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current().text(),
         "alpha beta\ngamma\ndelta"
     );
     assert_eq!(
@@ -1341,7 +1344,7 @@ fn vim_session_dialog_visual_yank_beats_copy_all_keymap() {
 
     app.type_char('y');
 
-    assert_eq!(app.tui.core.clipboard.kill_ring.current(), "session");
+    assert_eq!(app.tui.core.clipboard.kill_ring.current().text(), "session");
     assert_eq!(
         app.tui.ui.win(win_id).expect("session window").vim_mode(),
         VimMode::Normal

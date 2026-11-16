@@ -10,9 +10,8 @@ use crate::keymap::{self, KeyAction, KeyContext};
 use crate::smelt_edit::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
-use smelt_core::attachment::{Attachment, AttachmentId, AttachmentStore};
+use smelt_core::attachment::Attachment;
 use smelt_view as content;
-use std::sync::{Arc, Mutex};
 use vim_bridge::VimBridgeResult;
 
 pub(crate) use smelt_buffer::ATTACHMENT_MARKER;
@@ -75,14 +74,13 @@ pub(crate) struct InputSnapshot {
 
 // ── Shared input state ───────────────────────────────────────────────────────
 
-/// Prompt-specific side-cars (stash, attachments).
+/// Prompt-specific side-cars (stash, paste state).
 /// The canonical edit buffer lives in `ui.bufs[PROMPT_EDIT_BUF]` and the
 /// window in `ui.wins[PROMPT_WIN]`; methods that touch either take
 /// `&mut Buffer`/`&mut Window` (or shared refs) as parameters. Display
 /// coordinates (`cursor_row`, `cursor_col`, `scroll_top`) are synced from
 /// `buf.source` via `sync_display_coords` before each render.
 pub(crate) struct PromptState {
-    pub(crate) store: Arc<Mutex<AttachmentStore>>,
     pub(crate) stash: Option<InputSnapshot>,
     cwd: std::path::PathBuf,
     runtime_dir: std::path::PathBuf,
@@ -122,7 +120,7 @@ pub(crate) struct PromptSubmission {
 #[derive(Clone)]
 pub(crate) struct PromptReplay {
     pub(crate) source: String,
-    pub(crate) ids: Vec<AttachmentId>,
+    pub(crate) attachments: Vec<Attachment>,
     pub(crate) image_indices: Vec<usize>,
 }
 
@@ -141,13 +139,13 @@ fn rewind_source_and_attachments(
 ) -> (String, Vec<Attachment>) {
     let mut attachments = Vec::new();
     for (label, data_url) in images {
-        let attachment = Attachment::Image { label, data_url };
+        let attachment = Attachment::image(label, data_url);
         let display_label = attachment.display_label();
-        let labels = match &attachment {
-            Attachment::Image { label, .. } if format!("[{label}]") != display_label => {
-                vec![format!("[{label}]"), display_label]
-            }
-            _ => vec![display_label],
+        let raw_label = format!("[{}]", attachment.label());
+        let labels = if raw_label != display_label {
+            vec![raw_label, display_label]
+        } else {
+            vec![display_label]
         };
 
         if let Some((pos, len)) = labels
@@ -185,9 +183,7 @@ impl PromptState {
         cwd: std::path::PathBuf,
         runtime_dir: std::path::PathBuf,
     ) -> Self {
-        let store = Arc::new(Mutex::new(AttachmentStore::new()));
         Self {
-            store,
             stash: None,
             cwd,
             runtime_dir,
@@ -317,29 +313,31 @@ impl PromptState {
         if clipboard.kill_ring.last_clipboard_write() == Some(text.as_str()) {
             return;
         }
-        clipboard.kill_ring.set(text.clone());
+        clipboard
+            .kill_ring
+            .set(crate::smelt_edit::AttachedText::plain(text.clone()));
         clipboard.kill_ring.record_clipboard_write(text);
     }
 
-    /// Wholesale buffer swap. Installs `text` + `ids` atomically (via
+    /// Wholesale buffer swap. Installs `text` + `attachments` atomically (via
     /// `AttachedTextMut::install`, which debug-asserts that marker count in
-    /// `text` matches `ids.len()`). Clamps `cpos` to a grapheme boundary,
-    /// then clears selection + vim visual anchors.
+    /// `text` matches `attachments.len()`). Clamps `cpos` to a grapheme
+    /// boundary, then clears selection + vim visual anchors.
     ///
-    /// Passing `ids = vec![]` with marker-containing text trips the debug
+    /// Passing no attachments with marker-containing text trips the debug
     /// assert - exactly what you want, since the caller would otherwise be
-    /// silently dropping attachment ids while leaving their markers in
-    /// source. Callers that need to preserve attachments hand the
-    /// corresponding `Vec<AttachmentId>` in; those that genuinely want a
-    /// clean buffer pass `vec![]` and a marker-free `text`.
+    /// silently dropping attachments while leaving their markers in
+    /// source. Callers that need to preserve attachments hand them in;
+    /// those that genuinely want a clean buffer pass `vec![]` and a
+    /// marker-free `text`.
     pub(crate) fn install_source(
         &mut self,
         ctx: &mut PromptCtx<'_>,
         text: String,
         cpos: usize,
-        ids: Vec<AttachmentId>,
+        attachments: Vec<Attachment>,
     ) {
-        ctx.buf.text_mut().install(text, ids);
+        ctx.buf.text_mut().install(text, attachments);
         let source = ctx.buf.source();
         ctx.win
             .set_cpos(crate::smelt_edit::text::snap_grapheme(source, cpos));
@@ -350,25 +348,24 @@ impl PromptState {
     pub(crate) fn clear(&mut self, ctx: &mut PromptCtx<'_>) {
         self.install_source(ctx, String::new(), 0, Vec::new());
         self.from_paste = false;
-        // Stash and store are intentionally preserved.
+        // The stash is intentionally preserved.
     }
 
     pub(crate) fn clear_with_undo(&mut self, ctx: &mut PromptCtx<'_>) {
-        if !ctx.buf.source().is_empty() || !ctx.buf.attachment_ids.is_empty() {
+        if !ctx.buf.source().is_empty() || !ctx.buf.attachments.is_empty() {
             self.save_undo_force(ctx);
         }
         self.clear(ctx);
     }
 
     /// Wholesale buffer swap from user-supplied plain text (no attachments).
-    /// Snapshots undo, installs new source with empty `attachment_ids`,
-    /// cursor at end.
+    /// Snapshots undo, installs new source without attachments, cursor at end.
     ///
     /// Intended for callers feeding text from outside the prompt: Lua
     /// `smelt.prompt.set_text`, placeholder accept, `$EDITOR` re-import.
     /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped - these
-    /// callers can't carry attachment ids, so the markers would be
-    /// orphaned (and trip the marker/id invariant in
+    /// callers can't carry attachments, so the markers would be
+    /// orphaned (and trip the marker/attachment invariant in
     /// `AttachedTextMut::install`).
     pub(crate) fn replace_text(&mut self, ctx: &mut PromptCtx<'_>, text: String) {
         self.save_undo(ctx);
@@ -379,10 +376,10 @@ impl PromptState {
 
     /// Strip `ATTACHMENT_MARKER` bytes from `s`. Used at every seam where
     /// source bytes leave the buffer for storage that can't carry the
-    /// matching attachment ids: `History` draft slot, `replace_text`
+    /// matching attachments: `History` draft slot, `replace_text`
     /// install path, `$EDITOR` round-trip. Persisting raw markers
-    /// upstream would let them return without backing ids, violating
-    /// the marker/id invariant on install.
+    /// upstream would let them return without backing attachments,
+    /// violating the marker/attachment invariant on install.
     pub(crate) fn strip_attachment_markers(s: &str) -> String {
         s.replace(ATTACHMENT_MARKER, "")
     }
@@ -396,13 +393,13 @@ impl PromptState {
         self.install_source(ctx, text, cpos, Vec::new());
     }
 
-    /// Prepend source and attachment ids, snapshot undo, and shift the cursor.
-    /// Existing markers and ids remain paired after the inserted prefix.
+    /// Prepend source and attachments, snapshot undo, and shift the cursor.
+    /// Existing markers and attachments remain paired after the inserted prefix.
     pub(crate) fn prepend_attached(
         &mut self,
         ctx: &mut PromptCtx<'_>,
         prefix: String,
-        mut ids: Vec<AttachmentId>,
+        mut attachments: Vec<Attachment>,
     ) {
         if prefix.is_empty() {
             return;
@@ -410,8 +407,8 @@ impl PromptState {
         self.save_undo(ctx);
         let inserted = prefix.len();
         let source = format!("{prefix}{}", ctx.buf.source());
-        ids.extend_from_slice(&ctx.buf.attachment_ids);
-        ctx.buf.text_mut().install(source, ids);
+        attachments.extend_from_slice(&ctx.buf.attachments);
+        ctx.buf.text_mut().install(source, attachments);
         let cpos = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), ctx.win.cpos() + inserted);
         ctx.win.set_cpos(cpos);
         ctx.win.clear_selection_anchor();
@@ -429,7 +426,7 @@ impl PromptState {
         ctx: &mut PromptCtx<'_>,
         start: usize,
         removed: String,
-        ids: Vec<AttachmentId>,
+        attachments: Vec<Attachment>,
     ) {
         self.save_undo_force(ctx);
         let start = smelt_buffer::text::snap(ctx.buf.source(), start);
@@ -439,31 +436,26 @@ impl PromptState {
             "{before}{removed}{}",
             smelt_buffer::text::slice(ctx.buf.source(), start..ctx.buf.source().len())
         );
-        let mut restored_ids = ctx.buf.attachment_ids.clone();
-        restored_ids.splice(marker_index..marker_index, ids);
+        let mut restored = ctx.buf.attachments.clone();
+        restored.splice(marker_index..marker_index, attachments);
         let cpos = ctx.win.cpos();
         let cpos = if cpos >= start {
             cpos + removed.len()
         } else {
             cpos
         };
-        self.install_source(ctx, source, cpos, restored_ids);
+        self.install_source(ctx, source, cpos, restored);
     }
 
-    /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
+    /// Toggle stash. The stash keeps the prompt's attachments with its text.
     fn toggle_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {
             self.unstash(ctx, snap);
         } else {
             let source_empty = ctx.buf.source().is_empty();
-            let no_attachments = ctx.buf.attachment_ids.is_empty();
+            let no_attachments = ctx.buf.attachments.is_empty();
             if !source_empty || !no_attachments {
-                let attachments: Vec<_> = ctx
-                    .buf
-                    .attachment_ids
-                    .iter()
-                    .filter_map(|&id| self.store.lock().unwrap().get(id).cloned())
-                    .collect();
+                let attachments = ctx.buf.attachments.clone();
                 let stashed = ctx.buf.source().to_string();
                 ctx.buf.text_mut().clear();
                 let cpos = ctx.win.cpos();
@@ -489,16 +481,11 @@ impl PromptState {
     /// Put a stash snapshot back. Text already in the prompt stays, below the
     /// stashed text.
     fn unstash(&mut self, ctx: &mut PromptCtx<'_>, snap: InputSnapshot) {
-        let ids: Vec<_> = snap
-            .attachments
-            .into_iter()
-            .map(|a| self.store.lock().unwrap().insert(a))
-            .collect();
-        if ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty() {
-            self.install_source(ctx, snap.buf, snap.cpos, ids);
+        if ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty() {
+            self.install_source(ctx, snap.buf, snap.cpos, snap.attachments);
             self.from_paste = snap.from_paste;
         } else {
-            self.prepend_attached(ctx, format!("{}\n", snap.buf), ids);
+            self.prepend_attached(ctx, format!("{}\n", snap.buf), snap.attachments);
         }
     }
 
@@ -513,17 +500,15 @@ impl PromptState {
         let exact = placement.and_then(|placement| {
             (placement.source.matches(ATTACHMENT_MARKER).count() == placement.image_indices.len())
                 .then(|| {
+                    // A repeated image is one attachment in several places.
+                    let pool: Vec<_> = images
+                        .iter()
+                        .map(|(label, data_url)| Attachment::image(label.clone(), data_url.clone()))
+                        .collect();
                     placement
                         .image_indices
                         .iter()
-                        .map(|&index| {
-                            images
-                                .get(index)
-                                .map(|(label, data_url)| Attachment::Image {
-                                    label: label.clone(),
-                                    data_url: data_url.clone(),
-                                })
-                        })
+                        .map(|&index| pool.get(index).cloned())
                         .collect::<Option<Vec<_>>>()
                         .map(|attachments| (placement.source, attachments))
                 })
@@ -531,12 +516,8 @@ impl PromptState {
         });
         let (text, attachments) =
             exact.unwrap_or_else(|| rewind_source_and_attachments(text, images));
-        let ids = attachments
-            .into_iter()
-            .map(|attachment| self.store.lock().unwrap().insert(attachment))
-            .collect();
         let cpos = text.len();
-        self.install_source(ctx, text, cpos, ids);
+        self.install_source(ctx, text, cpos, attachments);
     }
 
     fn submission_from_range(
@@ -555,25 +536,24 @@ impl PromptState {
         let mut text = String::new();
         let mut display = String::new();
         let mut images = Vec::new();
-        let mut attachment_ids = Vec::new();
+        let mut attachments = Vec::new();
         let mut image_indices = Vec::new();
+        // One image per distinct content: base64 payloads are large.
         let mut seen = std::collections::HashMap::new();
-        let store = self.store.lock().unwrap();
 
         for c in selected.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = buf.attachment_ids.get(marker_idx) {
-                    attachment_ids.push(id);
-                    text.push_str(store.expanded_text(id));
-                    display.push_str(&store.display_label(id));
-                    if let Some(&index) = seen.get(&id) {
-                        image_indices.push(index);
-                    } else if let Some(Attachment::Image { label, data_url }) = store.get(id) {
-                        let index = images.len();
-                        seen.insert(id, index);
-                        image_indices.push(index);
-                        images.push((label.clone(), data_url.clone()));
-                    }
+                if let Some(attachment) = buf.attachments.get(marker_idx) {
+                    attachments.push(attachment.clone());
+                    display.push_str(&attachment.display_label());
+                    let index = *seen.entry(attachment.content_key()).or_insert_with(|| {
+                        images.push((
+                            attachment.label().to_string(),
+                            attachment.data_url().to_string(),
+                        ));
+                        images.len() - 1
+                    });
+                    image_indices.push(index);
                 }
                 marker_idx += 1;
             } else {
@@ -582,9 +562,9 @@ impl PromptState {
             }
         }
 
-        let replay = (!attachment_ids.is_empty()).then(|| PromptReplay {
+        let replay = (!attachments.is_empty()).then(|| PromptReplay {
             source: selected.to_string(),
-            ids: attachment_ids,
+            attachments,
             image_indices,
         });
         PromptSubmission {
@@ -617,8 +597,9 @@ impl PromptState {
             self.save_undo(ctx);
             self.replace_selection_for_insert(ctx);
         }
-        let id = self.store.lock().unwrap().insert_image(label, data_url);
-        self.insert_attachment_id(ctx, id);
+        let attachment = Attachment::image(label, data_url);
+        crate::app::attachment_preview::prewarm(attachment.clone());
+        self.insert_attachment(ctx, attachment);
     }
 
     /// Build submission `Content`. Duplicate image refs are deduplicated (base64 payloads are large).
@@ -671,7 +652,7 @@ impl PromptState {
             return action;
         }
 
-        if ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty() {
+        if ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty() {
             return match stage {
                 QueueStage::Turn => Action::SubmitEmpty,
                 QueueStage::Request => Action::Noop,
@@ -706,7 +687,7 @@ impl PromptState {
 
     pub(crate) fn key_context(&self, ctx: PromptCtxRef<'_>, agent_running: bool) -> KeyContext {
         KeyContext {
-            buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty(),
+            buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty(),
             vim_non_insert: ctx.win.vim_enabled()
                 && matches!(
                     ctx.win.vim_mode(),
@@ -1262,7 +1243,7 @@ impl PromptState {
             }
 
             let key_ctx = KeyContext {
-                buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty(),
+                buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty(),
                 vim_non_insert: ctx.win.vim_enabled()
                     && matches!(
                         ctx.win.vim_mode(),
@@ -1388,14 +1369,14 @@ mod tests {
     impl Harness {
         pub(super) fn new() -> Self {
             let state = PromptState::new();
-            let parser = Arc::new(smelt_view::prompt_parser::PromptBufferParser::new(
-                state.store.clone(),
-            ));
+            let parser =
+                std::sync::Arc::new(smelt_view::prompt_parser::PromptBufferParser::default());
             let mut buf = crate::smelt_edit::Buffer::new(
                 crate::app::PROMPT_EDIT_BUF,
                 crate::smelt_edit::BufCreateOpts::default(),
             );
             buf.set_parser(parser);
+            buf.hold_attachments();
             buf.history = crate::smelt_edit::UndoHistory::new(Some(100));
             let win = crate::smelt_edit::Window::new(
                 crate::app::PROMPT_WIN,
@@ -1501,7 +1482,7 @@ mod tests {
         );
 
         assert_eq!(input.buf.source(), &format!("look {ATTACHMENT_MARKER}"));
-        assert_eq!(input.buf.attachment_ids.len(), 1);
+        assert_eq!(input.buf.attachments.len(), 1);
     }
 
     #[test]
@@ -1966,7 +1947,7 @@ mod tests {
 
         assert!(matches!(action, Action::Redraw));
         assert_eq!(input.buf.source(), pasted);
-        assert!(input.buf.attachment_ids.is_empty());
+        assert!(input.buf.attachments.is_empty());
     }
 
     #[test]
@@ -2049,24 +2030,17 @@ mod tests {
     }
 
     #[test]
-    fn selected_submit_carries_only_selected_attachment_ids() {
+    fn selected_submit_carries_only_selected_attachments() {
         let mut input = Harness::new();
-        let keep = input
-            .state
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("keep.png".into(), "data:image/png;base64,KEEP".into());
-        let send = input
-            .state
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("send.png".into(), "data:image/png;base64,SEND".into());
+        let keep = Attachment::image("keep.png".into(), "data:image/png;base64,KEEP".into());
+        let send = Attachment::image("send.png".into(), "data:image/png;base64,SEND".into());
         let source = format!("keep {ATTACHMENT_MARKER}\nsend {ATTACHMENT_MARKER}");
         let start = source.find("send").expect("send line");
         let end = source.len();
-        input.buf.text_mut().install(source, vec![keep, send]);
+        input
+            .buf
+            .text_mut()
+            .install(source, vec![keep.clone(), send.clone()]);
         input.state.set_vim_enabled(&mut input.win, true);
         input.win.begin_visual(VimMode::Visual, start);
         input.win.set_cpos(end);
@@ -2086,7 +2060,10 @@ mod tests {
             panic!("expected selected submit");
         };
         assert_eq!(submission.display, "send [send.png]");
-        assert_eq!(submission.replay.as_ref().unwrap().ids, vec![send]);
+        assert_eq!(
+            submission.replay.as_ref().unwrap().attachments,
+            vec![send.clone()]
+        );
         match submission.content {
             Content::Parts(parts) => {
                 assert!(matches!(
@@ -2102,7 +2079,7 @@ mod tests {
             }
             other => panic!("expected multipart content, got {other:?}"),
         }
-        assert_eq!(input.buf.attachment_ids, vec![keep, send]);
+        assert_eq!(input.buf.attachments, vec![keep.clone(), send]);
         input.state.apply_submit_edit(
             &mut PromptCtx {
                 buf: &mut input.buf,
@@ -2110,7 +2087,7 @@ mod tests {
             },
             edit,
         );
-        assert_eq!(input.buf.attachment_ids, vec![keep]);
+        assert_eq!(input.buf.attachments, vec![keep]);
     }
 
     #[test]
@@ -2392,7 +2369,7 @@ mod tests {
         }
         assert_eq!(input.buf.source(), " world");
         // Killed text lands on the TuiApp-level kill ring.
-        assert_eq!(clip.kill_ring.current(), "hello");
+        assert_eq!(clip.kill_ring.current().text(), "hello");
     }
 
     #[test]
@@ -2772,14 +2749,12 @@ mod tests {
     fn delete_selection_removes_attachments() {
         let mut input = Harness::new();
         // Insert text with an image attachment marker in the middle.
-        input.buf.set_source(format!("ab{}cd", ATTACHMENT_MARKER));
+        let id = Attachment::image("img.png".into(), "data:image/png;base64,AAA".into());
+        input
+            .buf
+            .text_mut()
+            .install(format!("ab{}cd", ATTACHMENT_MARKER), vec![id]);
         input.win.set_cpos(0);
-        let id = input
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
-        input.buf.attachment_ids.push(id);
         // Select "b<marker>c" (bytes 1..5 - marker is 3 bytes).
         input.win.set_selection_anchor(Some(1));
         input.win.set_cpos(1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1);
@@ -2797,30 +2772,26 @@ mod tests {
         assert!(deleted.is_some());
         assert_eq!(input.buf.source(), "ad");
         assert!(
-            input.buf.attachment_ids.is_empty(),
+            input.buf.attachments.is_empty(),
             "Attachment should be removed"
         );
     }
 
     // ── Attachment dedup within a single message ───────────────────────
 
-    /// Place two markers in the buffer that both point at `id`.
-    fn buf_with_two_markers(input: &mut Harness, id: AttachmentId) {
-        input
-            .buf
-            .set_source(format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER));
+    /// Place two markers in the buffer that both carry `id`.
+    fn buf_with_two_markers(input: &mut Harness, id: Attachment) {
+        input.buf.text_mut().install(
+            format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER),
+            vec![id.clone(), id],
+        );
         input.win.set_cpos(input.buf.source().len());
-        input.buf.attachment_ids = vec![id, id];
     }
 
     #[test]
     fn build_content_dedups_repeated_image_in_parts() {
         let mut input = Harness::new();
-        let id = input
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
+        let id = Attachment::image("img.png".into(), "data:image/png;base64,AAA".into());
         buf_with_two_markers(&mut input, id);
         let content = input.state.build_content(&input.buf);
         assert_eq!(
@@ -2833,21 +2804,13 @@ mod tests {
     #[test]
     fn build_content_preserves_distinct_images() {
         let mut input = Harness::new();
-        let id1 = input
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        let id2 = input
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
+        let id1 = Attachment::image("a.png".into(), "data:image/png;base64,AAA".into());
+        let id2 = Attachment::image("b.png".into(), "data:image/png;base64,BBB".into());
         input
             .buf
-            .set_source(format!("{m}{m}", m = ATTACHMENT_MARKER));
+            .text_mut()
+            .install(format!("{m}{m}", m = ATTACHMENT_MARKER), vec![id1, id2]);
         input.win.set_cpos(input.buf.source().len());
-        input.buf.attachment_ids = vec![id1, id2];
         let content = input.state.build_content(&input.buf);
         assert_eq!(content.image_count(), 2);
     }
@@ -2856,21 +2819,13 @@ mod tests {
     fn build_content_dedups_interleaved_image_references() {
         // Pattern: img A, img B, img A again. Parts should be [A, B].
         let mut input = Harness::new();
-        let id_a = input
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
-        let id_b = input
-            .store
-            .lock()
-            .unwrap()
-            .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        input
-            .buf
-            .set_source(format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER));
+        let id_a = Attachment::image("a.png".into(), "data:image/png;base64,AAA".into());
+        let id_b = Attachment::image("b.png".into(), "data:image/png;base64,BBB".into());
+        input.buf.text_mut().install(
+            format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER),
+            vec![id_a.clone(), id_b, id_a],
+        );
         input.win.set_cpos(input.buf.source().len());
-        input.buf.attachment_ids = vec![id_a, id_b, id_a];
         let content = input.state.build_content(&input.buf);
         assert_eq!(content.image_count(), 2);
     }
@@ -2987,7 +2942,7 @@ mod tests {
             text,
         );
         assert_eq!(input.buf.source(), "hithere");
-        assert!(input.buf.attachment_ids.is_empty());
+        assert!(input.buf.attachments.is_empty());
     }
 
     #[test]
@@ -3205,12 +3160,12 @@ mod tests {
     fn attachment_insertion_advances_past_a_joined_grapheme() {
         let mut input = Harness::new();
         input.buf.set_source("\u{301}x".into());
-        input.state.insert_attachment_id(
+        input.state.insert_attachment(
             &mut PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            7,
+            Attachment::image("7.png".into(), "data:7".into()),
         );
 
         assert_eq!(input.buf.source(), format!("{ATTACHMENT_MARKER}\u{301}x"));
@@ -3234,7 +3189,7 @@ mod tests {
         );
 
         assert_eq!(input.buf.source(), "a\nb\nc");
-        assert!(input.buf.attachment_ids.is_empty());
+        assert!(input.buf.attachments.is_empty());
         assert_eq!(input.win.cpos(), input.buf.source().len());
     }
 

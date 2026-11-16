@@ -52,6 +52,7 @@ return {
   { name = "SmeltModeYolo", role = "style", owner = "statusline", description = "Yolo agent mode pill." },
   { name = "SmeltModeDefault", role = "style", owner = "statusline", description = "Default and custom agent mode pill." },
   { name = "SmeltExecPrefix", role = "style", owner = "prompt", description = "Shell execution prefix." },
+  { name = "SmeltAttachmentCursor", role = "style", owner = "prompt", description = "Prompt attachment under the cursor." },
 
   { name = "SmeltDiffAddCount", role = "foreground", owner = "diff", description = "Subdued added-line count." },
   { name = "SmeltDiffDeleteCount", role = "foreground", owner = "diff", description = "Subdued deleted-line count." },

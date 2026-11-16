@@ -30,7 +30,7 @@ pub(super) struct PendingPromptRecovery {
 struct RemovedPromptRange {
     start: usize,
     source: String,
-    ids: Vec<smelt_buffer::attachment::AttachmentId>,
+    attachments: Vec<smelt_buffer::attachment::Attachment>,
     buffer_id: BufId,
     source_tick: u64,
 }
@@ -126,9 +126,9 @@ impl PromptRuntime {
         &mut self,
         ctx: &mut PromptCtx<'_>,
         prefix: String,
-        ids: Vec<smelt_buffer::attachment::AttachmentId>,
+        attachments: Vec<smelt_buffer::attachment::Attachment>,
     ) {
-        self.input.prepend_attached(ctx, prefix, ids);
+        self.input.prepend_attached(ctx, prefix, attachments);
     }
 
     pub(super) fn prepare_submission_recovery(
@@ -149,7 +149,8 @@ impl PromptRuntime {
                 Some(RemovedPromptRange {
                     start,
                     source: source.to_owned(),
-                    ids: ctx.buf.attachment_ids[marker_start..marker_start + marker_count].to_vec(),
+                    attachments: ctx.buf.attachments[marker_start..marker_start + marker_count]
+                        .to_vec(),
                     buffer_id: ctx.buf.id(),
                     source_tick: ctx.buf.source_tick(),
                 })
@@ -171,14 +172,19 @@ impl PromptRuntime {
         if let Some(removed) = recovery.removed.filter(|removed| {
             removed.buffer_id == ctx.buf.id() && removed.source_tick == ctx.buf.source_tick()
         }) {
-            self.input
-                .restore_removed_range(ctx, removed.start, removed.source, removed.ids);
+            self.input.restore_removed_range(
+                ctx,
+                removed.start,
+                removed.source,
+                removed.attachments,
+            );
         } else {
             let mut replay = recovery.replay;
             if !ctx.buf.source().is_empty() {
                 replay.source.push('\n');
             }
-            self.input.prepend_attached(ctx, replay.source, replay.ids);
+            self.input
+                .prepend_attached(ctx, replay.source, replay.attachments);
         }
         self.input.from_paste = skip_shell_escape;
     }
@@ -191,9 +197,8 @@ impl PromptRuntime {
         self.input.clear_with_undo(ctx);
     }
 
-    pub(crate) fn clear_for_session_change(&mut self, ctx: &mut PromptCtx<'_>) {
+    pub(crate) fn clear(&mut self, ctx: &mut PromptCtx<'_>) {
         self.input.clear(ctx);
-        self.input.store.lock().unwrap().clear();
     }
 
     pub(crate) fn restore_stash(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -240,13 +245,6 @@ impl PromptRuntime {
 
     pub(crate) fn render_input(&self) -> &PromptState {
         &self.input
-    }
-
-    #[cfg(test)]
-    pub(crate) fn attachment_store(
-        &self,
-    ) -> std::sync::Arc<std::sync::Mutex<smelt_core::attachment::AttachmentStore>> {
-        std::sync::Arc::clone(&self.input.store)
     }
 
     #[cfg(any(test, feature = "harness"))]

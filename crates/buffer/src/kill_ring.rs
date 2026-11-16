@@ -1,23 +1,12 @@
 //! Emacs-style kill ring with yank-pop support.
 //!
-//! The kill ring carries plain text only. Attachment markers have no
-//! representation here - an `AttachmentId` is bound to a specific buffer's
-//! attachment list, not to text - so every entry point strips
-//! `ATTACHMENT_MARKER` before storing. Yanking back can then go through
-//! `AttachedTextMut::insert_str` without risk of producing orphan markers
-//! that would desync source from the id list.
+//! Entries are [`AttachedText`]: a cut attachment travels with its marker,
+//! so yanking it back restores the attachment, in any buffer that holds
+//! attachments.
 
-use crate::attachment::ATTACHMENT_MARKER;
+use crate::attached::AttachedText;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-
-fn strip_markers(text: String) -> String {
-    if text.contains(ATTACHMENT_MARKER) {
-        text.replace(ATTACHMENT_MARKER, "")
-    } else {
-        text
-    }
-}
 
 const KILL_RING_MAX: usize = 32;
 
@@ -26,9 +15,9 @@ pub const YANK_FLASH_DURATION: Duration = Duration::from_millis(150);
 
 /// Kill ring shared by emacs-style edits and vim yank/paste operations.
 pub struct KillRing {
-    current: String,
+    current: AttachedText,
     /// Older kills, newest first.
-    history: Vec<String>,
+    history: Vec<AttachedText>,
     /// Byte range of the last yank insertion, for yank-pop replacement.
     last_yank: Option<(usize, usize)>,
     pop_idx: usize,
@@ -50,7 +39,7 @@ pub struct KillRing {
     last_insert: Option<String>,
     /// Vim's named registers `a`-`z` and the yank register `0`, each with its
     /// linewise flag.
-    registers: HashMap<char, (String, bool)>,
+    registers: HashMap<char, (AttachedText, bool)>,
 }
 
 impl Default for KillRing {
@@ -62,7 +51,7 @@ impl Default for KillRing {
 impl KillRing {
     pub fn new() -> Self {
         Self {
-            current: String::new(),
+            current: AttachedText::default(),
             history: Vec::new(),
             last_yank: None,
             pop_idx: 0,
@@ -79,26 +68,25 @@ impl KillRing {
     /// Write `text` to vim register `name`. `a`-`z` and `0` replace it; `A`-`Z`
     /// append to the lowercase register, on a line of its own when either
     /// side is linewise.
-    pub fn store(&mut self, name: char, text: String, linewise: bool) {
-        let text = strip_markers(text);
+    pub fn store(&mut self, name: char, text: AttachedText, linewise: bool) {
         if !name.is_ascii_uppercase() {
             self.registers.insert(name, (text, linewise));
             return;
         }
         let (held, held_linewise) = self.registers.entry(name.to_ascii_lowercase()).or_default();
         if (*held_linewise || linewise) && !held.is_empty() {
-            held.push('\n');
+            held.push_str("\n");
         }
-        held.push_str(&text);
+        held.push(&text);
         *held_linewise |= linewise;
     }
 
     /// The text of vim register `name` and whether it is linewise; `A`-`Z`
     /// read their lowercase register.
-    pub fn register(&self, name: char) -> Option<(&str, bool)> {
+    pub fn register(&self, name: char) -> Option<(&AttachedText, bool)> {
         self.registers
             .get(&name.to_ascii_lowercase())
-            .map(|(text, linewise)| (text.as_str(), *linewise))
+            .map(|(text, linewise)| (text, *linewise))
     }
 
     /// The text typed during the last insert session, when it was plain typing.
@@ -111,8 +99,7 @@ impl KillRing {
     }
 
     /// Push a new kill, rotating the previous current into history.
-    pub fn kill(&mut self, text: String) {
-        let text = strip_markers(text);
+    pub fn kill(&mut self, text: AttachedText) {
         if text.is_empty() {
             return;
         }
@@ -139,11 +126,10 @@ impl KillRing {
             return None;
         }
         let cpos = crate::text::snap_grapheme(buf.as_str(), cpos);
-        let cpos = buf.insert_str(cpos, &self.current);
-        let inserted_end = cpos + self.current.len();
-        self.last_yank = Some((cpos, inserted_end));
+        let inserted = buf.insert_attached(cpos, &self.current);
+        self.last_yank = Some((inserted.start, inserted.end));
         self.pop_idx = 0;
-        Some(crate::text::ceil_grapheme(buf.as_str(), inserted_end))
+        Some(crate::text::ceil_grapheme(buf.as_str(), inserted.end))
     }
 
     /// Replace the last yank with the next history entry. Returns new cpos.
@@ -157,12 +143,11 @@ impl KillRing {
         // grapheme would make yank-pop delete bytes that were never yanked.
         let start = crate::text::snap(buf.as_str(), start);
         let end = crate::text::snap(buf.as_str(), end).max(start);
-        let text = self.history[self.pop_idx % self.history.len()].clone();
-        let new_end = start + text.len();
-        buf.replace_range(start..end, &text);
-        self.last_yank = Some((start, new_end));
+        let text = &self.history[self.pop_idx % self.history.len()];
+        let inserted = buf.replace_attached(start..end, text);
+        self.last_yank = Some((inserted.start, inserted.end));
         self.pop_idx = (self.pop_idx + 1) % self.history.len();
-        Some(crate::text::ceil_grapheme(buf.as_str(), new_end))
+        Some(crate::text::ceil_grapheme(buf.as_str(), inserted.end))
     }
 
     /// Clear last-yank tracking.
@@ -170,37 +155,43 @@ impl KillRing {
         self.last_yank = None;
     }
 
-    pub fn take(&mut self) -> String {
+    pub fn take(&mut self) -> AttachedText {
         self.linewise = false;
         self.source_range = None;
         std::mem::take(&mut self.current)
     }
 
     /// Set the current kill text, clearing the linewise flag.
-    pub fn set(&mut self, text: String) {
-        self.current = strip_markers(text);
+    pub fn set(&mut self, text: AttachedText) {
+        self.current = text;
         self.linewise = false;
         self.source_range = None;
     }
 
     /// Set the current kill text with an explicit linewise flag.
-    pub fn set_with_linewise(&mut self, text: String, linewise: bool) {
-        self.current = strip_markers(text);
+    pub fn set_with_linewise(&mut self, text: AttachedText, linewise: bool) {
+        self.current = text;
         self.linewise = linewise;
     }
 
     /// Set kill text, linewise flag, and source byte range. Bumps `yank_tick`
     /// so hosts can detect that a yank happened. Clears `last_yank_at` so
     /// deletes don't inherit a prior yank's flash; call `mark_yanked` after for yanks.
-    pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
+    pub fn set_with_source(
+        &mut self,
+        text: AttachedText,
+        linewise: bool,
+        start: usize,
+        end: usize,
+    ) {
         self.set_quietly(text, linewise, start, end);
         self.yank_tick = self.yank_tick.wrapping_add(1);
     }
 
     /// `set_with_source` without bumping `yank_tick`, so hosts leave the system
     /// clipboard alone: a write to a named register also sets the unnamed one.
-    pub fn set_quietly(&mut self, text: String, linewise: bool, start: usize, end: usize) {
-        self.current = strip_markers(text);
+    pub fn set_quietly(&mut self, text: AttachedText, linewise: bool, start: usize, end: usize) {
+        self.current = text;
         self.linewise = linewise;
         self.source_range = Some((start, end));
         self.last_yank_at = None;
@@ -212,7 +203,7 @@ impl KillRing {
         self.yank_tick
     }
 
-    pub fn current(&self) -> &str {
+    pub fn current(&self) -> &AttachedText {
         &self.current
     }
 
@@ -268,7 +259,7 @@ impl KillRing {
 mod tests {
     use super::*;
     use crate::attached::AttachedTextMut;
-    use crate::attachment::AttachmentId;
+    use crate::attachment::{Attachment, ATTACHMENT_MARKER};
 
     /// Mutate `buf` (a `String`) as if it were an attached text - empty ids.
     /// Returns the closure result.
@@ -276,7 +267,7 @@ mod tests {
     where
         F: FnOnce(&mut AttachedTextMut<'_>) -> R,
     {
-        let mut ids: Vec<AttachmentId> = Vec::new();
+        let mut ids: Vec<Attachment> = Vec::new();
         let mut a = AttachedTextMut::new(buf, &mut ids);
         f(&mut a)
     }
@@ -285,7 +276,7 @@ mod tests {
     fn flash_range_active_only_after_mark_yanked() {
         let mut kr = KillRing::new();
         let t0 = Instant::now();
-        kr.set_with_source("hello".into(), false, 3, 8);
+        kr.set_with_source(AttachedText::plain("hello"), false, 3, 8);
         // set_with_source alone (delete / change) must not flash.
         assert!(kr.yank_flash_range(t0).is_none());
         // Yank-only sites mark explicitly.
@@ -297,7 +288,7 @@ mod tests {
     fn flash_range_expires_after_window() {
         let mut kr = KillRing::new();
         let t0 = Instant::now();
-        kr.set_with_source("x".into(), false, 0, 1);
+        kr.set_with_source(AttachedText::plain("x"), false, 0, 1);
         kr.mark_yanked(t0);
         let later = t0 + YANK_FLASH_DURATION + Duration::from_millis(50);
         assert!(kr.yank_flash_range(later).is_none());
@@ -306,11 +297,11 @@ mod tests {
     #[test]
     fn flash_range_flashes_without_changing_kill_text() {
         let mut kr = KillRing::new();
-        kr.set("kept".into());
+        kr.set(AttachedText::plain("kept"));
         let t0 = Instant::now();
         kr.flash_range(2, 6, t0);
         assert_eq!(kr.yank_flash_range(t0), Some((2, 6)));
-        assert_eq!(kr.current(), "kept");
+        assert_eq!(kr.current().text(), "kept");
         assert_eq!(kr.yank_tick(), 0);
         assert!(kr.yank_flash_range(t0 + YANK_FLASH_DURATION).is_none());
     }
@@ -319,11 +310,11 @@ mod tests {
     fn delete_after_yank_clears_flash() {
         let mut kr = KillRing::new();
         let t0 = Instant::now();
-        kr.set_with_source("first".into(), false, 0, 5);
+        kr.set_with_source(AttachedText::plain("first"), false, 0, 5);
         kr.mark_yanked(t0);
         assert!(kr.yank_flash_range(t0).is_some());
         // Subsequent delete-style update - no mark_yanked.
-        kr.set_with_source("second".into(), false, 10, 16);
+        kr.set_with_source(AttachedText::plain("second"), false, 10, 16);
         assert!(kr.yank_flash_range(t0).is_none());
     }
 
@@ -332,17 +323,17 @@ mod tests {
     #[test]
     fn kill_empty_text_is_noop() {
         let mut kr = KillRing::new();
-        kr.kill("first".into());
-        kr.kill("".into()); // empty must not displace current
-        assert_eq!(kr.current(), "first");
+        kr.kill(AttachedText::plain("first"));
+        kr.kill(AttachedText::plain("")); // empty must not displace current
+        assert_eq!(kr.current().text(), "first");
     }
 
     #[test]
     fn second_kill_rotates_first_into_history() {
         let mut kr = KillRing::new();
-        kr.kill("A".into());
-        kr.kill("B".into());
-        assert_eq!(kr.current(), "B");
+        kr.kill(AttachedText::plain("A"));
+        kr.kill(AttachedText::plain("B"));
+        assert_eq!(kr.current().text(), "B");
         // First kill is now the most-recent history entry.
         // We can observe history indirectly through yank_pop after a yank.
         let mut buf = String::from("|");
@@ -358,7 +349,7 @@ mod tests {
         // Push 34 distinct kills: current = "k33", history holds the previous
         // 32 ("k32" … "k1"); "k0" got dropped past the cap.
         for i in 0..34 {
-            kr.kill(format!("k{i}"));
+            kr.kill(AttachedText::plain(format!("k{i}")));
         }
         // Yank installs k33, then yank_pop cycles through history newest-first.
         let mut buf = String::new();
@@ -388,7 +379,7 @@ mod tests {
     #[test]
     fn yank_inserts_current_and_returns_cursor_at_end_of_inserted_text() {
         let mut kr = KillRing::new();
-        kr.kill("xyz".into());
+        kr.kill(AttachedText::plain("xyz"));
         let mut buf = String::from("ab|cd");
         let end = with_attached(&mut buf, |a| kr.yank(a, 3)).expect("yank into 'ab|cd' at byte 3");
         assert_eq!(buf, "ab|xyzcd");
@@ -404,8 +395,8 @@ mod tests {
             ("🇨", "🇦z"),
         ] {
             let mut kr = KillRing::new();
-            kr.kill("x".into());
-            kr.kill(yanked.into());
+            kr.kill(AttachedText::plain("x"));
+            kr.kill(AttachedText::plain(yanked));
             let mut buf = following.to_string();
 
             let cursor = with_attached(&mut buf, |a| kr.yank(a, 0)).unwrap();
@@ -421,9 +412,9 @@ mod tests {
     #[test]
     fn yank_pop_replaces_last_yank_with_next_history_entry() {
         let mut kr = KillRing::new();
-        kr.kill("A".into());
-        kr.kill("B".into());
-        kr.kill("C".into());
+        kr.kill(AttachedText::plain("A"));
+        kr.kill(AttachedText::plain("B"));
+        kr.kill(AttachedText::plain("C"));
         // After 3 kills: current=C, history=[B, A] (newest first).
         let mut buf = String::new();
         with_attached(&mut buf, |a| kr.yank(a, 0));
@@ -439,8 +430,8 @@ mod tests {
     #[test]
     fn yank_pop_returns_none_when_no_prior_yank() {
         let mut kr = KillRing::new();
-        kr.kill("A".into());
-        kr.kill("B".into());
+        kr.kill(AttachedText::plain("A"));
+        kr.kill(AttachedText::plain("B"));
         let mut buf = String::from("x");
         assert!(
             with_attached(&mut buf, |a| kr.yank_pop(a)).is_none(),
@@ -452,8 +443,8 @@ mod tests {
     #[test]
     fn clear_yank_disables_subsequent_yank_pop() {
         let mut kr = KillRing::new();
-        kr.kill("A".into());
-        kr.kill("B".into());
+        kr.kill(AttachedText::plain("A"));
+        kr.kill(AttachedText::plain("B"));
         let mut buf = String::new();
         with_attached(&mut buf, |a| kr.yank(a, 0));
         kr.clear_yank();
@@ -466,16 +457,16 @@ mod tests {
     #[test]
     fn take_returns_current_and_clears_it() {
         let mut kr = KillRing::new();
-        kr.kill("payload".into());
-        assert_eq!(kr.take(), "payload");
-        assert_eq!(kr.current(), "");
+        kr.kill(AttachedText::plain("payload"));
+        assert_eq!(kr.take().text(), "payload");
+        assert!(kr.current().is_empty());
     }
 
     #[test]
     fn set_with_linewise_records_the_flag() {
         let mut kr = KillRing::new();
-        kr.set_with_linewise("line\n".into(), true);
-        assert_eq!(kr.current(), "line\n");
+        kr.set_with_linewise(AttachedText::plain("line\n"), true);
+        assert_eq!(kr.current().text(), "line\n");
         assert!(kr.is_linewise());
     }
 
@@ -483,8 +474,8 @@ mod tests {
     fn set_with_source_records_range_and_bumps_yank_tick() {
         let mut kr = KillRing::new();
         let t0 = kr.yank_tick();
-        kr.set_with_source("payload".into(), true, 5, 12);
-        assert_eq!(kr.current(), "payload");
+        kr.set_with_source(AttachedText::plain("payload"), true, 5, 12);
+        assert_eq!(kr.current().text(), "payload");
         assert!(kr.is_linewise());
         assert_eq!(kr.source_range(), Some((5, 12)));
         assert_eq!(kr.yank_tick(), t0 + 1, "tick monotonic on set_with_source");
@@ -496,5 +487,49 @@ mod tests {
         assert_eq!(kr.last_clipboard_write(), None);
         kr.record_clipboard_write("from-system".into());
         assert_eq!(kr.last_clipboard_write(), Some("from-system"));
+    }
+
+    #[test]
+    fn yanked_kills_bring_their_attachments_back() {
+        let image = Attachment::image("a.png".into(), "data:a".into());
+        let mut kr = KillRing::new();
+        kr.kill(AttachedText::new(
+            format!("x{ATTACHMENT_MARKER}"),
+            vec![image.clone()],
+        ));
+        kr.kill(AttachedText::plain("plain"));
+        let mut buf = String::from("|");
+        let mut ids = Vec::new();
+        kr.yank(&mut AttachedTextMut::new(&mut buf, &mut ids), 1);
+        assert_eq!(buf, "|plain");
+        kr.yank_pop(&mut AttachedTextMut::new(&mut buf, &mut ids));
+        assert_eq!(buf, format!("|x{ATTACHMENT_MARKER}"));
+        assert_eq!(ids, vec![image]);
+    }
+
+    #[test]
+    fn appending_to_a_register_keeps_both_attachments() {
+        let (a, b) = (
+            Attachment::image("a.png".into(), "data:a".into()),
+            Attachment::image("b.png".into(), "data:b".into()),
+        );
+        let mut kr = KillRing::new();
+        kr.store(
+            'a',
+            AttachedText::new(ATTACHMENT_MARKER.into(), vec![a.clone()]),
+            false,
+        );
+        kr.store(
+            'A',
+            AttachedText::new(ATTACHMENT_MARKER.into(), vec![b.clone()]),
+            true,
+        );
+        let (held, linewise) = kr.register('a').unwrap();
+        assert!(linewise);
+        assert_eq!(
+            held.text(),
+            format!("{ATTACHMENT_MARKER}\n{ATTACHMENT_MARKER}")
+        );
+        assert_eq!(held.attachments(), [a, b]);
     }
 }

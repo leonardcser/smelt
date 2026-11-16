@@ -256,7 +256,7 @@ impl TestApp {
             );
         }
 
-        // Prompt-buffer attachment_ids must be in 1:1 correspondence with
+        // Prompt-buffer attachments must be in 1:1 correspondence with
         // the `\u{FFFC}` markers in the source. A divergence means an
         // insert/delete path didn't keep them in sync - the next paste or
         // copy will read off the end of the vec.
@@ -265,10 +265,10 @@ impl TestApp {
             let marker_count = src.chars().filter(|c| *c == '\u{FFFC}').count();
             assert_eq!(
                 marker_count,
-                prompt.attachment_ids.len(),
-                "prompt has {} attachment markers but {} attachment_ids",
+                prompt.attachments.len(),
+                "prompt has {} attachment markers but {} attachments",
                 marker_count,
-                prompt.attachment_ids.len()
+                prompt.attachments.len()
             );
         }
     }

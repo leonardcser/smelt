@@ -1045,7 +1045,7 @@ mod tests {
                 },
             }))
             .expect("copy range");
-        assert_eq!(copied.kill_ring, "lpha\nbe");
+        assert_eq!(copied.kill_ring.text(), "lpha\nbe");
     }
 
     #[test]
@@ -1066,7 +1066,7 @@ mod tests {
                 },
             }))
             .expect("copy range");
-        assert_eq!(copied.kill_ring, "lpha\nbeta\nga");
+        assert_eq!(copied.kill_ring.text(), "lpha\nbeta\nga");
     }
 
     #[test]
@@ -1086,7 +1086,7 @@ mod tests {
             }))
             .expect("copy range");
 
-        assert_eq!(copied.kill_ring, grapheme);
+        assert_eq!(copied.kill_ring.text(), grapheme);
     }
 
     #[test]

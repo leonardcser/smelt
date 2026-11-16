@@ -282,9 +282,9 @@ impl QueuedInput {
                     .source
                     .matches(crate::input::ATTACHMENT_MARKER)
                     .count(),
-                replay.ids.len()
+                replay.attachments.len()
             );
-            assert_eq!(replay.ids.len(), replay.image_indices.len());
+            assert_eq!(replay.attachments.len(), replay.image_indices.len());
             assert!(replay
                 .image_indices
                 .iter()
@@ -385,7 +385,7 @@ impl QueuedInput {
         }
         PromptReplay {
             source: PromptState::strip_attachment_markers(&self.display()),
-            ids: Vec::new(),
+            attachments: Vec::new(),
             image_indices: Vec::new(),
         }
     }

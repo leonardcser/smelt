@@ -523,10 +523,8 @@ pub struct SplitConfig {
 }
 
 /// How the focused window's cursor renders (single global on `Ui`).
-/// `Hidden` - no cursor. `Block { glyph, style, pos }` - paint a cell at `pos`
-/// when set, else at the window-derived `(cursor_col, cursor_row - scroll_top)`.
-/// `pos` is the host's projected (screen-relative) `(col, row)` override for
-/// panes that wrap or format their buffer before paint (transcript, prompt).
+/// `Hidden` - no cursor. `Block { glyph, style }` - paint a cell at the
+/// window-derived `(cursor_col, cursor_row - scroll_top)`.
 /// The terminal's hardware caret is hidden for the lifetime of the app -
 /// every cursor we show is painted into the grid as a styled cell, which keeps
 /// large redraws atomic with the rest of the frame. The renderer still tracks
@@ -538,7 +536,6 @@ pub enum CursorShape {
     Block {
         glyph: char,
         style: Style,
-        pos: Option<(u16, u16)>,
     },
 }
 
@@ -1967,6 +1964,40 @@ impl Window {
     /// Project `cpos` to a visual `(row, cell_col)` through this window's
     /// layout. Used by cursor sync after navigation/edit so `cursor_row` stays
     /// in the backing buffer's local visual-row space.
+    /// The caret's `(row, col)` relative to a `width` x `height` rect showing
+    /// this window, snapped past chrome spans (e.g. inline gutter) so it never
+    /// lands inside non-selectable cells. `None` when it is scrolled out of
+    /// view. A caret parked one cell past a row that fills the viewport sits on
+    /// that row's last cell.
+    pub fn caret_position(&self, buf: &Buffer, width: u16, height: u16) -> Option<(u16, u16)> {
+        let viewport_height = self.prepared_viewport_height.unwrap_or(height).min(height);
+        let gutter_width = self.gutter_width(buf).min(width);
+        let (content_offset, content_width) = self.config.gutters.text_columns(width, gutter_width);
+        let (visual_row, col) = self.cursor_visual(buf, self.effective_endpoint());
+        // When the layout doesn't match, fall back to identity (vrow == logical).
+        let logical_row = self
+            .layout
+            .logical_at_visual(row_to_usize(visual_row))
+            .map(|(lr, _)| lr)
+            .unwrap_or_else(|| row_to_usize(visual_row));
+        let col = u16::try_from(resolve_cursor_col(buf, logical_row, usize::from(col))).ok()?;
+        let row = Self::screen_row_at(
+            self.absolute_row(visual_row),
+            self.scroll_top,
+            viewport_height,
+        )?;
+        if col < self.scroll_left || row >= height {
+            return None;
+        }
+        let col = col - self.scroll_left;
+        let col = if col == content_width {
+            col.saturating_sub(1)
+        } else {
+            col
+        };
+        (col < content_width).then_some((row, content_offset + col))
+    }
+
     fn cursor_visual(&self, buf: &Buffer, cpos: usize) -> (RowIndex, u16) {
         let (lrow, byte_col) = buf.display_byte_pos(cpos);
         if !self.layout_matches(buf) {
@@ -3642,6 +3673,11 @@ impl Window {
         let mut vt_buf: Vec<smelt_buffer::buffer::VirtualText> = Vec::new();
         let mut mask_buf: Vec<bool> = Vec::with_capacity(content_width as usize);
         let mut atomic_cells: Vec<(u16, std::ops::Range<u16>)> = Vec::new();
+        // Logical `(row, cell)` of the caret when this leaf paints one. A span
+        // with `cursor_hl` that contains it paints in place of the caret.
+        let caret_cell = matches!(ctx.cursor_shape, CursorShape::Block { .. })
+            .then(|| buf.display_cursor_pos(self.effective_endpoint()));
+        let mut caret_covered = false;
         for row in 0..height {
             if row >= viewport_height {
                 for col in 0..width {
@@ -3831,6 +3867,7 @@ impl Window {
                 );
             }
             let is_cursor_row = cursor_screen_row == Some(row);
+            let mut caret_cover = None;
             for span in &spans_buf {
                 if span.on_cursor_row && !is_cursor_row {
                     continue;
@@ -3843,6 +3880,18 @@ impl Window {
                 }
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
+                if let Some(hl) = span.meta.cursor_hl.filter(|_| end > start) {
+                    let covers = logical.is_some()
+                        && caret_cell.is_some_and(|(caret_row, caret_col)| {
+                            caret_row == logical_row
+                                && (usize::from(span.col_start)..usize::from(span.col_end))
+                                    .contains(&caret_col)
+                        });
+                    if covers {
+                        caret_cover =
+                            Some((start, end, merge_span_style(style, &ctx.theme.resolve(hl))));
+                    }
+                }
                 if end > start {
                     paint_span_cells(
                         slice,
@@ -3924,6 +3973,23 @@ impl Window {
                     paint_ranges(ranges, style);
                 }
             }
+            // Painted after selection layers so the covered caret stays visible
+            // inside a Visual range.
+            if let Some((start, end, style)) = caret_cover {
+                caret_covered = true;
+                paint_span_cells(
+                    slice,
+                    content_offset,
+                    row,
+                    start,
+                    end,
+                    &col_to_grapheme,
+                    &painted_graphemes,
+                    style,
+                    None,
+                    None,
+                );
+            }
             vt_buf.clear();
             // Virtual text attaches to the logical row's first chunk only; we
             // don't want EOL/RightAlign virt-text duplicated on every wrapped row.
@@ -3967,74 +4033,44 @@ impl Window {
         // `effective_endpoint`: `drag_endpoint` during a drag (so the cursor tracks
         // the mouse, even on non-focusable leaves like notifications), `cpos`
         // otherwise.
-        if let CursorShape::Block { glyph, style, pos } = ctx.cursor_shape {
-            let resolved = pos.or_else(|| {
-                let end = self.effective_endpoint();
-                let (row, col) = self.cursor_visual(buf, end);
-                // Snap visual cursor past chrome spans (e.g. inline gutter) so the
-                // caret never paints inside non-selectable cells. Logical row is
-                // resolved via the layout - when the layout doesn't match, fall
-                // back to identity (vrow == logical).
-                let logical_row = self
-                    .layout
-                    .logical_at_visual(row_to_usize(row))
-                    .map(|(lr, _)| lr)
-                    .unwrap_or_else(|| row_to_usize(row));
-                let col =
-                    u16::try_from(resolve_cursor_col(buf, logical_row, usize::from(col))).ok()?;
-                Self::screen_row_at(self.absolute_row(row), self.scroll_top, viewport_height)
-                    .map(|screen_row| (col, screen_row))
-            });
-            if let Some((col, screen_row)) = resolved {
-                // `col` is in source-row cells; shift into viewport coords. Off
-                // either side of the horizontal viewport drops the caret paint.
-                if col >= self.scroll_left && screen_row < height {
-                    let mut dst_col = col - self.scroll_left;
-                    // A caret parked one cell past a row that fills the viewport
-                    // sits on that row's last cell instead of vanishing.
-                    if dst_col == content_width {
-                        dst_col = dst_col.saturating_sub(1);
-                    }
-                    if dst_col < content_width {
-                        let mut cursor_col = content_offset + dst_col;
-                        if let Some((_, range)) = atomic_cells
-                            .iter()
-                            .find(|(row, range)| *row == screen_row && range.contains(&cursor_col))
-                        {
-                            let before = range
-                                .start
-                                .checked_sub(1)
-                                .filter(|col| *col >= content_offset);
-                            let after =
-                                (range.end < content_offset + content_width).then_some(range.end);
-                            let candidates = if cursor_col == range.start {
-                                [before, after]
-                            } else {
-                                [after, before]
-                            };
-                            let Some(boundary) = candidates.into_iter().flatten().find(|col| {
-                                slice
-                                    .cell(*col, screen_row)
-                                    .is_none_or(|cell| cell.image.is_none())
-                            }) else {
-                                return;
-                            };
-                            cursor_col = boundary;
-                        }
-                        let under = slice
-                            .cell(cursor_col, screen_row)
-                            .map(|cell| cell.symbol.clone())
-                            .filter(|under| !under.is_continuation() && *under != ' ');
-                        match under {
-                            Some(under) => {
-                                slice.set_symbol(cursor_col, screen_row, under.as_str(), style)
-                            }
-                            None => slice.set(cursor_col, screen_row, glyph, style),
-                        }
-                        slice.set_terminal_cursor_position(cursor_col, screen_row);
-                    }
+        if let CursorShape::Block { glyph, style } = ctx.cursor_shape {
+            let Some((screen_row, mut cursor_col)) = self.caret_position(buf, width, height) else {
+                return;
+            };
+            if let Some((_, range)) = atomic_cells
+                .iter()
+                .find(|(row, range)| *row == screen_row && range.contains(&cursor_col))
+            {
+                let before = range
+                    .start
+                    .checked_sub(1)
+                    .filter(|col| *col >= content_offset);
+                let after = (range.end < content_offset + content_width).then_some(range.end);
+                let candidates = if cursor_col == range.start {
+                    [before, after]
+                } else {
+                    [after, before]
+                };
+                let Some(boundary) = candidates.into_iter().flatten().find(|col| {
+                    slice
+                        .cell(*col, screen_row)
+                        .is_none_or(|cell| cell.image.is_none())
+                }) else {
+                    return;
+                };
+                cursor_col = boundary;
+            }
+            if !caret_covered {
+                let under = slice
+                    .cell(cursor_col, screen_row)
+                    .map(|cell| cell.symbol.clone())
+                    .filter(|under| !under.is_continuation() && *under != ' ');
+                match under {
+                    Some(under) => slice.set_symbol(cursor_col, screen_row, under.as_str(), style),
+                    None => slice.set(cursor_col, screen_row, glyph, style),
                 }
             }
+            slice.set_terminal_cursor_position(cursor_col, screen_row);
         }
     }
 }
@@ -7449,7 +7485,6 @@ mod tests {
         ctx.cursor_shape = CursorShape::Block {
             glyph: 'b',
             style: cursor_style,
-            pos: None,
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -7462,6 +7497,65 @@ mod tests {
         // Adjacent cells keep the buffer text untouched.
         assert_eq!(grid.cell(0, 0).symbol, 'a');
         assert_eq!(grid.cell(2, 0).symbol, 'c');
+    }
+
+    #[test]
+    fn caret_on_cursor_hl_span_paints_the_whole_span_instead() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["a[img]b".into()]);
+        buf.add_highlight_group_with_meta(
+            0,
+            1,
+            6,
+            intern("SmeltAccent"),
+            smelt_buffer::buffer::SpanMeta::cursor_hl(intern("CursorObjectTest")),
+        );
+        let object = crate::grid::Style::new()
+            .fg(crate::grid::Color::Black)
+            .bg(crate::grid::Color::AnsiValue(208));
+        let mut theme = Theme::default();
+        theme.set("CursorObjectTest", object);
+        let caret = crate::grid::Style::new().bg(crate::grid::Color::White);
+        let render = |cpos: usize| {
+            let mut w = make_win();
+            w.text_state_mut().cpos = cpos;
+            let ctx = DrawContext {
+                focused: true,
+                cursor_shape: CursorShape::Block {
+                    glyph: ' ',
+                    style: caret,
+                },
+                theme: std::sync::Arc::new(theme.clone()),
+                ..ctx()
+            };
+            let mut grid = Grid::new(10, 1);
+            w.render(&buf, &mut grid.slice_mut(Rect::new(0, 0, 10, 1)), &ctx);
+            grid
+        };
+
+        for cpos in 1..6 {
+            let grid = render(cpos);
+            for col in 1..6 {
+                assert_eq!(
+                    grid.cell(col, 0).style.bg,
+                    object.bg,
+                    "cpos {cpos} col {col}"
+                );
+                assert_eq!(
+                    grid.cell(col, 0).style.fg,
+                    object.fg,
+                    "cpos {cpos} col {col}"
+                );
+            }
+            assert_eq!(grid.cell(1, 0).symbol, '[', "the span keeps its glyphs");
+            assert_eq!(grid.terminal_cursor_position(), Some((cpos as u16, 0)));
+        }
+
+        let grid = render(6);
+        assert_eq!(grid.cell(6, 0).style.bg, caret.bg, "caret past the span");
+        for col in 1..6 {
+            assert_ne!(grid.cell(col, 0).style.bg, object.bg);
+        }
     }
 
     #[test]
@@ -7498,10 +7592,12 @@ mod tests {
             ctx.cursor_shape = CursorShape::Block {
                 glyph: ' ',
                 style: cursor_style,
-                pos: Some((first, 0)),
             };
+            // The caret lands on the image's first cell.
+            let mut w = make_win();
+            w.text_state_mut().cpos = prefix.len();
             let mut grid = Grid::new(10, 1);
-            make_win().render(&buf, &mut grid.slice_mut(Rect::new(0, 0, 10, 1)), &ctx);
+            w.render(&buf, &mut grid.slice_mut(Rect::new(0, 0, 10, 1)), &ctx);
             assert_eq!(grid.cell(first, 0).style.fg, Some(image_color));
             assert_eq!(grid.cell(first + 1, 0).style.fg, Some(image_color));
             assert_eq!(grid.terminal_cursor_position(), Some((cursor, 0)));
@@ -7535,7 +7631,6 @@ mod tests {
         ctx.cursor_shape = CursorShape::Block {
             glyph: 'g',
             style: cursor_style,
-            pos: None,
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -7587,7 +7682,6 @@ mod tests {
         ctx.cursor_shape = CursorShape::Block {
             glyph: '!',
             style: crate::grid::Style::default(),
-            pos: None,
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));

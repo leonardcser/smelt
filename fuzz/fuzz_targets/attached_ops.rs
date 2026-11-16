@@ -1,7 +1,7 @@
 #![no_main]
 
 //! Direct fuzzing of `smelt_buffer::attached::AttachedTextMut` - the
-//! lockstep `(source, attachment_ids)` invariant carrier. Bugs here
+//! lockstep `(source, attachments)` invariant carrier. Bugs here
 //! traced back to mis-counted markers across `replace_range` boundaries
 //! (a removed marker whose byte range straddles the snap point), which
 //! manifested far away as "attachment id list out of sync with source"
@@ -12,19 +12,35 @@
 //! After every op we rebuild the production state's segments and assert
 //! they match the reference's segments - a stronger check than just
 //! comparing `(source, ids)` because it catches realignment bugs that
-//! would still pass the marker-count invariant.
+//! would still pass the marker-count invariant. Fuzz inputs name
+//! attachments by number; one shared `Attachment` per number keeps
+//! identity comparisons meaningful.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use smelt_buffer::attached::AttachedTextMut;
-use smelt_buffer::attachment::{AttachmentId, ATTACHMENT_MARKER};
+use smelt_buffer::attachment::{Attachment, ATTACHMENT_MARKER};
+use std::collections::HashMap;
+
+/// One shared `Attachment` per fuzz-chosen number.
+#[derive(Default)]
+struct Pool(HashMap<u64, Attachment>);
+
+impl Pool {
+    fn get(&mut self, n: u64) -> Attachment {
+        self.0
+            .entry(n)
+            .or_insert_with(|| Attachment::image(format!("{n}.png"), format!("data:{n}")))
+            .clone()
+    }
+}
 
 /// Reference state. Segments alternate text/marker freely; rebuilding
 /// `(source, ids)` from segments is a fold over the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Seg {
     Text(String),
-    Marker(AttachmentId),
+    Marker(Attachment),
 }
 
 #[derive(Default, Clone)]
@@ -33,10 +49,10 @@ struct Ref {
 }
 
 impl Ref {
-    fn from_state(source: &str, ids: &[AttachmentId]) -> Self {
+    fn from_state(source: &str, ids: &[Attachment]) -> Self {
         let mut segs = Vec::new();
         let mut cur = String::new();
-        let mut id_iter = ids.iter().copied();
+        let mut id_iter = ids.iter().cloned();
         for c in source.chars() {
             if c == ATTACHMENT_MARKER {
                 if !cur.is_empty() {
@@ -71,11 +87,11 @@ impl Ref {
         out
     }
 
-    fn ids(&self) -> Vec<AttachmentId> {
+    fn ids(&self) -> Vec<Attachment> {
         self.segs
             .iter()
             .filter_map(|s| match s {
-                Seg::Marker(id) => Some(*id),
+                Seg::Marker(id) => Some(id.clone()),
                 _ => None,
             })
             .collect()
@@ -147,7 +163,7 @@ impl Ref {
         self.insert_str(pos, s)
     }
 
-    fn insert_marker(&mut self, pos: usize, id: AttachmentId) -> usize {
+    fn insert_marker(&mut self, pos: usize, id: Attachment) -> usize {
         let cur_source = self.source();
         let p = snap_chars(&cur_source, pos);
         let idx_before = cur_source[..p].matches(ATTACHMENT_MARKER).count();
@@ -161,7 +177,24 @@ impl Ref {
         p
     }
 
-    fn strip_attachments(&mut self) -> Vec<AttachmentId> {
+    /// Naive copy of `start..end` pasted at `pos`, attachments included.
+    fn copy_paste(&mut self, start: usize, end: usize, pos: usize) {
+        let cur_source = self.source();
+        let start = snap_chars(&cur_source, start);
+        let end = snap_chars(&cur_source, end).max(start);
+        let ids = self.ids();
+        let first = cur_source[..start].matches(ATTACHMENT_MARKER).count();
+        let clip = cur_source[start..end].to_string();
+        let clip_ids = ids[first..first + clip.matches(ATTACHMENT_MARKER).count()].to_vec();
+        let p = snap_chars(&cur_source, pos);
+        let at = cur_source[..p].matches(ATTACHMENT_MARKER).count();
+        let new_source = format!("{}{clip}{}", &cur_source[..p], &cur_source[p..]);
+        let mut new_ids = ids;
+        new_ids.splice(at..at, clip_ids);
+        *self = Ref::from_state(&new_source, &new_ids);
+    }
+
+    fn strip_attachments(&mut self) -> Vec<Attachment> {
         let dropped = self.ids();
         self.segs.retain(|s| matches!(s, Seg::Text(_)));
         dropped
@@ -196,6 +229,8 @@ enum AttachedOp {
     Insert { pos: u32, ch: u32 },
     /// `insert_marker` - atomic source-marker + id push.
     InsertMarker { pos: u32, id: u64 },
+    /// `slice` then `insert_attached` - a cut-and-paste round trip.
+    CopyPaste { start: u32, end: u32, pos: u32 },
     /// `strip_attachments` - drops every marker + id.
     Strip,
     /// `clear` - empties both halves.
@@ -214,7 +249,7 @@ struct Input {
     ops: Vec<AttachedOp>,
 }
 
-fn assert_invariant(source: &str, ids: &[AttachmentId]) {
+fn assert_invariant(source: &str, ids: &[Attachment]) {
     let n_markers = source.matches(ATTACHMENT_MARKER).count();
     if n_markers != ids.len() {
         panic!(
@@ -235,7 +270,8 @@ fn run(input: Input) {
         let _ = i;
     }
     source.push_str(&stripped);
-    let mut ids: Vec<AttachmentId> = (0..n as u64).collect();
+    let mut pool = Pool::default();
+    let mut ids: Vec<Attachment> = (0..n as u64).map(|i| pool.get(i)).collect();
     let mut reference = Ref::from_state(&source, &ids);
     assert_invariant(&source, &ids);
 
@@ -269,11 +305,20 @@ fn run(input: Input) {
                 let _ = reference.insert_char(pos as usize, c);
             }
             AttachedOp::InsertMarker { pos, id } => {
+                let id = pool.get(id);
                 {
                     let mut t = AttachedTextMut::new(&mut source, &mut ids);
-                    let _ = t.insert_marker(pos as usize, id);
+                    let _ = t.insert_marker(pos as usize, id.clone());
                 }
                 let _ = reference.insert_marker(pos as usize, id);
+            }
+            AttachedOp::CopyPaste { start, end, pos } => {
+                {
+                    let mut t = AttachedTextMut::new(&mut source, &mut ids);
+                    let clip = t.slice(start as usize..end as usize);
+                    let _ = t.insert_attached(pos as usize, &clip);
+                }
+                reference.copy_paste(start as usize, end as usize, pos as usize);
             }
             AttachedOp::Strip => {
                 let prod_dropped = {
@@ -313,7 +358,7 @@ fn run(input: Input) {
                 if let Some(t) = text_between.get(n) {
                     built.push_str(&t.replace(ATTACHMENT_MARKER, ""));
                 }
-                let new_ids: Vec<AttachmentId> = src_ids.clone();
+                let new_ids: Vec<Attachment> = src_ids.iter().map(|&id| pool.get(id)).collect();
                 {
                     let mut t = AttachedTextMut::new(&mut source, &mut ids);
                     t.install(built.clone(), new_ids.clone());
