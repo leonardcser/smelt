@@ -208,8 +208,8 @@ In the prompt, normal and visual mode support:
 
 Not supported yet: macros (`q`, `@`), marks in the prompt, `=`, replace mode (`R`
 in normal mode), and blockwise visual (`Ctrl+V`).
-Prompt visual selections scope submit/steer actions to
-the selection.
+A prompt visual selection scopes submit, steer and stash (`Ctrl+S`) to the
+selection.
 
 Yank / paste are mirrored with the system clipboard: `y` / `yy` / `d` / `x` push
 to the clipboard, and `p` / `P` read from it. If the clipboard was updated

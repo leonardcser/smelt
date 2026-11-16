@@ -48,7 +48,7 @@ pub(crate) mod transcript_work;
 pub(crate) mod ui_host;
 pub(crate) mod well_known;
 
-use crate::input::{PromptState, SubmitEdit};
+use crate::input::{PromptCut, PromptState};
 use engine::EngineHandle;
 use protocol::Content;
 use smelt_core::history::History;
@@ -949,7 +949,7 @@ pub(crate) enum EventOutcome {
     ContinueTurn,
     Submit {
         submission: crate::input::PromptSubmission,
-        edit: SubmitEdit,
+        cut: PromptCut,
     },
     Exec(crate::commands::ExecHandle),
 }
@@ -1497,20 +1497,17 @@ impl TuiApp {
         }
 
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        let mut prefix = String::new();
-        let mut attachments = Vec::new();
+        let mut prefix = crate::smelt_edit::AttachedText::default();
         for (index, input) in queued.into_iter().enumerate() {
             if index > 0 {
-                prefix.push('\n');
+                prefix.push_str("\n");
             }
-            let replay = input.prompt_replay();
-            prefix.push_str(&replay.source);
-            attachments.extend(replay.attachments);
+            prefix.push(&input.prompt_replay().into_attached());
         }
         if !prefix.is_empty() && !pctx.buf.source().is_empty() {
-            prefix.push('\n');
+            prefix.push_str("\n");
         }
-        self.prompt.prepend_attached(&mut pctx, prefix, attachments);
+        self.prompt.prepend_attached(&mut pctx, prefix);
         true
     }
 

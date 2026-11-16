@@ -645,6 +645,62 @@ fn vim_visual_ctrl_q_with_image_steers_and_restores_selection() {
 }
 
 #[test]
+fn vim_visual_ctrl_s_stashes_selection_only() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("alpha beta gamma");
+    app.press(KeyCode::Esc);
+    app.type_char('0');
+    app.type_char('w');
+    app.type_char('v');
+    app.type_char('e');
+
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.state().prompt_text, "alpha  gamma");
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("Stashed"), "{frame}");
+
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.state().prompt_text, "beta\nalpha  gamma");
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("Stashed"), "{frame}");
+}
+
+#[test]
+fn vim_visual_line_ctrl_s_stashes_selected_lines_with_their_attachments() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("keep ");
+    insert_image(&mut app, "keep.png", "data:image/png;base64,KEEP");
+    app.type_text("\nstash ");
+    insert_image(&mut app, "stash.png", "data:image/png;base64,STASH");
+    app.press(KeyCode::Esc);
+    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
+
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+    let marker = crate::input::ATTACHMENT_MARKER;
+    assert_eq!(app.state().prompt_text, format!("keep {marker}"));
+    assert_eq!(app.prompt_attachment_count(), 1);
+
+    app.press(KeyCode::Char('d'));
+    app.press(KeyCode::Char('d'));
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.state().prompt_text, format!("stash {marker}"));
+    assert_eq!(app.prompt_attachment_count(), 1);
+    app.press(KeyCode::Enter);
+    assert_eq!(
+        user_blocks(&mut app),
+        vec![(
+            "stash [stash.png]".to_string(),
+            vec!["[stash.png]".to_string()]
+        )]
+    );
+}
+
+#[test]
 fn vim_full_cycle_normal_insert_normal_visual_normal() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.press(KeyCode::Esc);

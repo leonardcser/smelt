@@ -384,7 +384,8 @@ top bar up to read the rest before you approve.
 - `Enter` submits; on an empty prompt it continues the turn when there is history.
 - `F1` opens help; `F3` and `F12` toggle the debug and performance panels.
 - **Stash a draft:** `Ctrl+S` saves your input and gives you a blank prompt, and
-  `Ctrl+S` again restores it. Handy for a quick side question mid-prompt.
+  `Ctrl+S` again restores it. Handy for a quick side question mid-prompt. In vim
+  visual mode, `Ctrl+S` stashes only the selection.
 - **Predictions:** after each turn the agent may suggest your next message as dim
   ghost text. `Tab` accepts it and typing dismisses it. Turn it off with
   `smelt.settings.show_prediction = false`.

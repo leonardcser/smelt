@@ -262,11 +262,10 @@ impl TuiApp {
             }
             EventOutcome::Submit {
                 mut submission,
-                edit,
+                cut,
             } => {
                 let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
                 self.clear_prompt_prediction();
-                let mut edit = Some(edit);
                 let accepted = match self.prompt_work_state() {
                     PromptWorkState::TurnActive
                     | PromptWorkState::BackgroundBusy
@@ -281,7 +280,7 @@ impl TuiApp {
                                 QueueStage::Turn,
                             );
                             if accepted {
-                                self.commit_prompt_submission(edit.take().expect("submit edit"));
+                                self.commit_prompt_submission(cut);
                             }
                             accepted
                         }
@@ -315,21 +314,17 @@ impl TuiApp {
                                         placement,
                                     ) {
                                         Some(turn) => {
-                                            self.commit_prompt_submission(
-                                                edit.take().expect("submit edit"),
-                                            );
+                                            self.commit_prompt_submission(cut);
                                             self.conversation.set_active(Some(turn));
                                             true
                                         }
                                         None if self.turn_submission_is_pending() => {
                                             let recovery = self.prompt.prepare_submission_recovery(
                                                 crate::input::prompt_ctx_ref(&self.ui),
-                                                edit.as_ref().expect("submit edit"),
+                                                &cut,
                                                 replay,
                                             );
-                                            self.commit_prompt_submission(
-                                                edit.take().expect("submit edit"),
-                                            );
+                                            self.commit_prompt_submission(cut);
                                             self.preserve_pending_prompt_submission(recovery);
                                             true
                                         }
@@ -337,9 +332,7 @@ impl TuiApp {
                                     }
                                 }
                                 outcome => {
-                                    self.commit_prompt_submission(
-                                        edit.take().expect("submit edit"),
-                                    );
+                                    self.commit_prompt_submission(cut);
                                     self.apply_input_outcome(
                                         outcome,
                                         submission.content,
@@ -391,9 +384,9 @@ impl TuiApp {
         self.apply_event_outcome(outcome);
     }
 
-    fn commit_prompt_submission(&mut self, edit: crate::input::SubmitEdit) {
+    fn commit_prompt_submission(&mut self, cut: crate::input::PromptCut) {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        self.prompt.apply_submit_edit(&mut pctx, edit);
+        self.prompt.apply_cut(&mut pctx, cut);
         // Publish the edit before the submission runs, so a picker it opens
         // does not take the cleared prompt for its query.
         let _ = self.queue_prompt_text_changed_if_dirty();
@@ -852,10 +845,10 @@ impl TuiApp {
         match input_action {
             Action::Submit {
                 submission,
-                edit,
+                cut,
                 stage,
             } => {
-                return self.handle_running_submit(submission, edit, stage);
+                return self.handle_running_submit(submission, cut, stage);
             }
             Action::SubmitEmpty => {
                 return self.handle_empty_submit();
@@ -881,7 +874,7 @@ impl TuiApp {
     fn handle_running_submit(
         &mut self,
         submission: PromptSubmission,
-        edit: crate::input::SubmitEdit,
+        cut: crate::input::PromptCut,
         target: QueueStage,
     ) -> EventOutcome {
         let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
@@ -891,7 +884,7 @@ impl TuiApp {
             && submission.content.image_count() == 0
         {
             if let InputOutcome::Command(line) = self.process_input(&text) {
-                self.commit_prompt_submission(edit);
+                self.commit_prompt_submission(cut);
                 self.apply_input_outcome(
                     InputOutcome::Command(line),
                     submission.content,
@@ -909,7 +902,7 @@ impl TuiApp {
                 target,
                 sent_at_ms,
             ) {
-                self.commit_prompt_submission(edit);
+                self.commit_prompt_submission(cut);
                 return outcome;
             }
         }
@@ -918,7 +911,7 @@ impl TuiApp {
         }
         if self.queue_explicit_submission(QueuedInput::from_prompt(submission, sent_at_ms), target)
         {
-            self.commit_prompt_submission(edit);
+            self.commit_prompt_submission(cut);
             self.restore_stash_after_submit();
         }
         EventOutcome::Noop
@@ -1109,14 +1102,14 @@ impl TuiApp {
         match action {
             Action::Submit {
                 submission,
-                edit,
+                cut,
                 stage,
             } if self.prompt_work_state() == PromptWorkState::Paused => {
-                self.handle_running_submit(submission, edit, stage)
+                self.handle_running_submit(submission, cut, stage)
             }
             Action::Submit {
-                submission, edit, ..
-            } => EventOutcome::Submit { submission, edit },
+                submission, cut, ..
+            } => EventOutcome::Submit { submission, cut },
             Action::SubmitEmpty => self.handle_empty_submit(),
             Action::EditInEditor => {
                 self.edit_in_editor();

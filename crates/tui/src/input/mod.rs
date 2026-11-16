@@ -7,6 +7,7 @@ pub(crate) use smelt_core::history::History;
 
 use crate::app::QueueStage;
 use crate::keymap::{self, KeyAction, KeyContext};
+use crate::smelt_edit::AttachedText;
 use crate::smelt_edit::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
@@ -62,14 +63,31 @@ pub(crate) fn prompt_ctx_ref(ui: &crate::smelt_edit::Ui) -> PromptCtxRef<'_> {
     }
 }
 
-/// Snapshot of the input buffer state (used for Ctrl+S stash).
-/// Owns its attachment data so it survives store clears across sessions.
+/// Prompt text set aside with Ctrl+S: the vim visual selection or the
+/// whole prompt. Owns its attachments so it survives store clears across
+/// sessions.
 #[derive(Clone, Debug)]
-pub(crate) struct InputSnapshot {
-    pub(crate) buf: String,
-    pub(crate) cpos: usize,
-    pub(crate) attachments: Vec<Attachment>,
+struct Stash {
+    text: AttachedText,
+    /// Cursor offset into `text`.
+    cpos: usize,
     from_paste: bool,
+}
+
+/// The part of the prompt that a submit or a stash takes.
+struct PromptScope {
+    /// Bytes the action takes.
+    taken: std::ops::Range<usize>,
+    /// What leaves the prompt once the action commits.
+    cut: PromptCut,
+}
+
+/// How the prompt changes once an action takes its [`PromptScope`].
+pub(crate) enum PromptCut {
+    /// The whole prompt went.
+    Clear,
+    /// A visual selection went, widened to whole lines when linewise.
+    Range(std::ops::Range<usize>),
 }
 
 // ── Shared input state ───────────────────────────────────────────────────────
@@ -81,7 +99,7 @@ pub(crate) struct InputSnapshot {
 /// coordinates (`cursor_row`, `cursor_col`, `scroll_top`) are synced from
 /// `buf.source` via `sync_display_coords` before each render.
 pub(crate) struct PromptState {
-    pub(crate) stash: Option<InputSnapshot>,
+    stash: Option<Stash>,
     cwd: std::path::PathBuf,
     runtime_dir: std::path::PathBuf,
     /// True when content came from a paste; cleared on manual character input.
@@ -95,7 +113,7 @@ pub(crate) enum Action {
     Redraw,
     Submit {
         submission: PromptSubmission,
-        edit: SubmitEdit,
+        cut: PromptCut,
         stage: QueueStage,
     },
     SubmitEmpty,
@@ -104,11 +122,6 @@ pub(crate) enum Action {
     PanColumns(isize),
     NotifyError(String),
     Noop,
-}
-
-pub(crate) enum SubmitEdit {
-    Clear,
-    DeleteRange { range: std::ops::Range<usize> },
 }
 
 pub(crate) struct PromptSubmission {
@@ -125,6 +138,10 @@ pub(crate) struct PromptReplay {
 }
 
 impl PromptReplay {
+    pub(crate) fn into_attached(self) -> AttachedText {
+        AttachedText::new(self.source, self.attachments)
+    }
+
     pub(crate) fn image_placement(&self) -> protocol::history::ImagePlacement {
         protocol::history::ImagePlacement {
             source: self.source.clone(),
@@ -393,22 +410,14 @@ impl PromptState {
         self.install_source(ctx, text, cpos, Vec::new());
     }
 
-    /// Prepend source and attachments, snapshot undo, and shift the cursor.
-    /// Existing markers and attachments remain paired after the inserted prefix.
-    pub(crate) fn prepend_attached(
-        &mut self,
-        ctx: &mut PromptCtx<'_>,
-        prefix: String,
-        mut attachments: Vec<Attachment>,
-    ) {
+    /// Prepend `prefix` with its attachments, snapshot undo, and shift the
+    /// cursor.
+    pub(crate) fn prepend_attached(&mut self, ctx: &mut PromptCtx<'_>, prefix: AttachedText) {
         if prefix.is_empty() {
             return;
         }
         self.save_undo(ctx);
-        let inserted = prefix.len();
-        let source = format!("{prefix}{}", ctx.buf.source());
-        attachments.extend_from_slice(&ctx.buf.attachments);
-        ctx.buf.text_mut().install(source, attachments);
+        let inserted = ctx.buf.text_mut().insert_attached(0, &prefix).len();
         let cpos = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), ctx.win.cpos() + inserted);
         ctx.win.set_cpos(cpos);
         ctx.win.clear_selection_anchor();
@@ -425,67 +434,71 @@ impl PromptState {
         &mut self,
         ctx: &mut PromptCtx<'_>,
         start: usize,
-        removed: String,
-        attachments: Vec<Attachment>,
+        removed: AttachedText,
     ) {
         self.save_undo_force(ctx);
-        let start = smelt_buffer::text::snap(ctx.buf.source(), start);
-        let before = smelt_buffer::text::slice(ctx.buf.source(), 0..start);
-        let marker_index = before.matches(ATTACHMENT_MARKER).count();
-        let source = format!(
-            "{before}{removed}{}",
-            smelt_buffer::text::slice(ctx.buf.source(), start..ctx.buf.source().len())
-        );
-        let mut restored = ctx.buf.attachments.clone();
-        restored.splice(marker_index..marker_index, attachments);
         let cpos = ctx.win.cpos();
-        let cpos = if cpos >= start {
-            cpos + removed.len()
+        let inserted = ctx.buf.text_mut().insert_attached(start, &removed);
+        let cpos = if cpos >= inserted.start {
+            cpos + inserted.len()
         } else {
             cpos
         };
-        self.install_source(ctx, source, cpos, restored);
+        ctx.win
+            .set_cpos(smelt_buffer::text::snap_grapheme(ctx.buf.source(), cpos));
+        ctx.win.clear_selection_anchor();
+        ctx.win.clear_vim_visual_anchor();
     }
 
-    /// Toggle stash. The stash keeps the prompt's attachments with its text.
+    pub(crate) fn has_stash(&self) -> bool {
+        self.stash.is_some()
+    }
+
+    /// Restore the stash if there is one, else stash the prompt's scope.
     fn toggle_stash(&mut self, ctx: &mut PromptCtx<'_>) {
-        if let Some(snap) = self.stash.take() {
-            self.unstash(ctx, snap);
+        if self.stash.is_some() {
+            self.restore_stash(ctx);
         } else {
-            let source_empty = ctx.buf.source().is_empty();
-            let no_attachments = ctx.buf.attachments.is_empty();
-            if !source_empty || !no_attachments {
-                let attachments = ctx.buf.attachments.clone();
-                let stashed = ctx.buf.source().to_string();
-                ctx.buf.text_mut().clear();
-                let cpos = ctx.win.cpos();
-                ctx.win.set_cpos(0);
-                self.stash = Some(InputSnapshot {
-                    buf: stashed,
-                    cpos,
-                    attachments,
-                    from_paste: self.from_paste,
-                });
-                ctx.win.clear_selection_anchor();
-                ctx.win.clear_vim_visual_anchor();
-            }
+            self.stash_scope(ctx);
         }
     }
 
-    pub(crate) fn restore_stash(&mut self, ctx: &mut PromptCtx<'_>) {
-        if let Some(snap) = self.stash.take() {
-            self.unstash(ctx, snap);
+    /// Move the visual selection, or else the whole prompt, into the stash.
+    /// The stash keeps the attachments of the text it takes.
+    fn stash_scope(&mut self, ctx: &mut PromptCtx<'_>) {
+        let scope = self.scope(ctx.as_ref());
+        let text =
+            AttachedText::slice_of(ctx.buf.source(), &ctx.buf.attachments, scope.taken.clone());
+        if text.is_empty() {
+            return;
         }
+        let cpos = ctx
+            .win
+            .cpos()
+            .saturating_sub(scope.taken.start)
+            .min(text.text().len());
+        self.stash = Some(Stash {
+            text,
+            cpos,
+            from_paste: self.from_paste,
+        });
+        self.apply_cut(ctx, scope.cut);
     }
 
-    /// Put a stash snapshot back. Text already in the prompt stays, below the
+    /// Put the stash back. Text already in the prompt stays, below the
     /// stashed text.
-    fn unstash(&mut self, ctx: &mut PromptCtx<'_>, snap: InputSnapshot) {
-        if ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty() {
-            self.install_source(ctx, snap.buf, snap.cpos, snap.attachments);
-            self.from_paste = snap.from_paste;
+    pub(crate) fn restore_stash(&mut self, ctx: &mut PromptCtx<'_>) {
+        let Some(stash) = self.stash.take() else {
+            return;
+        };
+        let mut text = stash.text;
+        if ctx.buf.source().is_empty() {
+            let (text, attachments) = text.into_parts();
+            self.install_source(ctx, text, stash.cpos, attachments);
+            self.from_paste = stash.from_paste;
         } else {
-            self.prepend_attached(ctx, format!("{}\n", snap.buf), snap.attachments);
+            text.push_str("\n");
+            self.prepend_attached(ctx, text);
         }
     }
 
@@ -609,66 +622,59 @@ impl PromptState {
             .content
     }
 
-    fn visual_submit_action(
-        &mut self,
-        ctx: &mut PromptCtx<'_>,
-        stage: QueueStage,
-    ) -> Option<Action> {
-        if !ctx.win.vim_enabled() {
-            return None;
-        }
-        let mode = ctx.win.vim_mode();
-        if !matches!(mode, VimMode::Visual | VimMode::VisualLine) {
-            return None;
-        }
-        let (start, end) = self.selection_range(ctx.as_ref())?;
-        if start >= end {
-            return None;
-        }
-
-        let submit_range = start..end;
-        let delete_range = if mode == VimMode::VisualLine {
-            crate::smelt_edit::vim::linewise_delete_range(ctx.buf.source(), submit_range.clone())
-        } else {
-            submit_range.clone()
-        };
-        let submission = self.submission_from_range(ctx.buf, submit_range);
-        let edit = SubmitEdit::DeleteRange {
-            range: delete_range,
-        };
-
-        Some(Action::Submit {
-            submission,
-            edit,
-            stage,
+    /// What a submit or stash takes: the non-empty vim visual selection, or
+    /// else the whole prompt.
+    fn scope(&self, ctx: PromptCtxRef<'_>) -> PromptScope {
+        self.visual_scope(ctx).unwrap_or_else(|| PromptScope {
+            taken: 0..ctx.buf.source().len(),
+            cut: PromptCut::Clear,
         })
     }
 
-    /// Submits the visual selection or the whole prompt at `stage`. An empty
-    /// prompt submits empty, which continues or advances work; steering an
-    /// empty prompt does nothing.
-    pub(crate) fn submit_action(&mut self, ctx: &mut PromptCtx<'_>, stage: QueueStage) -> Action {
-        if let Some(action) = self.visual_submit_action(ctx, stage) {
-            return action;
+    fn visual_scope(&self, ctx: PromptCtxRef<'_>) -> Option<PromptScope> {
+        let mode = ctx.win.vim_mode();
+        if !ctx.win.vim_enabled() || !matches!(mode, VimMode::Visual | VimMode::VisualLine) {
+            return None;
         }
+        let (start, end) = self.selection_range(ctx)?;
+        if start >= end {
+            return None;
+        }
+        let taken = start..end;
+        let cut = if mode == VimMode::VisualLine {
+            crate::smelt_edit::vim::linewise_delete_range(ctx.buf.source(), taken.clone())
+        } else {
+            taken.clone()
+        };
+        Some(PromptScope {
+            taken,
+            cut: PromptCut::Range(cut),
+        })
+    }
 
-        if ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty() {
+    /// Submits the prompt's scope at `stage`. An empty prompt submits empty,
+    /// which continues or advances work; steering an empty prompt does
+    /// nothing.
+    pub(crate) fn submit_action(&mut self, ctx: &mut PromptCtx<'_>, stage: QueueStage) -> Action {
+        let scope = self.scope(ctx.as_ref());
+        if scope.taken.is_empty() {
             return match stage {
                 QueueStage::Turn => Action::SubmitEmpty,
                 QueueStage::Request => Action::Noop,
             };
         }
         Action::Submit {
-            submission: self.submission_from_range(ctx.buf, 0..ctx.buf.source().len()),
-            edit: SubmitEdit::Clear,
+            submission: self.submission_from_range(ctx.buf, scope.taken),
+            cut: scope.cut,
             stage,
         }
     }
 
-    pub(crate) fn apply_submit_edit(&mut self, ctx: &mut PromptCtx<'_>, edit: SubmitEdit) {
-        match edit {
-            SubmitEdit::Clear => self.clear(ctx),
-            SubmitEdit::DeleteRange { range } => {
+    /// Remove what an action took from the prompt.
+    pub(crate) fn apply_cut(&mut self, ctx: &mut PromptCtx<'_>, cut: PromptCut) {
+        match cut {
+            PromptCut::Clear => self.clear(ctx),
+            PromptCut::Range(range) => {
                 self.save_undo(ctx);
                 ctx.buf.text_mut().replace_range(range.clone(), "");
                 let cpos = smelt_buffer::text::snap_grapheme(ctx.buf.source(), range.start);
@@ -1422,8 +1428,7 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            "e".into(),
-            Vec::new(),
+            AttachedText::plain("e"),
         );
 
         assert_eq!(input.buf.source(), "e\u{301}x");
@@ -1824,21 +1829,19 @@ mod tests {
         );
         assert!(input.skip_shell_escape());
 
-        // Stash: saves from_paste to snapshot, but doesn't clear it in active buffer
         input.state.toggle_stash(&mut PromptCtx {
             buf: &mut input.buf,
             win: &mut input.win,
         });
         assert!(
-            input.skip_shell_escape(),
-            "Stash saves from_paste to snapshot but keeps it in buffer"
+            !input.skip_shell_escape(),
+            "the emptied prompt holds no pasted text"
         );
         assert!(
             input.buf.source().is_empty(),
             "Buffer should be empty after stashing"
         );
 
-        // Restore: restores from_paste from snapshot
         input.state.toggle_stash(&mut PromptCtx {
             buf: &mut input.buf,
             win: &mut input.win,
@@ -1866,7 +1869,7 @@ mod tests {
 
         assert_eq!(input.buf.source(), "stashed\ncurrent");
         assert_eq!(input.win.cpos(), 3 + "stashed\n".len());
-        assert!(input.state.stash.is_none());
+        assert!(!input.state.has_stash());
     }
 
     #[test]
@@ -2054,7 +2057,7 @@ mod tests {
         );
 
         let Action::Submit {
-            submission, edit, ..
+            submission, cut, ..
         } = action
         else {
             panic!("expected selected submit");
@@ -2080,12 +2083,12 @@ mod tests {
             other => panic!("expected multipart content, got {other:?}"),
         }
         assert_eq!(input.buf.attachments, vec![keep.clone(), send]);
-        input.state.apply_submit_edit(
+        input.state.apply_cut(
             &mut PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            edit,
+            cut,
         );
         assert_eq!(input.buf.attachments, vec![keep]);
     }
@@ -2107,13 +2110,13 @@ mod tests {
         );
 
         let Action::Submit {
-            submission, edit, ..
+            submission, cut, ..
         } = action
         else {
             panic!("expected whole prompt submit");
         };
         assert_eq!(submission.content.text_content(), "alpha beta");
-        assert!(matches!(edit, SubmitEdit::Clear));
+        assert!(matches!(cut, PromptCut::Clear));
         assert_eq!(input.buf.source(), "alpha beta");
     }
 

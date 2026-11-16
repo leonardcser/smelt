@@ -73,6 +73,11 @@ impl AttachedText {
         &self.attachments
     }
 
+    /// The text and its attachments, still paired.
+    pub fn into_parts(self) -> (String, Vec<Attachment>) {
+        (self.text, self.attachments)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
