@@ -16,6 +16,16 @@ const RESCAN_DEBOUNCE: Duration = Duration::from_millis(150);
 const INLINE_SEARCH_BUDGET: Duration = Duration::from_millis(8);
 const GIT_LS_FILES_TIMEOUT: Duration = Duration::from_secs(5);
 const PARTIAL_PUBLISH_START: usize = 2_000;
+/// How deep a root that holds the home directory, or `/`, is indexed.
+const SHALLOW_SCAN_DEPTH: usize = 3;
+/// How old an unwatched index may get before a search rescans it.
+const UNWATCHED_RESCAN_AFTER: Duration = Duration::from_secs(3);
+/// Directory watches a project may hold where the OS limit is unknown.
+const DEFAULT_WATCH_BUDGET: usize = 32_768;
+/// Fraction of the per-user inotify limit a project may hold, so one large
+/// tree cannot starve other watchers of this user.
+const WATCH_BUDGET_DIVISOR: usize = 4;
+const INOTIFY_MAX_USER_WATCHES: &str = "/proc/sys/fs/inotify/max_user_watches";
 
 const NOISY_DIRS: &[&str] = &[
     ".git",
@@ -73,6 +83,8 @@ pub struct WorkspaceFiles {
     search_worker: Option<SearchWorker>,
     /// File paths of each project, by the index generation they came from.
     file_lists: HashMap<(PathBuf, SearchSource), GenerationFiles>,
+    /// Directory watches each project may hold.
+    watch_budget: usize,
 }
 
 #[derive(Debug)]
@@ -91,6 +103,7 @@ struct WorkspaceWatcher {
 #[derive(Debug)]
 enum WatcherCommand {
     WatchDir(PathBuf),
+    Forget(PathBuf),
     Shutdown,
 }
 
@@ -99,6 +112,47 @@ enum ProjectKind {
     Git,
     GitTracked,
     Filesystem,
+    /// A non-git root that holds the home directory, or `/`: indexed to
+    /// `SHALLOW_SCAN_DEPTH` and never watched.
+    Shallow,
+}
+
+impl ProjectKind {
+    /// Whether a watcher keeps the index current. Otherwise searches rescan
+    /// it when stale.
+    fn watched(self) -> bool {
+        self != ProjectKind::Shallow
+    }
+
+    fn scan_depth(self) -> Option<usize> {
+        (self == ProjectKind::Shallow).then_some(SHALLOW_SCAN_DEPTH)
+    }
+
+    /// How the watcher covers the source tree, or `None` when only the git
+    /// index (or nothing) is watched.
+    fn tree_watch(self) -> Option<TreeWatch> {
+        match self {
+            ProjectKind::Git => Some(TreeWatch { git_ignore: true }),
+            ProjectKind::Filesystem => Some(TreeWatch { git_ignore: false }),
+            ProjectKind::GitTracked | ProjectKind::Shallow => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TreeWatch {
+    /// Skip directories Git ignores. Their files are never indexed, and a
+    /// tracked file inside one changes the git index, which is watched.
+    git_ignore: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatchState {
+    /// The watcher is still adding its watches.
+    Starting,
+    Watching,
+    /// No watcher keeps the index current, so searches rescan it when stale.
+    Off,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -198,7 +252,10 @@ struct ProjectState {
     dirs: usize,
     scanned: usize,
     scanning: bool,
-    watcher_ready: bool,
+    watch: WatchState,
+    /// When the last full scan was published, or `None` while a newer one is
+    /// queued or running.
+    scanned_at: Option<Instant>,
     warmup_complete: bool,
     last_error: Option<String>,
     generation: u64,
@@ -305,14 +362,19 @@ impl ItemKind {
 }
 
 impl ProjectState {
-    fn new_scanning() -> Self {
+    fn new_scanning(kind: ProjectKind) -> Self {
         Self {
             entries: Arc::new(Vec::new()),
             files: 0,
             dirs: 0,
             scanned: 0,
             scanning: true,
-            watcher_ready: false,
+            watch: if kind.watched() {
+                WatchState::Starting
+            } else {
+                WatchState::Off
+            },
+            scanned_at: None,
             warmup_complete: false,
             last_error: None,
             generation: 0,
@@ -433,12 +495,28 @@ impl WorkspaceFiles {
             git_roots: HashSet::new(),
             search_worker: None,
             file_lists: HashMap::new(),
+            watch_budget: watch_budget(),
         }
     }
 
     pub fn warmup(&mut self, cwd: &Path) -> Result<(), String> {
         let root = self.workspace_root(cwd);
         self.ensure_project(&root, SearchSource::Workspace)
+    }
+
+    /// Make `cwd` the active workspace. Indexes of other roots are dropped
+    /// with their watches. The new root is warmed when an index was in use,
+    /// so a switch keeps search ready without indexing before first use.
+    pub fn focus(&mut self, cwd: &Path) {
+        let root = self.workspace_root(cwd);
+        let warm = !self.projects.is_empty();
+        self.projects
+            .retain(|(project_root, _), _| *project_root == root);
+        self.file_lists
+            .retain(|(project_root, _), _| *project_root == root);
+        if warm {
+            let _ = self.ensure_project(&root, SearchSource::Workspace);
+        }
     }
 
     pub fn search(&mut self, request: SearchRequest) -> Result<SearchResponse, String> {
@@ -471,6 +549,7 @@ impl WorkspaceFiles {
         self.ensure_project(&root, source)?;
         let key = (root, source);
         let project = &self.projects[&key];
+        project.refresh_if_unwatched();
         let snapshot = project.snapshot()?;
         let files = match self.file_lists.get(&key) {
             Some((generation, files)) if *generation == snapshot.generation => Arc::clone(files),
@@ -563,6 +642,7 @@ impl WorkspaceFiles {
             .projects
             .get(&(root.clone(), request.source))
             .ok_or_else(|| "workspace files project was not initialized".to_string())?;
+        project.refresh_if_unwatched();
         let snapshot = {
             let _perf = smelt_perf::perf::begin("workspace_files:snapshot");
             project.snapshot()?
@@ -576,14 +656,25 @@ impl WorkspaceFiles {
             return Ok(());
         }
 
-        let state = Arc::new(RwLock::new(ProjectState::new_scanning()));
         let kind = match source {
             SearchSource::Git => ProjectKind::GitTracked,
             SearchSource::Workspace if self.git_roots.contains(root) => ProjectKind::Git,
+            SearchSource::Workspace if smelt_paths::is_broad_root(root) => ProjectKind::Shallow,
             SearchSource::Workspace => ProjectKind::Filesystem,
         };
+        let state = Arc::new(RwLock::new(ProjectState::new_scanning(kind)));
         let worker_tx = spawn_project_worker(root.to_path_buf(), kind, Arc::clone(&state));
-        let watcher = start_watcher(root, kind, worker_tx.clone(), Arc::clone(&state));
+        let watcher = if kind.watched() {
+            start_watcher(
+                root,
+                kind,
+                self.watch_budget,
+                worker_tx.clone(),
+                Arc::clone(&state),
+            )
+        } else {
+            None
+        };
         self.projects.insert(
             key,
             ProjectSearch {
@@ -615,6 +706,21 @@ impl WorkspaceFiles {
 }
 
 impl ProjectSearch {
+    /// Queue a rescan of an unwatched index whose last scan is stale.
+    fn refresh_if_unwatched(&self) {
+        let Ok(mut state) = self.state.write() else {
+            return;
+        };
+        let stale = state.watch == WatchState::Off
+            && state
+                .scanned_at
+                .is_some_and(|at| at.elapsed() >= UNWATCHED_RESCAN_AFTER);
+        if stale {
+            state.scanned_at = None;
+            let _ = self.worker_tx.send(WorkerMsg::Changed);
+        }
+    }
+
     fn snapshot(&self) -> Result<ProjectSnapshot, String> {
         let state = self.state.read().map_err(|e| e.to_string())?;
         Ok(ProjectSnapshot {
@@ -623,7 +729,7 @@ impl ProjectSearch {
             dirs: state.dirs,
             scanned: state.scanned,
             scanning: state.scanning,
-            watcher_ready: state.watcher_ready,
+            watcher_ready: state.watch == WatchState::Watching,
             warmup_complete: state.warmup_complete,
             last_error: state.last_error.clone(),
             generation: state.generation,
@@ -816,6 +922,7 @@ fn spawn_project_worker(
 fn start_watcher(
     root: &Path,
     kind: ProjectKind,
+    budget: usize,
     tx: mpsc::Sender<WorkerMsg>,
     state: SharedProjectState,
 ) -> Option<WorkspaceWatcher> {
@@ -824,7 +931,7 @@ fn start_watcher(
     let manager_tx = watch_tx.clone();
     std::thread::Builder::new()
         .name("smelt-workspace-watcher".into())
-        .spawn(move || run_watcher(root, kind, tx, state, manager_tx, watch_rx))
+        .spawn(move || run_watcher(root, kind, budget, tx, state, manager_tx, watch_rx))
         .ok()?;
     Some(WorkspaceWatcher { tx: watch_tx })
 }
@@ -840,9 +947,19 @@ fn git_index_path(root: &Path) -> Option<PathBuf> {
     Some(std::fs::canonicalize(git_dir).ok()?.join("index"))
 }
 
+/// Directory watches a project may hold: a share of the per-user inotify
+/// limit where the OS has one.
+fn watch_budget() -> usize {
+    std::fs::read_to_string(INOTIFY_MAX_USER_WATCHES)
+        .ok()
+        .and_then(|max| max.trim().parse::<usize>().ok())
+        .map_or(DEFAULT_WATCH_BUDGET, |max| max / WATCH_BUDGET_DIVISOR)
+}
+
 fn run_watcher(
     root: PathBuf,
     kind: ProjectKind,
+    budget: usize,
     worker_tx: mpsc::Sender<WorkerMsg>,
     state: SharedProjectState,
     watch_tx: mpsc::Sender<WatcherCommand>,
@@ -851,8 +968,8 @@ fn run_watcher(
     let index = git_index_path(&root);
     let watch_index = index.clone();
     let watch_root = root.clone();
-    let callback_watch_tx = watch_tx.clone();
-    let tracked_only = kind == ProjectKind::GitTracked;
+    let tree_watch = kind.tree_watch();
+    let watches_tree = tree_watch.is_some();
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
@@ -860,17 +977,17 @@ fn run_watcher(
                 && watch_index
                     .as_ref()
                     .is_some_and(|index| event.paths.contains(index));
-            if index_changed || (!tracked_only && relevant_event(&watch_root, &event)) {
+            if index_changed || (watches_tree && relevant_event(&watch_root, &event)) {
                 let _ = worker_tx.send(WorkerMsg::Changed);
-                if !tracked_only {
-                    enqueue_new_directory_watches(&watch_root, &event, &callback_watch_tx);
-                }
+            }
+            if watches_tree {
+                forward_directory_changes(&watch_root, &event, &watch_tx);
             }
         },
         NotifyConfig::default(),
     ) {
         Ok(watcher) => watcher,
-        Err(_) => return,
+        Err(err) => return stop_watching(&state, &root, &err.to_string()),
     };
 
     // Watch the directory because Git replaces index through an atomic rename.
@@ -878,77 +995,176 @@ fn run_watcher(
         .as_ref()
         .and_then(|path| path.parent())
         .is_some_and(|dir| watcher.watch(dir, RecursiveMode::NonRecursive).is_ok());
-    let ready = if tracked_only {
-        index_watched
-    } else {
-        watch_workspace_tree(&mut watcher, &root).is_ok()
+    let mut tree = match tree_watch {
+        Some(tree_watch) => {
+            let mut tree = WatchedTree::new(root.clone(), tree_watch, budget);
+            if let Err(reason) = tree.add(&mut watcher, &root) {
+                return stop_watching(&state, &root, &reason);
+            }
+            Some(tree)
+        }
+        None if index_watched => None,
+        None => return stop_watching(&state, &root, "git index is not watchable"),
     };
-    if !ready {
-        return;
-    }
     if let Ok(mut state) = state.write() {
-        state.watcher_ready = true;
+        state.watch = WatchState::Watching;
     }
 
     while let Ok(command) = watch_rx.recv() {
-        match command {
-            WatcherCommand::WatchDir(path) => watch_dir_tree(&mut watcher, &root, &path),
-            WatcherCommand::Shutdown => break,
+        match (command, tree.as_mut()) {
+            (WatcherCommand::WatchDir(path), Some(tree)) => {
+                if let Err(reason) = tree.add(&mut watcher, &path) {
+                    return stop_watching(&state, &root, &reason);
+                }
+            }
+            (WatcherCommand::Forget(path), Some(tree)) => tree.forget(&path),
+            (WatcherCommand::Shutdown, _) => break,
+            (WatcherCommand::WatchDir(_) | WatcherCommand::Forget(_), None) => {}
         }
     }
 }
 
-fn enqueue_new_directory_watches(
+/// Give up on watching `root`: the caller drops the watcher, which frees all
+/// its OS watches, and searches rescan the index when it gets stale.
+fn stop_watching(state: &SharedProjectState, root: &Path, reason: &str) {
+    engine::log::entry(
+        engine::log::Level::Warn,
+        "workspace_watch_stopped",
+        &serde_json::json!({ "root": root, "reason": reason }),
+    );
+    if let Ok(mut state) = state.write() {
+        state.watch = WatchState::Off;
+    }
+}
+
+/// Ask the watcher thread to cover new directories and forget removed ones.
+fn forward_directory_changes(
     root: &Path,
     event: &notify::Event,
     tx: &mpsc::Sender<WatcherCommand>,
 ) {
-    if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
-        return;
+    use notify::event::RemoveKind;
+    match event.kind {
+        EventKind::Create(_) | EventKind::Modify(_) => {
+            for path in &event.paths {
+                if path.is_dir() && should_watch_descendants(root, path) {
+                    let _ = tx.send(WatcherCommand::WatchDir(path.clone()));
+                }
+            }
+        }
+        EventKind::Remove(RemoveKind::File) => {}
+        EventKind::Remove(_) => {
+            for path in &event.paths {
+                let _ = tx.send(WatcherCommand::Forget(path.clone()));
+            }
+        }
+        _ => {}
     }
-    for path in &event.paths {
-        if path.is_dir() && should_watch_descendants(root, path) {
-            let _ = tx.send(WatcherCommand::WatchDir(path.clone()));
+}
+
+/// The directories a project watches, held within a budget so one large
+/// tree cannot exhaust the OS watch limit.
+struct WatchedTree {
+    root: PathBuf,
+    watch: TreeWatch,
+    budget: usize,
+    dirs: HashSet<PathBuf>,
+}
+
+impl WatchedTree {
+    fn new(root: PathBuf, watch: TreeWatch, budget: usize) -> Self {
+        Self {
+            root,
+            watch,
+            budget,
+            dirs: HashSet::new(),
         }
     }
-}
 
-fn watch_workspace_tree(watcher: &mut RecommendedWatcher, root: &Path) -> notify::Result<()> {
-    watcher.watch(root, RecursiveMode::NonRecursive)?;
-    watch_descendant_dirs(watcher, root, root);
-    Ok(())
-}
+    /// Watch `start` and the directories below it. Fails without adding any
+    /// when they would exceed the budget, and fails when the OS runs out of
+    /// watches or `root` itself cannot be watched.
+    fn add(&mut self, watcher: &mut RecommendedWatcher, start: &Path) -> Result<(), String> {
+        if self.dirs.contains(start) || !self.covers(start) {
+            return Ok(());
+        }
+        let limit = self.budget.saturating_sub(self.dirs.len());
+        let dirs = tree_dirs(&self.root, self.watch, start, limit)
+            .ok_or_else(|| format!("more than {} directories to watch", self.budget))?;
+        for dir in dirs {
+            if self.dirs.contains(&dir) {
+                continue;
+            }
+            match watcher.watch(&dir, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    self.dirs.insert(dir);
+                }
+                Err(err) if matches!(err.kind, notify::ErrorKind::MaxFilesWatch) => {
+                    return Err(err.to_string());
+                }
+                Err(err) if dir == self.root => return Err(err.to_string()),
+                // The directory vanished or is unreadable; nothing to watch.
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    }
 
-fn watch_dir_tree(watcher: &mut RecommendedWatcher, root: &Path, path: &Path) {
-    if should_watch_descendants(root, path) {
-        let _ = watcher.watch(path, RecursiveMode::NonRecursive);
-        watch_descendant_dirs(watcher, root, path);
+    fn forget(&mut self, dir: &Path) {
+        self.dirs.remove(dir);
+    }
+
+    fn covers(&self, dir: &Path) -> bool {
+        dir == self.root
+            || (should_watch_descendants(&self.root, dir)
+                && !(self.watch.git_ignore && git_ignored(self.watch, dir)))
     }
 }
 
-fn watch_descendant_dirs(watcher: &mut RecommendedWatcher, root: &Path, start: &Path) {
-    let mut builder = WalkBuilder::new(start);
+/// `start` and the directories below it that a watch covers, or `None` when
+/// there are more than `limit`.
+fn tree_dirs(root: &Path, watch: TreeWatch, start: &Path, limit: usize) -> Option<Vec<PathBuf>> {
     let watch_root = root.to_path_buf();
+    let mut builder = tree_walk(watch, start);
+    builder.filter_entry(move |entry| should_watch_descendants(&watch_root, entry.path()));
+    let mut dirs = Vec::new();
+    for entry in builder.build().flatten() {
+        if entry.file_type().is_some_and(|ty| ty.is_dir()) {
+            if dirs.len() == limit {
+                return None;
+            }
+            dirs.push(entry.into_path());
+        }
+    }
+    Some(dirs)
+}
+
+fn tree_walk(watch: TreeWatch, start: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(start);
     builder
         .standard_filters(false)
         .hidden(false)
-        .ignore(false)
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .parents(false)
-        .follow_links(false)
-        .filter_entry(move |entry| should_watch_descendants(&watch_root, entry.path()));
-
-    for result in builder.build() {
-        let Ok(entry) = result else { continue };
-        if entry.path() == start {
-            continue;
-        }
-        if entry.file_type().is_some_and(|ty| ty.is_dir()) {
-            let _ = watcher.watch(entry.path(), RecursiveMode::NonRecursive);
-        }
+        .follow_links(false);
+    if watch.git_ignore {
+        builder
+            .git_ignore(true)
+            .git_exclude(true)
+            .git_global(true)
+            .parents(true)
+            .require_git(false);
     }
+    builder
+}
+
+/// Whether Git ignores `dir`. A walk never filters its own start, so the
+/// check lists the parent.
+fn git_ignored(watch: TreeWatch, dir: &Path) -> bool {
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    let mut builder = tree_walk(watch, parent);
+    builder.max_depth(Some(1));
+    !builder.build().flatten().any(|entry| entry.path() == dir)
 }
 
 fn should_watch_descendants(root: &Path, path: &Path) -> bool {
@@ -970,7 +1186,9 @@ fn scan_project(root: &Path, kind: ProjectKind, state: &SharedProjectState) {
     let scan = match kind {
         ProjectKind::Git => scan_git_project(root),
         ProjectKind::GitTracked => scan_tracked_project(root),
-        ProjectKind::Filesystem => scan_filesystem_project(root, state),
+        ProjectKind::Filesystem | ProjectKind::Shallow => {
+            scan_filesystem_project(root, kind.scan_depth(), state)
+        }
     };
     publish_scan(
         state,
@@ -1153,7 +1371,11 @@ fn add_existing_file(root: &Path, scan: &mut ScanResult, seen: &mut HashSet<Stri
     }
 }
 
-fn scan_filesystem_project(root: &Path, state: &SharedProjectState) -> ScanResult {
+fn scan_filesystem_project(
+    root: &Path,
+    max_depth: Option<usize>,
+    state: &SharedProjectState,
+) -> ScanResult {
     let mut scan = ScanResult::new();
     let mut seen = HashSet::new();
     let mut next_publish = PARTIAL_PUBLISH_START;
@@ -1170,6 +1392,7 @@ fn scan_filesystem_project(root: &Path, state: &SharedProjectState) -> ScanResul
         .git_exclude(false)
         .parents(false)
         .follow_links(true)
+        .max_depth(max_depth)
         .filter_entry(move |entry| {
             if entry.path() == scan_root {
                 return true;
@@ -1278,6 +1501,9 @@ fn publish_scan(state: &SharedProjectState, update: ScanPublish) {
         state.warmup_complete |= update.warmup_complete;
         state.last_error = update.error;
         state.generation = state.generation.saturating_add(1);
+        if !update.scanning {
+            state.scanned_at = Some(Instant::now());
+        }
     }
 }
 
@@ -1930,9 +2156,14 @@ mod tests {
 
     #[test]
     fn new_project_state_reports_scanning_before_worker_publishes() {
-        let state = ProjectState::new_scanning();
+        let state = ProjectState::new_scanning(ProjectKind::Filesystem);
         assert!(state.scanning);
         assert!(!state.warmup_complete);
+        assert_eq!(state.watch, WatchState::Starting);
+        assert_eq!(
+            ProjectState::new_scanning(ProjectKind::Shallow).watch,
+            WatchState::Off
+        );
     }
 
     #[test]
@@ -1978,6 +2209,126 @@ mod tests {
             &root,
             &root.join("crates/app/bazel-smelt")
         ));
+    }
+
+    #[test]
+    fn shallow_scan_stops_at_depth_limit() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("a/b/c")).unwrap();
+        std::fs::write(project.path().join("a/b/near.rs"), "").unwrap();
+        std::fs::write(project.path().join("a/b/c/deep.rs"), "").unwrap();
+        let kind = ProjectKind::Shallow;
+        let state = Arc::new(RwLock::new(ProjectState::new_scanning(kind)));
+        scan_project(project.path(), kind, &state);
+        let state = state.read().unwrap();
+        let paths: Vec<_> = state.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"a/b/near.rs"), "{paths:?}");
+        assert!(!paths.contains(&"a/b/c/deep.rs"), "{paths:?}");
+    }
+
+    #[test]
+    fn git_watch_skips_ignored_directories() {
+        let project = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(project.path()).unwrap();
+        assert!(init_git(&root));
+        std::fs::write(root.join(".gitignore"), "results/\n").unwrap();
+        for dir in ["src/nested", "results/run/1", "target/debug"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let git = TreeWatch { git_ignore: true };
+        let mut dirs = tree_dirs(&root, git, &root, usize::MAX).unwrap();
+        dirs.sort();
+        assert_eq!(
+            dirs,
+            [root.clone(), root.join("src"), root.join("src/nested")]
+        );
+        assert!(git_ignored(git, &root.join("results")));
+        assert!(!git_ignored(git, &root.join("src/nested")));
+
+        let filesystem = TreeWatch { git_ignore: false };
+        let all = tree_dirs(&root, filesystem, &root, usize::MAX).unwrap();
+        assert!(all.contains(&root.join("results/run/1")));
+        assert!(!all.contains(&root.join("target")));
+        assert!(tree_dirs(&root, filesystem, &root, 2).is_none());
+    }
+
+    #[test]
+    fn watcher_covers_directories_created_after_start() {
+        let project = tempfile::tempdir().unwrap();
+        let mut files = WorkspaceFiles::default();
+        let request = SearchRequest {
+            query: "fresh".to_string(),
+            cwd: project.path().to_path_buf(),
+            limit: 20,
+            offset: 0,
+            include_dirs: false,
+            source: SearchSource::Workspace,
+        };
+        wait_for_search(&mut files, &request, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !files.status(project.path()).unwrap().watcher_ready {
+            assert!(Instant::now() < deadline, "watcher did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::create_dir_all(project.path().join("new/inner")).unwrap();
+        std::fs::write(project.path().join("new/inner/first.rs"), "").unwrap();
+        wait_for_search(&mut files, &request, 1);
+        std::fs::write(project.path().join("new/inner/fresh.rs"), "").unwrap();
+        let response = wait_for_search(&mut files, &request, 2);
+        assert_eq!(response.items[0].path, "new/inner/fresh.rs");
+    }
+
+    #[test]
+    fn project_over_watch_budget_rescans_on_search() {
+        let project = tempfile::tempdir().unwrap();
+        for dir in ["a", "b", "c"] {
+            std::fs::create_dir(project.path().join(dir)).unwrap();
+        }
+        let mut files = WorkspaceFiles {
+            watch_budget: 2,
+            ..WorkspaceFiles::default()
+        };
+        let request = SearchRequest {
+            query: "late".to_string(),
+            cwd: project.path().to_path_buf(),
+            limit: 20,
+            offset: 0,
+            include_dirs: false,
+            source: SearchSource::Workspace,
+        };
+        wait_for_search(&mut files, &request, 0);
+        let key = (normalize_cwd(project.path()), SearchSource::Workspace);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while files.projects[&key].state.read().unwrap().watch != WatchState::Off {
+            assert!(Instant::now() < deadline, "watcher did not stop");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!files.status(project.path()).unwrap().watcher_ready);
+
+        std::fs::write(project.path().join("a/late.rs"), "").unwrap();
+        files.projects[&key].state.write().unwrap().scanned_at =
+            Instant::now().checked_sub(UNWATCHED_RESCAN_AFTER);
+        let response = wait_for_search(&mut files, &request, 1);
+        assert_eq!(response.items[0].path, "a/late.rs");
+    }
+
+    #[test]
+    fn focus_drops_other_roots_and_warms_the_new_one() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut files = WorkspaceFiles::default();
+        files.focus(first.path());
+        assert!(files.projects.is_empty(), "focus alone does not index");
+
+        files.warmup(first.path()).unwrap();
+        files.files(first.path(), SearchSource::Git).unwrap();
+        files.focus(second.path());
+        let roots: Vec<_> = files.projects.keys().cloned().collect();
+        assert_eq!(
+            roots,
+            [(normalize_cwd(second.path()), SearchSource::Workspace)]
+        );
+        assert!(files.file_lists.is_empty());
     }
 
     #[test]

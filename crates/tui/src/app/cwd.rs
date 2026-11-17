@@ -628,6 +628,7 @@ impl TuiApp {
 
     fn install_runtime_cwd(&mut self, cwd: std::path::PathBuf, mark_session_dirty: bool) {
         self.core.env.set_cwd(cwd.clone());
+        self.core.workspace_files.focus(&cwd);
         self.prompt.set_cwd(cwd.clone());
         self.workspace.install_cwd(cwd.clone());
         if mark_session_dirty && !self.session_is_read_only() {

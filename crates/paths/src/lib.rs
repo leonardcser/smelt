@@ -135,12 +135,17 @@ pub fn git_root(cwd: &std::path::Path) -> Option<PathBuf> {
     workspace_boundary(PathBuf::from(smelt_text::trim_whitespace(&root_text)))
 }
 
-/// `root` as a workspace boundary, or `None` when it is `~` or `/`.
+/// `root` as a workspace boundary, or `None` when it is too broad.
 pub fn workspace_boundary(root: PathBuf) -> Option<PathBuf> {
-    if root == home_dir() || root.as_os_str() == "/" {
-        return None;
-    }
-    Some(root)
+    (!is_broad_root(&root)).then_some(root)
+}
+
+/// Whether `root` is `/`, `~`, or a parent of `~`: too broad to treat as a
+/// workspace.
+pub fn is_broad_root(root: &Path) -> bool {
+    let home = home_dir();
+    let home = std::fs::canonicalize(&home).unwrap_or(home);
+    root.parent().is_none() || home.starts_with(root)
 }
 
 pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
@@ -404,6 +409,24 @@ mod tests {
                 assert_eq!(data_dir(), local_app.join("data"));
             },
         );
+    }
+
+    #[test]
+    #[serial]
+    fn broad_roots_are_filesystem_root_home_and_its_parents() {
+        let base = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(base.path()).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir(&home).unwrap();
+        with_env(&[("HOME", Some(home.to_str().unwrap()))], || {
+            for root in [Path::new("/"), base.as_path(), home.as_path()] {
+                assert!(is_broad_root(root), "{root:?}");
+                assert_eq!(workspace_boundary(root.to_path_buf()), None);
+            }
+            let project = home.join("project");
+            assert!(!is_broad_root(&project));
+            assert_eq!(workspace_boundary(project.clone()), Some(project));
+        });
     }
 
     // ---- git_root / git_branch (best-effort, depends on the test workspace being a git repo) ----
