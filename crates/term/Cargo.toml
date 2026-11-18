@@ -19,7 +19,6 @@ path = "src/lib.rs"
 smelt-style = { workspace = true }
 smelt-ansi = { workspace = true }
 crossterm = { workspace = true }
-unicode-width = "0.2"
 compact_str = "0.10.0"
 
 [target.'cfg(unix)'.dependencies]

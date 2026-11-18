@@ -15,13 +15,12 @@ smelt-perf = { workspace = true }
 smelt-ansi = { workspace = true }
 smelt-store = { workspace = true }
 smelt-permissions = { workspace = true }
-smelt-text = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 url = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
-syntect = "5"
-two-face = "0.5"
+syntect = { version = "5", default-features = false, features = ["parsing", "dump-load", "regex-onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
 similar = { version = "3", features = ["inline"] }
 seahash = "4"
 pulldown-cmark = { version = "0.13", default-features = false }

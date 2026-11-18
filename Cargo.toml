@@ -35,7 +35,6 @@ smelt-mermaid = { path = "crates/mermaid" }
 # Async / runtime
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
-futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false }
 
 # HTTP
@@ -90,7 +89,6 @@ path = "src/main.rs"
 [dependencies]
 smelt-protocol = { workspace = true }
 smelt-paths = { workspace = true }
-smelt-transcript = { workspace = true }
 smelt-permissions = { workspace = true }
 smelt-worktree = { workspace = true }
 smelt-provider = { workspace = true }
@@ -162,10 +160,11 @@ opt-level = 1
 
 [dev-dependencies]
 insta = { workspace = true }
+smelt-transcript = { workspace = true }
 smelt-test-support = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
-smelt-store = { path = "crates/store" }
+smelt-store = { workspace = true }
 rusqlite = { version = "0.41.1", default-features = false }
 vt100 = "0.18.1"

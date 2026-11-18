@@ -21,7 +21,6 @@ url = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 libc = { workspace = true }
-thiserror = "2"
 futures-util = { workspace = true }
 rand = "0.10"
 smelt-perf = { version = "0.3.0", path = "../perf" }

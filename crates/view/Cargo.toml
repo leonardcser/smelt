@@ -16,7 +16,6 @@ smelt-perf = { workspace = true }
 smelt-buffer = { workspace = true }
 smelt-edit = { workspace = true }
 smelt-term = { workspace = true }
-smelt-store = { workspace = true }
 smelt-transcript = { workspace = true }
 smelt-text = { workspace = true }
 smelt-mermaid = { workspace = true }
@@ -33,7 +32,6 @@ ratex-types = "0.1.14"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tempfile = { workspace = true }
 
 [features]

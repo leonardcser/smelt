@@ -16,7 +16,6 @@ smelt-engine = { workspace = true }
 smelt-provider = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-buffer = { workspace = true }
-smelt-ansi = { workspace = true }
 smelt-lua-doc-derive = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "process", "net"] }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -39,7 +38,6 @@ neo_frizbee = { version = "0.13.3", features = ["safe_read"] }
 notify = { workspace = true }
 smelt-store = { workspace = true }
 chrono = "0.4.45"
-brush-parser = "0.4.0"
 scoped-tls-hkt = "0.1.5"
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 atomic-write-file = "0.3.1"
