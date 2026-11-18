@@ -807,33 +807,13 @@ mod tests {
     }
 
     #[test]
-    fn needs_refresh_true_when_within_60_seconds_of_expiry() {
-        let t = tokens(1_030, 900);
-        assert!(t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_true_when_past_expiry() {
-        let t = tokens(900, 800);
-        assert!(t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_false_when_expiry_far_and_recent_refresh() {
-        let t = tokens(8_200, 940);
-        assert!(!t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_true_when_last_refresh_older_than_interval() {
-        let t = tokens(REFRESH_INTERVAL_SECS + 2_000, 1_000);
-        assert!(t.needs_refresh_at(1_000 + REFRESH_INTERVAL_SECS + 1));
-    }
-
-    #[test]
-    fn needs_refresh_ignores_zero_last_refresh_interval() {
-        let t = tokens(8_200, 0);
-        assert!(!t.needs_refresh_at(1_000));
+    fn needs_refresh_on_expiry_or_stale_last_refresh() {
+        assert!(tokens(1_030, 900).needs_refresh_at(1_000));
+        assert!(tokens(900, 800).needs_refresh_at(1_000));
+        assert!(!tokens(8_200, 940).needs_refresh_at(1_000));
+        assert!(!tokens(8_200, 0).needs_refresh_at(1_000));
+        let stale = tokens(REFRESH_INTERVAL_SECS + 2_000, 1_000);
+        assert!(stale.needs_refresh_at(1_000 + REFRESH_INTERVAL_SECS + 1));
     }
 
     #[test]
@@ -859,45 +839,20 @@ mod tests {
     }
 
     #[test]
-    fn html_error_embeds_message_in_body() {
-        let html = html_error("boom");
-        assert!(html.contains("boom"));
-        assert!(html.contains("Authorization Failed"));
-    }
-
-    #[test]
-    fn deserialize_interval_accepts_number() {
-        let r: DeviceCodeResponse = serde_json::from_value(
-            serde_json::json!({"device_auth_id":"d","user_code":"u","interval": 7}),
-        )
-        .unwrap();
-        assert_eq!(r.interval, Some(7));
-    }
-
-    #[test]
-    fn deserialize_interval_accepts_numeric_string() {
-        let r: DeviceCodeResponse = serde_json::from_value(
-            serde_json::json!({"device_auth_id":"d","user_code":"u","interval":"3"}),
-        )
-        .unwrap();
-        assert_eq!(r.interval, Some(3));
-    }
-
-    #[test]
-    fn deserialize_interval_handles_null() {
-        let r: DeviceCodeResponse = serde_json::from_value(
-            serde_json::json!({"device_auth_id":"d","user_code":"u","interval": null}),
-        )
-        .unwrap();
-        assert!(r.interval.is_none());
-    }
-
-    #[test]
-    fn deserialize_interval_defaults_to_none_when_field_missing() {
-        let r: DeviceCodeResponse =
-            serde_json::from_value(serde_json::json!({"device_auth_id":"d","user_code":"u"}))
-                .unwrap();
-        assert!(r.interval.is_none());
+    fn deserialize_interval_accepts_numbers_and_numeric_strings() {
+        let interval = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({"device_auth_id":"d","user_code":"u"});
+            if let Some(i) = extra.get("interval") {
+                v["interval"] = i.clone();
+            }
+            serde_json::from_value::<DeviceCodeResponse>(v)
+                .unwrap()
+                .interval
+        };
+        assert_eq!(interval(serde_json::json!({"interval": 7})), Some(7));
+        assert_eq!(interval(serde_json::json!({"interval": "3"})), Some(3));
+        assert_eq!(interval(serde_json::json!({"interval": null})), None);
+        assert_eq!(interval(serde_json::json!({})), None);
     }
 
     #[test]
@@ -909,17 +864,11 @@ mod tests {
     }
 
     #[test]
-    fn generate_pkce_produces_nonempty_verifier_and_challenge() {
+    fn generated_pkce_and_state_are_nonempty_and_unique() {
         let p = generate_pkce();
         assert!(!p.verifier.is_empty());
-        assert!(!p.challenge.is_empty());
         assert_ne!(p.verifier, p.challenge);
-    }
-
-    #[test]
-    fn generate_state_produces_nonempty_unique_strings() {
-        let a = generate_state();
-        let b = generate_state();
+        let (a, b) = (generate_state(), generate_state());
         assert!(!a.is_empty());
         assert_ne!(a, b);
     }

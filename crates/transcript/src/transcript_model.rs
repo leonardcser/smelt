@@ -5995,7 +5995,8 @@ mod tests {
             .iter()
             .flat_map(|patch| &patch.operations);
         assert!(
-            mid_stream_operations.all(|operation| !matches!(operation, TranscriptPatchOperation::Reset)),
+            mid_stream_operations
+                .all(|operation| !matches!(operation, TranscriptPatchOperation::Reset)),
             "mid-stream consumers should not need a full rebuild after streaming compaction: {mid_stream_patches:?}"
         );
         assert!(
@@ -6747,14 +6748,32 @@ mod tests {
     }
 
     #[test]
-    fn raw_text_for_thinking_returns_content() {
-        let block = Block::Thinking {
+    fn raw_text_returns_block_source_for_simple_blocks() {
+        let thinking = Block::Thinking {
             title: None,
             summary_titles: Vec::new(),
             kind: protocol::ReasoningKind::Raw,
             content: "ponder".into(),
         };
-        assert_eq!(block.raw_text().as_deref(), Some("ponder"));
+        let compacted = Block::Compacted {
+            summary: "earlier session compacted".into(),
+            kept: Vec::new(),
+        };
+        let code_line = Block::CodeLine {
+            content: "let x = 1;".into(),
+            lang: "rust".into(),
+        };
+        let exec = Block::Exec {
+            command: "ls".into(),
+            output: "foo\nbar".into(),
+        };
+        assert_eq!(thinking.raw_text().as_deref(), Some("ponder"));
+        assert_eq!(
+            compacted.raw_text().as_deref(),
+            Some("earlier session compacted")
+        );
+        assert_eq!(code_line.raw_text().as_deref(), Some("let x = 1;"));
+        assert_eq!(exec.raw_text().as_deref(), Some("$ ls\nfoo\nbar"));
     }
 
     #[test]
@@ -6791,36 +6810,6 @@ mod tests {
                 content: "**Plan**\nbody".into(),
             })
         );
-    }
-
-    #[test]
-    fn raw_text_for_compacted_returns_summary() {
-        let block = Block::Compacted {
-            summary: "earlier session compacted".into(),
-            kept: Vec::new(),
-        };
-        assert_eq!(
-            block.raw_text().as_deref(),
-            Some("earlier session compacted")
-        );
-    }
-
-    #[test]
-    fn raw_text_for_code_line_returns_content() {
-        let block = Block::CodeLine {
-            content: "let x = 1;".into(),
-            lang: "rust".into(),
-        };
-        assert_eq!(block.raw_text().as_deref(), Some("let x = 1;"));
-    }
-
-    #[test]
-    fn raw_text_for_exec_combines_command_and_output() {
-        let block = Block::Exec {
-            command: "ls".into(),
-            output: "foo\nbar".into(),
-        };
-        assert_eq!(block.raw_text().as_deref(), Some("$ ls\nfoo\nbar"));
     }
 
     #[test]
@@ -7295,88 +7284,40 @@ mod tests {
     }
 
     #[test]
-    fn gap_between_codeline_to_codeline_is_zero() {
-        assert_eq!(gap_between(&code("a"), &code("b")), 0);
-    }
-
-    #[test]
-    fn gap_between_codeline_to_other_is_one() {
-        assert_eq!(gap_between(&code("a"), &text("b")), 1);
-    }
-
-    #[test]
-    fn gap_between_text_to_codeline_zero_after_heading() {
-        assert_eq!(gap_between(&text("# heading"), &code("a")), 0);
-        // Leading whitespace before # still counts as heading.
-        assert_eq!(gap_between(&text("   ## sub"), &code("a")), 0);
-    }
-
-    #[test]
-    fn gap_between_text_to_codeline_one_otherwise() {
-        assert_eq!(gap_between(&text("plain"), &code("a")), 1);
-    }
-
-    #[test]
-    fn gap_between_other_to_codeline_is_one() {
-        assert_eq!(gap_between(&user("q"), &code("a")), 1);
-    }
-
-    #[test]
-    fn gap_between_user_blocks_are_separated_by_one() {
-        assert_eq!(gap_between(&user("a"), &text("b")), 1);
-        assert_eq!(gap_between(&text("a"), &user("b")), 1);
-    }
-
-    #[test]
-    fn gap_between_exec_blocks_are_separated_by_one() {
-        assert_eq!(gap_between(&exec(), &text("a")), 1);
-        assert_eq!(gap_between(&text("a"), &exec()), 1);
-    }
-
-    #[test]
-    fn gap_between_thinking_blocks_only_separates_new_titles() {
-        assert_eq!(gap_between(&thinking("a"), &thinking("b")), 0);
-        assert_eq!(
-            gap_between(
-                &thinking("a"),
-                &reasoning_summary("Assessing directory exclusions", "body")
+    fn gap_between_separates_blocks_except_code_runs_and_heading_bodies() {
+        let thinking_titled = reasoning_summary("Assessing directory exclusions", "body");
+        let cases = [
+            (code("a"), code("b"), 0),
+            (code("a"), text("b"), 1),
+            (text("# heading"), code("a"), 0),
+            (text("   ## sub"), code("a"), 0),
+            (text("plain"), code("a"), 1),
+            (user("q"), code("a"), 1),
+            (text("# heading"), text("body"), 0),
+            (user("a"), text("b"), 1),
+            (text("a"), user("b"), 1),
+            (exec(), text("a"), 1),
+            (text("a"), exec(), 1),
+            (thinking("a"), thinking("b"), 0),
+            (thinking("a"), thinking_titled, 1),
+            (
+                reasoning_summary("First title", "body"),
+                thinking("body"),
+                0,
             ),
-            1
-        );
-        assert_eq!(
-            gap_between(&reasoning_summary("First title", "body"), &thinking("body")),
-            0
-        );
-    }
-
-    #[test]
-    fn gap_between_thinking_and_text_is_one() {
-        assert_eq!(gap_between(&thinking("a"), &text("b")), 1);
-        assert_eq!(gap_between(&text("a"), &thinking("b")), 1);
-    }
-
-    #[test]
-    fn gap_between_tool_calls_separated_by_one() {
-        assert_eq!(gap_between(&tool("a"), &tool("b")), 1);
-        assert_eq!(gap_between(&text("a"), &tool("b")), 1);
-        assert_eq!(gap_between(&tool("a"), &text("b")), 1);
-    }
-
-    #[test]
-    fn gap_between_compacted_separates_both_sides() {
-        assert_eq!(gap_between(&text("a"), &compacted()), 1);
-        assert_eq!(gap_between(&compacted(), &text("a")), 1);
-    }
-
-    #[test]
-    fn gap_between_text_after_heading_collapses() {
-        assert_eq!(gap_between(&text("# heading"), &text("body")), 0);
-    }
-
-    #[test]
-    fn gap_between_mode_blocks_are_separated_by_one() {
-        assert_eq!(gap_between(&text("a"), &mode()), 1);
-        assert_eq!(gap_between(&mode(), &text("b")), 1);
-        assert_eq!(gap_between(&mode(), &tool("b")), 1);
+            (thinking("a"), text("b"), 1),
+            (text("a"), thinking("b"), 1),
+            (tool("a"), tool("b"), 1),
+            (text("a"), tool("b"), 1),
+            (tool("a"), text("b"), 1),
+            (text("a"), compacted(), 1),
+            (compacted(), text("a"), 1),
+            (text("a"), mode(), 1),
+            (mode(), text("b"), 1),
+            (mode(), tool("b"), 1),
+        ];
+        for (prev, next, gap) in cases {
+            assert_eq!(gap_between(&prev, &next), gap, "{prev:?} -> {next:?}");
+        }
     }
 }

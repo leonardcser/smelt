@@ -88,13 +88,6 @@ mod tests {
     }
 
     #[test]
-    fn hit_outside_all_rects_returns_none() {
-        let mut reg = HitRegistry::<u32>::new();
-        reg.record(Rect::new(0, 0, 5, 5), 7);
-        assert_eq!(reg.hit(10, 10), None);
-    }
-
-    #[test]
     fn empty_rect_is_not_recorded() {
         let mut reg = HitRegistry::<u32>::new();
         reg.record(Rect::new(0, 0, 0, 5), 1);

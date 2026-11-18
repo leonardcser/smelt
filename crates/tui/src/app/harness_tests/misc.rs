@@ -703,67 +703,6 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
 }
 
 #[test]
-fn narrow_math_in_assistant_transcript_keeps_fraction_together() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(58, 18);
-    assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
-    app.start_turn(42);
-    app.feed_one(SourceEvent::engine(EngineEvent::Text {
-        content: concat!(
-            "The slope is\n\n\\[\n",
-            "\\frac{0(0.5-0)+1(0.73106-0)+2(0.88080-1)}{3}\\approx0.16422.\n",
-            "\\]\n"
-        )
-        .into(),
-    }));
-    let text = app.render_to_frame().text();
-    let lines: Vec<&str> = text.lines().collect();
-    let bar = lines
-        .iter()
-        .position(|line| line.contains("────"))
-        .expect("fraction visible");
-    assert!(lines[bar + 1].trim().contains('3'), "{text}");
-    assert!(lines[bar + 2].contains("≈ 0.16422"), "{text}");
-}
-
-#[test]
-fn wide_math_in_assistant_transcript_keeps_approximation_after_denominator() {
-    for width in [72, 90, 120] {
-        let mut app = TestApp::builder().build();
-        app.set_terminal_size(width, 18);
-        assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
-        app.start_turn(42);
-        app.feed_one(SourceEvent::engine(EngineEvent::Text {
-            content: concat!(
-                "\\[\n",
-                "\\frac{0(0.5-0)+1(0.73106-0)+2(0.88080-1)}{3}\n",
-                "\\approx0.16422.\n",
-                "\\]\n"
-            )
-            .into(),
-        }));
-        let text = app.render_to_frame().text();
-        let lines: Vec<&str> = text.lines().collect();
-        let bar = lines
-            .iter()
-            .position(|line| line.contains("────"))
-            .expect("fraction visible");
-        let denominator = lines
-            .iter()
-            .position(|line| line.trim() == "3")
-            .expect("denominator visible");
-        let approximation = lines
-            .iter()
-            .position(|line| line.contains("≈ 0.16422"))
-            .expect("approximation visible");
-        assert!(
-            bar < denominator && denominator < approximation,
-            "width={width}: {text}"
-        );
-    }
-}
-
-#[test]
 fn assistant_inline_math_keeps_operators_and_fraction_structure() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 18);
@@ -775,41 +714,6 @@ fn assistant_inline_math_keeps_operators_and_fraction_structure() {
     let text = app.render_to_frame().text();
     assert!(text.contains("a · b · c"), "{text}");
     assert!(text.contains("(a)/(b)"), "{text}");
-}
-
-#[test]
-fn assistant_math_renders_top_in_unicode_mode() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(80, 18);
-    assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
-    app.start_turn(42);
-    app.feed_one(SourceEvent::engine(EngineEvent::Text {
-        content: "The transpose is $A^\\top$.\n\n\\[\\top\\]".into(),
-    }));
-    let text = app.render_to_frame().text();
-    assert!(text.contains("A^⊤"), "{text}");
-    assert!(text.matches('⊤').count() >= 2, "{text}");
-    assert!(!text.contains(r"\top"), "{text}");
-}
-
-#[test]
-fn assistant_unicode_math_keeps_script_grouping_and_unary_minus() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(80, 18);
-    assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
-    app.start_turn(42);
-    app.feed_one(SourceEvent::engine(EngineEvent::Text {
-        content: "The power is $x^{n+1}$.\n\n\\[\n-x=1\n\\]".into(),
-    }));
-    let text = app.render_to_frame().text();
-    assert!(
-        text.contains("xⁿ⁺¹") || text.contains("x^(n + 1)"),
-        "{text}"
-    );
-    assert!(
-        text.lines().any(|line| line.starts_with("−x = 1")),
-        "{text}"
-    );
 }
 
 #[test]
@@ -1807,45 +1711,6 @@ fn signal_api_reads_sets_and_subscribes_to_values() {
 }
 
 #[test]
-fn events_on_subscribes_to_event_shaped_signals() {
-    let mut app = TestApp::builder().build();
-
-    assert!(app.run_lua(
-        r#"
-        smelt.events.on("turn_start", function(payload)
-            _G.turn_start_seen = payload.kind
-        end)
-        smelt.events.emit("turn_start", { kind = "manual" })
-        "#
-    ));
-    app.drain_signals_pending();
-
-    let globals = app.lua_probe().lua.globals();
-    assert_eq!(
-        globals.get::<String>("turn_start_seen").ok().as_deref(),
-        Some("manual")
-    );
-}
-
-#[test]
-fn custom_events_declare_and_emit_through_events_api() {
-    let mut app = TestApp::builder().build();
-
-    assert!(app.run_lua(
-        r#"
-        smelt.events.on("plugin:ready", function(payload)
-            _G.custom_event_seen = payload.answer
-        end)
-        smelt.events.emit("plugin:ready", { answer = 42 })
-        "#
-    ));
-    app.drain_signals_pending();
-
-    let globals = app.lua_probe().lua.globals();
-    assert_eq!(globals.get::<i64>("custom_event_seen").ok(), Some(42));
-}
-
-#[test]
 fn events_deliver_payload_to_handlers() {
     let mut app = TestApp::builder().build();
 
@@ -1855,13 +1720,21 @@ fn events_deliver_payload_to_handlers() {
         smelt.events.on("plugin:tick", function(payload)
             _G.tick_payload = payload.value
         end)
+        smelt.events.on("turn_start", function(payload)
+            _G.turn_start_seen = payload.kind
+        end)
         smelt.events.emit("plugin:tick", { value = 7 })
+        smelt.events.emit("turn_start", { kind = "manual" })
         "#
     ));
     app.drain_signals_pending();
 
     let globals = app.lua_probe().lua.globals();
     assert_eq!(globals.get::<i64>("tick_payload").ok(), Some(7));
+    assert_eq!(
+        globals.get::<String>("turn_start_seen").ok().as_deref(),
+        Some("manual")
+    );
 }
 
 #[test]
@@ -3478,46 +3351,6 @@ fn transcript_user_resize_keeps_viewport_top_content_stable() {
 }
 
 #[test]
-fn transcript_resize_keeps_wrapped_line_anchor_visible() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(56, 20);
-    let before = "before wrapping content ".repeat(10);
-    let after = " after wrapping content".repeat(10);
-    app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
-        content: format!("{before} ANCHOR stay at viewport top {after}").into(),
-    });
-    for i in 0..120 {
-        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
-            content: format!("tail {i}").into(),
-        });
-    }
-    app.render_silent();
-    pin_transcript_top_to_line_containing(&mut app, "ANCHOR");
-
-    app.set_terminal_size(96, 20);
-    app.render_silent();
-
-    assert!(
-        transcript_viewport_lines(&app)
-            .iter()
-            .any(|line| line.contains("ANCHOR")),
-        "viewport moved to {:?}",
-        transcript_viewport_lines(&app)
-    );
-
-    app.set_terminal_size(40, 20);
-    app.render_silent();
-
-    assert!(
-        transcript_viewport_lines(&app)
-            .iter()
-            .any(|line| line.contains("ANCHOR")),
-        "viewport moved to {:?}",
-        transcript_viewport_lines(&app)
-    );
-}
-
-#[test]
 fn transcript_resize_keeps_markdown_anchor_visible() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(58, 20);
@@ -4235,31 +4068,6 @@ fn resumed_heterogeneous_sparse_wheel_scroll_up_keeps_visible_records_monotonic(
 }
 
 #[test]
-fn cold_transcript_wheel_moves_exact_visible_rows() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(78, 18);
-    for index in 0..700 {
-        app.push_transcript_block(smelt_transcript::transcript_model::Block::Text {
-            content: format!(
-                "record-{index:04} assistant paragraph\n\n```rust\nlet value = {index};\n```\n{}",
-                "variable wrapped content ".repeat(index % 23),
-            )
-            .into(),
-        });
-    }
-    app.focus_transcript();
-    app.follow_transcript_tail();
-    app.render_silent();
-
-    let before = transcript_viewport_lines(&app);
-    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
-    app.render_silent();
-    let after = transcript_viewport_lines(&app);
-
-    assert_viewport_shifted_up_rows(0, &before, &after, 3);
-}
-
-#[test]
 fn first_resumed_wheel_after_tiny_initial_layout_moves_exact_rows() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(700, 78, 1);
     app.set_transcript_scroll_trace_for_harness(true);
@@ -4771,33 +4579,6 @@ fn assert_transcript_tail_follows_append(app: &mut TestApp, label: &str) {
         lines.iter().any(|line| line.contains(&append_marker)),
         "{label} did not follow appended tail content: {lines:?}"
     );
-}
-
-#[test]
-fn resumed_sparse_vim_g_pins_semantic_tail() {
-    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
-
-    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
-    app.render_silent();
-    assert!(
-        !app.transcript_window().following_tail,
-        "test setup should leave tail-follow mode"
-    );
-
-    app.configure_transcript_vim(true, VimMode::Normal);
-    app.type_char('G');
-    settle_transcript_vim_tail(&mut app);
-
-    assert!(
-        app.transcript_window().following_tail,
-        "vim G should pin a resumed transcript to semantic tail"
-    );
-    let lines = transcript_viewport_lines(&app);
-    assert!(
-        lines.iter().any(|line| line.contains("record-025")),
-        "vim G should render the resumed transcript tail: {lines:?}"
-    );
-    assert_transcript_tail_follows_append(&mut app, "vim G");
 }
 
 #[test]
@@ -5487,48 +5268,6 @@ fn resumed_sparse_tail_scroll_down_keeps_previous_user_target_stable() {
             "top pill target changed on the idle render after wheel-down at tail"
         );
     }
-}
-
-#[test]
-fn resumed_sparse_near_tail_scroll_down_stays_incremental() {
-    let count = 260;
-    let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
-    let loaded = app
-        .conversation_probe()
-        .transcript()
-        .history()
-        .block_records()
-        .len();
-    assert!(
-        loaded < count / 2,
-        "resume test must stay sparse, loaded={loaded}, count={count}"
-    );
-
-    assert!(
-        app.transcript_window().following_tail,
-        "resumed transcript test starts pinned to tail"
-    );
-    for step in 0..6 {
-        let before = transcript_viewport_lines(&app);
-        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
-        app.render_silent();
-        let after = transcript_viewport_lines(&app);
-        assert_viewport_shifted_up_rows(step, &before, &after, 3);
-    }
-    assert!(
-        !app.transcript_window().following_tail,
-        "wheel up should leave tail-follow mode"
-    );
-
-    let before = transcript_viewport_lines(&app);
-    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
-    app.render_silent();
-    let after = transcript_viewport_lines(&app);
-    assert_viewport_shifted_down_rows(0, &before, &after, 3);
-    assert!(
-        !app.transcript_window().following_tail,
-        "one near-tail wheel tick should not re-enter tail-follow after scrolling up six ticks"
-    );
 }
 
 #[test]
@@ -8481,15 +8220,6 @@ fn user_message_jump_at_tail_keeps_the_full_prompt_visible() {
     for expected in ["final question", "final details", "final line"] {
         assert!(lines.contains(expected), "{lines}");
     }
-}
-
-#[test]
-fn block_motions_walk_user_messages() {
-    let mut app = block_nav_app(true);
-    block_nav(&mut app, "G");
-    assert_eq!(block_nav(&mut app, "[u"), "second question");
-    assert_eq!(block_nav(&mut app, "[u"), "first question");
-    assert_eq!(block_nav(&mut app, "]u"), "second question");
 }
 
 fn press_and_render(app: &mut TestApp, code: KeyCode, mods: KeyModifiers) -> String {

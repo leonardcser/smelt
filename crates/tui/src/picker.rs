@@ -550,28 +550,14 @@ mod tests {
     // ── picker_height ────────────────────────────────────────────────────
 
     #[test]
-    fn picker_height_uses_item_count_when_below_cap() {
+    fn picker_height_clamps_to_item_count_and_caps() {
         let ui = fresh_ui();
-        assert_eq!(picker_height(3, PickerPlacement::ScreenCenter, &ui), 3);
-    }
-
-    #[test]
-    fn picker_height_clamps_to_max_rows_when_items_exceed_cap() {
-        let ui = fresh_ui();
-        assert_eq!(picker_height(50, PickerPlacement::ScreenCenter, &ui), 32);
-    }
-
-    #[test]
-    fn picker_height_is_at_least_one_for_empty_lists() {
+        let center = PickerPlacement::ScreenCenter;
+        assert_eq!(picker_height(3, center, &ui), 3);
+        assert_eq!(picker_height(50, center, &ui), 32);
         // An empty picker still needs a row to show "(no matches)".
-        let ui = fresh_ui();
-        assert_eq!(picker_height(0, PickerPlacement::ScreenCenter, &ui), 1);
-    }
-
-    #[test]
-    fn picker_height_treats_a_zero_cap_as_one() {
+        assert_eq!(picker_height(0, center, &ui), 1);
         // `max_rows = 0` is meaningless; fall back to a one-row picker.
-        let ui = fresh_ui();
         assert_eq!(
             picker_height(5, PickerPlacement::PromptDocked { max_rows: 0 }, &ui),
             1
@@ -623,28 +609,14 @@ mod tests {
     // ── visual_cursor ────────────────────────────────────────────────────
 
     #[test]
-    fn visual_cursor_returns_logical_index_when_not_reversed() {
-        assert_eq!(visual_cursor(0, 5, false), 0);
-        assert_eq!(visual_cursor(3, 5, false), 3);
-    }
-
-    #[test]
     fn visual_cursor_mirrors_index_when_reversed() {
-        // Reversed: logical 0 → last row, logical n-1 → first row.
+        assert_eq!(visual_cursor(3, 5, false), 3);
         assert_eq!(visual_cursor(0, 5, true), 4);
         assert_eq!(visual_cursor(4, 5, true), 0);
         assert_eq!(visual_cursor(2, 5, true), 2);
-    }
-
-    #[test]
-    fn visual_cursor_clamps_logical_overflow_to_last_item() {
+        // Overflow clamps to the last item; empty lists yield zero.
         assert_eq!(visual_cursor(99, 5, false), 4);
         assert_eq!(visual_cursor(99, 5, true), 0);
-    }
-
-    #[test]
-    fn visual_cursor_returns_zero_for_empty_list() {
-        assert_eq!(visual_cursor(0, 0, false), 0);
         assert_eq!(visual_cursor(0, 0, true), 0);
     }
 
@@ -664,46 +636,23 @@ mod tests {
     // ── cursor_and_scroll ────────────────────────────────────────────────
 
     #[test]
-    fn cursor_and_scroll_keeps_visible_selection_without_scrolling() {
-        // 10 items, 5-row viewport, selection at row 2 already on screen.
-        let (cursor, scroll) = cursor_and_scroll(2, 10, 5, false, 0);
-        assert_eq!(cursor, 2);
-        assert_eq!(scroll, 0);
-    }
-
-    #[test]
-    fn cursor_and_scroll_scrolls_down_when_selection_falls_below_viewport() {
-        // Selection at row 7, viewport [0, 5) - needs to scroll so row 7 is visible.
-        let (cursor, scroll) = cursor_and_scroll(7, 10, 5, false, 0);
-        assert_eq!(cursor, 7);
-        // Window slides so cursor is at the bottom: scroll = 7 + 1 - 5 = 3.
-        assert_eq!(scroll, 3);
-    }
-
-    #[test]
-    fn cursor_and_scroll_scrolls_up_when_selection_falls_above_viewport() {
-        // Selection at row 1, viewport [4, 9) - needs to scroll up.
-        let (cursor, scroll) = cursor_and_scroll(1, 10, 5, false, 4);
-        assert_eq!(cursor, 1);
-        // Window slides so cursor is at the top: scroll = 1.
-        assert_eq!(scroll, 1);
-    }
-
-    #[test]
-    fn cursor_and_scroll_clamps_scroll_to_max_when_selection_is_at_end() {
-        // 10 items, 5-row viewport, selection at last item. max_scroll = 10 - 5 = 5.
-        let (cursor, scroll) = cursor_and_scroll(9, 10, 5, false, 0);
-        assert_eq!(cursor, 9);
-        assert_eq!(scroll, 5);
-    }
-
-    #[test]
-    fn cursor_and_scroll_inverts_buffer_row_in_reversed_mode() {
-        // Reversed: logical 0 → bottom of buffer. 5 items, 3-row viewport.
-        // Logical 0 → buffer row 4. Needs scroll to show: scroll = 4+1-3 = 2.
-        let (cursor, scroll) = cursor_and_scroll(0, 5, 3, true, 0);
-        assert_eq!(cursor, 4);
-        assert_eq!(scroll, 2);
+    fn cursor_and_scroll_follows_selection_within_bounds() {
+        // (selected, items, height, reversed, prev_scroll) -> (cursor, scroll)
+        let cases = [
+            // already visible
+            ((2, 10, 5, false, 0), (2, 0)),
+            // below the viewport: cursor lands on the bottom row
+            ((7, 10, 5, false, 0), (7, 3)),
+            // above the viewport: cursor lands on the top row
+            ((1, 10, 5, false, 4), (1, 1)),
+            // scroll clamps to max_scroll at the end
+            ((9, 10, 5, false, 0), (9, 5)),
+            // reversed: logical 0 is the bottom buffer row
+            ((0, 5, 3, true, 0), (4, 2)),
+        ];
+        for ((sel, n, h, rev, prev), want) in cases {
+            assert_eq!(cursor_and_scroll(sel, n, h, rev, prev), want);
+        }
     }
 
     // ── max_label_width ──────────────────────────────────────────────────
@@ -716,6 +665,7 @@ mod tests {
         ];
         // "# abc" = 5 chars, ">> xy" = 5 chars. Max = 5.
         assert_eq!(max_label_width(&items), 5);
+        assert_eq!(max_label_width(&[]), 0);
     }
 
     #[test]
@@ -735,11 +685,6 @@ mod tests {
             max_label_width(&[PickerItem::new("\u{fe0e}").with_prefix("⌚")]),
             1
         );
-    }
-
-    #[test]
-    fn max_label_width_returns_zero_for_empty_list() {
-        assert_eq!(max_label_width(&[]), 0);
     }
 
     // ── anchor_for ───────────────────────────────────────────────────────
@@ -763,15 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn anchor_for_screen_center_returns_centered_anchor() {
-        let ui = fresh_ui();
-        assert!(matches!(
-            anchor_for(&ui, PickerPlacement::ScreenCenter, 4),
-            Anchor::ScreenCenter
-        ));
-    }
-
-    #[test]
     fn anchor_for_cursor_places_overlay_one_row_below_cursor() {
         let ui = fresh_ui();
         match anchor_for(&ui, PickerPlacement::Cursor, 3) {
@@ -790,11 +726,8 @@ mod tests {
 
     #[test]
     fn anchor_for_screen_bottom_does_not_reserve_statusline_rows() {
-        // The host has no `statusline` concept anymore - the Lua layer
-        // owns the statusline window and any reservation lives on the
-        // caller. `ScreenBottom` resolves to the literal screen bottom;
-        // overlays that need to clear chrome anchor explicitly against
-        // the Lua-allocated statusline window.
+        // `ScreenBottom` resolves to the literal screen bottom; overlays
+        // that need to clear chrome anchor explicitly against its window.
         let ui = fresh_ui();
         match anchor_for(&ui, PickerPlacement::ScreenBottom, 4) {
             Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 0),

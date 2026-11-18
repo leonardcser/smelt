@@ -117,25 +117,13 @@ mod tests {
     }
 
     #[test]
-    fn truncate_str_returns_input_when_within_width() {
+    fn truncate_str_fits_width_with_ellipsis() {
         assert_eq!(truncate_str("hello", 5), "hello");
-        assert_eq!(truncate_str("hi", 80), "hi");
-    }
-
-    #[test]
-    fn truncate_str_truncates_with_ellipsis_when_over() {
-        let out = truncate_str("hello world", 8);
-        // target = max - 1 = 7 cols of original + ellipsis.
-        assert_eq!(out, "hello w…");
-        assert_eq!(cell_width::text_width(out.as_str()), 8);
-    }
-
-    #[test]
-    fn truncate_str_respects_wide_chars() {
-        // Each CJK char is width=2; target=4 means at most 2 chars before ellipsis.
-        let out = truncate_str("日本語", 5);
-        assert!(out.ends_with('…'));
-        assert!(cell_width::text_width(out.as_str()) <= 5);
+        assert_eq!(truncate_str("hello world", 8), "hello w…");
+        assert_eq!(truncate_str("x", 0), "…");
+        let wide = truncate_str("日本語", 5);
+        assert!(wide.ends_with('…'));
+        assert!(cell_width::text_width(wide.as_str()) <= 5);
     }
 
     #[test]
@@ -146,24 +134,20 @@ mod tests {
         assert_eq!(truncate_str("🇨🇦xyz", 3), "🇨🇦…");
     }
 
-    #[test]
-    fn truncate_str_zero_max_returns_just_ellipsis() {
-        let out = truncate_str("x", 0);
-        assert_eq!(out, "…");
-    }
-
     // ── scan_at_token ─────────────────────────────────────────────────
 
     #[test]
-    fn scan_at_token_returns_none_when_not_at_marker() {
-        assert!(scan_at_token(&chars("hello"), 0).is_none());
-    }
-
-    #[test]
-    fn scan_at_token_rejects_when_preceded_by_word_char() {
-        // e.g., "foo@bar" - `@` glued to a letter is not a reference.
-        let cs = chars("foo@bar");
-        assert!(scan_at_token(&cs, 3).is_none());
+    fn scan_at_token_rejects_non_references() {
+        for (text, at) in [
+            ("hello", 0),
+            ("foo@bar", 3),
+            (r#"@"never closed"#, 0),
+            (r#"@"" rest"#, 0),
+            ("@", 0),
+            ("@ word", 0),
+        ] {
+            assert!(scan_at_token(&chars(text), at).is_none(), "{text:?}");
+        }
     }
 
     #[test]
@@ -198,30 +182,6 @@ mod tests {
         let result = scan_at_token(&cs, 0).unwrap();
         assert_eq!(result.0, "@\"path with spaces\"");
         assert_eq!(result.1, "path with spaces");
-    }
-
-    #[test]
-    fn scan_at_token_returns_none_on_unterminated_quote() {
-        let cs = chars(r#"@"never closed"#);
-        assert!(scan_at_token(&cs, 0).is_none());
-    }
-
-    #[test]
-    fn scan_at_token_returns_none_on_empty_quoted_path() {
-        let cs = chars(r#"@"" rest"#);
-        assert!(scan_at_token(&cs, 0).is_none());
-    }
-
-    #[test]
-    fn scan_at_token_returns_none_on_lone_at_at_eof() {
-        let cs = chars("@");
-        assert!(scan_at_token(&cs, 0).is_none());
-    }
-
-    #[test]
-    fn scan_at_token_returns_none_when_followed_by_whitespace() {
-        let cs = chars("@ word");
-        assert!(scan_at_token(&cs, 0).is_none());
     }
 
     // ── try_at_ref ────────────────────────────────────────────────────

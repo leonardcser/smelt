@@ -993,23 +993,23 @@ mod tests {
     // ── is_scroll_event ──────────────────────────────────────────────────
 
     #[test]
-    fn is_scroll_event_covers_all_four_wheel_directions() {
-        assert!(is_scroll_event(ev(MouseEventKind::ScrollUp)));
-        assert!(is_scroll_event(ev(MouseEventKind::ScrollDown)));
-        assert!(is_scroll_event(ev(MouseEventKind::ScrollLeft)));
-        assert!(is_scroll_event(ev(MouseEventKind::ScrollRight)));
-    }
-
-    #[test]
-    fn is_scroll_event_rejects_click_and_drag_events() {
-        assert!(!is_scroll_event(ev(MouseEventKind::Down(
-            MouseButton::Left
-        ))));
-        assert!(!is_scroll_event(ev(MouseEventKind::Up(MouseButton::Left))));
-        assert!(!is_scroll_event(ev(MouseEventKind::Drag(
-            MouseButton::Left
-        ))));
-        assert!(!is_scroll_event(ev(MouseEventKind::Moved)));
+    fn is_scroll_event_matches_only_wheel_events() {
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            assert!(is_scroll_event(ev(kind)));
+        }
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+        ] {
+            assert!(!is_scroll_event(ev(kind)));
+        }
     }
 
     // ── is_left_down ─────────────────────────────────────────────────────
@@ -1030,56 +1030,26 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_transition_is_false_without_scrollbar_capture() {
+    fn scrollbar_transition_detects_capture_before_or_after_dispatch() {
+        let captured = Some(HitTarget::Scrollbar { owner: other_win() });
         assert!(!is_scrollbar_capture_transition(None, None));
-    }
-
-    #[test]
-    fn scrollbar_transition_detects_capture_before_dispatch() {
         // `Up` clears capture during dispatch.
-        let before = Some(HitTarget::Scrollbar { owner: other_win() });
-        assert!(is_scrollbar_capture_transition(before, None));
-    }
-
-    #[test]
-    fn scrollbar_transition_detects_capture_after_dispatch() {
+        assert!(is_scrollbar_capture_transition(captured, None));
         // `Down` establishes capture during dispatch.
-        let after = Some(HitTarget::Scrollbar { owner: other_win() });
-        assert!(is_scrollbar_capture_transition(None, after));
+        assert!(is_scrollbar_capture_transition(None, captured));
     }
 
     // ── focus_for_region_click ───────────────────────────────────────────
 
     #[test]
-    fn region_click_on_prompt_always_promotes_to_prompt_focus() {
-        assert_eq!(
-            focus_for_region_click(HitRegion::Prompt, true),
-            Some(AppFocus::Prompt)
-        );
-        assert_eq!(
-            focus_for_region_click(HitRegion::Prompt, false),
-            Some(AppFocus::Prompt)
-        );
-    }
-
-    #[test]
-    fn region_click_on_transcript_with_content_promotes_to_content_focus() {
-        assert_eq!(
-            focus_for_region_click(HitRegion::Transcript, true),
-            Some(AppFocus::Content)
-        );
-    }
-
-    #[test]
-    fn region_click_on_empty_transcript_does_not_steal_focus() {
-        // No content means there's nothing to focus into - leave the user
-        // in the prompt.
-        assert_eq!(focus_for_region_click(HitRegion::Transcript, false), None);
-    }
-
-    #[test]
-    fn region_click_outside_does_not_change_focus() {
-        assert_eq!(focus_for_region_click(HitRegion::Outside, true), None);
+    fn region_click_focus_follows_region_and_content() {
+        let focus = |region, has_content| focus_for_region_click(region, has_content);
+        assert_eq!(focus(HitRegion::Prompt, true), Some(AppFocus::Prompt));
+        assert_eq!(focus(HitRegion::Prompt, false), Some(AppFocus::Prompt));
+        assert_eq!(focus(HitRegion::Transcript, true), Some(AppFocus::Content));
+        // No content means there's nothing to focus into.
+        assert_eq!(focus(HitRegion::Transcript, false), None);
+        assert_eq!(focus(HitRegion::Outside, true), None);
     }
 
     fn left_down(x: u16, y: u16) -> MouseEvent {

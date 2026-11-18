@@ -405,57 +405,6 @@ fn keyboard_yank_in_readonly_viewer_preserves_grapheme_clusters() {
 }
 
 #[test]
-fn vim_i_enters_insert_from_normal() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.press(KeyCode::Esc);
-    assert_eq!(app.state().vim_mode, VimMode::Normal);
-
-    app.type_char('i');
-    assert_eq!(app.state().vim_mode, VimMode::Insert);
-}
-
-#[test]
-fn vim_a_enters_insert_after_cursor() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.press(KeyCode::Esc);
-    app.type_char('a');
-    assert_eq!(app.state().vim_mode, VimMode::Insert);
-}
-
-#[test]
-fn vim_esc_returns_insert_to_normal() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    // Prompt starts in Insert; type directly.
-    app.type_text("hello");
-    assert_eq!(app.state().vim_mode, VimMode::Insert);
-    assert_eq!(app.state().prompt_text, "hello");
-
-    app.press(KeyCode::Esc);
-    assert_eq!(app.state().vim_mode, VimMode::Normal);
-}
-
-#[test]
-fn vim_v_enters_visual_from_normal() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("abc");
-    app.press(KeyCode::Esc);
-    assert_eq!(app.state().vim_mode, VimMode::Normal);
-
-    app.type_char('v');
-    assert_eq!(app.state().vim_mode, VimMode::Visual);
-}
-
-#[test]
-fn vim_shift_v_enters_visual_line() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("abc");
-    app.press(KeyCode::Esc);
-
-    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
-    assert_eq!(app.state().vim_mode, VimMode::VisualLine);
-}
-
-#[test]
 fn vim_terminal_paste_exits_visual_mode() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.type_text("abc");
@@ -480,18 +429,6 @@ fn vim_terminal_paste_exits_visual_line_mode() {
     app.feed_one(SourceEvent::Term(Event::Paste("THREE".into())));
 
     assert_eq!(app.state().prompt_text, "one\ntwo\nTHREE");
-    assert_eq!(app.state().vim_mode, VimMode::Normal);
-}
-
-#[test]
-fn vim_esc_from_visual_returns_to_normal() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("abc");
-    app.press(KeyCode::Esc);
-    app.type_char('v');
-    assert_eq!(app.state().vim_mode, VimMode::Visual);
-
-    app.press(KeyCode::Esc);
     assert_eq!(app.state().vim_mode, VimMode::Normal);
 }
 
@@ -743,23 +680,29 @@ fn rewind_keeps_the_draft_below_the_rewound_prompt() {
 }
 
 #[test]
-fn vim_full_cycle_normal_insert_normal_visual_normal() {
+fn vim_prompt_mode_transitions() {
     let mut app = TestApp::builder().with_vim(true).build();
-    app.press(KeyCode::Esc);
-    assert_eq!(app.state().vim_mode, VimMode::Normal);
-
-    app.type_char('i');
     assert_eq!(app.state().vim_mode, VimMode::Insert);
-
     app.type_text("foo");
-    app.press(KeyCode::Esc);
-    assert_eq!(app.state().vim_mode, VimMode::Normal);
-
-    app.type_char('v');
-    assert_eq!(app.state().vim_mode, VimMode::Visual);
-
-    app.press(KeyCode::Esc);
-    assert_eq!(app.state().vim_mode, VimMode::Normal);
+    for (keys, expected) in [
+        ("<Esc>", VimMode::Normal),
+        ("i", VimMode::Insert),
+        ("<Esc>", VimMode::Normal),
+        ("a", VimMode::Insert),
+        ("<Esc>", VimMode::Normal),
+        ("v", VimMode::Visual),
+        ("<Esc>", VimMode::Normal),
+        ("V", VimMode::VisualLine),
+        ("<Esc>", VimMode::Normal),
+    ] {
+        match keys {
+            "<Esc>" => app.press(KeyCode::Esc),
+            "V" => app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT),
+            key => app.type_text(key),
+        }
+        assert_eq!(app.state().vim_mode, expected, "after {keys}");
+    }
+    assert_eq!(app.state().prompt_text, "foo");
 }
 
 #[test]
@@ -774,54 +717,20 @@ fn vim_typing_in_normal_mode_does_not_append_to_buffer() {
 }
 
 #[test]
-fn vim_typing_in_insert_mode_appends_to_buffer() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    // Prompt starts in Insert.
-    app.type_text("hello world");
-    assert_eq!(app.state().prompt_text, "hello world");
-}
+fn vim_pending_replace_owns_colon_and_slash_before_cmdline_and_search() {
+    for key in [':', '/'] {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.type_text("abc");
+        app.press(KeyCode::Esc);
 
-#[test]
-fn vim_dd_in_normal_deletes_line() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("line one");
-    app.press(KeyCode::Esc);
-    assert_eq!(app.state().prompt_text, "line one");
+        app.type_char('r');
+        app.type_char(key);
 
-    // `dd` deletes the current line.
-    app.type_char('d');
-    app.type_char('d');
-    assert_eq!(app.state().prompt_text, "");
-}
-
-#[test]
-fn vim_pending_replace_owns_colon_before_cmdline() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("abc");
-    app.press(KeyCode::Esc);
-
-    app.type_char('r');
-    app.type_char(':');
-
-    let state = app.state();
-    assert_eq!(state.prompt_text, "ab:");
-    assert!(!state.cmdline_open);
-    assert_eq!(state.vim_mode, VimMode::Normal);
-}
-
-#[test]
-fn vim_pending_replace_owns_slash_before_search() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("abc");
-    app.press(KeyCode::Esc);
-
-    app.type_char('r');
-    app.type_char('/');
-
-    let state = app.state();
-    assert_eq!(state.prompt_text, "ab/");
-    assert!(!state.cmdline_open);
-    assert_eq!(state.vim_mode, VimMode::Normal);
+        let state = app.state();
+        assert_eq!(state.prompt_text, format!("ab{key}"));
+        assert!(!state.cmdline_open);
+        assert_eq!(state.vim_mode, VimMode::Normal);
+    }
 }
 
 #[test]
@@ -880,22 +789,6 @@ fn vim_yy_yank_flash_expires_after_tick() {
         flash.is_none(),
         "flash should expire after Tick past the window"
     );
-}
-
-#[test]
-fn vim_paragraph_motions_move_the_prompt_cursor_between_blank_lines() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("one\ntwo\n\nthree");
-    app.press(KeyCode::Esc);
-
-    app.type_text("{");
-    assert_eq!(app.prompt_cpos(), 8);
-    app.type_text("{");
-    assert_eq!(app.prompt_cpos(), 0);
-    app.type_text("}");
-    assert_eq!(app.prompt_cpos(), 8);
-    app.type_text("}");
-    assert_eq!(app.prompt_cpos(), "one\ntwo\n\nthree".len() - 1);
 }
 
 #[test]

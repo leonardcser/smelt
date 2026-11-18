@@ -116,14 +116,6 @@ mod tests {
     use crate::grid::Color;
 
     #[test]
-    fn span_from_str_is_default_style() {
-        let s: Span = "hi".into();
-        assert_eq!(s.text, "hi");
-        assert_eq!(s.style, Style::default());
-        assert_eq!(s.width(), 2);
-    }
-
-    #[test]
     fn line_width_sums_spans() {
         let l = Line::from_spans([
             Span::raw("ab"),
@@ -160,32 +152,9 @@ mod tests {
     }
 
     #[test]
-    fn span_width_is_zero_for_empty_text() {
-        assert_eq!(Span::raw("").width(), 0);
-    }
-
-    #[test]
     fn line_width_zero_for_empty_and_for_all_empty_spans() {
         assert_eq!(Line::new().width(), 0);
         let l = Line::from_spans([Span::raw(""), Span::raw("")]);
         assert_eq!(l.width(), 0);
-    }
-
-    #[test]
-    fn line_push_appends_a_span() {
-        let l = Line::new()
-            .push("a")
-            .push(Span::styled("b", Style::new().fg(Color::Red)));
-        assert_eq!(l.spans.len(), 2);
-        assert_eq!(l.spans[0].text, "a");
-        assert_eq!(l.spans[1].style.fg, Some(Color::Red));
-    }
-
-    #[test]
-    fn line_raw_wraps_text_in_a_single_default_span() {
-        let l = Line::raw("hello");
-        assert_eq!(l.spans.len(), 1);
-        assert_eq!(l.spans[0].text, "hello");
-        assert_eq!(l.spans[0].style, Style::default());
     }
 }

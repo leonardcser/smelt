@@ -666,260 +666,88 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ctrl_c_empty_idle_quits() {
-        let c = ctx();
-        assert_eq!(lookup(KeyCode::Char('c'), CTRL, &c), Some(KeyAction::Quit));
+    fn vim_normal() -> KeyContext {
+        KeyContext {
+            vim_non_insert: true,
+            vim_enabled: true,
+            ..ctx()
+        }
     }
 
     #[test]
-    fn ctrl_c_nonempty_clears() {
+    fn ctrl_c_depends_on_buffer_and_agent_state() {
+        let c = |buf_empty, agent_running| KeyContext {
+            buf_empty,
+            agent_running,
+            ..ctx()
+        };
+        let ctrl_c = |c: &KeyContext| lookup(KeyCode::Char('c'), CTRL, c);
+        assert_eq!(ctrl_c(&c(true, false)), Some(KeyAction::Quit));
+        assert_eq!(ctrl_c(&c(false, false)), Some(KeyAction::ClearBuffer));
+        assert_eq!(ctrl_c(&c(true, true)), Some(KeyAction::CancelAgent));
+    }
+
+    #[test]
+    fn default_bindings() {
         let c = KeyContext {
             buf_empty: false,
             ..ctx()
         };
-        assert_eq!(
-            lookup(KeyCode::Char('c'), CTRL, &c),
-            Some(KeyAction::ClearBuffer)
-        );
+        let cases = [
+            (KeyCode::Char('v'), ALT, Some(KeyAction::PageUp)),
+            (KeyCode::Char('v'), CTRL, Some(KeyAction::PageDown)),
+            (KeyCode::Char('f'), CTRL, Some(KeyAction::MoveRight)),
+            (KeyCode::Char('p'), CTRL, Some(KeyAction::MoveUp)),
+            (KeyCode::Char('<'), ALT, Some(KeyAction::MoveStartOfBuffer)),
+            (KeyCode::Char('>'), ALT, Some(KeyAction::MoveEndOfBuffer)),
+            (KeyCode::Char('u'), CTRL, Some(KeyAction::KillToStartOfLine)),
+            (KeyCode::Char('_'), CTRL, Some(KeyAction::Undo)),
+            (KeyCode::Char('z'), SUPER, Some(KeyAction::Undo)),
+            (KeyCode::Char('_'), ALT, Some(KeyAction::Redo)),
+            (
+                KeyCode::Char('z'),
+                SUPER.union(SHIFT),
+                Some(KeyAction::Redo),
+            ),
+            (KeyCode::Char('Z'), SUPER, Some(KeyAction::Redo)),
+            (KeyCode::Tab, NONE, None),
+            (KeyCode::Enter, NONE, Some(KeyAction::Submit)),
+            (KeyCode::Enter, CTRL, Some(KeyAction::SubmitToRequestQueue)),
+            (
+                KeyCode::Char('q'),
+                CTRL,
+                Some(KeyAction::SubmitToRequestQueue),
+            ),
+            (KeyCode::Enter, SHIFT, Some(KeyAction::InsertNewline)),
+            (KeyCode::BackTab, SHIFT, Some(KeyAction::ToggleMode)),
+            (KeyCode::Backspace, ALT, Some(KeyAction::DeleteWordBackward)),
+            (KeyCode::Backspace, NONE, Some(KeyAction::Backspace)),
+            (KeyCode::Left, SHIFT, Some(KeyAction::SelectLeft)),
+            (
+                KeyCode::Left,
+                SHIFT.union(ALT),
+                Some(KeyAction::SelectWordBackward),
+            ),
+        ];
+        for (code, mods, want) in cases {
+            assert_eq!(lookup(code, mods, &c), want, "{code:?} {mods:?}");
+        }
     }
 
     #[test]
-    fn ctrl_c_running_cancels() {
-        let c = KeyContext {
-            agent_running: true,
-            ..ctx()
-        };
-        assert_eq!(
-            lookup(KeyCode::Char('c'), CTRL, &c),
-            Some(KeyAction::CancelAgent)
-        );
-    }
-
-    #[test]
-    fn ctrl_u_vim_non_insert_is_halfpage() {
-        let c = KeyContext {
-            vim_non_insert: true,
-            vim_enabled: true,
-            ..ctx()
-        };
-        assert_eq!(
-            lookup(KeyCode::Char('u'), CTRL, &c),
-            Some(KeyAction::HalfPageUp)
-        );
-    }
-
-    #[test]
-    fn alt_v_emacs_page_up() {
-        let c = ctx();
-        assert_eq!(lookup(KeyCode::Char('v'), ALT, &c), Some(KeyAction::PageUp));
-    }
-
-    #[test]
-    fn ctrl_v_emacs_page_down() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Char('v'), CTRL, &c),
-            Some(KeyAction::PageDown)
-        );
-    }
-
-    #[test]
-    fn ctrl_f_emacs_is_move_right_outside_vim() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Char('f'), CTRL, &c),
-            Some(KeyAction::MoveRight)
-        );
-    }
-
-    #[test]
-    fn ctrl_f_vim_normal_is_page_down() {
-        let c = KeyContext {
-            vim_non_insert: true,
-            vim_enabled: true,
-            ..ctx()
-        };
-        assert_eq!(
-            lookup(KeyCode::Char('f'), CTRL, &c),
-            Some(KeyAction::PageDown)
-        );
-    }
-
-    #[test]
-    fn ctrl_p_is_move_up() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Char('p'), CTRL, &c),
-            Some(KeyAction::MoveUp)
-        );
-    }
-
-    #[test]
-    fn ctrl_y_vim_normal_is_scroll_line_up() {
-        let c = KeyContext {
-            vim_non_insert: true,
-            vim_enabled: true,
-            ..ctx()
-        };
-        assert_eq!(
-            lookup(KeyCode::Char('y'), CTRL, &c),
-            Some(KeyAction::ScrollLineUp)
-        );
-    }
-
-    #[test]
-    fn ctrl_e_vim_normal_is_scroll_line_down() {
-        let c = KeyContext {
-            vim_non_insert: true,
-            vim_enabled: true,
-            ..ctx()
-        };
-        assert_eq!(
-            lookup(KeyCode::Char('e'), CTRL, &c),
-            Some(KeyAction::ScrollLineDown)
-        );
-    }
-
-    #[test]
-    fn alt_lt_start_of_buffer() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Char('<'), ALT, &c),
-            Some(KeyAction::MoveStartOfBuffer)
-        );
-    }
-
-    #[test]
-    fn alt_gt_end_of_buffer() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Char('>'), ALT, &c),
-            Some(KeyAction::MoveEndOfBuffer)
-        );
-    }
-
-    #[test]
-    fn ctrl_u_insert_is_kill() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Char('u'), CTRL, &c),
-            Some(KeyAction::KillToStartOfLine)
-        );
-    }
-
-    #[test]
-    fn undo_redo_bindings() {
-        let c = ctx();
-        assert_eq!(lookup(KeyCode::Char('_'), CTRL, &c), Some(KeyAction::Undo));
-        assert_eq!(lookup(KeyCode::Char('z'), SUPER, &c), Some(KeyAction::Undo));
-        assert_eq!(lookup(KeyCode::Char('_'), ALT, &c), Some(KeyAction::Redo));
-        assert_eq!(
-            lookup(KeyCode::Char('z'), SUPER.union(SHIFT), &c),
-            Some(KeyAction::Redo)
-        );
-        assert_eq!(lookup(KeyCode::Char('Z'), SUPER, &c), Some(KeyAction::Redo));
-    }
-
-    #[test]
-    fn cmd_z_does_not_override_vim_normal_undo() {
-        let c = KeyContext {
-            vim_non_insert: true,
-            vim_enabled: true,
-            ..ctx()
-        };
-        assert_eq!(lookup(KeyCode::Char('z'), SUPER, &c), None);
-    }
-
-    #[test]
-    fn ctrl_r_vim_non_insert_no_match() {
-        let c = KeyContext {
-            vim_non_insert: true,
-            vim_enabled: true,
-            ..ctx()
-        };
-        assert_eq!(lookup(KeyCode::Char('r'), CTRL, &c), None);
-    }
-
-    #[test]
-    fn tab_unbound_by_default() {
-        let c = ctx();
-        assert_eq!(lookup(KeyCode::Tab, NONE, &c), None);
-    }
-
-    #[test]
-    fn enter_submits() {
-        let c = ctx();
-        assert_eq!(lookup(KeyCode::Enter, NONE, &c), Some(KeyAction::Submit));
-    }
-
-    #[test]
-    fn ctrl_enter_and_ctrl_q_submit_to_request_queue() {
-        let c = KeyContext {
-            buf_empty: false,
-            ..ctx()
-        };
-        assert_eq!(
-            lookup(KeyCode::Enter, CTRL, &c),
-            Some(KeyAction::SubmitToRequestQueue)
-        );
-        assert_eq!(
-            lookup(KeyCode::Char('q'), CTRL, &c),
-            Some(KeyAction::SubmitToRequestQueue)
-        );
-    }
-
-    #[test]
-    fn shift_enter_inserts_newline() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Enter, SHIFT, &c),
-            Some(KeyAction::InsertNewline)
-        );
-    }
-
-    #[test]
-    fn backtab_toggles_mode() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::BackTab, SHIFT, &c),
-            Some(KeyAction::ToggleMode)
-        );
-    }
-
-    #[test]
-    fn alt_backspace_deletes_word() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Backspace, ALT, &c),
-            Some(KeyAction::DeleteWordBackward)
-        );
-    }
-
-    #[test]
-    fn plain_backspace() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Backspace, NONE, &c),
-            Some(KeyAction::Backspace)
-        );
-    }
-
-    #[test]
-    fn shift_left_selects() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Left, SHIFT, &c),
-            Some(KeyAction::SelectLeft)
-        );
-    }
-
-    #[test]
-    fn shift_alt_left_selects_word_backward() {
-        let c = ctx();
-        assert_eq!(
-            lookup(KeyCode::Left, SHIFT.union(ALT), &c),
-            Some(KeyAction::SelectWordBackward)
-        );
+    fn vim_normal_overrides_emacs_bindings() {
+        let c = vim_normal();
+        let cases = [
+            (KeyCode::Char('u'), CTRL, Some(KeyAction::HalfPageUp)),
+            (KeyCode::Char('f'), CTRL, Some(KeyAction::PageDown)),
+            (KeyCode::Char('y'), CTRL, Some(KeyAction::ScrollLineUp)),
+            (KeyCode::Char('e'), CTRL, Some(KeyAction::ScrollLineDown)),
+            // Left to the vim engine.
+            (KeyCode::Char('z'), SUPER, None),
+            (KeyCode::Char('r'), CTRL, None),
+        ];
+        for (code, mods, want) in cases {
+            assert_eq!(lookup(code, mods, &c), want, "{code:?} {mods:?}");
+        }
     }
 }

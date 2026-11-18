@@ -260,27 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn new_creates_empty_transcript() {
-        let t = Transcript::new();
-        assert!(t.history.is_empty());
-    }
-
-    #[test]
-    fn default_matches_new() {
-        let t = Transcript::default();
-        assert!(t.history.is_empty());
-    }
-
-    #[test]
-    fn push_text_block_records_it() {
-        let mut t = Transcript::new();
-        t.push(Block::Text {
-            content: "hello".into(),
-        });
-        assert_eq!(t.history.len(), 1);
-    }
-
-    #[test]
     fn insert_before_normalizes_text_and_rejects_missing_anchors() {
         let mut t = Transcript::new();
         t.push(Block::Text {
@@ -339,22 +318,20 @@ mod tests {
     }
 
     #[test]
-    fn push_drops_blank_text_block() {
+    fn push_drops_blank_text_thinking_and_compacted_blocks() {
         let mut t = Transcript::new();
         t.push(Block::Text {
             content: "   ".into(),
         });
-        assert!(t.history.is_empty());
-    }
-
-    #[test]
-    fn push_drops_blank_thinking_block() {
-        let mut t = Transcript::new();
         t.push(Block::Thinking {
             title: None,
             summary_titles: Vec::new(),
             kind: protocol::ReasoningKind::Raw,
             content: "\n\n".into(),
+        });
+        t.push(Block::Compacted {
+            summary: "".into(),
+            kept: Vec::new(),
         });
         assert!(t.history.is_empty());
     }
@@ -377,16 +354,6 @@ mod tests {
                 content: String::new().into(),
             }
         );
-    }
-
-    #[test]
-    fn push_drops_blank_compacted_block() {
-        let mut t = Transcript::new();
-        t.push(Block::Compacted {
-            summary: "".into(),
-            kept: Vec::new(),
-        });
-        assert!(t.history.is_empty());
     }
 
     #[test]

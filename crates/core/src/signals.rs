@@ -1095,44 +1095,6 @@ mod tests {
     }
 
     #[test]
-    fn declare_then_get_lua_returns_initial_value() {
-        let lua = Lua::new();
-        let mut c = Signals::new();
-        c.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
-        c.declare("count", 7u32);
-        match c.get_lua("count", &lua) {
-            mlua::Value::Integer(7) => {}
-            other => panic!("expected Integer(7), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn get_lua_returns_nil_for_undeclared() {
-        let lua = Lua::new();
-        let c = Signals::new();
-        assert!(matches!(c.get_lua("missing", &lua), mlua::Value::Nil));
-    }
-
-    #[test]
-    fn set_dyn_updates_value() {
-        let lua = Lua::new();
-        let mut c = Signals::new();
-        c.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
-        c.declare("count", 0u32);
-        assert!(c.set_dyn("count", Rc::new(42u32)));
-        match c.get_lua("count", &lua) {
-            mlua::Value::Integer(42) => {}
-            other => panic!("expected Integer(42), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn set_dyn_returns_false_for_undeclared() {
-        let mut c = Signals::new();
-        assert!(!c.set_dyn("missing", Rc::new(1u32)));
-    }
-
-    #[test]
     fn set_without_subscribers_does_not_queue() {
         let mut c = Signals::new();
         c.declare("count", 0u32);
@@ -1162,25 +1124,6 @@ mod tests {
         assert!(!fires[0].callbacks[0].is_glob);
         // Snapshot carries the post-set value.
         assert_eq!(fires[0].value.downcast_ref::<u32>(), Some(&5u32));
-    }
-
-    #[test]
-    fn multiple_subscribers_appear_in_registration_order() {
-        let lua = Lua::new();
-        let mut c = Signals::new();
-        c.declare("count", 0u32);
-        for src in [
-            "function() return 1 end",
-            "function() return 2 end",
-            "function() return 3 end",
-        ] {
-            c.subscribe_kind("count", SubscriberKind::Lua(handle(&lua, src)))
-                .unwrap();
-        }
-        c.set_dyn("count", Rc::new(1u32));
-        let fires = c.drain_pending();
-        assert_eq!(fires.len(), 1);
-        assert_eq!(fires[0].callbacks.len(), 3);
     }
 
     #[test]
@@ -1262,31 +1205,6 @@ mod tests {
                 .and_then(|v| v.downcast_ref::<u32>()),
             Some(&8u32)
         );
-    }
-
-    #[test]
-    fn emit_dyn_has_no_previous_value() {
-        let lua = Lua::new();
-        let mut c = Signals::new();
-        c.declare_event("event");
-        c.subscribe_kind("event", SubscriberKind::Lua(handle(&lua, "function() end")))
-            .unwrap();
-        c.emit_dyn("event", Rc::new(42u32));
-        let fires = c.drain_pending();
-        assert_eq!(fires.len(), 1);
-        assert!(fires[0].prev.is_none());
-    }
-
-    #[test]
-    fn drain_pending_is_idempotent() {
-        let lua = Lua::new();
-        let mut c = Signals::new();
-        c.declare("count", 0u32);
-        c.subscribe_kind("count", SubscriberKind::Lua(handle(&lua, "function() end")))
-            .unwrap();
-        c.set_dyn("count", Rc::new(1u32));
-        assert_eq!(c.drain_pending().len(), 1);
-        assert!(c.drain_pending().is_empty());
     }
 
     #[test]

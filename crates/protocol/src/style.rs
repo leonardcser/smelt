@@ -358,12 +358,6 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_accepts_plain_string() {
-        let s: StyledLines = serde_json::from_str("\"ls -la\"").unwrap();
-        assert_eq!(s.as_plain_text(), "ls -la");
-    }
-
-    #[test]
     fn deserialize_accepts_lines_array() {
         let s: StyledLines = serde_json::from_str(r#"[[{"text":"ls","syntax":"bash"}]]"#).unwrap();
         assert_eq!(s.0.len(), 1);

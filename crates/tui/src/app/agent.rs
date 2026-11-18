@@ -4268,25 +4268,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_env_var_maps_to_not_set_error_with_var_name() {
-        let out = lookup_api_key("MY_KEY", |_| Err(std::env::VarError::NotPresent));
+    fn env_lookup_failures_map_to_errors_naming_the_var() {
+        let not_set = lookup_api_key("MY_KEY", |_| Err(std::env::VarError::NotPresent));
         assert_eq!(
-            out,
+            not_set,
             Err(ApiKeyError::NotSet {
                 var: "MY_KEY".into()
             })
         );
-    }
-
-    #[test]
-    fn non_unicode_env_var_maps_to_not_unicode_error() {
-        // `std::env::VarError::NotUnicode` carries an `OsString`; we don't
-        // care about its payload - only the variant matters for our message.
-        let out = lookup_api_key("MY_KEY", |_| {
+        let not_unicode = lookup_api_key("MY_KEY", |_| {
             Err(std::env::VarError::NotUnicode(std::ffi::OsString::new()))
         });
         assert_eq!(
-            out,
+            not_unicode,
             Err(ApiKeyError::NotUnicode {
                 var: "MY_KEY".into()
             })

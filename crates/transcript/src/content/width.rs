@@ -171,17 +171,9 @@ mod tests {
     }
 
     #[test]
-    fn truncate_returns_input_when_fits() {
+    fn truncate_to_cells_appends_suffix_only_when_clipped() {
         assert_eq!(truncate_to_cells("hi", 10, "…"), "hi");
-    }
-
-    #[test]
-    fn truncate_appends_suffix_when_clipped() {
         assert_eq!(truncate_to_cells("hello world", 8, "…"), "hello w…");
-    }
-
-    #[test]
-    fn truncate_returns_suffix_prefix_when_suffix_overruns() {
         assert_eq!(truncate_to_cells("hello world", 2, "..."), "..");
     }
 

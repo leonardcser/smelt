@@ -146,7 +146,7 @@ fn drain_app_events_for(app: &mut TestApp, duration: std::time::Duration) {
 
 fn begin_slow_persisted_search(app: &mut TestApp) {
     app.tui
-        .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
+        .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(30));
     app.type_char('/');
     app.type_text("needle");
 }
@@ -524,7 +524,7 @@ fn transcript_search_session_switch_discards_pending_results() {
 
     app.load_session(replacement);
     assert_ne!(app.session_snapshot().id, previous_id);
-    drain_app_events_for(&mut app, std::time::Duration::from_millis(120));
+    drain_app_events_for(&mut app, std::time::Duration::from_millis(70));
     assert!(app.overlays_probe().search_session().is_none());
 }
 
@@ -534,7 +534,7 @@ fn transcript_search_rewind_cancels_pending_results() {
     begin_slow_persisted_search(&mut app);
 
     app.rewind_to_history_index(Some(100), false);
-    drain_app_events_for(&mut app, std::time::Duration::from_millis(120));
+    drain_app_events_for(&mut app, std::time::Duration::from_millis(70));
     assert!(app.overlays_probe().search_session().is_none());
 }
 
@@ -546,7 +546,7 @@ fn transcript_search_session_close_cancels_pending_results() {
 
     app.reset_session();
     assert_ne!(app.session_snapshot().id, previous_id);
-    drain_app_events_for(&mut app, std::time::Duration::from_millis(120));
+    drain_app_events_for(&mut app, std::time::Duration::from_millis(70));
     assert!(app.overlays_probe().search_session().is_none());
 }
 
@@ -884,33 +884,24 @@ fn transcript_cursor_api_reads_absolute_row_after_scroll() {
 }
 
 #[test]
-fn transcript_search_paints_visible_matches_and_nohl_aliases_clear() {
-    for command in ["nohl", "nohlsearch", "noh"] {
+fn transcript_search_highlights_clear_on_nohl_aliases_and_esc() {
+    for command in ["nohl", "nohlsearch", "noh", "<Esc>"] {
         let mut app = row_document_transcript_app(20, true);
         start_visible_transcript_search(&mut app);
 
-        run_cmdline(&mut app, command);
+        if command == "<Esc>" {
+            app.press(KeyCode::Esc);
+        } else {
+            run_cmdline(&mut app, command);
+        }
         app.render_silent();
 
-        let win = app.transcript_window();
         assert!(
-            win.search_ranges.is_empty(),
+            app.transcript_window().search_ranges.is_empty(),
             "{command} should clear search highlights"
         );
         assert!(app.overlays_probe().search_session().is_none());
     }
-}
-
-#[test]
-fn transcript_search_paints_visible_matches_and_esc_clears() {
-    let mut app = row_document_transcript_app(20, true);
-    start_visible_transcript_search(&mut app);
-
-    app.press(KeyCode::Esc);
-    app.render_silent();
-    let win = app.transcript_window();
-    assert!(win.search_ranges.is_empty());
-    assert!(app.overlays_probe().search_session().is_none());
 }
 
 fn start_visible_transcript_search(app: &mut TestApp) {
@@ -1205,19 +1196,13 @@ fn prompt_backward_search_finds_the_previous_match() {
 }
 
 #[test]
-fn prompt_slash_and_n_are_text_in_insert_mode() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.type_text("a/n?N");
-    assert_eq!(app.state().prompt_text, "a/n?N");
-    assert!(!app.state().cmdline_open);
-}
-
-#[test]
-fn prompt_slash_is_text_without_vim() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    app.type_text("a/b");
-    assert_eq!(app.state().prompt_text, "a/b");
-    assert!(!app.state().cmdline_open);
+fn prompt_slash_and_n_are_text_outside_vim_normal_mode() {
+    for vim in [true, false] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.type_text("a/n?N");
+        assert_eq!(app.state().prompt_text, "a/n?N", "vim {vim}");
+        assert!(!app.state().cmdline_open, "vim {vim}");
+    }
 }
 
 #[test]

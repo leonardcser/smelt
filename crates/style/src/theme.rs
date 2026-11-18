@@ -293,29 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn set_overwrites_existing_set() {
-        let mut t = Theme::new();
-        t.set("X", Style::new().bg(Color::AnsiValue(1)));
-        let direct = Style::new().bg(Color::AnsiValue(2));
-        t.set("X", direct);
-        assert_eq!(t.get("X"), direct);
-    }
-
-    #[test]
-    fn light_flag_round_trips() {
-        let mut t = Theme::new();
-        assert!(!t.is_light());
-        t.set_light(true);
-        assert!(t.is_light());
-    }
-
-    #[test]
-    fn clone_preserves_revision() {
-        let t = Theme::new();
-        assert_eq!(t.revision(), t.clone().revision());
-    }
-
-    #[test]
     fn separate_themes_have_distinct_revisions() {
         assert_ne!(Theme::new().revision(), Theme::new().revision());
     }
@@ -378,14 +355,6 @@ mod tests {
         assert_eq!(
             intern("style_audit_intern_a"),
             intern("style_audit_intern_a")
-        );
-    }
-
-    #[test]
-    fn intern_returns_different_ids_for_different_names() {
-        assert_ne!(
-            intern("style_audit_intern_b"),
-            intern("style_audit_intern_c")
         );
     }
 

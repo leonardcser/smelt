@@ -427,7 +427,7 @@ fn assert_bash(
     expected: Decision,
 ) {
     let p = perms_with_bash(allow, ask, deny);
-    assert_eq!(p.check_subcommand(mode, "bash", cmd), expected);
+    assert_eq!(p.check_subcommand(mode, "bash", cmd), expected, "{cmd}");
 }
 
 #[test]
@@ -448,28 +448,43 @@ fn normal_mode_asks_for_mcp_by_default() {
     );
 }
 
-// --- simple commands ---
+// --- chained command decisions ---
 
 #[test]
-fn simple_allowed() {
-    assert_bash(&["ls *"], &[], &[], normal(), "ls -la", Decision::Allow);
-}
-
-#[test]
-fn simple_denied() {
-    assert_bash(&[], &[], &["rm *"], normal(), "rm -rf /", Decision::Deny);
-}
-
-#[test]
-fn simple_ask() {
-    assert_bash(&[], &["rm *"], &[], normal(), "rm -rf /", Decision::Ask);
-}
-
-// --- deny rules with chained commands ---
-
-#[test]
-fn deny_rm_simple() {
-    assert_bash(&[], &[], &["rm *"], normal(), "rm -rf /", Decision::Deny);
+fn bash_rules_combine_across_chained_commands() {
+    use Decision::{Allow, Ask, Deny};
+    type Case = (
+        &'static [&'static str],
+        &'static [&'static str],
+        &'static [&'static str],
+        &'static str,
+        Decision,
+    );
+    let cases: [Case; 14] = [
+        (&["ls *"], &[], &[], "ls -la", Allow),
+        (&[], &[], &["rm *"], "rm -rf /", Deny),
+        (&[], &["rm *"], &[], "rm -rf /", Ask),
+        (&["ls *"], &[], &["rm *"], "ls && rm -rf /", Deny),
+        (&["ls *"], &[], &["rm *"], "rm -rf / && ls", Deny),
+        (&["ls *"], &["rm *"], &[], "ls && rm -rf /", Ask),
+        (&["ls *"], &["rm *"], &[], "rm -rf / && ls", Ask),
+        (&["ls *"], &[], &[], "ls && rm README.md", Ask),
+        (&["ls *", "rm *"], &[], &[], "ls && rm README.md", Allow),
+        (
+            &["cat *", "grep *"],
+            &[],
+            &[],
+            "cat file.txt | grep foo",
+            Allow,
+        ),
+        (&["cat *"], &[], &[], "cat file.txt | rm foo", Ask),
+        (&["echo *"], &[], &["rm *"], "echo hi; rm -rf /", Deny),
+        (&["make *"], &[], &[], "make || make install", Allow),
+        (&["rm *"], &[], &["rm *"], "rm foo", Deny),
+    ];
+    for (allow, ask, deny, cmd, expected) in cases {
+        assert_bash(allow, ask, deny, normal(), cmd, expected);
+    }
 }
 
 #[test]
@@ -498,208 +513,78 @@ fn nested_shell_rules_check_executed_commands() {
     }
 }
 
-#[test]
-fn deny_rm_after_ls() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &["rm *"],
-        normal(),
-        "ls && rm -rf /",
-        Decision::Deny,
-    );
-}
-
-#[test]
-fn deny_rm_before_ls() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &["rm *"],
-        normal(),
-        "rm -rf / && ls",
-        Decision::Deny,
-    );
-}
-
-// --- ask rules with chained commands ---
-
-#[test]
-fn ask_rm_simple() {
-    assert_bash(&[], &["rm *"], &[], normal(), "rm -rf /", Decision::Ask);
-}
-
-#[test]
-fn ask_rm_after_ls() {
-    assert_bash(
-        &["ls *"],
-        &["rm *"],
-        &[],
-        normal(),
-        "ls && rm -rf /",
-        Decision::Ask,
-    );
-}
-
-#[test]
-fn ask_rm_before_ls() {
-    assert_bash(
-        &["ls *"],
-        &["rm *"],
-        &[],
-        normal(),
-        "rm -rf / && ls",
-        Decision::Ask,
-    );
-}
-
-// --- allow rule should not match chained commands ---
-
-#[test]
-fn allow_ls_does_not_allow_chained_rm() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &[],
-        normal(),
-        "ls && rm README.md",
-        Decision::Ask,
-    );
-}
-
-// --- both sub-commands allowed ---
-
-#[test]
-fn chained_both_allowed() {
-    assert_bash(
-        &["ls *", "rm *"],
-        &[],
-        &[],
-        normal(),
-        "ls && rm README.md",
-        Decision::Allow,
-    );
-}
-
-// --- pipes ---
-
-#[test]
-fn pipe_both_allowed() {
-    assert_bash(
-        &["cat *", "grep *"],
-        &[],
-        &[],
-        normal(),
-        "cat file.txt | grep foo",
-        Decision::Allow,
-    );
-}
-
-#[test]
-fn pipe_second_not_allowed() {
-    assert_bash(
-        &["cat *"],
-        &[],
-        &[],
-        normal(),
-        "cat file.txt | rm foo",
-        Decision::Ask,
-    );
-}
-
-// --- semicolon ---
-
-#[test]
-fn semicolon_second_denied() {
-    assert_bash(
-        &["echo *"],
-        &[],
-        &["rm *"],
-        normal(),
-        "echo hi; rm -rf /",
-        Decision::Deny,
-    );
-}
-
-// --- or chain ---
-
-#[test]
-fn or_chain_both_allowed() {
-    assert_bash(
-        &["make *"],
-        &[],
-        &[],
-        normal(),
-        "make || make install",
-        Decision::Allow,
-    );
-}
-
-// --- deny wins over allow ---
-
-#[test]
-fn deny_wins_over_allow() {
-    assert_bash(
-        &["rm *"],
-        &[],
-        &["rm *"],
-        normal(),
-        "rm foo",
-        Decision::Deny,
-    );
-}
-
 // --- split helper ---
 
 #[test]
-fn split_shell_commands_basic() {
-    assert_eq!(split_shell_commands("ls"), vec!["ls"]);
-    assert_eq!(split_shell_commands("ls && rm foo"), vec!["ls", "rm foo"]);
-    assert_eq!(
-        split_shell_commands("a | b || c; d && e"),
-        vec!["a", "b", "c", "d", "e"]
-    );
+fn split_shell_commands_cases() {
+    let cases: &[(&str, &[&str])] = &[
+        ("ls", &["ls"]),
+        ("ls && rm foo", &["ls", "rm foo"]),
+        ("a | b || c; d && e", &["a", "b", "c", "d", "e"]),
+        ("  ls   &&   rm foo  ", &["ls", "rm foo"]),
+        ("ls\nrm -rf /", &["ls", "rm -rf /"]),
+        ("ls &&", &["ls"]),
+        ("&& rm foo", &["rm foo"]),
+        ("&& || ;", &[]),
+        ("ls ;; rm", &["ls", "rm"]),
+        ("ls &&&rm foo", &["ls", "rm foo"]),
+        ("ls &&& rm foo", &["ls", "rm foo"]),
+        (r"ls \&\& rm foo", &[r"ls \&\& rm foo"]),
+        (r"echo hello\; world", &[r"echo hello\; world"]),
+        (r"echo hello\|world", &[r"echo hello\|world"]),
+        ("ls \\", &["ls \\"]),
+        ("cat << EOF", &["cat << EOF"]),
+        ("cargo build 2>&1", &["cargo build 2>&1"]),
+        ("cargo build &> /dev/null", &["cargo build &> /dev/null"]),
+        ("cat <&0 | head", &["cat <&0", "head"]),
+        (
+            "cat << 'EOF'\nhello world\nsome content\nEOF",
+            &["cat << 'EOF'\nhello world\nsome content\nEOF"],
+        ),
+        ("cat << 'EOF'\n✿\nEOF", &["cat << 'EOF'\n✿\nEOF"]),
+        ("✿", &["✿"]),
+        ("echo ✿", &["echo ✿"]),
+        ("echo ✿ && rm foo", &["echo ✿", "rm foo"]),
+        ("echo '✿ && world'", &["echo '✿ && world'"]),
+        (r"\✿", &[r"\✿"]),
+        (r"echo \✿", &[r"echo \✿"]),
+        ("echo $(echo ✿)", &["echo $(echo ✿)", "echo ✿"]),
+        ("echo ✿ && (echo ✿)", &["echo ✿", "(echo ✿)", "echo ✿"]),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(split_shell_commands(input), *expected, "{input:?}");
+    }
 }
 
 #[test]
-fn split_shell_commands_utf8_multibyte() {
-    // Multi-byte characters should not cause panics on byte-index slicing.
-    assert_eq!(split_shell_commands("✿"), vec!["✿"]);
-    assert_eq!(split_shell_commands("echo ✿"), vec!["echo ✿"]);
-    assert_eq!(
-        split_shell_commands("echo ✿ && rm foo"),
-        vec!["echo ✿", "rm foo"]
-    );
-    assert_eq!(
-        split_shell_commands("echo '✿ && world'"),
-        vec!["echo '✿ && world'"]
-    );
+fn split_shell_commands_keeps_heredoc_bodies_out_of_commands() {
+    let cmd = "cd /tmp && uv run python3 << 'EOF'\nfrom main import load\ndata = load(num_features=25)\nEOF";
+    let cmds = split_shell_commands(cmd);
+    assert_eq!(cmds.len(), 2, "Expected [cd, uv], got: {cmds:?}");
+    assert!(cmds[0].starts_with("cd "));
+    assert!(cmds[1].starts_with("uv "));
+
+    let cmds = split_shell_commands("cat << 'EOF' | grep foo\nhello\nworld\nEOF");
+    assert!(!cmds.iter().any(|c| c == "hello" || c == "world"));
 }
 
 #[test]
-fn split_shell_commands_utf8_with_backslash() {
-    // Backslash before a multi-byte char should not land mid-char.
-    assert_eq!(split_shell_commands(r"\✿"), vec![r"\✿"]);
-    assert_eq!(split_shell_commands(r"echo \✿"), vec![r"echo \✿"]);
-}
-
-#[test]
-fn split_shell_commands_utf8_in_subshell() {
-    // Subshell extraction with multi-byte chars - inner commands are appended.
+fn split_with_ops_background_and_multibyte() {
+    let ops = |s: &str| {
+        split_shell_commands_with_ops(s)
+            .into_iter()
+            .map(|(c, op)| (c, op.unwrap_or_default()))
+            .collect::<Vec<_>>()
+    };
+    let pair = |c: &str, o: &str| (c.to_string(), o.to_string());
     assert_eq!(
-        split_shell_commands("echo $(echo ✿)"),
-        vec!["echo $(echo ✿)", "echo ✿"]
+        ops("sleep 5 & echo done"),
+        vec![pair("sleep 5", "&"), pair("echo done", "")]
     );
     assert_eq!(
-        split_shell_commands("echo ✿ && (echo ✿)"),
-        vec!["echo ✿", "(echo ✿)", "echo ✿"]
+        ops("echo ✿ && rm foo"),
+        vec![pair("echo ✿", "&&"), pair("rm foo", "")]
     );
-}
-
-#[test]
-fn split_shell_commands_utf8_with_heredoc() {
-    let cmd = "cat << 'EOF'\n✿\nEOF";
-    assert_eq!(split_shell_commands(cmd), vec![cmd]);
 }
 
 #[test]
@@ -815,80 +700,6 @@ fn split_shell_commands_ampersand_input_redirect_is_background() {
 }
 
 #[test]
-fn has_output_redirection_utf8() {
-    // Multi-byte chars near redirection operators.
-    assert!(!has_output_redirection("echo ✿"));
-    assert!(has_output_redirection("echo ✿ > out.txt"));
-}
-
-#[test]
-fn split_shell_commands_with_ops_utf8() {
-    assert_eq!(
-        split_shell_commands_with_ops("echo ✿ && rm foo"),
-        vec![
-            ("echo ✿".to_string(), Some("&&".to_string())),
-            ("rm foo".to_string(), None),
-        ]
-    );
-}
-
-// --- edge cases ---
-
-// Empty / whitespace-only commands
-#[test]
-fn empty_command() {
-    assert_bash(&["ls *"], &[], &[], normal(), "", Decision::Ask);
-}
-
-#[test]
-fn whitespace_only_command() {
-    assert_bash(&["ls *"], &[], &[], normal(), "   ", Decision::Ask);
-}
-
-// --- quote-aware splitting (shlex) ---
-
-// Operators inside quotes are NOT treated as operators
-#[test]
-fn operator_in_quoted_argument() {
-    let p = perms_with_bash(&["grep *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"grep "&&" file.txt"#),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn semicolon_in_echo() {
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"echo "hello; world""#),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn pipe_in_quoted_filename() {
-    let p = perms_with_bash(&["cat *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"cat "file|name""#),
-        Decision::Allow
-    );
-}
-
-// --- single & (background operator) now handled ---
-
-#[test]
-fn single_ampersand_background() {
-    let p = perms_with_bash(&["sleep *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "sleep 5 & rm foo"),
-        Decision::Deny
-    );
-}
-
-// --- subshell / substitution ---
-
-#[test]
 fn split_shell_commands_nested_subshells_once_per_level() {
     let mut command = "rm foo".to_string();
     for _ in 0..12 {
@@ -898,250 +709,6 @@ fn split_shell_commands_nested_subshells_once_per_level() {
     assert_eq!(commands.len(), 13);
     assert_eq!(commands[0], command);
     assert_eq!(commands.last().map(String::as_str), Some("rm foo"));
-}
-
-#[test]
-fn command_substitution() {
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "echo $(rm -rf /)"),
-        Decision::Deny
-    );
-}
-
-#[test]
-fn backtick_substitution() {
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "echo `rm -rf /`"),
-        Decision::Deny
-    );
-}
-
-// --- newline separator ---
-
-#[test]
-fn newline_separator() {
-    let p = perms_with_bash(&["ls *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "ls\nrm -rf /"),
-        Decision::Deny
-    );
-}
-
-// --- trailing / leading operators ---
-
-#[test]
-fn trailing_operator() {
-    assert_bash(&["ls *"], &[], &[], normal(), "ls &&", Decision::Allow);
-}
-
-#[test]
-fn split_trailing_operator() {
-    assert_eq!(split_shell_commands("ls &&"), vec!["ls"]);
-}
-
-#[test]
-fn leading_operator() {
-    let p = perms_with_bash(&["rm *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "&& rm foo"),
-        Decision::Ask
-    );
-}
-
-#[test]
-fn split_leading_operator() {
-    assert_eq!(split_shell_commands("&& rm foo"), vec!["rm foo"]);
-}
-
-// --- triple &&& ---
-
-#[test]
-fn triple_ampersand() {
-    assert_eq!(split_shell_commands("ls &&&rm foo"), vec!["ls", "rm foo"]);
-}
-
-#[test]
-fn triple_ampersand_spaced() {
-    assert_eq!(split_shell_commands("ls &&& rm foo"), vec!["ls", "rm foo"]);
-}
-
-// --- bare commands ---
-
-#[test]
-fn bare_command_matches_star_pattern() {
-    assert_bash(&["ls *"], &[], &[], normal(), "ls", Decision::Allow);
-}
-
-#[test]
-fn trailing_space_no_false_positive() {
-    assert_bash(&["ls *"], &[], &[], normal(), "lsof", Decision::Ask);
-}
-
-// --- unclosed quotes ---
-
-#[test]
-fn unclosed_quote() {
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"echo "hello && rm foo"#),
-        Decision::Allow
-    );
-}
-
-// --- escaped operators outside quotes ---
-
-#[test]
-fn escaped_ampersand_not_split() {
-    // \&\& is two literal & chars in bash, not an operator
-    assert_eq!(
-        split_shell_commands(r"ls \&\& rm foo"),
-        vec![r"ls \&\& rm foo"]
-    );
-}
-
-#[test]
-fn escaped_semicolon_not_split() {
-    assert_eq!(
-        split_shell_commands(r"echo hello\; world"),
-        vec![r"echo hello\; world"]
-    );
-}
-
-#[test]
-fn escaped_pipe_not_split() {
-    assert_eq!(
-        split_shell_commands(r"echo hello\|world"),
-        vec![r"echo hello\|world"]
-    );
-}
-
-// --- mixed quote types ---
-
-#[test]
-fn single_quotes_inside_double() {
-    // echo "it's fine" && rm foo → two commands
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"echo "it's fine" && rm foo"#),
-        Decision::Deny
-    );
-}
-
-#[test]
-fn double_quotes_inside_single() {
-    // echo '"hello"' && rm foo → two commands
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"echo '"hello"' && rm foo"#),
-        Decision::Deny
-    );
-}
-
-// --- escaped quote inside double quotes ---
-
-#[test]
-fn escaped_quote_inside_double_quotes() {
-    // echo "he said \"hi\" && rm" is all one quoted string - single command
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"echo "he said \"hi\" && rm""#),
-        Decision::Allow
-    );
-}
-
-// --- consecutive operators ---
-
-#[test]
-fn double_semicolons() {
-    // ls ;; rm → empty command between ;; is dropped, both ls and rm checked
-    assert_eq!(split_shell_commands("ls ;; rm"), vec!["ls", "rm"]);
-}
-
-#[test]
-fn double_semicolons_deny() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &["rm *"],
-        normal(),
-        "ls ;; rm foo",
-        Decision::Deny,
-    );
-}
-
-// --- operator-only input ---
-
-#[test]
-fn only_operators() {
-    // No actual commands, just operators
-    assert_eq!(split_shell_commands("&& || ;"), Vec::<String>::new());
-}
-
-// --- whitespace around operators ---
-
-#[test]
-fn extra_whitespace_around_operators() {
-    assert_eq!(
-        split_shell_commands("  ls   &&   rm foo  "),
-        vec!["ls", "rm foo"]
-    );
-}
-
-// --- single-command leading whitespace ---
-
-#[test]
-fn leading_whitespace_single_command() {
-    let p = perms_with_bash(&["ls *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "  ls -la"),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn leading_whitespace_chained_command() {
-    let p = perms_with_bash(&["ls *", "echo *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "  ls -la && echo hi"),
-        Decision::Allow
-    );
-}
-
-// --- subshells / parentheses ---
-
-#[test]
-fn subshell_not_parsed() {
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "echo hi && (rm -rf /)"),
-        Decision::Deny
-    );
-}
-
-#[test]
-fn subshell_hides_denied_command() {
-    let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    // extract_embedded_commands scans through quotes; $() is found and rm is extracted.
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", r#"echo "$(rm -rf /)""#),
-        Decision::Deny
-    );
-}
-
-// --- approval_pattern with background operator ---
-
-#[test]
-fn split_with_ops_background() {
-    let result = split_shell_commands_with_ops("sleep 5 & echo done");
-    assert_eq!(
-        result,
-        vec![
-            ("sleep 5".to_string(), Some("&".to_string())),
-            ("echo done".to_string(), None),
-        ]
-    );
 }
 
 #[test]
@@ -1158,94 +725,48 @@ fn split_with_ops_preserves_operators() {
     );
 }
 
-// --- backslash at end of string ---
-
 #[test]
-fn trailing_backslash() {
-    // Trailing backslash with nothing after - should not panic
-    assert_eq!(split_shell_commands("ls \\"), vec!["ls \\"]);
-}
-
-// --- here-string / redirection ---
-
-#[test]
-fn redirection_not_split() {
-    // << is not a shell operator we handle, so it stays as one command
-    assert_eq!(split_shell_commands("cat << EOF"), vec!["cat << EOF"]);
-}
-
-// --- heredoc content not treated as commands ---
-
-#[test]
-fn heredoc_content_not_split() {
-    let cmd = "cat << 'EOF'\nhello world\nsome content\nEOF";
-    assert_eq!(
-        split_shell_commands(cmd),
-        vec!["cat << 'EOF'\nhello world\nsome content\nEOF"]
-    );
+fn has_output_redirection_ignores_multibyte_text() {
+    assert!(!has_output_redirection("echo ✿"));
+    assert!(has_output_redirection("echo ✿ > out.txt"));
 }
 
 #[test]
-fn heredoc_with_chained_command_not_split() {
-    let cmd = "cd /tmp && uv run python3 << 'EOF'\nfrom main import load\ndata = load(num_features=25)\nEOF";
-    let cmds = split_shell_commands(cmd);
-    assert_eq!(cmds.len(), 2, "Expected [cd, uv], got: {cmds:?}");
-    assert!(cmds[0].starts_with("cd "), "first: {:?}", cmds[0]);
-    assert!(cmds[1].starts_with("uv "), "second: {:?}", cmds[1]);
-}
-
-#[test]
-fn heredoc_with_pipe() {
-    let cmd = "cat << 'EOF' | grep foo\nhello\nworld\nEOF";
-    // The heredoc body should not produce extra commands
-    let cmds = split_shell_commands(cmd);
-    assert!(!cmds.iter().any(|c| c == "hello" || c == "world"));
-}
-
-#[test]
-fn heredoc_permission_check() {
-    let p = perms_with_bash(&["cat *", "grep *"], &[], &["rm *"]);
-    let cmd = "cat << 'EOF' | grep foo\nrm -rf /\nEOF";
-    // "rm -rf /" is heredoc content, not a command - should not be denied
-    assert_eq!(p.check_subcommand(normal(), "bash", cmd), Decision::Allow);
-}
-
-// --- 2>&1 not split on & ---
-
-#[test]
-fn redirect_stderr_not_split() {
-    assert_eq!(
-        split_shell_commands("cargo build 2>&1"),
-        vec!["cargo build 2>&1"]
-    );
-}
-
-#[test]
-fn redirect_stderr_permission() {
-    assert_bash(
-        &["cargo *"],
-        &[],
-        &[],
-        normal(),
-        "cargo build 2>&1",
-        Decision::Allow,
-    );
-}
-
-#[test]
-fn redirect_ampersand_greater() {
-    // &> /dev/null
-    assert_eq!(
-        split_shell_commands("cargo build &> /dev/null"),
-        vec!["cargo build &> /dev/null"]
-    );
-}
-
-// --- newline as separator ---
-
-#[test]
-fn newline_treated_as_separator() {
-    assert_eq!(split_shell_commands("ls\nrm -rf /"), vec!["ls", "rm -rf /"]);
+fn bash_decisions_for_quoting_and_separators() {
+    use Decision::{Allow, Ask, Deny};
+    let cases: [(&[&str], &str, Decision); 23] = [
+        (&["ls *"], "", Ask),
+        (&["ls *"], "   ", Ask),
+        (&["ls *"], "ls", Allow),
+        (&["ls *"], "lsof", Ask),
+        (&["ls *"], "ls &&", Allow),
+        (&["ls *"], "  ls -la", Allow),
+        (&["ls *", "echo *"], "  ls -la && echo hi", Allow),
+        (&["grep *"], r#"grep "&&" file.txt"#, Allow),
+        (&["echo *"], r#"echo "hello; world""#, Allow),
+        (&["cat *"], r#"cat "file|name""#, Allow),
+        (&["echo *"], r#"echo "hello && rm foo"#, Allow),
+        (&["echo *"], r#"echo "he said \"hi\" && rm""#, Allow),
+        (&["echo *"], r#"echo "it's fine" && rm foo"#, Deny),
+        (&["echo *"], r#"echo '"hello"' && rm foo"#, Deny),
+        (&["sleep *"], "sleep 5 & rm foo", Deny),
+        (&["ls *"], "ls ;; rm foo", Deny),
+        (&["ls *"], "ls\nrm -rf /", Deny),
+        (&["echo *"], "echo $(rm -rf /)", Deny),
+        (&["echo *"], "echo `rm -rf /`", Deny),
+        (&["echo *"], r#"echo "$(rm -rf /)""#, Deny),
+        (&["echo *"], "echo hi && (rm -rf /)", Deny),
+        (
+            &["cat *", "grep *"],
+            "cat << 'EOF' | grep foo\nrm -rf /\nEOF",
+            Allow,
+        ),
+        (&["cargo *"], "cargo build 2>&1", Allow),
+    ];
+    for (allow, cmd, expected) in cases {
+        assert_bash(allow, &[], &["rm *"], normal(), cmd, expected);
+    }
+    assert_bash(&["rm *"], &[], &[], normal(), "&& rm foo", Ask);
 }
 
 // ── workspace restriction ────────────────────────────────────────
@@ -1359,43 +880,17 @@ fn shell_expands_nested_empty_and_quoted_brace_lists() {
 // --- is_in_workspace ---
 
 #[test]
-fn relative_path_in_workspace() {
-    assert!(is_in_workspace(
-        "src/main.rs",
-        Path::new("/home/user/project")
-    ));
-}
-
-#[test]
-fn absolute_path_in_workspace() {
-    assert!(is_in_workspace(
-        "/home/user/project/src/main.rs",
-        Path::new("/home/user/project")
-    ));
-}
-
-#[test]
-fn absolute_path_outside_workspace() {
-    assert!(!is_in_workspace(
-        "/etc/passwd",
-        Path::new("/home/user/project")
-    ));
-}
-
-#[test]
-fn dotdot_escape_outside_workspace() {
-    assert!(!is_in_workspace(
-        "/home/user/project/../../etc/passwd",
-        Path::new("/home/user/project")
-    ));
-}
-
-#[test]
-fn workspace_root_itself_is_in_workspace() {
-    assert!(is_in_workspace(
-        "/home/user/project",
-        Path::new("/home/user/project")
-    ));
+fn is_in_workspace_resolves_dotdot_and_absolute_paths() {
+    let ws = Path::new("/home/user/project");
+    for (path, expected) in [
+        ("src/main.rs", true),
+        ("/home/user/project/src/main.rs", true),
+        ("/home/user/project", true),
+        ("/etc/passwd", false),
+        ("/home/user/project/../../etc/passwd", false),
+    ] {
+        assert_eq!(is_in_workspace(path, ws), expected, "{path}");
+    }
 }
 
 // --- decide with workspace restriction ---
@@ -1469,27 +964,6 @@ fn workspace_allows_multiple_project_roots() {
 
     let outside_args = args_with("command", "cd /home/user/other && git status");
     assert_eq!(decide(&p, normal(), "bash", &outside_args), Decision::Ask);
-}
-
-#[test]
-fn workspace_allows_file_inside() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("file_path", "/home/user/project/src/main.rs");
-    assert_eq!(decide(&p, normal(), "read_file", &args), Decision::Allow);
-}
-
-#[test]
-fn workspace_downgrades_file_outside() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("file_path", "/etc/passwd");
-    assert_eq!(decide(&p, normal(), "read_file", &args), Decision::Ask);
-}
-
-#[test]
-fn workspace_allows_relative_path() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("file_path", "src/main.rs");
-    assert_eq!(decide(&p, normal(), "write_file", &args), Decision::Allow);
 }
 
 #[test]
@@ -2982,34 +2456,6 @@ fn workspace_bash_cargo_install_root_requires_root_directory() {
 }
 
 #[test]
-fn workspace_downgrades_bash_outside() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("command", "rm -rf /tmp/foo");
-    assert_eq!(decide(&p, normal(), "bash", &args), Decision::Ask);
-}
-
-#[test]
-fn workspace_allows_bash_inside() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("command", "rm -rf /home/user/project/target");
-    assert_eq!(decide(&p, normal(), "bash", &args), Decision::Allow);
-}
-
-#[test]
-fn workspace_allows_bash_relative() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("command", "cargo build");
-    assert_eq!(decide(&p, normal(), "bash", &args), Decision::Allow);
-}
-
-#[test]
-fn workspace_downgrades_yolo_outside() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("command", "rm -rf /etc");
-    assert_eq!(decide(&p, yolo(), "bash", &args), Decision::Ask);
-}
-
-#[test]
 fn session_dir_approval_covers_resolved_bash_cd_paths() {
     let p = perms_with_workspace("/home/user/project");
     let command = "cd /tmp && cat ./foo";
@@ -3390,10 +2836,43 @@ fn opaque_awk_approval_combines_with_outside_path_approval() {
 }
 
 #[test]
-fn workspace_yolo_allows_inside() {
+fn workspace_restriction_downgrades_only_outside_paths() {
+    use Decision::{Allow, Ask};
     let p = perms_with_workspace("/home/user/project");
-    let args = args_with("file_path", "/home/user/project/foo.txt");
-    assert_eq!(decide(&p, yolo(), "write_file", &args), Decision::Allow);
+    let cases = [
+        (
+            normal(),
+            "read_file",
+            "file_path",
+            "/home/user/project/src/main.rs",
+            Allow,
+        ),
+        (normal(), "read_file", "file_path", "/etc/passwd", Ask),
+        (normal(), "write_file", "file_path", "src/main.rs", Allow),
+        (
+            yolo(),
+            "write_file",
+            "file_path",
+            "/home/user/project/foo.txt",
+            Allow,
+        ),
+        (normal(), "glob", "path", "/tmp", Ask),
+        (normal(), "bash", "command", "rm -rf /tmp/foo", Ask),
+        (
+            normal(),
+            "bash",
+            "command",
+            "rm -rf /home/user/project/target",
+            Allow,
+        ),
+        (normal(), "bash", "command", "cargo build", Allow),
+        (yolo(), "bash", "command", "rm -rf /etc", Ask),
+    ];
+    for (mode, tool, key, val, expected) in cases {
+        let args = args_with(key, val);
+        assert_eq!(decide(&p, mode, tool, &args), expected, "{tool} {val}");
+    }
+    assert_eq!(decide(&p, yolo(), "web_search", &HashMap::new()), Allow);
 }
 
 #[test]
@@ -3414,13 +2893,6 @@ fn workspace_ask_stays_ask() {
         .remove("write_file"); // defaults to Ask
     let args = args_with("file_path", "/home/user/project/foo.txt");
     assert_eq!(decide(&p, normal(), "write_file", &args), Decision::Ask);
-}
-
-#[test]
-fn workspace_glob_outside_downgrades() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = args_with("path", "/tmp");
-    assert_eq!(decide(&p, normal(), "glob", &args), Decision::Ask);
 }
 
 #[test]
@@ -3482,13 +2954,6 @@ fn workspace_allows_missing_children_under_symlinked_workspace() {
     let args = args_with("file_path", "missing/child.txt");
 
     assert_eq!(decide(&p, normal(), "write_file", &args), Decision::Allow);
-}
-
-#[test]
-fn workspace_no_path_tools_unaffected() {
-    let p = perms_with_workspace("/home/user/project");
-    let args = HashMap::new();
-    assert_eq!(decide(&p, yolo(), "web_search", &args), Decision::Allow);
 }
 
 // --- mode behavior is configurable ---
@@ -3702,181 +3167,53 @@ fn plan_policy_keeps_shell_writes_denied() {
 // --- output redirection escalation ---
 
 #[test]
-fn has_output_redirection_simple_greater() {
-    assert!(has_output_redirection("cat file > out.txt"));
+fn has_output_redirection_detects_file_writes_only() {
+    let cases = [
+        ("cat file > out.txt", true),
+        ("cat file >> out.txt", true),
+        ("cargo build &> output.log", true),
+        ("cargo build &>> output.log", true),
+        ("cat file > 'out.txt'", true),
+        ("cat << 'EOF' > file.txt\nbody\nEOF", true),
+        ("cmd 2>/dev/null > out.txt", true),
+        ("echo hi > /dev/null-backup", true),
+        ("cat file", false),
+        ("cat < input.txt", false),
+        ("cat << EOF", false),
+        (r#"echo ">" file.txt"#, false),
+        ("cargo build 2>&1", false),
+        ("find /tmp 2>/dev/null", false),
+        ("find /tmp 2> /dev/null", false),
+        ("echo hello > /dev/null", false),
+        ("echo hello >> /dev/null", false),
+        ("cargo build &> /dev/null", false),
+        ("cat > /dev/stdout", false),
+        ("cat 2> /dev/stderr", false),
+        ("tree -L 3 /tmp 2>/dev/null || find /tmp -type d", false),
+    ];
+    for (cmd, expected) in cases {
+        assert_eq!(has_output_redirection(cmd), expected, "{cmd}");
+    }
 }
 
 #[test]
-fn has_output_redirection_double_greater() {
-    assert!(has_output_redirection("cat file >> out.txt"));
-}
-
-#[test]
-fn has_output_redirection_ampersand_greater() {
-    assert!(has_output_redirection("cargo build &> output.log"));
-}
-
-#[test]
-fn has_output_redirection_double_ampersand_greater() {
-    assert!(has_output_redirection("cargo build &>> output.log"));
-}
-
-#[test]
-fn has_output_redirection_no_redirection() {
-    assert!(!has_output_redirection("cat file"));
-}
-
-#[test]
-fn has_output_redirection_input_only() {
-    assert!(!has_output_redirection("cat < input.txt"));
-}
-
-#[test]
-fn has_output_redirection_heredoc_only() {
-    // << alone is not an output redirection
-    assert!(!has_output_redirection("cat << EOF"));
-}
-
-#[test]
-fn has_output_redirection_heredoc_with_output_redirect() {
-    // heredoc with output redirection to a file
-    assert!(has_output_redirection("cat << 'EOF' > file.txt\nbody\nEOF"));
-}
-
-#[test]
-fn has_output_redirection_inside_quotes_ignored() {
-    // > inside quotes should not be detected as redirection
-    assert!(!has_output_redirection(r#"echo ">" file.txt"#));
-}
-
-#[test]
-fn has_output_redirection_mixed_quotes() {
-    assert!(has_output_redirection("cat file > 'out.txt'"));
-}
-
-#[test]
-fn has_output_redirection_stderr_redirect() {
-    // 2>&1 is fd duplication, not file output redirection
-    assert!(!has_output_redirection("cargo build 2>&1"));
-}
-
-#[test]
-fn dev_null_redirect_not_escalated() {
-    assert!(!has_output_redirection("find /tmp 2>/dev/null"));
-}
-
-#[test]
-fn dev_null_redirect_with_space() {
-    assert!(!has_output_redirection("find /tmp 2> /dev/null"));
-}
-
-#[test]
-fn dev_null_stdout_redirect() {
-    assert!(!has_output_redirection("echo hello > /dev/null"));
-}
-
-#[test]
-fn dev_null_append_redirect() {
-    assert!(!has_output_redirection("echo hello >> /dev/null"));
-}
-
-#[test]
-fn dev_null_ampersand_redirect() {
-    assert!(!has_output_redirection("cargo build &> /dev/null"));
-}
-
-#[test]
-fn standard_output_stream_redirects_are_not_escalated() {
-    assert!(!has_output_redirection("cat > /dev/stdout"));
-    assert!(!has_output_redirection("cat 2> /dev/stderr"));
-}
-
-#[test]
-fn dev_null_in_chain_not_escalated() {
-    // 2>/dev/null is harmless, the whole command should stay allowed
-    assert!(!has_output_redirection(
-        "tree -L 3 /tmp 2>/dev/null || find /tmp -type d"
-    ));
-}
-
-#[test]
-fn dev_null_mixed_with_real_redirect() {
-    // One redirect to /dev/null, but another to a real file - should escalate
-    assert!(has_output_redirection("cmd 2>/dev/null > out.txt"));
-}
-
-#[test]
-fn dev_null_prefix_not_treated_as_dev_null() {
-    // `/dev/null-x` is a real file, not `/dev/null` - should escalate
-    assert!(has_output_redirection("echo hi > /dev/null-backup"));
-}
-
-#[test]
-fn auto_allowed_with_dev_null_stays_allow() {
-    assert_bash(
-        &["find *"],
-        &[],
-        &[],
-        normal(),
+fn core_parser_ignores_output_redirection() {
+    let p = perms_with_bash(&["cat *", "ls *", "grep *", "find *"], &[], &[]);
+    for cmd in [
         "find /tmp 2>/dev/null",
-        Decision::Allow,
-    );
-}
-
-#[test]
-fn auto_allowed_with_output_redirect_stays_allow_in_core_parser() {
-    let p = perms_with_bash(&["cat *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "cat file.txt > output.txt"),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn auto_allowed_with_append_redirect_stays_allow_in_core_parser() {
-    assert_bash(
-        &["cat *"],
-        &[],
-        &[],
-        normal(),
+        "cat file.txt",
+        "cat file.txt > output.txt",
         "cat file.txt >> output.txt",
-        Decision::Allow,
-    );
-}
-
-#[test]
-fn auto_allowed_heredoc_with_redirect_stays_allow_in_core_parser() {
-    let p = perms_with_bash(&["cat *"], &[], &[]);
-    let cmd = "cat << 'EOF' > long_file.txt\nhello\nworld\nEOF";
-    assert_eq!(p.check_subcommand(normal(), "bash", cmd), Decision::Allow);
-}
-
-#[test]
-fn auto_allowed_no_redirect_stays_allow() {
-    // Without redirection, cat * should still be allowed
-    let p = perms_with_bash(&["cat *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "cat file.txt"),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn chained_command_with_redirect_stays_allow_in_core_parser() {
-    let p = perms_with_bash(&["ls *", "cat *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "ls -la && cat file > out.txt"),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn pipe_with_output_redirect_stays_allow_in_core_parser() {
-    let p = perms_with_bash(&["cat *", "grep *"], &[], &[]);
-    assert_eq!(
-        p.check_subcommand(normal(), "bash", "cat file | grep foo > out.txt"),
-        Decision::Allow
-    );
+        "cat << 'EOF' > long_file.txt\nhello\nworld\nEOF",
+        "ls -la && cat file > out.txt",
+        "cat file | grep foo > out.txt",
+    ] {
+        assert_eq!(
+            p.check_subcommand(normal(), "bash", cmd),
+            Decision::Allow,
+            "{cmd}"
+        );
+    }
 }
 
 #[test]
@@ -4459,83 +3796,48 @@ fn runtime_dir_approval_does_not_affect_inside_workspace_request() {
 // --- tilde path normalization for path requirements ---
 
 #[test]
-fn dirs_approved_tilde_stored_absolute_queried() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("~/syncthing"));
+fn dirs_approved_covers_descendants_across_tilde_and_absolute_forms() {
     let home = smelt_paths::home_dir();
-    let abs = format!("{}/syncthing/vault/file.txt", home.display());
-    assert!(dirs_approved(&rt, &[&abs]));
-}
+    let abs_home_file = format!("{}/syncthing/vault/file.txt", home.display());
+    let cases: [(&[&str], &[&str], bool); 10] = [
+        (&["~/syncthing"], &[abs_home_file.as_str()], true),
+        (&["~/syncthing"], &["~/syncthing/vault"], true),
+        (&["/tmp/data"], &["/tmp/data/subdir/file.txt"], true),
+        (&["~/sync"], &["~/syncthing/file.txt"], false),
+        (
+            &["~/syncthing/vault"],
+            &["~/syncthing/vault/file.txt"],
+            true,
+        ),
+        (
+            &["~/syncthing/vault"],
+            &["~/syncthing/other/file.txt"],
+            false,
+        ),
+        (&["/tmp"], &["/tmp"], true),
+        (
+            &["~/syncthing", "/tmp"],
+            &["~/syncthing/vault/a.txt", "/tmp/b.txt"],
+            true,
+        ),
+        (
+            &["~/syncthing"],
+            &["~/syncthing/vault/a.txt", "/tmp/b.txt"],
+            false,
+        ),
+        (&[], &["/tmp/x"], false),
+    ];
+    for (dirs, paths, expected) in cases {
+        let mut rt = RuntimeApprovals::new();
+        for d in dirs {
+            rt.add_session_dir(PathBuf::from(d));
+        }
+        assert_eq!(dirs_approved(&rt, paths), expected, "{dirs:?} {paths:?}");
+    }
 
-#[test]
-fn dirs_approved_absolute_stored_tilde_queried() {
-    let home = smelt_paths::home_dir();
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(home.join("syncthing"));
     assert!(dirs_approved(&rt, &["~/syncthing/vault/file.txt"]));
-}
-
-#[test]
-fn dirs_approved_both_tilde() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("~/syncthing"));
-    assert!(dirs_approved(&rt, &["~/syncthing/vault"]));
-}
-
-#[test]
-fn dirs_approved_both_absolute() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("/tmp/data"));
-    assert!(dirs_approved(&rt, &["/tmp/data/subdir/file.txt"]));
-}
-
-#[test]
-fn dirs_approved_no_false_prefix_match() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("~/sync"));
-    assert!(!dirs_approved(&rt, &["~/syncthing/file.txt"]));
-}
-
-#[test]
-fn dirs_approved_exact_dir_match() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("~/syncthing/vault"));
-    assert!(dirs_approved(&rt, &["~/syncthing/vault/file.txt"]));
-}
-
-#[test]
-fn dirs_approved_parent_not_covered() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("~/syncthing/vault"));
-    assert!(!dirs_approved(&rt, &["~/syncthing/other/file.txt"]));
-}
-
-#[test]
-fn dirs_approved_path_is_dir_itself() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("/tmp"));
-    assert!(dirs_approved(&rt, &["/tmp"]));
-}
-
-#[test]
-fn dirs_approved_multiple_paths_all_covered() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("~/syncthing"));
-    rt.add_session_dir(PathBuf::from("/tmp"));
-    assert!(dirs_approved(
-        &rt,
-        &["~/syncthing/vault/a.txt", "/tmp/b.txt"]
-    ));
-}
-
-#[test]
-fn dirs_approved_multiple_paths_one_uncovered() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("~/syncthing"));
-    assert!(!dirs_approved(
-        &rt,
-        &["~/syncthing/vault/a.txt", "/tmp/b.txt"]
-    ));
 }
 
 // --- tilde normalization in is_auto_approved ---
@@ -4639,73 +3941,43 @@ fn pat(s: &str) -> glob::Pattern {
 }
 
 #[test]
-fn approvals_add_session_tool_stores_patterns_on_first_call() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_tool("bash", vec![pat("ls *"), pat("cat *")]);
-    assert!(rt.has_pattern("bash", "ls *"));
-    assert!(rt.has_pattern("bash", "cat *"));
-    // Blanket approval is NOT in effect - only patterns match.
-    assert!(rt.is_approved("bash", "ls /tmp", None));
-    assert!(!rt.is_approved("bash", "rm /tmp", None));
+fn approvals_add_tool_stores_patterns_or_grants_blanket() {
+    for workspace in [false, true] {
+        let add = |rt: &mut RuntimeApprovals, patterns: Vec<glob::Pattern>| {
+            if workspace {
+                rt.add_workspace_tool("bash", patterns);
+            } else {
+                rt.add_session_tool("bash", patterns);
+            }
+        };
+
+        let mut rt = RuntimeApprovals::new();
+        add(&mut rt, vec![pat("ls *")]);
+        add(&mut rt, vec![pat("cat *")]);
+        assert!(rt.has_pattern("bash", "ls *"));
+        assert!(rt.has_pattern("bash", "cat *"));
+        assert!(rt.is_approved("bash", "ls /tmp", None));
+        assert!(!rt.is_approved("bash", "rm /tmp", None));
+
+        let mut rt = RuntimeApprovals::new();
+        add(&mut rt, Vec::new());
+        assert!(rt.is_approved("bash", "anything goes", None));
+    }
 }
 
 #[test]
-fn approvals_add_session_tool_with_empty_patterns_grants_blanket_approval() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_tool("bash", Vec::new());
-    assert!(rt.is_approved("bash", "anything goes", None));
-}
-
-#[test]
-fn approvals_add_session_tool_blanket_retains_existing_patterns() {
+fn approvals_blanket_and_patterns_coexist_in_either_order() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![pat("ls *")]);
     rt.add_session_tool("bash", Vec::new());
     assert!(rt.is_approved("bash", "anything", None));
     assert!(rt.has_explicit_pattern("bash", "ls *"));
-}
 
-#[test]
-fn approvals_add_session_tool_stores_patterns_alongside_blanket() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", Vec::new());
     rt.add_session_tool("bash", vec![pat("ls *")]);
     assert!(rt.is_approved("bash", "anything goes", None));
     assert!(rt.has_explicit_pattern("bash", "ls *"));
-}
-
-#[test]
-fn approvals_add_session_tool_extends_existing_pattern_list() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_tool("bash", vec![pat("ls *")]);
-    rt.add_session_tool("bash", vec![pat("cat *")]);
-    assert!(rt.has_pattern("bash", "ls *"));
-    assert!(rt.has_pattern("bash", "cat *"));
-}
-
-#[test]
-fn approvals_add_workspace_tool_stores_patterns_on_first_call() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_workspace_tool("bash", vec![pat("git *")]);
-    assert!(rt.has_pattern("bash", "git *"));
-    assert!(rt.is_approved("bash", "git status", None));
-    assert!(!rt.is_approved("bash", "rm -rf /", None));
-}
-
-#[test]
-fn approvals_add_workspace_tool_with_empty_patterns_grants_blanket_approval() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_workspace_tool("bash", Vec::new());
-    assert!(rt.is_approved("bash", "anything", None));
-}
-
-#[test]
-fn approvals_add_workspace_tool_extends_existing_pattern_list() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_workspace_tool("bash", vec![pat("git *")]);
-    rt.add_workspace_tool("bash", vec![pat("ls *")]);
-    assert!(rt.has_pattern("bash", "git *"));
-    assert!(rt.has_pattern("bash", "ls *"));
 }
 
 #[test]
@@ -5275,20 +4547,6 @@ fn approvals_has_pattern_false_for_unknown_tool_or_pattern() {
 fn approvals_dirs_approved_returns_true_for_empty_paths() {
     let rt = RuntimeApprovals::new();
     assert!(dirs_approved(&rt, &[]));
-}
-
-#[test]
-fn approvals_dirs_approved_returns_false_when_no_dirs_registered() {
-    let rt = RuntimeApprovals::new();
-    assert!(!dirs_approved(&rt, &["/tmp/foo"]));
-}
-
-#[test]
-fn approvals_dirs_approved_checks_parent_prefix_match() {
-    let mut rt = RuntimeApprovals::new();
-    rt.add_session_dir(PathBuf::from("/work"));
-    assert!(dirs_approved(&rt, &["/work/sub/file.rs"]));
-    assert!(!dirs_approved(&rt, &["/other/file.rs"]));
 }
 
 #[test]

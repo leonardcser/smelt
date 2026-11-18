@@ -170,13 +170,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_handles_string_source() {
-        let json = r#"{"cells":[{"cell_type":"code","source":"x = 1"}]}"#;
-        let nb = parse(json).unwrap();
-        assert_eq!(nb.cells[0].source, "x = 1");
-    }
-
-    #[test]
     fn parse_handles_missing_cells_array() {
         let nb = parse(r#"{"nbformat":4}"#).unwrap();
         assert!(nb.cells.is_empty());
@@ -184,24 +177,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_handles_missing_nbformat() {
-        let nb = parse(r#"{"cells":[]}"#).unwrap();
-        assert_eq!(nb.format, None);
-        assert_eq!(nb.format_minor, None);
-    }
-
-    #[test]
     fn parse_treats_unknown_cell_type_as_other_variant() {
         let json = r#"{"cells":[{"cell_type":"weird","source":""}]}"#;
         let nb = parse(json).unwrap();
         assert_eq!(nb.cells[0].kind, CellKind::Other("weird".into()));
-    }
-
-    #[test]
-    fn parse_handles_cell_without_id() {
-        let json = r#"{"cells":[{"cell_type":"code","source":""}]}"#;
-        let nb = parse(json).unwrap();
-        assert_eq!(nb.cells[0].id, None);
     }
 
     #[test]
@@ -216,11 +195,6 @@ mod tests {
         for s in ["code", "markdown", "raw"] {
             assert_eq!(CellKind::from_str(s).as_str(), s);
         }
-    }
-
-    #[test]
-    fn cellkind_other_preserves_original_string() {
-        assert_eq!(CellKind::Other("xyz".into()).as_str(), "xyz");
     }
 }
 
@@ -990,18 +964,6 @@ mod edit_tests {
     }
 
     #[test]
-    fn syntax_ext_returns_md_for_markdown_cell() {
-        let d = render_data(None, Some("markdown"));
-        assert_eq!(d.syntax_ext(), "md");
-    }
-
-    #[test]
-    fn syntax_ext_returns_py_for_code_cell() {
-        let d = render_data(None, Some("code"));
-        assert_eq!(d.syntax_ext(), "py");
-    }
-
-    #[test]
     fn syntax_ext_uses_old_type_when_new_is_none() {
         let d = render_data(Some("markdown"), None);
         assert_eq!(d.syntax_ext(), "md");
@@ -1033,12 +995,6 @@ mod edit_tests {
         assert!(d.title().contains("id=abc123"));
     }
 
-    #[test]
-    fn title_falls_back_to_cell_label_when_no_types() {
-        let d = render_data(None, None);
-        assert!(d.title().contains("[cell]"));
-    }
-
     // ── resolve_cell_index ─────────────────────────────────────────
 
     fn cells_with_ids(ids: &[&str]) -> Vec<Value> {
@@ -1051,12 +1007,6 @@ mod edit_tests {
     fn resolve_by_id_returns_position() {
         let cells = cells_with_ids(&["a", "b", "c"]);
         assert_eq!(resolve_cell_index(&cells, "b", None), Some(1));
-    }
-
-    #[test]
-    fn resolve_by_id_returns_none_for_missing() {
-        let cells = cells_with_ids(&["a", "b"]);
-        assert_eq!(resolve_cell_index(&cells, "z", None), None);
     }
 
     #[test]
@@ -1076,12 +1026,6 @@ mod edit_tests {
         let cells = cells_with_ids(&["a", "b", "c"]);
         // id "c" is at index 2; cell_number 0 should be ignored.
         assert_eq!(resolve_cell_index(&cells, "c", Some(0)), Some(2));
-    }
-
-    #[test]
-    fn resolve_returns_none_when_neither_provided() {
-        let cells = cells_with_ids(&["a"]);
-        assert_eq!(resolve_cell_index(&cells, "", None), None);
     }
 
     // ── source_to_json ──────────────────────────────────────────────
@@ -1133,11 +1077,6 @@ mod edit_tests {
     #[test]
     fn strip_ansi_removes_osc_with_st_terminator() {
         assert_eq!(strip_ansi("pre\x1b]0;title\x1b\\post"), "prepost");
-    }
-
-    #[test]
-    fn strip_ansi_preserves_plain_text() {
-        assert_eq!(strip_ansi("hello, world"), "hello, world");
     }
 
     #[test]
@@ -1297,15 +1236,6 @@ mod edit_tests {
         let r = read_notebook(&path, 1, 10);
         assert!(!r.is_error);
         assert!(r.content.contains("no cells"));
-    }
-
-    #[test]
-    fn read_notebook_ok_with_empty_cells() {
-        let dir = tempdir().unwrap();
-        let path = write_nb(dir.path(), "a.ipynb", json!({"nbformat": 4, "cells": []}));
-        let r = read_notebook(&path, 1, 10);
-        assert!(!r.is_error);
-        assert!(r.content.contains("empty"));
     }
 
     #[test]

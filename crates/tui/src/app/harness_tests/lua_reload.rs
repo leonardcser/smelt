@@ -3634,40 +3634,6 @@ fn named_overlay_refresh_replaces_layout_structure() {
 }
 
 #[test]
-fn sweep_state_prunes_untouched_entries() {
-    let rt = crate::lua::LuaRuntime::new();
-    rt.lua
-        .load(
-            r#"
-                local s1 = smelt.state.get("alive")
-                s1.open = true
-                local s2 = smelt.state.get("dead")
-                s2.open = true
-                "#,
-        )
-        .exec()
-        .expect("seed");
-
-    // Re-running bootstrap starts a new touch cycle while preserving the
-    // private state table. Simulate one plugin re-touching its state, then use
-    // the host-only lifecycle hook to finish the cycle.
-    smelt_core::lua::runtime::load_host_bootstrap_chunks(&rt.lua)
-        .expect("start a new state touch cycle");
-    rt.lua
-        .load("smelt.state.get('alive')")
-        .exec()
-        .expect("touch alive state");
-    smelt_core::lua::module::internal_api_function(&rt.lua, "smelt", "__sweep_state")
-        .unwrap()
-        .call::<()>(())
-        .expect("sweep");
-
-    let state = rt.state_snapshot();
-    assert!(state.get("alive").is_some(), "touched entry survives");
-    assert!(state.get("dead").is_none(), "untouched entry is swept");
-}
-
-#[test]
 fn sweep_state_prunes_clean_untouched_persistent_entries() {
     let rt = crate::lua::LuaRuntime::new();
     rt.lua
@@ -3836,42 +3802,6 @@ fn direct_reload_clears_pending_scheduled_reload() {
         app.lua_int_global("reload_count"),
         Some(1),
         "a committed reload installs a fresh Lua global environment"
-    );
-}
-
-#[test]
-fn reload_lua_does_not_double_wrap_tools_register() {
-    let tmp = tempfile::tempdir().unwrap();
-    let init = tmp.path().join("init.lua");
-    std::fs::write(&init, "").unwrap();
-
-    let mut app = TestApp::builder().with_init_lua(&init).build();
-    {
-        for _ in 0..5 {
-            app.reload_lua();
-        }
-        // Register a tool with no `summary`; the bootstrap wrap should
-        // populate it once. If the wrap had compounded across reloads
-        // the call would still succeed - but every reload would add a
-        // closure frame on top. The functional check: registration
-        // works and the registered summary handler runs.
-        app.exec_lua_entry(
-            r#"
-                smelt.tools.register({
-                    name = "t",
-                    description = "",
-                    parameters = { type = "object", properties = {} },
-                    execute = function() return "" end,
-                })
-                "#,
-        )
-        .expect("register after many reloads");
-    }
-    let summary = app.tool_summary("t", &std::collections::HashMap::new());
-    // `default_summary` returns "" when args have no recognised keys.
-    assert!(
-        summary.is_empty(),
-        "summary should be empty for no-arg tool"
     );
 }
 

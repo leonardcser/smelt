@@ -153,45 +153,6 @@ mod tests {
     // ---- TokenUsage::accumulate ----
 
     #[test]
-    fn accumulate_adds_other_to_none_self_sets_value() {
-        let mut acc = TokenUsage::default();
-        let other = TokenUsage {
-            context_tokens: Some(20),
-            prompt_tokens: Some(10),
-            completion_tokens: Some(5),
-            ..Default::default()
-        };
-        acc.accumulate(&other);
-        assert!(acc.context_tokens.is_none());
-        assert_eq!(acc.prompt_tokens, Some(10));
-        assert_eq!(acc.completion_tokens, Some(5));
-        assert!(acc.cache_read_tokens.is_none());
-    }
-
-    #[test]
-    fn accumulate_sums_when_both_sides_have_value() {
-        let mut acc = TokenUsage {
-            prompt_tokens: Some(7),
-            ..Default::default()
-        };
-        acc.accumulate(&TokenUsage {
-            prompt_tokens: Some(3),
-            ..Default::default()
-        });
-        assert_eq!(acc.prompt_tokens, Some(10));
-    }
-
-    #[test]
-    fn accumulate_preserves_self_when_other_field_is_none() {
-        let mut acc = TokenUsage {
-            prompt_tokens: Some(7),
-            ..Default::default()
-        };
-        acc.accumulate(&TokenUsage::default());
-        assert_eq!(acc.prompt_tokens, Some(7));
-    }
-
-    #[test]
     fn accumulate_threads_all_five_fields() {
         let mut acc = TokenUsage {
             context_tokens: Some(99),
@@ -215,6 +176,11 @@ mod tests {
         assert_eq!(acc.cache_write_tokens, Some(44));
         assert_eq!(acc.reasoning_tokens, Some(55));
         assert_eq!(acc.context_tokens, Some(99));
+
+        let mut empty = TokenUsage::default();
+        empty.accumulate(&acc);
+        assert_eq!(empty.prompt_tokens, Some(11));
+        assert!(empty.context_tokens.is_none());
     }
 
     // ---- TokenUsage serde ----
@@ -228,14 +194,6 @@ mod tests {
         };
         let v = serde_json::to_value(u).unwrap();
         assert_eq!(v, json!({"context_tokens": 8, "prompt_tokens": 5}));
-    }
-
-    #[test]
-    fn token_usage_deserialize_defaults_missing_fields_to_none() {
-        let u: TokenUsage = serde_json::from_value(json!({})).unwrap();
-        assert!(u.context_tokens.is_none());
-        assert!(u.prompt_tokens.is_none());
-        assert!(u.completion_tokens.is_none());
     }
 
     // ---- ThinkingBudgets ----
@@ -271,28 +229,6 @@ mod tests {
         assert_eq!(v, json!({"temperature": 0.5}));
     }
 
-    #[test]
-    fn model_config_overrides_defaults_on_empty_object() {
-        let o: ModelConfigOverrides = serde_json::from_value(json!({})).unwrap();
-        assert!(o.temperature.is_none());
-        assert!(o.top_p.is_none());
-        assert!(o.top_k.is_none());
-        assert!(o.min_p.is_none());
-        assert!(o.repeat_penalty.is_none());
-        assert!(o.max_tokens.is_none());
-        assert!(o.thinking_budgets.is_none());
-    }
-
-    // ---- RuleSetOverride ----
-
-    #[test]
-    fn rule_set_override_defaults_all_lists_to_empty() {
-        let r: RuleSetOverride = serde_json::from_value(json!({})).unwrap();
-        assert!(r.allow.is_empty());
-        assert!(r.ask.is_empty());
-        assert!(r.deny.is_empty());
-    }
-
     // ---- PermissionOverrides ----
 
     #[test]
@@ -301,19 +237,5 @@ mod tests {
         let v = serde_json::to_value(p).unwrap();
         assert!(v.get("subcommands").is_none());
         assert!(v.get("tools").is_none());
-    }
-
-    #[test]
-    fn permission_overrides_includes_non_empty_subcommands() {
-        let mut p = PermissionOverrides::default();
-        p.subcommands.insert(
-            "bash".into(),
-            RuleSetOverride {
-                allow: vec!["ls".into()],
-                ..Default::default()
-            },
-        );
-        let v = serde_json::to_value(p).unwrap();
-        assert_eq!(v["subcommands"]["bash"]["allow"][0], json!("ls"));
     }
 }

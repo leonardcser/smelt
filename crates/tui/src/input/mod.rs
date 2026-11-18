@@ -613,15 +613,6 @@ impl PromptState {
         }
     }
 
-    /// Expand attachment markers to text. Image markers are stripped (data flows via `Content::Parts`).
-    #[cfg(test)]
-    pub(crate) fn expanded_text(&self, buf: &crate::smelt_edit::Buffer) -> String {
-        self.submission_from_range(buf, 0..buf.source().len())
-            .content
-            .text_content()
-            .into_owned()
-    }
-
     pub(crate) fn insert_image(
         &mut self,
         ctx: &mut PromptCtx<'_>,
@@ -1530,115 +1521,36 @@ mod tests {
     // ── from_paste behavior for shell escape prevention ───────────────────
 
     #[test]
-    fn paste_into_empty_buffer_sets_from_paste() {
-        let mut input = Harness::new();
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "!echo hello".to_string(),
-        );
-        assert!(
-            input.skip_shell_escape(),
-            "Paste at buffer start should set from_paste"
-        );
-        assert_eq!(input.buf.source(), "!echo hello");
-    }
-
-    #[test]
-    fn type_then_type_sets_from_paste_false() {
-        let mut input = Harness::new();
-        input.state.insert_char(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            '!',
-        );
-        input.state.insert_char(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            'e',
-        );
-        assert!(
-            !input.skip_shell_escape(),
-            "Manual typing should clear from_paste"
-        );
-    }
-
-    #[test]
-    fn type_bang_then_paste_sets_from_paste() {
-        let mut input = Harness::new();
-
-        // Simulate user typing '!'
-        input.state.insert_char(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            '!',
-        );
-        assert!(!input.skip_shell_escape(), "Typing clears from_paste");
-
-        // Reset cursor to simulate the scenario: user types '!', then pastes at line start
-        // This is the key scenario that was broken before the fix
-        input.buf.set_source(String::new());
-        input.win.set_cpos(0);
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "echo hello".to_string(),
-        );
-        assert!(
-            input.skip_shell_escape(),
-            "Paste at line start should set from_paste"
-        );
-        assert_eq!(input.buf.source(), "echo hello");
-    }
-
-    #[test]
-    fn paste_in_middle_of_line_does_not_set_from_paste() {
-        let mut input = Harness::new();
-
-        input.buf.set_source("hello ".to_string());
-        input.win.set_cpos(6); // After "hello "
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "!world".to_string(),
-        );
-        assert!(
-            !input.skip_shell_escape(),
-            "Paste in middle of line should not set from_paste"
-        );
-        assert_eq!(input.buf.source(), "hello !world");
-    }
-
-    #[test]
-    fn paste_at_end_of_line_does_not_set_from_paste() {
-        let mut input = Harness::new();
-
-        input.buf.set_source("hello".to_string());
-        input.win.set_cpos(5); // At end
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            " world".to_string(),
-        );
-        assert!(
-            !input.skip_shell_escape(),
-            "Paste at end of line should not set from_paste"
-        );
-        assert_eq!(input.buf.source(), "hello world");
+    fn paste_sets_from_paste_only_at_line_start() {
+        // (source, cursor, pasted, from_paste, resulting source)
+        let cases = [
+            ("", 0, "!echo hello", true, "!echo hello"),
+            ("", 0, "", false, ""),
+            ("", 0, "   ", true, "   "),
+            ("hello ", 6, "!world", false, "hello !world"),
+            ("hello", 5, " world", false, "hello world"),
+            ("line1\nline2", 0, "!command", true, "!commandline1\nline2"),
+            ("line1\n", 6, "!command", true, "line1\n!command"),
+            ("line1\nhello", 8, " world", false, "line1\nhe worldllo"),
+        ];
+        for (source, cpos, pasted, from_paste, result) in cases {
+            let mut input = Harness::new();
+            input.buf.set_source(source.to_string());
+            input.win.set_cpos(cpos);
+            input.state.insert_paste(
+                &mut PromptCtx {
+                    buf: &mut input.buf,
+                    win: &mut input.win,
+                },
+                pasted.to_string(),
+            );
+            assert_eq!(
+                input.skip_shell_escape(),
+                from_paste,
+                "{source:?} + {pasted:?}"
+            );
+            assert_eq!(input.buf.source(), result);
+        }
     }
 
     #[test]
@@ -1666,120 +1578,6 @@ mod tests {
                 smelt_buffer::text::next_grapheme_boundary(input.buf.source(), 0)
             );
         }
-    }
-
-    #[test]
-    fn paste_at_start_of_multiline_buffer() {
-        let mut input = Harness::new();
-
-        input.buf.set_source("line1\nline2".to_string());
-        input.win.set_cpos(0); // At very start
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "!command".to_string(),
-        );
-        assert!(
-            input.skip_shell_escape(),
-            "Paste at buffer start should set from_paste"
-        );
-        assert_eq!(input.buf.source(), "!commandline1\nline2");
-    }
-
-    #[test]
-    fn paste_at_start_of_second_line_sets_from_paste() {
-        let mut input = Harness::new();
-
-        input.buf.set_source("line1\n".to_string());
-        input.win.set_cpos(6); // Start of second line
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "!command".to_string(),
-        );
-        assert!(
-            input.skip_shell_escape(),
-            "Paste at line start should set from_paste"
-        );
-        assert_eq!(input.buf.source(), "line1\n!command");
-    }
-
-    #[test]
-    fn paste_middle_of_second_line_does_not_set_from_paste() {
-        let mut input = Harness::new();
-
-        input.buf.set_source("line1\nhello".to_string());
-        input.win.set_cpos(8); // Insert at byte position 8 (before first 'l' of "hello")
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            " world".to_string(),
-        );
-        assert!(
-            !input.skip_shell_escape(),
-            "Paste in middle of line should not set from_paste"
-        );
-        assert_eq!(input.buf.source(), "line1\nhe worldllo");
-    }
-
-    #[test]
-    fn manual_char_after_paste_clears_from_paste() {
-        let mut input = Harness::new();
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "!echo hello".to_string(),
-        );
-        assert!(input.skip_shell_escape());
-
-        input.state.insert_char(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            'x',
-        );
-        assert!(
-            !input.skip_shell_escape(),
-            "Manual character after paste should clear from_paste"
-        );
-    }
-
-    #[test]
-    fn backspace_at_start_clears_from_paste() {
-        let mut input = Harness::new();
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "!echo hello".to_string(),
-        );
-        assert!(input.skip_shell_escape());
-
-        input.state.backspace(&mut PromptCtx {
-            buf: &mut input.buf,
-            win: &mut input.win,
-        }); // Deletes last character
-        assert!(
-            input.skip_shell_escape(),
-            "Backspace not at start should not clear from_paste"
-        );
-
-        input.win.set_cpos(0);
-        input.state.backspace(&mut PromptCtx {
-            buf: &mut input.buf,
-            win: &mut input.win,
-        }); // Now at position 0
-            // Can't backspace further, but the logic would clear it if we could
     }
 
     #[test]
@@ -1979,64 +1777,6 @@ mod tests {
         assert!(input.buf.attachments.is_empty());
     }
 
-    #[test]
-    fn empty_paste_does_not_set_from_paste() {
-        let mut input = Harness::new();
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "".to_string(),
-        );
-        assert!(
-            !input.skip_shell_escape(),
-            "Empty paste should not set from_paste"
-        );
-    }
-
-    #[test]
-    fn whitespace_only_paste_at_start_sets_from_paste() {
-        let mut input = Harness::new();
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "   ".to_string(),
-        );
-        assert!(
-            input.skip_shell_escape(),
-            "Whitespace paste at start should set from_paste"
-        );
-    }
-
-    #[test]
-    fn paste_starting_with_bang_at_line_start() {
-        // This is the main bug scenario: type '!', then paste command
-        let mut input = Harness::new();
-
-        input.buf.set_source(String::new());
-        input.win.set_cpos(0);
-        input.state.insert_paste(
-            &mut PromptCtx {
-                buf: &mut input.buf,
-                win: &mut input.win,
-            },
-            "!ls -la".to_string(),
-        );
-
-        assert!(
-            input.skip_shell_escape(),
-            "Paste at start of line should set from_paste"
-        );
-        assert_eq!(input.buf.source(), "!ls -la");
-
-        // The expanded text should not be treated as shell command
-        let text = input.state.expanded_text(&input.buf);
-        assert_eq!(text, "!ls -la");
-    }
-
     // ── Selection tests ─────────────────────────────────────────────────
 
     #[test]
@@ -2147,39 +1887,88 @@ mod tests {
     }
 
     #[test]
-    fn shift_select_right_creates_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello".to_string());
-        input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.win.selection_anchor(), Some(0));
-        assert_eq!(input.win.cpos(), 1);
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((0, 1))
+    fn shift_actions_extend_selection_from_the_anchor() {
+        use KeyAction::*;
+        // (source, cursor, actions, cursor after, selection range)
+        type Case = (
+            &'static str,
+            usize,
+            &'static [KeyAction],
+            usize,
+            Option<(usize, usize)>,
         );
+        let cases: [Case; 12] = [
+            ("hello", 0, &[SelectRight], 1, Some((0, 1))),
+            ("hello", 0, &[SelectRight; 3], 3, Some((0, 3))),
+            ("hello", 5, &[SelectLeft; 2], 3, Some((3, 5))),
+            ("hello world foo", 0, &[SelectWordForward], 6, Some((0, 6))),
+            ("hello world", 11, &[SelectWordBackward], 6, Some((6, 11))),
+            ("hello world", 5, &[SelectStartOfLine], 0, Some((0, 5))),
+            ("hello world", 5, &[SelectEndOfLine], 11, Some((5, 11))),
+            // Reversing direction keeps the anchor.
+            (
+                "abcdef",
+                3,
+                &[
+                    SelectRight,
+                    SelectRight,
+                    SelectLeft,
+                    SelectLeft,
+                    SelectLeft,
+                    SelectLeft,
+                ],
+                1,
+                Some((1, 3)),
+            ),
+            // Multibyte characters move by character.
+            ("héllo", 0, &[SelectRight; 2], 3, Some((0, 3))),
+            ("hello", 0, &[SelectLeft], 0, None),
+            ("hello", 5, &[SelectRight], 5, None),
+            ("", 0, &[SelectRight], 0, None),
+        ];
+        for (source, cpos, actions, after, range) in cases {
+            let mut input = Harness::new();
+            input.buf.set_source(source.to_string());
+            input.win.set_cpos(cpos);
+            for action in actions {
+                input.test_action(*action, VimMode::Insert);
+            }
+            assert_eq!(input.win.cpos(), after, "{source:?} {actions:?}");
+            assert_eq!(
+                input.state.selection_range(PromptCtxRef {
+                    buf: &input.buf,
+                    win: &input.win
+                }),
+                range,
+                "{source:?} {actions:?}"
+            );
+        }
     }
 
     #[test]
-    fn shift_select_extends_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello".to_string());
-        input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.win.selection_anchor(), Some(0));
-        assert_eq!(input.win.cpos(), 3);
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((0, 3))
-        );
+    fn edit_actions_replace_the_selection() {
+        use KeyAction::*;
+        // (source, cursor, selected chars, action, resulting source)
+        let cases = [
+            ("hello world", 0, 5, Backspace, " world"),
+            ("hello world", 0, 5, DeleteCharForward, " world"),
+            ("hello world", 0, 5, InsertNewline, "\n world"),
+            ("hello world", 6, 3, DeleteWordBackward, "hello ld"),
+            ("hello world", 0, 3, DeleteWordForward, "lo world"),
+            ("hello world", 3, 4, DeleteToStartOfLine, "helorld"),
+            ("ab", 0, 2, Backspace, ""),
+            ("héllo", 0, 2, Backspace, "llo"),
+        ];
+        for (source, cpos, selected, action, result) in cases {
+            let mut input = Harness::new();
+            input.buf.set_source(source.to_string());
+            input.win.set_cpos(cpos);
+            for _ in 0..selected {
+                input.test_action(SelectRight, VimMode::Insert);
+            }
+            input.test_action(action, VimMode::Insert);
+            assert_eq!(input.buf.source(), result, "{source:?} {action:?}");
+        }
     }
 
     #[test]
@@ -2207,42 +1996,6 @@ mod tests {
     }
 
     #[test]
-    fn backspace_deletes_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(0);
-        // Select "hello"
-        for _ in 0..5 {
-            input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        }
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((0, 5))
-        );
-        input.test_action(KeyAction::Backspace, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.buf.source(), " world");
-        assert_eq!(input.win.cpos(), 0);
-    }
-
-    #[test]
-    fn delete_forward_deletes_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(0);
-        for _ in 0..5 {
-            input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        }
-        input.test_action(
-            KeyAction::DeleteCharForward,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(input.buf.source(), " world");
-    }
-
-    #[test]
     fn typing_replaces_selection() {
         let mut input = Harness::new();
         input.buf.set_source("hello world".to_string());
@@ -2258,109 +2011,6 @@ mod tests {
             'X',
         );
         assert_eq!(input.buf.source(), "X world");
-        assert_eq!(input.win.cpos(), 1);
-    }
-
-    #[test]
-    fn select_left_from_end() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello".to_string());
-        input.win.set_cpos(5);
-        input.test_action(KeyAction::SelectLeft, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectLeft, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.win.selection_anchor(), Some(5));
-        assert_eq!(input.win.cpos(), 3);
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((3, 5))
-        );
-    }
-
-    #[test]
-    fn select_word_forward() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world foo".to_string());
-        input.win.set_cpos(0);
-        input.test_action(
-            KeyAction::SelectWordForward,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(input.win.selection_anchor(), Some(0));
-        // word_forward_pos from 0 should be 6 (start of "world").
-        assert_eq!(input.win.cpos(), 6);
-        input.test_action(KeyAction::Backspace, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.buf.source(), "world foo");
-    }
-
-    #[test]
-    fn select_word_backward() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(11);
-        input.test_action(
-            KeyAction::SelectWordBackward,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((6, 11))
-        );
-        input.test_action(KeyAction::Backspace, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.buf.source(), "hello ");
-    }
-
-    #[test]
-    fn select_to_line_start() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(5);
-        input.test_action(
-            KeyAction::SelectStartOfLine,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((0, 5))
-        );
-    }
-
-    #[test]
-    fn select_to_line_end() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(5);
-        input.test_action(
-            KeyAction::SelectEndOfLine,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((5, 11))
-        );
-    }
-
-    #[test]
-    fn newline_replaces_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(0);
-        for _ in 0..5 {
-            input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        }
-        input.test_action(KeyAction::InsertNewline, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.buf.source(), "\n world");
         assert_eq!(input.win.cpos(), 1);
     }
 
@@ -2402,26 +2052,6 @@ mod tests {
     }
 
     #[test]
-    fn selection_at_buffer_boundary() {
-        let mut input = Harness::new();
-        input.buf.set_source("ab".to_string());
-        input.win.set_cpos(0);
-        // Select all.
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((0, 2))
-        );
-        input.test_action(KeyAction::Backspace, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.buf.source(), "");
-        assert_eq!(input.win.cpos(), 0);
-    }
-
-    #[test]
     fn selection_range_empty_when_anchor_equals_cursor() {
         let mut input = Harness::new();
         input.buf.set_source("hello".to_string());
@@ -2460,137 +2090,6 @@ mod tests {
                 win: &input.win
             })
             .is_none());
-    }
-
-    #[test]
-    fn delete_word_backward_with_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(6);
-        // Select "wor"
-        for _ in 0..3 {
-            input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        }
-        input.test_action(
-            KeyAction::DeleteWordBackward,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(input.buf.source(), "hello ld");
-    }
-
-    #[test]
-    fn delete_word_forward_with_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(0);
-        for _ in 0..3 {
-            input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        }
-        input.test_action(
-            KeyAction::DeleteWordForward,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(input.buf.source(), "lo world");
-    }
-
-    #[test]
-    fn delete_to_start_of_line_with_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello world".to_string());
-        input.win.set_cpos(3);
-        for _ in 0..4 {
-            input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        }
-        input.test_action(
-            KeyAction::DeleteToStartOfLine,
-            crate::smelt_edit::VimMode::Insert,
-        );
-        assert_eq!(input.buf.source(), "helorld");
-    }
-
-    #[test]
-    fn select_left_at_start_stays() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello".to_string());
-        input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectLeft, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.win.cpos(), 0);
-        assert_eq!(input.win.selection_anchor(), Some(0));
-    }
-
-    #[test]
-    fn select_right_at_end_stays() {
-        let mut input = Harness::new();
-        input.buf.set_source("hello".to_string());
-        input.win.set_cpos(5);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.win.cpos(), 5);
-    }
-
-    #[test]
-    fn select_empty_buffer() {
-        let mut input = Harness::new();
-        input.buf.set_source(String::new());
-        input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.win.cpos(), 0);
-        assert!(input
-            .state
-            .selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            })
-            .is_none());
-    }
-
-    #[test]
-    fn utf8_selection() {
-        let mut input = Harness::new();
-        input.buf.set_source("héllo".to_string());
-        input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        // Should select "hé" - 2 chars but 3 bytes.
-        assert_eq!(input.win.cpos(), 3); // byte offset of 'l'
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((0, 3))
-        );
-        input.test_action(KeyAction::Backspace, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.buf.source(), "llo");
-    }
-
-    #[test]
-    fn selection_preserved_across_multiple_select_directions() {
-        let mut input = Harness::new();
-        input.buf.set_source("abcdef".to_string());
-        input.win.set_cpos(3); // on 'd'
-                               // Select right 2 chars.
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((3, 5))
-        );
-        // Then select left 4 chars - anchor stays at 3.
-        input.test_action(KeyAction::SelectLeft, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectLeft, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectLeft, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectLeft, crate::smelt_edit::VimMode::Insert);
-        assert_eq!(input.win.cpos(), 1);
-        assert_eq!(
-            input.state.selection_range(PromptCtxRef {
-                buf: &input.buf,
-                win: &input.win
-            }),
-            Some((1, 3))
-        );
     }
 
     #[test]

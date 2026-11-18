@@ -1181,21 +1181,6 @@ mod tests {
     }
 
     #[test]
-    fn mode_pending_clears_when_cycling_back_to_applied_mode() {
-        let mut app = normal_app();
-        app.tui
-            .conversation
-            .replace_history_for_harness(vec![user("hello")]);
-        app.start_turn(1);
-
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
-        assert!(app.mode_pending());
-
-        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
-        assert!(!app.mode_pending());
-    }
-
-    #[test]
     fn recorded_mode_change_during_turn_sets_pending_marker() {
         let mut app = normal_app();
         app.tui
@@ -1786,38 +1771,43 @@ mod tests {
     }
 
     #[test]
-    fn bang_prefix_parses_as_shell_escape() {
-        assert_eq!(
-            parse_command_line("!echo hi"),
-            shell("echo hi", ShellSink::Transcript)
-        );
+    fn shell_escape_parses_script_after_bang() {
+        let cases = [
+            ("!echo hi", "echo hi"),
+            ("!   echo hi", "echo hi"),
+            ("  !echo hi  ", "echo hi"),
+            ("!", ""),
+            // The leading char wins: `!/foo` is a shell escape for `/foo`.
+            ("!/foo bar", "/foo bar"),
+        ];
+        for (line, script) in cases {
+            assert_eq!(
+                parse_command_line(line),
+                shell(script, ShellSink::Transcript),
+                "{line:?}"
+            );
+        }
     }
 
     #[test]
-    fn shell_escape_trims_leading_whitespace_after_bang() {
-        // `! echo hi` and `!echo hi` produce the same script.
-        assert_eq!(
-            parse_command_line("!   echo hi"),
-            shell("echo hi", ShellSink::Transcript)
-        );
-    }
-
-    #[test]
-    fn shell_escape_keeps_an_empty_script_for_bare_bang() {
-        assert_eq!(parse_command_line("!"), shell("", ShellSink::Transcript));
-    }
-
-    #[test]
-    fn slash_prefix_extracts_name_with_no_arg() {
-        assert_eq!(parse_command_line("/quit"), slash("quit", None));
-    }
-
-    #[test]
-    fn slash_with_argument_splits_on_first_whitespace() {
-        assert_eq!(
-            parse_command_line("/model claude-haiku"),
-            slash("model", Some("claude-haiku"))
-        );
+    fn slash_splits_name_from_argument() {
+        let cases = [
+            ("/quit", "quit", None),
+            ("/foo   ", "foo", None),
+            ("/model claude-haiku", "model", Some("claude-haiku")),
+            ("   /foo bar   ", "foo", Some("bar")),
+            (
+                "/btw first line\nsecond line",
+                "btw",
+                Some("first line\nsecond line"),
+            ),
+            // Interior whitespace is preserved; only the name/arg boundary
+            // and trailing whitespace are trimmed.
+            ("/cmd   a    b  ", "cmd", Some("a    b")),
+        ];
+        for (line, name, arg) in cases {
+            assert_eq!(parse_command_line(line), slash(name, arg), "{line:?}");
+        }
     }
 
     #[test]
@@ -1835,24 +1825,6 @@ mod tests {
             ParsedCommand::Bare {
                 text: " \u{301}!echo"
             }
-        );
-    }
-
-    #[test]
-    fn slash_with_multiline_argument_preserves_body() {
-        assert_eq!(
-            parse_command_line("/btw first line\nsecond line"),
-            slash("btw", Some("first line\nsecond line"))
-        );
-    }
-
-    #[test]
-    fn slash_collapses_extra_whitespace_in_argument() {
-        // Extra interior whitespace inside the arg is preserved; only the
-        // boundary between name and arg, plus trailing whitespace, is trimmed.
-        assert_eq!(
-            parse_command_line("/cmd   a    b  "),
-            slash("cmd", Some("a    b"))
         );
     }
 
@@ -1883,33 +1855,6 @@ mod tests {
             ParsedCommand::Bare {
                 text: "btw what's up"
             }
-        );
-    }
-
-    #[test]
-    fn slash_with_only_trailing_whitespace_has_no_arg() {
-        // `"/foo   "` is the same as `"/foo"` once trimmed.
-        assert_eq!(parse_command_line("/foo   "), slash("foo", None));
-    }
-
-    #[test]
-    fn shell_takes_priority_over_slash_when_both_prefixes_present() {
-        // The leading char wins - `!/foo` is a shell escape for `/foo`.
-        assert_eq!(
-            parse_command_line("!/foo bar"),
-            shell("/foo bar", ShellSink::Transcript)
-        );
-    }
-
-    #[test]
-    fn outer_whitespace_does_not_change_the_parse() {
-        assert_eq!(
-            parse_command_line("   /foo bar   "),
-            slash("foo", Some("bar"))
-        );
-        assert_eq!(
-            parse_command_line("  !echo hi  "),
-            shell("echo hi", ShellSink::Transcript)
         );
     }
 

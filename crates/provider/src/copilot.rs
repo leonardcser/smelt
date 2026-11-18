@@ -556,41 +556,26 @@ mod tests {
     }
 
     #[test]
-    fn base_url_from_token_parses_proxy_ep() {
-        let token = "tid=abc;exp=9999;proxy-ep=proxy.individual.githubcopilot.com;sku=x";
-        assert_eq!(
-            base_url_from_token(token).as_deref(),
-            Some("https://api.individual.githubcopilot.com")
-        );
-    }
-
-    #[test]
-    fn base_url_from_token_handles_enterprise() {
-        let token = "tid=abc;proxy-ep=proxy.business.githubcopilot.com";
-        assert_eq!(
-            base_url_from_token(token).as_deref(),
-            Some("https://api.business.githubcopilot.com")
-        );
-    }
-
-    #[test]
-    fn base_url_from_token_returns_none_without_claim() {
-        let token = "tid=abc;exp=9999;sku=x";
-        assert_eq!(base_url_from_token(token), None);
-    }
-
-    #[test]
-    fn base_url_from_token_handles_host_without_proxy_prefix() {
-        let token = "proxy-ep=direct.example.com";
-        assert_eq!(
-            base_url_from_token(token).as_deref(),
-            Some("https://api.direct.example.com")
-        );
-    }
-
-    #[test]
-    fn base_url_from_token_returns_none_for_empty_token() {
-        assert_eq!(base_url_from_token(""), None);
+    fn base_url_from_token_derives_api_host_from_proxy_endpoint() {
+        let cases = [
+            (
+                "tid=abc;exp=9999;proxy-ep=proxy.individual.githubcopilot.com;sku=x",
+                Some("https://api.individual.githubcopilot.com"),
+            ),
+            (
+                "tid=abc;proxy-ep=proxy.business.githubcopilot.com",
+                Some("https://api.business.githubcopilot.com"),
+            ),
+            (
+                "proxy-ep=direct.example.com",
+                Some("https://api.direct.example.com"),
+            ),
+            ("tid=abc;exp=9999;sku=x", None),
+            ("", None),
+        ];
+        for (token, expected) in cases {
+            assert_eq!(base_url_from_token(token).as_deref(), expected, "{token}");
+        }
     }
 
     fn tokens(expires_at: u64) -> CopilotTokens {
@@ -604,21 +589,10 @@ mod tests {
     }
 
     #[test]
-    fn needs_refresh_true_when_within_60s_of_expiry() {
-        let t = tokens(1_030);
-        assert!(t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_true_when_past_expiry() {
-        let t = tokens(999);
-        assert!(t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_false_when_expiry_far_future() {
-        let t = tokens(4_600);
-        assert!(!t.needs_refresh_at(1_000));
+    fn needs_refresh_within_a_minute_of_expiry() {
+        assert!(tokens(1_030).needs_refresh_at(1_000));
+        assert!(tokens(999).needs_refresh_at(1_000));
+        assert!(!tokens(4_600).needs_refresh_at(1_000));
     }
 
     #[test]
@@ -817,14 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_models_defaults_picker_to_enabled_when_missing() {
-        let v = serde_json::json!({"data": [model("default", None, None)]});
-        let ms = parse_models_response(&v).unwrap();
-        assert_eq!(ms.len(), 1);
-    }
-
-    #[test]
-    fn parse_models_skips_entries_without_id() {
+    fn parse_models_skips_entries_without_id_and_defaults_picker_enabled() {
         let v = serde_json::json!({"data": [
             {"name": "no-id"},
             model("ok", None, None),
@@ -835,35 +802,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_models_extracts_context_window_from_max_context_window_tokens() {
-        let v = serde_json::json!({"data": [{
-            "id": "m", "model_picker_enabled": true,
-            "capabilities": {"type": "chat",
-                "limits": {"max_context_window_tokens": 128000}}
-        }]});
-        let ms = parse_models_response(&v).unwrap();
+    fn parse_models_extracts_token_limits() {
+        let entry = |limits: serde_json::Value| {
+            serde_json::json!({"data": [{
+                "id": "m", "model_picker_enabled": true,
+                "capabilities": {"type": "chat", "limits": limits}
+            }]})
+        };
+        let ms = parse_models_response(&entry(serde_json::json!({
+            "max_context_window_tokens": 128000,
+            "max_prompt_tokens": 8000,
+            "max_output_tokens": 4096,
+        })))
+        .unwrap();
         assert_eq!(ms[0].context_window, Some(128000));
-    }
-
-    #[test]
-    fn parse_models_falls_back_to_max_prompt_tokens_for_context_window() {
-        let v = serde_json::json!({"data": [{
-            "id": "m", "model_picker_enabled": true,
-            "capabilities": {"type": "chat",
-                "limits": {"max_prompt_tokens": 8000}}
-        }]});
-        let ms = parse_models_response(&v).unwrap();
-        assert_eq!(ms[0].context_window, Some(8000));
-    }
-
-    #[test]
-    fn parse_models_extracts_max_output_tokens() {
-        let v = serde_json::json!({"data": [{
-            "id": "m", "model_picker_enabled": true,
-            "capabilities": {"type": "chat", "limits": {"max_output_tokens": 4096}}
-        }]});
-        let ms = parse_models_response(&v).unwrap();
         assert_eq!(ms[0].max_output_tokens, Some(4096));
+
+        let ms =
+            parse_models_response(&entry(serde_json::json!({"max_prompt_tokens": 8000}))).unwrap();
+        assert_eq!(ms[0].context_window, Some(8000));
     }
 
     #[test]
@@ -880,51 +837,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_models_uses_id_as_name_when_name_missing() {
-        let v = serde_json::json!({"data": [{
-            "id": "naked-id", "model_picker_enabled": true,
-            "capabilities": {"type": "chat"}
-        }]});
+    fn parse_models_extracts_identity_metadata() {
+        let v = serde_json::json!({"data": [
+            {"id": "naked-id", "model_picker_enabled": true, "capabilities": {"type": "chat"}},
+            {"id": "m", "name": "M", "vendor": "openai", "family": "claude",
+             "model_picker_enabled": true, "capabilities": {"type": "chat"}},
+            {"id": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6",
+             "model_picker_enabled": true, "capabilities": {"type": "chat"}},
+        ]});
         let ms = parse_models_response(&v).unwrap();
-        assert_eq!(ms[0].name, "naked-id");
-    }
-
-    #[test]
-    fn parse_models_captures_vendor_when_present() {
-        let v = serde_json::json!({"data": [{
-            "id": "m", "name": "M", "vendor": "openai", "model_picker_enabled": true,
-            "capabilities": {"type": "chat"}
-        }]});
-        let ms = parse_models_response(&v).unwrap();
-        assert_eq!(ms[0].vendor.as_deref(), Some("openai"));
-    }
-
-    #[test]
-    fn parse_models_vendor_none_when_absent() {
-        let v = serde_json::json!({"data": [model("m", Some("chat"), Some(true))]});
-        let ms = parse_models_response(&v).unwrap();
-        assert!(ms[0].vendor.is_none());
-    }
-
-    #[test]
-    fn parse_models_captures_family_and_capability_type() {
-        let v = serde_json::json!({"data": [{
-            "id": "m", "name": "M", "family": "claude", "model_picker_enabled": true,
-            "capabilities": {"type": "chat"}
-        }]});
-        let ms = parse_models_response(&v).unwrap();
-        assert_eq!(ms[0].family.as_deref(), Some("claude"));
-        assert_eq!(ms[0].capability_type.as_deref(), Some("chat"));
-    }
-
-    #[test]
-    fn parse_models_infers_family_when_missing() {
-        let v = serde_json::json!({"data": [{
-            "id": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6", "model_picker_enabled": true,
-            "capabilities": {"type": "chat"}
-        }]});
-        let ms = parse_models_response(&v).unwrap();
-        assert_eq!(ms[0].family.as_deref(), Some("claude"));
+        let by_id = |id: &str| ms.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(by_id("naked-id").name, "naked-id");
+        assert!(by_id("naked-id").vendor.is_none());
+        assert_eq!(by_id("m").vendor.as_deref(), Some("openai"));
+        assert_eq!(by_id("m").family.as_deref(), Some("claude"));
+        assert_eq!(by_id("m").capability_type.as_deref(), Some("chat"));
+        assert_eq!(by_id("claude-sonnet-4.6").family.as_deref(), Some("claude"));
     }
 
     #[test]

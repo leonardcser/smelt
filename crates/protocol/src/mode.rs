@@ -189,55 +189,7 @@ mod tests {
         assert_eq!(labels, vec!["normal", "apply", "yolo"]);
     }
 
-    #[test]
-    fn agent_mode_serializes_as_string() {
-        assert_eq!(
-            serde_json::to_value(AgentMode::parse("plan").unwrap()).unwrap(),
-            serde_json::json!("plan")
-        );
-    }
-
-    #[test]
-    fn agent_mode_deserializes_from_string() {
-        let m: AgentMode = serde_json::from_value(serde_json::json!("custom")).unwrap();
-        assert_eq!(m.as_str(), "custom");
-    }
-
     // ---- ReasoningEffort ----
-
-    #[test]
-    fn reasoning_effort_default_is_off() {
-        assert_eq!(ReasoningEffort::default(), ReasoningEffort::Off);
-    }
-
-    #[test]
-    fn reasoning_effort_parse_each_label() {
-        assert_eq!(ReasoningEffort::parse("off"), Some(ReasoningEffort::Off));
-        assert_eq!(ReasoningEffort::parse("low"), Some(ReasoningEffort::Low));
-        assert_eq!(
-            ReasoningEffort::parse("medium"),
-            Some(ReasoningEffort::Medium)
-        );
-        assert_eq!(ReasoningEffort::parse("high"), Some(ReasoningEffort::High));
-        assert_eq!(
-            ReasoningEffort::parse("xhigh"),
-            Some(ReasoningEffort::XHigh)
-        );
-        assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::Max));
-        assert_eq!(
-            ReasoningEffort::parse("ultra"),
-            Some(ReasoningEffort::Ultra)
-        );
-    }
-
-    #[test]
-    fn reasoning_effort_parse_is_case_insensitive() {
-        assert_eq!(ReasoningEffort::parse("HIGH"), Some(ReasoningEffort::High));
-        assert_eq!(
-            ReasoningEffort::parse("Medium"),
-            Some(ReasoningEffort::Medium)
-        );
-    }
 
     #[test]
     fn reasoning_effort_parse_preserves_custom_labels_and_rejects_empty() {

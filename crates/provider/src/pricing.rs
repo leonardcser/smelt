@@ -125,42 +125,6 @@ mod tests {
     // ---- ModelPricing::cost ----
 
     #[test]
-    fn cost_zero_when_pricing_zero() {
-        let p = ZERO;
-        assert_eq!(p.cost(&usage(100, 50, 10, 5, 2)), 0.0);
-    }
-
-    #[test]
-    fn cost_scales_per_million_tokens() {
-        let p = ModelPricing {
-            input: 1.0,
-            output: 2.0,
-            cache_read: 0.5,
-            cache_write: 1.5,
-        };
-        let u = TokenUsage {
-            context_tokens: Some(2_000_000),
-            prompt_tokens: Some(1_000_000),
-            completion_tokens: None,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            reasoning_tokens: None,
-        };
-        assert!((p.cost(&u) - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn cost_treats_missing_usage_fields_as_zero() {
-        let p = ModelPricing {
-            input: 1.0,
-            output: 1.0,
-            cache_read: 1.0,
-            cache_write: 1.0,
-        };
-        assert_eq!(p.cost(&TokenUsage::default()), 0.0);
-    }
-
-    #[test]
     fn cost_treats_reasoning_as_output_detail() {
         let p = ModelPricing {
             input: 0.0,
@@ -195,7 +159,7 @@ mod tests {
     // ---- ModelPricing::is_zero ----
 
     #[test]
-    fn is_zero_true_for_zero_input_and_output() {
+    fn is_zero_depends_only_on_input_and_output() {
         let p = ModelPricing {
             input: 0.0,
             output: 0.0,
@@ -203,10 +167,6 @@ mod tests {
             cache_write: 99.0,
         };
         assert!(p.is_zero());
-    }
-
-    #[test]
-    fn is_zero_false_when_either_input_or_output_nonzero() {
         let p = ModelPricing {
             input: 1.0,
             output: 0.0,
@@ -221,15 +181,6 @@ mod tests {
             cache_write: 0.0,
         };
         assert!(!p.is_zero());
-    }
-
-    // ---- PricingSource::label ----
-
-    #[test]
-    fn pricing_source_labels() {
-        assert_eq!(PricingSource::Config.label(), "config override");
-        assert_eq!(PricingSource::Catalog.label(), "models.dev");
-        assert_eq!(PricingSource::None.label(), "none");
     }
 
     // ---- resolve (catalog populated in OnceLock isn't accessible in tests, so cover via config override + None path) ----

@@ -1644,78 +1644,89 @@ mod tests {
     // ── Plain ──────────────────────────────────────────────────────────
 
     #[test]
-    fn plain_text() {
-        assert_eq!(parse("hello world"), vec![p("hello world")]);
-    }
-
-    #[test]
-    fn empty_string() {
-        assert_eq!(parse(""), vec![]);
-    }
-
-    #[test]
-    fn inline_context_preserves_block_markers_as_text() {
-        assert_eq!(parse("- item"), vec![p("- item")]);
-        assert_eq!(parse("# heading"), vec![p("# heading")]);
-    }
-
-    // ── Bold ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn bold_star() {
-        assert_eq!(parse("**hello**"), vec![b("hello")]);
-    }
-
-    #[test]
-    fn bold_underscore() {
-        assert_eq!(parse("__hello__"), vec![b("hello")]);
-    }
-
-    #[test]
-    fn bold_within_text() {
-        assert_eq!(parse("a **bold** c"), vec![p("a "), b("bold"), p(" c")]);
-    }
-
-    // ── Italic ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn italic_star() {
-        assert_eq!(parse("*hello*"), vec![i("hello")]);
-    }
-
-    #[test]
-    fn italic_underscore() {
-        assert_eq!(parse("_hello_"), vec![i("hello")]);
-    }
-
-    #[test]
-    fn italic_within_text() {
-        assert_eq!(parse("a *word* b"), vec![p("a "), i("word"), p(" b")]);
-    }
-
-    // ── Bold + italic (triple delimiters) ──────────────────────────────
-
-    #[test]
-    fn bold_italic_star() {
-        assert_eq!(parse("***both***"), vec![bi("both")]);
-    }
-
-    #[test]
-    fn bold_italic_underscore() {
-        assert_eq!(parse("___both___"), vec![bi("both")]);
-    }
-
-    // ── Inline code ────────────────────────────────────────────────────
-
-    #[test]
-    fn inline_code() {
-        assert_eq!(parse("`foo`"), vec![c("foo")]);
-    }
-
-    #[test]
-    fn inline_code_with_stars_inside() {
-        // Stars inside backticks are literal.
-        assert_eq!(parse("`*not bold*`"), vec![c("*not bold*")]);
+    fn parses_inline_markdown_styles() {
+        let cases: Vec<(&str, Vec<(&'static str, String)>)> = vec![
+            ("hello world", vec![p("hello world")]),
+            ("", vec![]),
+            ("- item", vec![p("- item")]),
+            ("# heading", vec![p("# heading")]),
+            ("**hello**", vec![b("hello")]),
+            ("__hello__", vec![b("hello")]),
+            ("a **bold** c", vec![p("a "), b("bold"), p(" c")]),
+            ("*hello*", vec![i("hello")]),
+            ("_hello_", vec![i("hello")]),
+            ("a *word* b", vec![p("a "), i("word"), p(" b")]),
+            ("***both***", vec![bi("both")]),
+            ("___both___", vec![bi("both")]),
+            ("***a b c***", vec![bi("a b c")]),
+            ("`foo`", vec![c("foo")]),
+            ("`*not bold*`", vec![c("*not bold*")]),
+            ("`_not italic_`", vec![c("_not italic_")]),
+            (
+                "call `foo()` please",
+                vec![p("call "), c("foo()"), p(" please")],
+            ),
+            (
+                "before `*x*` after",
+                vec![p("before "), c("*x*"), p(" after")],
+            ),
+            // A backtick inside a code span closes it.
+            ("`a`b`", vec![c("a"), p("b`")]),
+            ("~~gone~~", vec![s("gone")]),
+            ("<https://example.com>", vec![l("https://example.com")]),
+            ("**a** and *b*", vec![b("a"), p(" and "), i("b")]),
+            ("**a** **b**", vec![b("a"), p(" "), b("b")]),
+            (
+                "start *a* mid *b* end",
+                vec![p("start "), i("a"), p(" mid "), i("b"), p(" end")],
+            ),
+            ("****text****", vec![b("text")]),
+            // Nested emphasis and code inherit the outer style.
+            ("**bold *it* bold**", vec![b("bold "), bi("it"), b(" bold")]),
+            ("*it **bold** it*", vec![i("it "), bi("bold"), i(" it")]),
+            (
+                "**call `foo()` now**",
+                vec![b("call "), ("bold+code", "foo()".into()), b(" now")],
+            ),
+            (
+                "*a `code` b*",
+                vec![i("a "), ("italic+code", "code".into()), i(" b")],
+            ),
+            (
+                "**a *b `c` d* e**",
+                vec![
+                    b("a "),
+                    bi("b "),
+                    ("bi+code", "c".into()),
+                    bi(" d"),
+                    b(" e"),
+                ],
+            ),
+            // Intraword underscores and flanking rules keep delimiters literal.
+            ("snake_case_variable", vec![p("snake_case_variable")]),
+            (
+                "https://example.com/foo_bar_baz",
+                vec![p("https://example.com/foo_bar_baz")],
+            ),
+            ("foo_bar", vec![p("foo_bar")]),
+            ("**text", vec![p("**text")]),
+            ("*text", vec![p("*text")]),
+            ("`unclosed", vec![p("`unclosed")]),
+            ("a * b = c", vec![p("a * b = c")]),
+            ("note*", vec![p("note*")]),
+            ("footnote*", vec![p("footnote*")]),
+            ("**text **", vec![p("**text **")]),
+            ("** text**", vec![p("** text**")]),
+            ("*foo_", vec![p("*foo_")]),
+            // CommonMark pairs the trailing single `*` and leaves the other literal.
+            ("**text*", vec![p("*"), i("text")]),
+            ("*text**", vec![i("text"), p("*")]),
+            ("(_foo_)", vec![p("("), i("foo"), p(")")]),
+            ("foo*bar*baz", vec![p("foo"), i("bar"), p("baz")]),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(parse(text), expected, "{text:?}");
+        }
     }
 
     #[test]
@@ -1726,13 +1737,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn markdown_autolink_styles_destination_without_duplicate_suffix() {
-        assert_eq!(
-            parse("<https://example.com>"),
-            vec![l("https://example.com")]
-        );
-    }
+    // ── Bold ───────────────────────────────────────────────────────────
+
+    // ── Italic ─────────────────────────────────────────────────────────
+
+    // ── Bold + italic (triple delimiters) ──────────────────────────────
+
+    // ── Inline code ────────────────────────────────────────────────────
 
     #[test]
     fn markdown_link_keeps_code_distinct_from_destination() {
@@ -1848,229 +1859,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn inline_code_with_underscores_inside() {
-        assert_eq!(parse("`_not italic_`"), vec![c("_not italic_")]);
-    }
-
-    #[test]
-    fn inline_code_around_text() {
-        assert_eq!(
-            parse("call `foo()` please"),
-            vec![p("call "), c("foo()"), p(" please")]
-        );
-    }
-
     // ── Strikethrough ──────────────────────────────────────────────────
-
-    #[test]
-    fn strikethrough_basic() {
-        assert_eq!(parse("~~gone~~"), vec![s("gone")]);
-    }
 
     // ── Intraword underscores (CommonMark: NOT emphasis) ──────────────
 
-    #[test]
-    fn intraword_underscore_identifier() {
-        // `snake_case_variable` - underscores are part of the identifier.
-        assert_eq!(parse("snake_case_variable"), vec![p("snake_case_variable")]);
-    }
-
-    #[test]
-    fn intraword_underscore_in_url() {
-        assert_eq!(
-            parse("https://example.com/foo_bar_baz"),
-            vec![p("https://example.com/foo_bar_baz")]
-        );
-    }
-
-    #[test]
-    fn intraword_underscore_between_letters() {
-        assert_eq!(parse("foo_bar"), vec![p("foo_bar")]);
-    }
-
     // ── Unclosed delimiters (should stay literal) ─────────────────────
-
-    #[test]
-    fn unclosed_bold_stays_literal() {
-        assert_eq!(parse("**text"), vec![p("**text")]);
-    }
-
-    #[test]
-    fn unclosed_italic_stays_literal() {
-        assert_eq!(parse("*text"), vec![p("*text")]);
-    }
-
-    #[test]
-    fn unclosed_code_stays_literal() {
-        assert_eq!(parse("`unclosed"), vec![p("`unclosed")]);
-    }
-
-    /// CommonMark parses the trailing single `*` as an italic delimiter and
-    /// leaves the unmatched leading `*` literal.
-    #[test]
-    fn odd_star_count_does_not_invert_emphasis() {
-        assert_eq!(parse("**text*"), vec![p("*"), i("text")]);
-    }
-
-    #[test]
-    fn odd_star_count_trailing_double() {
-        assert_eq!(parse("*text**"), vec![i("text"), p("*")]);
-    }
 
     // ── Nested emphasis (CommonMark supports this) ────────────────────
 
-    #[test]
-    fn bold_containing_italic() {
-        // `**bold *italic* bold**` - inner italic must render inside bold.
-        assert_eq!(
-            parse("**bold *it* bold**"),
-            vec![b("bold "), bi("it"), b(" bold")]
-        );
-    }
-
-    #[test]
-    fn italic_containing_bold() {
-        assert_eq!(
-            parse("*it **bold** it*"),
-            vec![i("it "), bi("bold"), i(" it")]
-        );
-    }
-
-    #[test]
-    fn bold_containing_code() {
-        // Code span nested inside bold inherits the outer bold, so the
-        // inner span carries both attributes at once.
-        assert_eq!(
-            parse("**call `foo()` now**"),
-            vec![b("call "), ("bold+code", "foo()".into()), b(" now")]
-        );
-    }
-
     // ── Precedence: code > emphasis ───────────────────────────────────
-
-    #[test]
-    fn code_inside_italic() {
-        // `*a `code` b*` - italic wrapping, code inside. The inner code
-        // span inherits italic, so it's italic+code.
-        assert_eq!(
-            parse("*a `code` b*"),
-            vec![i("a "), ("italic+code", "code".into()), i(" b")]
-        );
-    }
-
-    #[test]
-    fn code_containing_italic_stars() {
-        // The `*` inside a code span is literal.
-        assert_eq!(
-            parse("before `*x*` after"),
-            vec![p("before "), c("*x*"), p(" after")]
-        );
-    }
 
     // ── Multiple runs on one line ─────────────────────────────────────
 
-    #[test]
-    fn bold_then_italic() {
-        assert_eq!(parse("**a** and *b*"), vec![b("a"), p(" and "), i("b")]);
-    }
-
-    #[test]
-    fn adjacent_bolds() {
-        assert_eq!(parse("**a** **b**"), vec![b("a"), p(" "), b("b")]);
-    }
-
     // ── Asterisk as literal ───────────────────────────────────────────
 
-    #[test]
-    fn asterisk_as_multiplication() {
-        // `a * b` - stars with whitespace on both sides, not emphasis.
-        assert_eq!(parse("a * b = c"), vec![p("a * b = c")]);
-    }
-
-    #[test]
-    fn trailing_lone_star() {
-        assert_eq!(parse("note*"), vec![p("note*")]);
-    }
-
-    #[test]
-    fn star_right_after_word() {
-        assert_eq!(parse("footnote*"), vec![p("footnote*")]);
-    }
-
     // ── Stress: edge cases the spec cares about ──────────────────────
-
-    #[test]
-    fn space_before_closing_delim_rejects_emphasis() {
-        // `**text **` - close preceded by space is NOT right-flanking.
-        assert_eq!(parse("**text **"), vec![p("**text **")]);
-    }
-
-    #[test]
-    fn space_after_opening_delim_rejects_emphasis() {
-        // `** text**` - open followed by space is NOT left-flanking.
-        assert_eq!(parse("** text**"), vec![p("** text**")]);
-    }
-
-    #[test]
-    fn four_star_run_is_literal() {
-        assert_eq!(parse("****text****"), vec![b("text")]);
-    }
-
-    #[test]
-    fn deeply_nested_bold_italic_code() {
-        // `**outer *inner `code` inner* outer**`
-        assert_eq!(
-            parse("**a *b `c` d* e**"),
-            vec![
-                b("a "),
-                bi("b "),
-                ("bi+code", "c".into()),
-                bi(" d"),
-                b(" e"),
-            ]
-        );
-    }
-
-    #[test]
-    fn bold_italic_containing_plain_text() {
-        assert_eq!(parse("***a b c***"), vec![bi("a b c")]);
-    }
-
-    #[test]
-    fn two_italic_runs_separated_by_text() {
-        assert_eq!(
-            parse("start *a* mid *b* end"),
-            vec![p("start "), i("a"), p(" mid "), i("b"), p(" end"),]
-        );
-    }
-
-    #[test]
-    fn mixed_underscore_and_star_dont_match() {
-        // `*foo_` - `*` opener, `_` is just a literal char, not a closer.
-        assert_eq!(parse("*foo_"), vec![p("*foo_")]);
-    }
-
-    #[test]
-    fn underscore_surrounded_by_non_alnum_can_italic() {
-        // `(_foo_)` - `_` is not intraword here because `(` and `)` are
-        // not alphanumeric. CommonMark permits this as italic.
-        assert_eq!(parse("(_foo_)"), vec![p("("), i("foo"), p(")")]);
-    }
-
-    #[test]
-    fn star_can_italic_intraword() {
-        // Unlike `_`, `*` does not have the intraword restriction.
-        assert_eq!(parse("foo*bar*baz"), vec![p("foo"), i("bar"), p("baz")]);
-    }
-
-    #[test]
-    fn code_with_backtick_literal() {
-        // A backtick inside a code span closes it - our single-backtick
-        // parser can't represent literal backticks inside a code span.
-        // `` `a`b` `` → code("a") + plain("b`").
-        assert_eq!(parse("`a`b`"), vec![c("a"), p("b`")]);
-    }
 
     #[test]
     fn strip_markers_matches_parse_for_nested() {

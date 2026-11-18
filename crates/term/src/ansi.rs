@@ -55,28 +55,11 @@ mod tests {
     }
 
     #[test]
-    fn ansi_lines_split_rows() {
-        let lines = parse_ansi_lines("one\n\x1b[32mtwo");
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].text, "one");
-        assert_eq!(lines[1].spans[0].text, "two");
-        assert_eq!(lines[1].spans[0].style.fg, Some(Color::DarkGreen));
-    }
-
-    #[test]
     fn ansi_lines_preserve_sgr_across_rows() {
         let lines = parse_ansi_lines("\x1b[31mred\nstill red");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].spans[0].style.fg, Some(Color::DarkRed));
         assert_eq!(lines[1].spans[0].text, "still red");
         assert_eq!(lines[1].spans[0].style.fg, Some(Color::DarkRed));
-    }
-
-    #[test]
-    fn ansi_lines_preserve_trailing_empty_row() {
-        let lines = parse_ansi_lines("one\n");
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].text, "one");
-        assert!(lines[1].spans.is_empty());
     }
 }

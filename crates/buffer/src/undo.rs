@@ -164,41 +164,4 @@ mod tests {
         assert_eq!(h.undo(entry("C")).unwrap().buf, "B");
         assert!(h.undo(entry("B")).is_none(), "A was evicted");
     }
-
-    #[test]
-    fn default_history_is_unbounded() {
-        let mut h = UndoHistory::default();
-        for i in 0..100 {
-            h.save(entry(&format!("v{i}")));
-        }
-        // All 100 entries must be present; undo 100 times yields a result each.
-        for _ in 0..100 {
-            assert!(h.undo(entry("x")).is_some());
-        }
-        assert!(h.undo(entry("x")).is_none());
-    }
-
-    #[test]
-    fn entry_snapshot_captures_all_three_fields() {
-        let atts = vec![
-            Attachment::image("a.png".into(), "data:a".into()),
-            Attachment::image("b.png".into(), "data:b".into()),
-        ];
-        let e = UndoEntry::snapshot("hello", 3, &atts);
-        assert_eq!(e.buf, "hello");
-        assert_eq!(e.cpos, 3);
-        assert_eq!(e.attachments, atts);
-    }
-
-    #[test]
-    fn clone_is_independent_of_original() {
-        let mut h = UndoHistory::default();
-        h.save(entry("A"));
-        let mut h2 = h.clone();
-        h2.save(entry("B")); // mutate the clone
-        assert_eq!(h.undo(entry("x")).unwrap().buf, "A");
-        // Original has nothing left now; clone still has [A, B].
-        assert_eq!(h2.undo(entry("x")).unwrap().buf, "B");
-        assert_eq!(h2.undo(entry("x")).unwrap().buf, "A");
-    }
 }

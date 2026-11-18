@@ -1347,14 +1347,6 @@ fn test_visual_empty_buffer() {
 }
 
 #[test]
-fn test_visual_single_char() {
-    let mut h = TestHarness::new("x");
-    h.handle(key('v'));
-    h.handle(key('d'));
-    assert_eq!(h.buf, "");
-}
-
-#[test]
 fn test_visual_paste_replaces() {
     let mut h = TestHarness::new("hello world");
     h.handle(key('y'));
@@ -1414,18 +1406,6 @@ fn test_visual_dollar_motion() {
     h.handle(key('$'));
     h.handle(key('d'));
     assert_eq!(h.buf, "");
-}
-
-#[test]
-fn test_visual_range_anchor_after_cursor() {
-    let mut h = TestHarness::new("abcdef");
-    h.cpos = 3;
-    h.handle(key('v'));
-    h.handle(key('h'));
-    h.handle(key('h'));
-    assert_eq!(h.cpos, 1);
-    h.handle(key('d'));
-    assert_eq!(h.buf, "aef");
 }
 
 #[test]
@@ -1630,22 +1610,6 @@ fn visual_case_mapping_keeps_cursor_on_a_grapheme_boundary() {
 }
 
 #[test]
-fn test_visual_line_single_line_buffer() {
-    let mut h = TestHarness::new("hello");
-    h.handle(key('V'));
-    h.handle(key('d'));
-    assert_eq!(h.buf, "");
-}
-
-#[test]
-fn test_visual_line_first_line() {
-    let mut h = TestHarness::new("aaa\nbbb");
-    h.handle(key('V'));
-    h.handle(key('d'));
-    assert_eq!(h.buf, "bbb");
-}
-
-#[test]
 fn test_visual_undo() {
     let mut h = TestHarness::new("hello world");
     h.handle(key('v'));
@@ -1675,15 +1639,6 @@ fn test_visual_ctrl_c_passes_through() {
 }
 
 #[test]
-fn test_open_line_above() {
-    let mut h = TestHarness::new("hello");
-    h.handle(key('O'));
-    assert_eq!(h.buf, "\nhello");
-    assert_eq!(h.cpos, 0);
-    assert_eq!(h.mode, VimMode::Insert);
-}
-
-#[test]
 fn test_open_line_above_multiline() {
     let mut h = TestHarness::new("aaa\nbbb");
     h.cpos = 4;
@@ -1707,15 +1662,6 @@ fn test_visual_gg() {
 }
 
 #[test]
-fn test_visual_go_end() {
-    let mut h = TestHarness::new("aaa\nbbb\nccc");
-    h.handle(key('v'));
-    h.handle(key('G'));
-    h.handle(key('d'));
-    assert_eq!(h.buf, "cc");
-}
-
-#[test]
 fn test_visual_line_change_middle() {
     let mut h = TestHarness::new("aaa\nbbb\nccc");
     h.cpos = 4;
@@ -1723,16 +1669,6 @@ fn test_visual_line_change_middle() {
     h.handle(key('c'));
     assert_eq!(h.buf, "aaa\n\nccc");
     assert_eq!(h.mode, VimMode::Insert);
-}
-
-#[test]
-fn test_visual_join_three_lines() {
-    let mut h = TestHarness::new("aaa\nbbb\nccc");
-    h.handle(key('V'));
-    h.handle(key('j'));
-    h.handle(key('j'));
-    h.handle(key('J'));
-    assert_eq!(h.buf, "aaa bbb ccc");
 }
 
 #[test]

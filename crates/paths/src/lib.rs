@@ -198,16 +198,10 @@ mod tests {
     }
 
     #[test]
-    fn expand_tilde_absolute_unchanged() {
-        assert_eq!(
-            expand_tilde(Path::new("/usr/local/bin")),
-            PathBuf::from("/usr/local/bin")
-        );
-    }
-
-    #[test]
-    fn expand_tilde_relative_unchanged() {
-        assert_eq!(expand_tilde(Path::new("foo/bar")), PathBuf::from("foo/bar"));
+    fn expand_tilde_leaves_other_paths_unchanged() {
+        for path in ["/usr/local/bin", "foo/bar"] {
+            assert_eq!(expand_tilde(Path::new(path)), PathBuf::from(path));
+        }
     }
 
     #[test]

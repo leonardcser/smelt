@@ -627,34 +627,48 @@ mod tests {
     // -- Text streaming -----------------------------------------------
 
     #[test]
-    fn text_single_chunk() {
-        let (mut parser, mut history) = setup();
-        parser.append_streaming_text(&mut history, "hello world");
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "hello world".into(),
+    fn streamed_text_chunks_flush_into_one_text_block() {
+        let cases: [(&[&str], &str); 8] = [
+            (&["hello world"], "hello world"),
+            (&["hel", "lo wo", "rld"], "hello world"),
+            (
+                &["```rust\nfn main() {}\n```"],
+                "```rust\nfn main() {}\n```",
+            ),
+            (
+                &["```rust\n", "fn main() {}\n", "```"],
+                "```rust\nfn main() {}\n```",
+            ),
+            (
+                &["```py\nprint(1)\nprint(2)\n```"],
+                "```py\nprint(1)\nprint(2)\n```",
+            ),
+            (
+                &["| a | b |\n|---|---|\n| 1 | 2 |"],
+                "| a | b |\n|---|---|\n| 1 | 2 |",
+            ),
+            (&["line1\n", "line2"], "line1\nline2"),
+            (
+                &["| a ", "| b |\n|---", "--|\n| 1 | 2 |"],
+                "| a | b |\n|-----|\n| 1 | 2 |",
+            ),
+        ];
+        for (chunks, expected) in cases {
+            let (mut parser, mut history) = setup();
+            for chunk in chunks {
+                parser.append_streaming_text(&mut history, chunk);
             }
-        );
-        assert_eq!(history.status(history.order[0]), Some(Status::Done));
-    }
-
-    #[test]
-    fn text_multi_chunk_same_result() {
-        let (mut parser, mut history) = setup();
-        for chunk in ["hel", "lo wo", "rld"] {
-            parser.append_streaming_text(&mut history, chunk);
+            parser.flush_streaming_text(&mut history);
+            assert_eq!(history.len(), 1, "{chunks:?}");
+            assert_eq!(
+                block_at(&history, 0),
+                &Block::Text {
+                    content: expected.into()
+                },
+                "{chunks:?}"
+            );
+            assert_eq!(history.status(history.order[0]), Some(Status::Done));
         }
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "hello world".into(),
-            }
-        );
     }
 
     #[test]
@@ -774,51 +788,6 @@ mod tests {
     }
 
     // -- Code blocks --------------------------------------------------
-
-    #[test]
-    fn code_block_detected() {
-        let (mut parser, mut history) = setup();
-        parser.append_streaming_text(&mut history, "```rust\nfn main() {}\n```");
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "```rust\nfn main() {}\n```".into(),
-            }
-        );
-        assert_eq!(history.status(history.order[0]), Some(Status::Done));
-    }
-
-    #[test]
-    fn code_block_chunked_at_line_boundaries() {
-        let (mut parser, mut history) = setup();
-        for chunk in ["```rust\n", "fn main() {}\n", "```"] {
-            parser.append_streaming_text(&mut history, chunk);
-        }
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "```rust\nfn main() {}\n```".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn code_block_with_multiple_lines() {
-        let (mut parser, mut history) = setup();
-        parser.append_streaming_text(&mut history, "```py\nprint(1)\nprint(2)\n```");
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "```py\nprint(1)\nprint(2)\n```".into(),
-            }
-        );
-    }
 
     #[test]
     fn streaming_opening_fence_is_not_shown_as_text() {
@@ -944,21 +913,6 @@ mod tests {
     }
 
     // -- Tables -------------------------------------------------------
-
-    #[test]
-    fn table_detected() {
-        let (mut parser, mut history) = setup();
-        parser.append_streaming_text(&mut history, "| a | b |\n|---|---|\n| 1 | 2 |");
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
-            }
-        );
-        assert_eq!(history.status(history.order[0]), Some(Status::Done));
-    }
 
     #[test]
     fn streaming_table_rows_are_not_shown_until_line_commit() {
@@ -1307,38 +1261,6 @@ mod tests {
 
     // -- Chunk boundary stress ----------------------------------------
 
-    #[test]
-    fn newline_split_across_chunks() {
-        let (mut parser, mut history) = setup();
-        for chunk in ["line1\n", "line2"] {
-            parser.append_streaming_text(&mut history, chunk);
-        }
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "line1\nline2".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn table_row_split_across_chunks() {
-        let (mut parser, mut history) = setup();
-        for chunk in ["| a ", "| b |\n|---", "--|\n| 1 | 2 |"] {
-            parser.append_streaming_text(&mut history, chunk);
-        }
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: "| a | b |\n|-----|\n| 1 | 2 |".into(),
-            }
-        );
-    }
-
     // -- Paragraph break ----------------------------------------------
 
     #[test]
@@ -1362,23 +1284,6 @@ mod tests {
     }
 
     // -- No-drop invariant --------------------------------------------
-
-    #[test]
-    fn no_text_lost_across_many_small_chunks() {
-        let (mut parser, mut history) = setup();
-        let full = "The quick brown fox jumps over the lazy dog.";
-        for ch in full.chars() {
-            parser.append_streaming_text(&mut history, &ch.to_string());
-        }
-        parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            block_at(&history, 0),
-            &Block::Text {
-                content: full.into()
-            }
-        );
-    }
 
     // -- Tool drafts -----------------------------------------------------
 

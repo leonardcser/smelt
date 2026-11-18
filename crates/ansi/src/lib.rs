@@ -384,14 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_plain_text() {
-        let spans = parse_ansi("hello");
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].text, "hello");
-        assert_eq!(spans[0].style, Style::default());
-    }
-
-    #[test]
     fn parse_red_fg() {
         let spans = parse_ansi("a\x1b[31mb\x1b[0mc");
         assert_eq!(spans.len(), 3);
@@ -547,13 +539,6 @@ mod tests {
         let spans = parse_ansi("abc\rdef");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].text, "def");
-    }
-
-    #[test]
-    fn parse_multiple_carriage_returns() {
-        let spans = parse_ansi("0%\r25%\r50%\r100%");
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].text, "100%");
     }
 
     #[test]

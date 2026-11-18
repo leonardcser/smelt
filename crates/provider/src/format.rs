@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_supports_structured_output_recognizes_4_5_4_6_and_mythos() {
+    fn anthropic_structured_output_requires_4_5_or_newer() {
         for model in [
             "claude-sonnet-4-5-20250929",
             "claude-opus-4-6",
@@ -116,10 +116,6 @@ mod tests {
         ] {
             assert!(anthropic_supports_structured_output(model), "{model}");
         }
-    }
-
-    #[test]
-    fn anthropic_supports_structured_output_rejects_older_models() {
         for model in ["claude-3-5-sonnet", "claude-sonnet-4-4", "gpt-5"] {
             assert!(!anthropic_supports_structured_output(model), "{model}");
         }

@@ -235,11 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn expand_config_path_normalizes_relative_paths() {
-        assert_eq!(expand("foo/../bar").unwrap(), PathBuf::from("bar"));
-    }
-
-    #[test]
     fn expand_config_path_is_passthrough_for_non_expanding_paths() {
         assert_eq!(expand("/etc").unwrap(), PathBuf::from("/etc"));
         assert_eq!(

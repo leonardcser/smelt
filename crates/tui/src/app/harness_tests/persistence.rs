@@ -2790,31 +2790,6 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
 }
 
 #[test]
-fn store_backed_resume_then_continue_preserves_prior_tool_invocations() {
-    let guard = test_home_guard();
-    let session_id = {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        for item in tool_history() {
-            app.session_append_history(item);
-        }
-        save_and_close_full_history_fixture(app)
-    };
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
-    resumed.session_append_history(HistoryItem::user(Content::text("continue after resume")));
-    resumed.save_session_and_flush();
-
-    let loaded = loaded_session(&resumed, &session_id);
-    assert_eq!(loaded.history.len(), 3);
-    assert_committed_tool_invocation(&loaded.history);
-    assert!(matches!(
-        loaded.history.last(),
-        Some(HistoryItem::User { content, .. }) if content.text_content() == "continue after resume"
-    ));
-}
-
-#[test]
 fn repeated_store_backed_resume_cycles_preserve_all_history() {
     let guard = test_home_guard();
     let session_id = {

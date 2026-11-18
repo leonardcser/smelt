@@ -415,37 +415,22 @@ fn fast_slash_command_enables_the_next_turn_payload() {
 }
 
 #[test]
-fn fast_slash_command_rejects_unsupported_model() {
-    let mut app = TestApp::builder().build();
-    app.configure_active_model_fast_mode("codex", false);
+fn fast_slash_command_rejects_unsupported_model_or_provider() {
+    for (provider, supported) in [("codex", false), ("openai", true)] {
+        let mut app = TestApp::builder().build();
+        app.configure_active_model_fast_mode(provider, supported);
 
-    app.type_text("/fast");
-    app.press(KeyCode::Enter);
+        app.type_text("/fast on");
+        app.press(KeyCode::Enter);
 
-    assert_eq!(app.session_snapshot().fast_mode, Some(false));
-    assert!(app.state().notification.is_some());
-    assert!(!app.actions().iter().any(|action| matches!(
-        action,
-        Action::EngineSend(cmd)
-            if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { .. })
-    )));
-}
-
-#[test]
-fn fast_slash_command_rejects_non_codex_provider() {
-    let mut app = TestApp::builder().build();
-    app.configure_active_model_fast_mode("openai", true);
-
-    app.type_text("/fast on");
-    app.press(KeyCode::Enter);
-
-    assert_eq!(app.session_snapshot().fast_mode, Some(false));
-    assert!(app.state().notification.is_some());
-    assert!(!app.actions().iter().any(|action| matches!(
-        action,
-        Action::EngineSend(cmd)
-            if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { .. })
-    )));
+        assert_eq!(app.session_snapshot().fast_mode, Some(false), "{provider}");
+        assert!(app.state().notification.is_some(), "{provider}");
+        assert!(!app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd)
+                if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { .. })
+        )));
+    }
 }
 
 #[test]
@@ -1630,47 +1615,11 @@ fn placeholder_dismissal_does_not_swallow_second_escape_cancel() {
 }
 
 #[test]
-fn ctrl_c_on_empty_buffer_when_idle_quits() {
-    let mut app = TestApp::builder().build();
-    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(app.quit_requested());
-}
-
-#[test]
-fn ctrl_c_with_text_in_buffer_clears_buffer_without_quitting() {
-    let mut app = TestApp::builder().build();
-    app.type_text("hello");
-    assert_eq!(app.state().prompt_text, "hello");
-
-    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert_eq!(app.state().prompt_text, "");
-    assert!(!app.quit_requested());
-}
-
-#[test]
 fn fresh_vim_prompt_starts_in_insert_mode() {
     // Chat input ergonomics: even with vim enabled, the prompt starts
     // in Insert so the first keystroke types instead of navigating.
     let app = TestApp::builder().with_vim(true).build();
     assert_eq!(app.state().vim_mode, VimMode::Insert);
-}
-
-#[test]
-fn typing_into_cmdline_appends_to_payload() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.press(KeyCode::Esc);
-    app.type_char(':');
-    app.type_text("help");
-    assert_eq!(app.state().cmdline_text, "help");
-}
-
-#[test]
-fn slash_in_editable_prompt_does_not_open_search() {
-    let mut app = TestApp::builder().build();
-    app.type_char('/');
-    let s = app.state();
-    assert!(!s.cmdline_open);
-    assert_eq!(s.prompt_text, "/");
 }
 
 #[test]
@@ -1730,19 +1679,13 @@ fn prompt_docked_picker_does_not_get_tail_clobbered_on_first_render() {
 }
 
 #[test]
-fn generic_prompt_buf_source_setter_uses_prompt_install_path() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    assert!(app.run_lua(r#"smelt.prompt.win:buf():source("hel")"#));
-    app.type_text("lo");
-    assert_eq!(app.state().prompt_text, "hello");
-}
-
-#[test]
-fn generic_prompt_buf_lines_setter_uses_prompt_install_path() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    assert!(app.run_lua(r#"smelt.prompt.win:buf():lines({ "hel" })"#));
-    app.type_text("lo");
-    assert_eq!(app.state().prompt_text, "hello");
+fn generic_prompt_buf_setters_keep_the_prompt_editable() {
+    for setter in [r#"source("hel")"#, r#"lines({ "hel" })"#] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(&format!("smelt.prompt.win:buf():{setter}")));
+        app.type_text("lo");
+        assert_eq!(app.state().prompt_text, "hello", "{setter}");
+    }
 }
 
 #[test]
@@ -2379,12 +2322,6 @@ fn pasted_http_image_url_stays_text() {
     assert_eq!(app.state().prompt_text, url);
     let prompt = app.ui_probe().buf(crate::app::PROMPT_EDIT_BUF).unwrap();
     assert!(prompt.attachments.is_empty());
-}
-
-#[test]
-fn prompt_cursor_probe_catches_stuck_insert_after_turn() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    app.probe_prompt_cursor_after_turn(1);
 }
 
 #[test]

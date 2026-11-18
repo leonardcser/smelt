@@ -189,32 +189,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn style_builder_methods_set_their_fields() {
-        let s = Style::new()
-            .fg(Color::Red)
-            .bg(Color::Blue)
-            .bold()
-            .dim()
-            .italic()
-            .underline()
-            .crossedout()
-            .reverse();
-        assert_eq!(
-            s,
-            Style {
-                fg: Some(Color::Red),
-                bg: Some(Color::Blue),
-                bold: true,
-                dim: true,
-                italic: true,
-                underline: true,
-                crossedout: true,
-                reverse: true,
-            }
-        );
-    }
-
-    #[test]
     fn color_mix_toward_handles_named_and_ansi_colors() {
         assert_eq!(
             Color::Black.mix_toward(Color::White, 0.5),

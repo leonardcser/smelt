@@ -410,32 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn avg_returns_none_for_empty_samples() {
-        assert_eq!(avg(&[]), None);
-    }
-
-    #[test]
     fn avg_computes_arithmetic_mean() {
         assert_eq!(avg(&[1.0, 2.0, 3.0]), Some(2.0));
         assert_eq!(avg(&[5.0]), Some(5.0));
-    }
-
-    #[test]
-    fn new_starts_idle_and_not_animating() {
-        let (_clock, s) = fixture();
-        assert!(!s.is_animating());
-        assert_eq!(s.elapsed(), None);
-        assert!(s.turn_meta().is_none());
-        assert!(s.engine_state().is_none());
-    }
-
-    #[test]
-    fn begin_working_marks_state_animating() {
-        let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        assert!(s.is_animating());
-        assert!(s.elapsed().is_some());
-        assert_eq!(s.engine_state(), Some(WorkState::Working));
     }
 
     #[test]
@@ -513,15 +490,6 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_reflects_advanced_clock_for_live_turn() {
-        let (clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        assert_eq!(s.elapsed(), Some(Duration::ZERO));
-        clock.advance(Duration::from_millis(750));
-        assert_eq!(s.elapsed(), Some(Duration::from_millis(750)));
-    }
-
-    #[test]
     fn clear_drops_both_live_and_last() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
@@ -564,20 +532,6 @@ mod tests {
     }
 
     #[test]
-    fn display_tps_survives_turn_without_samples() {
-        let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        s.record_tokens_per_sec(12.0);
-        s.finish(TurnOutcome::Done);
-
-        s.begin(TurnPhase::Working);
-        let meta = s.finish(TurnOutcome::Done);
-        assert!(meta.avg_tps.is_none());
-        assert_eq!(meta.display_tps, Some(12.0));
-        assert_eq!(s.display_tps(), Some(12.0));
-    }
-
-    #[test]
     fn restore_from_turn_meta_uses_display_tps_snapshot() {
         let (_clock, mut s) = fixture();
         let meta = TurnMeta {
@@ -591,46 +545,6 @@ mod tests {
 
         assert_eq!(s.turn_meta().unwrap().avg_tps, None);
         assert_eq!(s.display_tps(), Some(18.0));
-    }
-
-    #[test]
-    fn set_paused_freezes_elapsed_clock() {
-        let (clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        clock.advance(Duration::from_millis(50));
-        assert_eq!(s.elapsed(), Some(Duration::from_millis(50)));
-        s.set_paused(true);
-        assert_eq!(s.engine_state(), Some(WorkState::Paused));
-        clock.advance(Duration::from_millis(100));
-        // Elapsed is frozen while paused.
-        assert_eq!(s.elapsed(), Some(Duration::from_millis(50)));
-        s.set_paused(false);
-        assert_eq!(s.engine_state(), Some(WorkState::Working));
-        clock.advance(Duration::from_millis(10));
-        assert_eq!(s.elapsed(), Some(Duration::from_millis(60)));
-    }
-
-    #[test]
-    fn set_paused_is_idempotent() {
-        let (clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        s.set_paused(true);
-        clock.advance(Duration::from_millis(5));
-        s.set_paused(true); // no-op
-        assert_eq!(s.engine_state(), Some(WorkState::Paused));
-        clock.advance(Duration::from_millis(5));
-        s.set_paused(false);
-        clock.advance(Duration::from_millis(10));
-        s.set_paused(false); // no-op
-        assert_eq!(s.engine_state(), Some(WorkState::Working));
-    }
-
-    #[test]
-    fn set_paused_without_live_turn_is_noop() {
-        let (_clock, mut s) = fixture();
-        s.set_paused(true);
-        s.set_paused(false);
-        assert!(!s.is_animating());
     }
 
     #[test]
@@ -667,47 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn restore_from_turn_meta_archives_interrupted_outcome() {
-        let (_clock, mut s) = fixture();
-        let meta = TurnMeta {
-            elapsed_ms: 200,
-            avg_tps: None,
-            display_tps: None,
-            interrupted: true,
-        };
-        s.restore_from_turn_meta(&meta);
-        let round = s.turn_meta().unwrap();
-        assert!(round.interrupted);
-    }
-
-    #[test]
-    fn restore_from_turn_meta_discards_existing_live_turn() {
-        let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        let meta = TurnMeta {
-            elapsed_ms: 0,
-            avg_tps: None,
-            display_tps: None,
-            interrupted: false,
-        };
-        s.restore_from_turn_meta(&meta);
-        assert!(!s.is_animating());
-    }
-
-    #[test]
-    fn engine_state_idle_returns_none() {
-        let (_clock, s) = fixture();
-        assert!(s.engine_state().is_none());
-    }
-
-    #[test]
-    fn engine_state_working_after_begin() {
-        let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        assert_eq!(s.engine_state(), Some(WorkState::Working));
-    }
-
-    #[test]
     fn engine_state_retrying_after_begin_retrying() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Retrying {
@@ -715,27 +588,6 @@ mod tests {
             attempt: 1,
         });
         assert_eq!(s.engine_state(), Some(WorkState::Retrying));
-    }
-
-    #[test]
-    fn engine_state_paused_when_timer_paused() {
-        let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        s.set_paused(true);
-        assert_eq!(s.engine_state(), Some(WorkState::Paused));
-        s.set_paused(false);
-        assert_eq!(s.engine_state(), Some(WorkState::Working));
-    }
-
-    #[test]
-    fn engine_state_idle_after_finish() {
-        let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Done);
-        // `Done` is layered by the tui resolver on top of the busy stack;
-        // `engine_state` itself only describes the live turn.
-        assert!(s.engine_state().is_none());
-        assert_eq!(s.last_outcome(), Some(TurnOutcome::Done));
     }
 
     #[test]

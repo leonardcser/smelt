@@ -1040,50 +1040,29 @@ mod tests {
         );
     }
 
-    // ---- supports_adaptive_thinking ----
-
     #[test]
-    fn adaptive_thinking_recognizes_opus_and_sonnet_4_6() {
+    fn adaptive_thinking_is_limited_to_opus_and_sonnet_4_6() {
         assert!(supports_adaptive_thinking("claude-opus-4-6"));
         assert!(supports_adaptive_thinking("claude-sonnet-4-6"));
-    }
-
-    #[test]
-    fn adaptive_thinking_rejects_other_models() {
         assert!(!supports_adaptive_thinking("claude-opus-3-5"));
         assert!(!supports_adaptive_thinking("claude-haiku-4-5"));
     }
 
-    // ---- parse_cache_write_tokens ----
-
     #[test]
-    fn parse_cache_write_prefers_top_level_cache_creation_input_tokens() {
-        let v = json!({"cache_creation_input_tokens": 42});
-        assert_eq!(parse_cache_write_tokens(&v), Some(42));
-    }
-
-    #[test]
-    fn parse_cache_write_sums_ephemeral_5m_and_1h_when_top_level_absent() {
-        let v = json!({"cache_creation": {
-            "ephemeral_5m_input_tokens": 10,
-            "ephemeral_1h_input_tokens": 5,
-        }});
-        assert_eq!(parse_cache_write_tokens(&v), Some(15));
-    }
-
-    #[test]
-    fn parse_cache_write_returns_none_when_ephemeral_sum_is_zero() {
-        let v = json!({"cache_creation": {
-            "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 0,
-        }});
-        assert_eq!(parse_cache_write_tokens(&v), None);
-    }
-
-    #[test]
-    fn parse_cache_write_returns_none_when_nothing_present() {
-        let v = json!({});
-        assert_eq!(parse_cache_write_tokens(&v), None);
+    fn parse_cache_write_tokens_prefers_top_level_then_sums_ephemeral() {
+        let ephemeral = |a, b| {
+            json!({"cache_creation": {
+                "ephemeral_5m_input_tokens": a,
+                "ephemeral_1h_input_tokens": b,
+            }})
+        };
+        assert_eq!(
+            parse_cache_write_tokens(&json!({"cache_creation_input_tokens": 42})),
+            Some(42)
+        );
+        assert_eq!(parse_cache_write_tokens(&ephemeral(10, 5)), Some(15));
+        assert_eq!(parse_cache_write_tokens(&ephemeral(0, 0)), None);
+        assert_eq!(parse_cache_write_tokens(&json!({})), None);
     }
 
     // ---- build_body ----

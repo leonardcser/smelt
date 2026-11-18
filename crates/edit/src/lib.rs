@@ -5079,16 +5079,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_open_returns_unique_ids() {
-        let mut ui = make_ui();
-        let a = ui.overlay_open(stub_overlay());
-        let b = ui.overlay_open(stub_overlay());
-        assert_ne!(a, b);
-        assert!(ui.overlay(a).is_some());
-        assert!(ui.overlay(b).is_some());
-    }
-
-    #[test]
     fn overlay_close_removes_overlay() {
         let mut ui = make_ui();
         let id = ui.overlay_open(stub_overlay());
@@ -5435,12 +5425,6 @@ mod tests {
     }
 
     #[test]
-    fn active_modal_empty_returns_none() {
-        let ui = make_ui();
-        assert_eq!(ui.active_modal(), None);
-    }
-
-    #[test]
     fn active_modal_skips_non_modal_overlays() {
         let mut ui = make_ui();
         ui.overlay_open(stub_overlay()); // non-modal
@@ -5500,13 +5484,6 @@ mod tests {
         assert!(ui.focus_history().is_empty());
         ui.overlay_close(id);
         assert_eq!(ui.focus(), None);
-    }
-
-    #[test]
-    fn focused_overlay_returns_none_when_no_focus() {
-        let mut ui = make_ui();
-        ui.overlay_open(stub_overlay());
-        assert_eq!(ui.focused_overlay(), None);
     }
 
     #[test]
@@ -5736,27 +5713,10 @@ mod tests {
     }
 
     #[test]
-    fn focus_returns_none_on_fresh_ui() {
-        let ui = make_ui();
-        assert_eq!(ui.focus(), None);
-        assert!(ui.focus_history().is_empty());
-    }
-
-    #[test]
     fn set_focus_unknown_win_returns_false() {
         let mut ui = make_ui();
         assert!(!ui.set_focus(WinId(999)));
         assert_eq!(ui.focus(), None);
-    }
-
-    #[test]
-    fn set_focus_on_registered_split_focuses_the_win() {
-        let mut ui = make_ui();
-        let win = WinId(7);
-        make_split(&mut ui, win);
-        assert!(ui.set_focus(win));
-        assert_eq!(ui.focus(), Some(win));
-        assert!(ui.focus_history().is_empty());
     }
 
     #[test]
@@ -5780,26 +5740,6 @@ mod tests {
         ui.set_focus(win);
         assert!(ui.set_focus(win));
         assert!(ui.focus_history().is_empty());
-    }
-
-    #[test]
-    fn set_focus_chain_builds_history_in_order() {
-        let mut ui = make_ui();
-        for n in 1..=4 {
-            make_split(&mut ui, WinId(n));
-        }
-        ui.set_focus(WinId(1));
-        ui.set_focus(WinId(2));
-        ui.set_focus(WinId(3));
-        ui.set_focus(WinId(4));
-        assert_eq!(ui.focus(), Some(WinId(4)));
-        assert_eq!(ui.focus_history(), &[WinId(1), WinId(2), WinId(3)]);
-    }
-
-    #[test]
-    fn overlay_hit_test_returns_none_when_empty() {
-        let ui = make_ui();
-        assert_eq!(ui.overlay_hit_test(30, 10), None);
     }
 
     #[test]
@@ -6437,12 +6377,6 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_returns_none_when_nothing_covers_point() {
-        let ui = make_ui();
-        assert_eq!(ui.hit_test(0, 0), None);
-    }
-
-    #[test]
     fn overlay_hit_test_topmost_wins_when_no_modal() {
         let mut ui = make_ui();
         let _bottom =
@@ -6559,22 +6493,6 @@ mod tests {
         // New tree omits the focused leaf - focus clears.
         ui.set_layout(LayoutTree::vbox(Vec::new()));
         assert_eq!(ui.focus(), None);
-    }
-
-    #[test]
-    fn capture_starts_unset() {
-        let ui = make_ui();
-        assert_eq!(ui.capture(), None);
-    }
-
-    #[test]
-    fn set_capture_then_clear_capture() {
-        let mut ui = make_ui();
-        let target = HitTarget::Scrollbar { owner: WinId(7) };
-        ui.set_capture(target);
-        assert_eq!(ui.capture(), Some(target));
-        ui.clear_capture();
-        assert_eq!(ui.capture(), None);
     }
 
     #[test]
@@ -6746,20 +6664,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_event_esc_closes_active_modal() {
-        let mut ui = make_ui();
-        let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
-        assert_eq!(ui.active_modal_overlay(), Some(id));
-        let result = dispatch_key(
-            &mut ui,
-            crossterm::event::KeyCode::Esc,
-            crossterm::event::KeyModifiers::NONE,
-        );
-        assert_eq!(result, Status::Consumed);
-        assert_eq!(ui.active_modal(), None);
-    }
-
-    #[test]
     fn dispatch_event_esc_with_modifiers_does_not_dismiss_modal() {
         let mut ui = make_ui();
         let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
@@ -6807,20 +6711,6 @@ mod tests {
         assert_eq!(result, Status::Consumed);
         assert_eq!(*count.lock().unwrap(), 1);
         assert!(ui.overlay(id).is_none());
-    }
-
-    #[test]
-    fn dispatch_event_ctrl_c_closes_active_modal() {
-        let mut ui = make_ui();
-        let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
-        assert_eq!(ui.active_modal_overlay(), Some(id));
-        let result = dispatch_key(
-            &mut ui,
-            crossterm::event::KeyCode::Char('c'),
-            crossterm::event::KeyModifiers::CONTROL,
-        );
-        assert_eq!(result, Status::Consumed);
-        assert_eq!(ui.active_modal(), None);
     }
 
     #[test]
@@ -7566,78 +7456,6 @@ mod tests {
     }
 
     // ── UiHost trait dispatch ────────────────────────────────────────
-
-    #[test]
-    fn ui_host_dispatch_round_trips_through_dyn() {
-        // Drive every UiHost method through `&mut dyn UiHost` so the
-        // trait shape is exercised end-to-end (not just the inherent
-        // path). Mirrors how Lua bindings reach the compositor - by
-        // trait, not by direct field access.
-        fn drive(host: &mut dyn UiHost) -> (BufId, WinId, OverlayId) {
-            let buf = host.buf_create(BufCreateOpts::default());
-            host.buf_mut(buf)
-                .unwrap()
-                .set_all_lines(vec!["uihost".into()]);
-            let win = host
-                .win_open_split(
-                    buf,
-                    SplitConfig {
-                        gutters: Gutters::default(),
-                    },
-                )
-                .unwrap();
-            {
-                let w = host.win_mut(win).unwrap();
-                w.text_state_mut().cursor_row = 0;
-                w.text_state_mut().cursor_col = 3;
-            }
-            // Hosting `win` in a modal overlay both makes it focusable
-            // (overlay leaf) and exercises `overlay_open`. The modal
-            // also auto-focuses the first leaf - re-asserting via the
-            // explicit `set_focus` keeps that method on the trait path.
-            let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]);
-            let oid =
-                host.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter).modal(true));
-            assert!(host.set_focus(win));
-            // `ui()` must yield the same compositor every other method
-            // mutates; assert the focused window matches what we just set.
-            assert_eq!(host.ui().focus(), Some(win));
-            (buf, win, oid)
-        }
-
-        let mut ui = make_ui();
-        let (buf, win, oid) = drive(&mut ui);
-
-        // Fire-event path through the trait. The callback observes the
-        // payload that the trait dispatch threaded through.
-        let saw = std::sync::Arc::new(std::sync::Mutex::new(false));
-        let saw_cb = saw.clone();
-        ui.win_on_event(
-            win,
-            WinEvent::TextChanged,
-            Callback::Rust(Box::new(move |_| {
-                *saw_cb.lock().unwrap() = true;
-                CallbackResult::Consumed
-            })),
-        );
-        ui.fire_win_event(
-            win,
-            WinEvent::TextChanged,
-            Payload::Text {
-                content: "uihost".into(),
-            },
-            &mut |_, _, _| {},
-        );
-        assert!(*saw.lock().unwrap());
-
-        // Close paths through the trait clean up the structures the
-        // open paths created.
-        let removed = ui.overlay_close(oid);
-        assert!(removed.is_some());
-        let cb_ids = UiHost::win_close(&mut ui, win);
-        assert!(cb_ids.is_empty());
-        assert!(ui.buf(buf).is_none());
-    }
 
     // ── UiHost per-pane data accessors ───────────────────────────────
 

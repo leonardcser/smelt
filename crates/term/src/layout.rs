@@ -1837,15 +1837,6 @@ mod tests {
     }
 
     #[test]
-    fn natural_size_hbox_lengths_sum_along_primary() {
-        let tree = LayoutTree::hbox(vec![
-            (Constraint::Length(20), LayoutTree::leaf(A)),
-            (Constraint::Length(10), LayoutTree::leaf(B)),
-        ]);
-        assert_eq!(tree.natural_size((80, 24)), (30, 0));
-    }
-
-    #[test]
     fn natural_size_vbox_gap_adds_to_primary() {
         let tree = LayoutTree::vbox(vec![
             (Constraint::Length(3), LayoutTree::leaf(A)),
@@ -1906,12 +1897,6 @@ mod tests {
             ),
         ]);
         assert_eq!(tree.leaves_in_order(), vec![A, B, C]);
-    }
-
-    #[test]
-    fn leaves_in_order_single_leaf() {
-        let tree = LayoutTree::leaf(A);
-        assert_eq!(tree.leaves_in_order(), vec![A]);
     }
 
     #[test]

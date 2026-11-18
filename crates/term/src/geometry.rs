@@ -223,24 +223,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bottom_is_y_plus_height() {
-        let r = Rect::new(0, 3, 10, 7);
-        assert_eq!(r.bottom(), 10);
-    }
-
-    #[test]
-    fn right_is_x_plus_width() {
-        let r = Rect::new(5, 0, 12, 4);
-        assert_eq!(r.right(), 17);
-    }
-
-    #[test]
-    fn area_multiplies_width_by_height() {
-        assert_eq!(Rect::new(0, 0, 80, 24).area(), 1920);
-        assert_eq!(Rect::new(0, 0, 0, 99).area(), 0);
-    }
-
-    #[test]
     fn contains_includes_top_left_excludes_bottom_right() {
         // Half-open ranges: [x, right) × [y, bottom).
         let r = Rect::new(10, 5, 4, 3); // x 10..14, y 5..8
@@ -248,12 +230,6 @@ mod tests {
         assert!(r.contains(13, 7), "last inclusive cell should be inside");
         assert!(!r.contains(10, 8), "bottom edge is exclusive");
         assert!(!r.contains(14, 5), "right edge is exclusive");
-    }
-
-    #[test]
-    fn zero_sized_rect_contains_nothing() {
-        let r = Rect::new(5, 5, 0, 0);
-        assert!(!r.contains(5, 5));
     }
 
     #[test]

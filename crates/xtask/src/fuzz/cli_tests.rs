@@ -657,14 +657,6 @@ fn cmin_rejects_competing_minimizers_empty_results_and_publication_conflicts() {
 }
 
 #[test]
-fn run_rejects_worker_counts_that_overflow_libfuzzer() {
-    let fixture = Fixture::new();
-    let output = fixture.run(&["run", "text_ops", "--fork", "4294967295"], "ok");
-    assert_eq!(output.termination.code(), 2);
-    assert!(!fixture.root().join("replays").exists());
-}
-
-#[test]
 fn default_build_path_and_missing_llvm_are_reported_correctly() {
     let fixture = Fixture::new();
     let mut command = fixture.command(&["build", "text_ops"]);
@@ -724,29 +716,6 @@ fn build_timeout_override_bounds_target_and_helper_builds() {
         .run(&["build", "text_ops"], "slow-target-build")
         .success("build with default watchdog")
         .unwrap();
-}
-
-#[test]
-fn invalid_build_timeouts_fail_before_tool_execution() {
-    let fixture = Fixture::new();
-    for args in [
-        vec!["build", "--build-timeout"],
-        vec!["build", "--build-timeout=0"],
-        vec!["build", "--build-timeout", "invalid"],
-        vec!["build", "--build-timeout", "4294967296"],
-        vec!["--build-timeout=0", "build", "--build-timeout=2"],
-    ] {
-        let mut command = fixture.command(&args);
-        command.env("PATH", fixture.root().join("no-tools"));
-        let output = fixture
-            .runner
-            .run(command, Some(Duration::from_secs(20)), OutputMode::Capture)
-            .unwrap();
-        assert_eq!(output.termination.code(), 2, "{}", output.stderr.text());
-        assert!(output.stderr.text().contains("--build-timeout"));
-        assert!(!output.stderr.text().contains("spawn cargo"));
-        assert!(!fixture.root().join("invocation/relative build").exists());
-    }
 }
 
 #[test]

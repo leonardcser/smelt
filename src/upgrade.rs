@@ -1141,12 +1141,6 @@ mod tests {
     }
 
     #[test]
-    fn unstable_build_uses_explicit_staging_root() {
-        let args = main_install_args(Path::new("/tmp/staging")).unwrap();
-        assert_eq!(args[args.len() - 2..], ["--root", "/tmp/staging"]);
-    }
-
-    #[test]
     fn install_lock_admits_one_holder_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("smelt");

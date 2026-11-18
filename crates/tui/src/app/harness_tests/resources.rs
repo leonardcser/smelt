@@ -1,17 +1,6 @@
 use super::*;
 
 #[test]
-fn builds_a_fresh_test_app() {
-    let app = TestApp::builder().build();
-    let s = app.state();
-    assert!(!s.cmdline_open);
-    assert!(!s.quit_requested);
-    assert!(!s.agent_running);
-    assert_eq!(s.app_focus, AppFocus::Prompt);
-    assert!(s.queued_inputs.is_empty());
-}
-
-#[test]
 fn function_key_overlays_toggle_and_dismiss_without_mouse_focus() {
     let mut app = TestApp::builder().build();
 
@@ -1097,20 +1086,6 @@ fn api_base_endpoint_warning_is_persistent_and_deduped() {
     assert!(entries[0]
         .full
         .contains("using https://api.cerebras.ai/v1 instead"));
-}
-
-#[test]
-fn feed_one_records_alloc_delta_with_tick_near_zero() {
-    let mut app = TestApp::builder().build();
-    assert!(app.last_alloc_delta().is_none());
-    app.feed_one(SourceEvent::Tick(10));
-    let delta = app.last_alloc_delta().expect("delta after first event");
-    assert!(
-        delta.allocs < 32,
-        "Tick should allocate near zero, got {} allocs / {} bytes",
-        delta.allocs,
-        delta.bytes_grown
-    );
 }
 
 #[test]

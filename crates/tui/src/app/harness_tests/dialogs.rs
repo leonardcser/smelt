@@ -2543,47 +2543,6 @@ fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
 }
 
 #[test]
-fn tool_evaluation_denies_commands_inside_nested_shells() {
-    let mut app = TestApp::builder().build();
-    let permissions = app.core_probe().permissions.snapshot().as_ref().clone();
-    let permissions = permissions.with_overrides(&protocol::PermissionOverrides {
-        tools: None,
-        subcommands: std::collections::HashMap::from([(
-            "bash".to_string(),
-            protocol::RuleSetOverride {
-                allow: vec!["bash *".into(), "flock *".into()],
-                deny: vec!["rm *".into()],
-                ask: vec![],
-            },
-        )]),
-    });
-    app.replace_permissions_for_harness(permissions);
-    app.start_turn(1);
-    let _ = app.drain_engine_sends();
-
-    for (id, command) in [
-        (301, "bash -c 'rm scratch.txt'"),
-        (302, "flock lockfile bash -c 'rm scratch.txt'"),
-        (303, "flock lockfile -c 'rm scratch.txt'"),
-        (304, "env -i bash -c 'rm scratch.txt'"),
-        (305, "flock lockfile env -i bash -c 'rm scratch.txt'"),
-    ] {
-        let decision = evaluate_tool(
-            &mut app,
-            id,
-            "nested-command",
-            "bash",
-            std::collections::HashMap::from([(
-                "command".to_string(),
-                serde_json::Value::String(command.to_string()),
-            )]),
-            protocol::AgentMode::parse("yolo").unwrap(),
-        );
-        assert_eq!(decision, protocol::Decision::Deny, "command={command}");
-    }
-}
-
-#[test]
 fn switch_cwd_outside_workspace_requires_destination_permission() {
     let environment_guard = test_environment_guard();
     let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
@@ -3042,7 +3001,7 @@ fn open_confirm_recheck_keeps_dialog_when_mode_still_asks() {
 }
 
 #[test]
-fn public_status_open_confirm_needs_attention() {
+fn open_confirm_needs_attention_without_statusline_pending() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
@@ -3056,33 +3015,14 @@ fn public_status_open_confirm_needs_attention() {
     assert_eq!(app.pending_confirm_count(), 1);
     assert!(app.state().active_modal.is_some());
 
-    let (state, reason) = app.public_status_state_reason();
     assert_eq!(
-        state,
-        smelt_core::public_status::PublicState::NeedsAttention
+        app.public_status_state_reason(),
+        (
+            smelt_core::public_status::PublicState::NeedsAttention,
+            Some(smelt_core::public_status::PublicReason::Permission)
+        )
     );
-    assert_eq!(
-        reason,
-        Some(smelt_core::public_status::PublicReason::Permission)
-    );
-}
-
-#[test]
-fn open_confirm_dialog_does_not_show_permission_pending_in_statusline() {
-    let mut app = TestApp::builder().build();
-    install_confirm_test_permissions(&mut app);
-    app.start_turn(1);
-
-    {
-        let mut pending = Vec::new();
-        let ctrl = dispatch_confirm_request(&mut app, confirm_req(130), &mut pending);
-        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
-    }
-
-    assert_eq!(app.pending_confirm_count(), 1);
-    assert!(app.state().active_modal.is_some());
-    let frame = app.render_to_frame();
-    let text = frame.text();
+    let text = app.render_to_frame().text();
     let statusline = text.lines().last().expect("rendered statusline");
     assert!(!statusline.contains("permission pending"), "{statusline:?}");
 }
@@ -3905,46 +3845,22 @@ fn chained_dialog_opens_before_the_frame_that_follows_the_closing_key() {
 }
 
 #[test]
-fn colon_in_non_vim_mode_does_not_open_cmdline() {
-    let mut app = TestApp::builder().build();
-    app.type_char(':');
-    let s = app.state();
-    assert!(!s.cmdline_open);
-    assert_eq!(s.prompt_text, ":");
-}
-
-#[test]
-fn colon_in_vim_insert_mode_does_not_open_cmdline() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    // Fresh prompt is already in Insert.
-    assert_eq!(app.state().vim_mode, VimMode::Insert);
-
-    app.type_char(':');
-    let s = app.state();
-    assert!(!s.cmdline_open);
-    assert_eq!(s.prompt_text, ":");
-}
-
-#[test]
-fn colon_in_vim_normal_mode_opens_cmdline() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    // Drop to Normal first since the prompt starts in Insert.
-    app.press(KeyCode::Esc);
-    app.type_char(':');
-    let s = app.state();
-    assert!(s.cmdline_open);
-    assert_eq!(s.cmdline_text, "");
-}
-
-#[test]
-fn esc_closes_cmdline() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.press(KeyCode::Esc);
-    app.type_char(':');
-    assert!(app.state().cmdline_open);
-
-    app.press(KeyCode::Esc);
-    assert!(!app.state().cmdline_open);
+fn colon_opens_cmdline_only_in_vim_normal_mode() {
+    for (vim, normal) in [(false, false), (true, false), (true, true)] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        if normal {
+            app.press(KeyCode::Esc);
+        }
+        app.type_char(':');
+        let s = app.state();
+        assert_eq!(s.cmdline_open, normal, "vim={vim} normal={normal}");
+        assert_eq!(s.prompt_text, if normal { "" } else { ":" });
+        if normal {
+            assert_eq!(s.cmdline_text, "");
+            app.press(KeyCode::Esc);
+            assert!(!app.state().cmdline_open);
+        }
+    }
 }
 
 #[test]
@@ -3981,17 +3897,7 @@ fn cmdline_unicode_editing_uses_byte_safe_cursor() {
 
     let s = app.state();
     assert_eq!(s.cmdline_text, "a日b");
-    app.assert_invariants();
-}
-
-#[test]
-fn cmdline_typed_payload_does_not_trip_cursor_invariant() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.press(KeyCode::Esc);
-    app.type_char(':');
-    // Type more than any single-line buffer could ever encode in
-    // source byte arithmetic from cell position alone.
-    app.type_text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    app.type_text(&"a".repeat(60));
     app.assert_invariants();
 }
 

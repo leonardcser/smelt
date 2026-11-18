@@ -197,14 +197,6 @@ mod tests {
     // ---- Content constructors ----
 
     #[test]
-    fn content_text_constructor_wraps_string() {
-        match Content::text("hi") {
-            Content::Text(s) => assert_eq!(s, "hi"),
-            _ => panic!("expected Text"),
-        }
-    }
-
-    #[test]
     fn with_images_empty_list_returns_text_variant() {
         match Content::with_images("body".into(), vec![]) {
             Content::Text(s) => assert_eq!(s, "body"),
@@ -237,11 +229,6 @@ mod tests {
     }
 
     // ---- as_text ----
-
-    #[test]
-    fn as_text_returns_inner_string_for_text_variant() {
-        assert_eq!(Content::Text("body".into()).as_text(), "body");
-    }
 
     #[test]
     fn as_text_returns_first_text_part_for_parts_variant() {
@@ -284,11 +271,6 @@ mod tests {
         assert_eq!(c.text_content(), "a\nb");
     }
 
-    #[test]
-    fn text_content_clones_text_variant() {
-        assert_eq!(Content::Text("x".into()).text_content(), "x");
-    }
-
     // ---- image_labels / image_count ----
 
     #[test]
@@ -304,16 +286,6 @@ mod tests {
             },
         ]);
         assert_eq!(c.image_labels(), vec!["[named]", "[image]"]);
-    }
-
-    #[test]
-    fn image_labels_empty_for_text_variant() {
-        assert!(Content::Text("x".into()).image_labels().is_empty());
-    }
-
-    #[test]
-    fn image_count_zero_for_text_variant() {
-        assert_eq!(Content::Text("x".into()).image_count(), 0);
     }
 
     #[test]
@@ -349,12 +321,6 @@ mod tests {
     // ---- Content Serialize ----
 
     #[test]
-    fn content_text_serializes_as_bare_string() {
-        let s = serde_json::to_value(Content::Text("hi".into())).unwrap();
-        assert_eq!(s, json!("hi"));
-    }
-
-    #[test]
     fn content_parts_serializes_as_array() {
         let c = Content::Parts(vec![
             ContentPart::Text { text: "t".into() },
@@ -382,12 +348,6 @@ mod tests {
     }
 
     // ---- Content Deserialize ----
-
-    #[test]
-    fn content_deserialize_string_to_text_variant() {
-        let c: Content = serde_json::from_value(json!("hello")).unwrap();
-        assert!(matches!(c, Content::Text(ref s) if s == "hello"));
-    }
 
     #[test]
     fn content_deserialize_array_to_parts_variant() {

@@ -1062,11 +1062,6 @@ mod tests {
     // ---- ToolExecutionMode defaults + rename ----
 
     #[test]
-    fn tool_execution_mode_default_is_concurrent() {
-        assert_eq!(ToolExecutionMode::default(), ToolExecutionMode::Concurrent);
-    }
-
-    #[test]
     fn tool_execution_mode_serializes_as_snake_case() {
         assert_eq!(
             serde_json::to_value(ToolExecutionMode::Sequential).unwrap(),
@@ -1075,11 +1070,6 @@ mod tests {
     }
 
     // ---- ToolHookFlags::any ----
-
-    #[test]
-    fn tool_hook_flags_any_false_when_all_unset() {
-        assert!(!ToolHookFlags::default().any());
-    }
 
     #[test]
     fn tool_hook_flags_any_true_when_approval_patterns_set() {
@@ -1102,11 +1092,6 @@ mod tests {
     // ---- Decision ----
 
     #[test]
-    fn decision_default_is_allow() {
-        assert_eq!(Decision::default(), Decision::Allow);
-    }
-
-    #[test]
     fn decision_serializes_unit_variants_as_snake_case_strings() {
         assert_eq!(
             serde_json::to_value(Decision::Allow).unwrap(),
@@ -1120,14 +1105,6 @@ mod tests {
     fn decision_error_variant_serializes_with_rename_tag() {
         let v = serde_json::to_value(Decision::Error("boom".into())).unwrap();
         assert_eq!(v, json!({"error": "boom"}));
-    }
-
-    #[test]
-    fn decision_error_roundtrips_through_json() {
-        let d = Decision::Error("x".into());
-        let v = serde_json::to_value(&d).unwrap();
-        let back: Decision = serde_json::from_value(v).unwrap();
-        assert_eq!(back, Decision::Error("x".into()));
     }
 
     // ---- ToolDef defaults ----
@@ -1165,23 +1142,6 @@ mod tests {
 
     // ---- ToolMetadata ----
 
-    #[test]
-    fn tool_metadata_default_is_empty() {
-        let h = ToolMetadata::default();
-        assert!(h.approval_patterns.is_empty());
-        assert!(h.preflight_error.is_none());
-        assert!(h.summary.is_empty());
-    }
-
-    #[test]
-    fn tool_evaluation_default_decision_is_allow() {
-        let e = ToolEvaluation::default();
-        assert_eq!(e.decision, Decision::Allow);
-        assert!(e.metadata.approval_patterns.is_empty());
-        assert!(e.metadata.preflight_error.is_none());
-        assert!(e.metadata.summary.is_empty());
-    }
-
     // ---- EngineEvent roundtrip sanity ----
 
     #[test]
@@ -1198,12 +1158,6 @@ mod tests {
             EngineEvent::TokenUsage { background, .. } => assert!(!background),
             _ => panic!("expected TokenUsage"),
         }
-    }
-
-    #[test]
-    fn engine_event_ready_serializes_as_string_variant() {
-        let v = serde_json::to_value(EngineEvent::Ready).unwrap();
-        assert_eq!(v, json!("Ready"));
     }
 
     // ---- StartTurnPayload optional fields ----

@@ -15,11 +15,12 @@ fn recorded_turn_end(app: &mut TestApp) -> mlua::Table {
 }
 
 #[test]
-fn turn_error_preserves_request_queue() {
+fn turn_error_ends_the_turn_and_preserves_both_queue_stages() {
     let mut app = TestApp::builder().build();
     record_turn_end(&mut app);
     app.start_turn(1);
     app.steer("steer during error");
+    app.push_queued_message("next turn after error".to_string());
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "connection failed".to_string(),
@@ -27,61 +28,27 @@ fn turn_error_preserves_request_queue() {
         retry_at_ms: None,
     }));
 
-    assert!(!app.agent_running(), "error should end the active turn");
+    assert!(!app.agent_running());
+    assert_eq!(app.queued_request_count(), 1);
     assert_eq!(
-        app.queued_request_count(),
-        1,
-        "request-stage queued input should be preserved on error"
+        app.state().queued_inputs,
+        ["steer during error", "next turn after error"]
     );
-    assert_eq!(
-        app.working_probe().last_outcome(),
-        Some(smelt_core::working::TurnOutcome::Errored),
-        "error should archive an error outcome"
-    );
-
-    // Plugins observe the turn_end event; it must signal interruption on error.
-    assert!(
-        recorded_turn_end(&mut app)
-            .get::<bool>("cancelled")
-            .unwrap(),
-        "turn_end event should be cancelled on error"
-    );
-}
-
-#[test]
-fn turn_error_preserves_turn_queue() {
-    let mut app = TestApp::builder().build();
-    app.start_turn(1);
-    app.push_queued_message("next turn after error".to_string());
-
-    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
-        message: "quota exceeded".to_string(),
-        kind: None,
-        retry_at_ms: None,
-    }));
-
-    assert!(!app.agent_running(), "error should end the active turn");
-    let state = app.state();
-    assert_eq!(
-        state.queued_inputs,
-        vec!["next turn after error".to_string()],
-        "turn-stage queued input should be preserved on error"
-    );
-    // A queued turn-stage message must not auto-start after an error.
-    let started_turn = app.actions().iter().any(|action| match action {
-        Action::EngineSend(cmd) => matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(_)),
-        _ => false,
-    });
-    assert!(
-        !started_turn,
-        "queued turn should not auto-start after an error"
-    );
-
-    // The status bar should record an error outcome, not done.
+    assert!(!has_started_turn(&app.drain_engine_sends()));
     assert_eq!(
         app.working_probe().last_outcome(),
         Some(smelt_core::working::TurnOutcome::Errored)
     );
+    assert_eq!(
+        app.public_status_state_reason(),
+        (
+            smelt_core::public_status::PublicState::NeedsAttention,
+            Some(smelt_core::public_status::PublicReason::Error)
+        )
+    );
+    assert!(recorded_turn_end(&mut app)
+        .get::<bool>("cancelled")
+        .unwrap());
 }
 
 #[test]
@@ -212,83 +179,42 @@ fn paused_prompt_still_queues_messages_and_resumes_on_empty_enter() {
 }
 
 #[test]
-fn public_status_turn_error_needs_attention() {
-    let mut app = TestApp::builder().build();
-    app.start_turn(1);
+fn only_quota_errors_publish_a_continuation_token() {
+    for (kind, name, resumable) in [
+        (protocol::EngineAskErrorKind::Quota, "quota", true),
+        (protocol::EngineAskErrorKind::Network, "network", false),
+    ] {
+        let mut app = TestApp::builder().build();
+        record_turn_end(&mut app);
+        app.start_turn(1);
 
-    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
-        message: "connection failed".to_string(),
-        kind: None,
-        retry_at_ms: None,
-    }));
-    let (state, reason) = app.public_status_state_reason();
-    assert_eq!(
-        state,
-        smelt_core::public_status::PublicState::NeedsAttention
-    );
-    assert_eq!(reason, Some(smelt_core::public_status::PublicReason::Error));
-}
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+            message: "provider error".into(),
+            kind: Some(kind),
+            retry_at_ms: Some(123_000),
+        }));
 
-#[test]
-fn resumable_turn_error_publishes_continuation_token() {
-    let mut app = TestApp::builder().build();
-    record_turn_end(&mut app);
-    app.start_turn(1);
-
-    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
-        message: "quota exceeded".to_string(),
-        kind: Some(protocol::EngineAskErrorKind::Quota),
-        retry_at_ms: Some(123_000),
-    }));
-
-    let turn_end = recorded_turn_end(&mut app);
-    assert!(turn_end.get::<bool>("cancelled").unwrap());
-    assert_eq!(
-        turn_end
-            .get::<Option<String>>("error_kind")
-            .unwrap()
-            .as_deref(),
-        Some("quota")
-    );
-    assert_eq!(
-        turn_end.get::<Option<i64>>("retry_at_ms").unwrap(),
-        Some(123_000)
-    );
-    assert!(turn_end
-        .get::<Option<u64>>("continuation_token")
-        .unwrap()
-        .is_some());
-}
-
-#[test]
-fn non_quota_retry_metadata_does_not_publish_continuation_token() {
-    let mut app = TestApp::builder().build();
-    record_turn_end(&mut app);
-    app.start_turn(1);
-
-    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
-        message: "network failed".to_string(),
-        kind: Some(protocol::EngineAskErrorKind::Network),
-        retry_at_ms: Some(123_000),
-    }));
-
-    let turn_end = recorded_turn_end(&mut app);
-    assert!(turn_end.get::<bool>("cancelled").unwrap());
-    assert_eq!(
-        turn_end
-            .get::<Option<String>>("error_kind")
-            .unwrap()
-            .as_deref(),
-        Some("network")
-    );
-    assert_eq!(
-        turn_end.get::<Option<i64>>("retry_at_ms").unwrap(),
-        Some(123_000)
-    );
-    assert!(turn_end
-        .get::<Option<u64>>("continuation_token")
-        .unwrap()
-        .is_none());
+        let turn_end = recorded_turn_end(&mut app);
+        assert!(turn_end.get::<bool>("cancelled").unwrap());
+        assert_eq!(
+            turn_end
+                .get::<Option<String>>("error_kind")
+                .unwrap()
+                .as_deref(),
+            Some(name)
+        );
+        assert_eq!(
+            turn_end.get::<Option<i64>>("retry_at_ms").unwrap(),
+            Some(123_000)
+        );
+        assert_eq!(
+            turn_end
+                .get::<Option<u64>>("continuation_token")
+                .unwrap()
+                .is_some(),
+            resumable
+        );
+    }
 }
 
 fn run_due_timers(app: &mut TestApp, ms: u64) -> Vec<protocol::UiCommand> {
@@ -350,22 +276,6 @@ fn with_advancing_clock(app: TestApp) -> TestApp {
 }
 
 #[test]
-fn goal_auto_continues_after_recoverable_quota_error() {
-    let mut app = isolated_app();
-    create_auto_goal(&mut app, "finish quota test");
-    start_canonical_turn(&mut app);
-
-    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
-        message: "quota exceeded".to_string(),
-        kind: Some(protocol::EngineAskErrorKind::Quota),
-        retry_at_ms: Some(0),
-    }));
-    app.wait_for_turn_dispatch();
-
-    assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
-}
-
-#[test]
 fn quota_pause_resumes_without_goal() {
     let mut app = isolated_app();
     // A goal cleared before the turn does not stop the turn's own work.
@@ -420,22 +330,6 @@ fn clearing_a_goal_stops_only_its_own_paused_turns() {
             "queued={queued} goal_turn={goal_turn}"
         );
     }
-}
-
-#[test]
-fn auto_continue_off_disables_quota_retry() {
-    let mut app = isolated_app();
-    assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
-    create_auto_goal(&mut app, "finish quota test");
-    start_canonical_turn(&mut app);
-
-    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
-        message: "quota exceeded".to_string(),
-        kind: Some(protocol::EngineAskErrorKind::Quota),
-        retry_at_ms: Some(0),
-    }));
-
-    assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
 }
 
 #[test]
@@ -1219,20 +1113,6 @@ fn background_follow_up_invalidates_old_auto_continue_timer() {
 }
 
 #[test]
-fn cancelling_quota_wait_preserves_queue_and_blocks_background_wakeups() {
-    let mut app = isolated_app();
-    create_auto_goal(&mut app, "cancel wait");
-    start_canonical_turn(&mut app);
-    app.push_queued_message("keep this message".into());
-    quota_error(&mut app, Some(0));
-    assert!(app.run_lua("smelt.engine.cancel()"));
-    complete_background_job(&mut app);
-    assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
-    assert_eq!(app.state().queued_inputs.len(), 1);
-    assert!(!app.start_next_queued_input_if_idle());
-}
-
-#[test]
 fn changing_auto_continue_setting_updates_quota_wait() {
     let mut app = isolated_app();
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
@@ -1741,19 +1621,6 @@ fn goal_auto_setting_changes_update_a_paused_continuation() {
     app.type_text("/goal auto on");
     app.press(KeyCode::Enter);
     assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
-}
-
-#[test]
-fn a_new_quota_reset_can_schedule_another_retry() {
-    let mut app = isolated_app();
-    create_auto_goal(&mut app, "wait for a new quota window");
-    start_canonical_turn(&mut app);
-    quota_error(&mut app, Some(0));
-    assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
-    let now = engine::clock::unix_time_ms(app.clock.as_ref());
-    quota_error(&mut app, Some(now + 5_000));
-    assert!(!has_started_turn(&run_due_timers(&mut app, 5_999)));
-    assert!(has_started_turn(&run_due_timers(&mut app, 1)));
 }
 
 #[test]

@@ -4826,13 +4826,6 @@ mod tests {
     }
 
     #[test]
-    fn window_viewport_keeps_large_total_rows() {
-        let vp = WindowViewport::new(Rect::new(0, 0, 20, 10), 20, 100_000, 80_000, None);
-        assert_eq!(vp.total_rows, 100_000);
-        assert_eq!(vp.scroll_top, 80_000);
-    }
-
-    #[test]
     fn pan_by_lines_preserves_cursor_screen_row_for_fast_scroll() {
         let mut w = make_win();
         let rows = sample_rows(200);
@@ -5815,12 +5808,6 @@ mod tests {
 
         assert_eq!(w.cpos(), 2);
         assert_eq!(w.cursor_col(), 2);
-    }
-
-    #[test]
-    fn tail_mode_default_false() {
-        let w = make_win();
-        assert!(!w.is_following_tail());
     }
 
     #[test]

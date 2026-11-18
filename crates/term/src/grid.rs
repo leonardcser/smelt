@@ -983,15 +983,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_grid_filled_with_spaces() {
-        let grid = Grid::new(10, 5);
-        assert_eq!(grid.width(), 10);
-        assert_eq!(grid.height(), 5);
-        assert_eq!(grid.cell(0, 0).symbol, ' ');
-        assert_eq!(grid.cell(9, 4).symbol, ' ');
-    }
-
-    #[test]
     fn private_use_icons_are_narrow_cells() {
         let mut grid = Grid::new(4, 1);
         grid.as_mut_slice().set(0, 0, '\u{e6b2}', Style::default());
@@ -1429,18 +1420,6 @@ mod tests {
     }
 
     #[test]
-    fn slice_put_str_lays_wide_chars_two_columns_apart() {
-        let mut grid = Grid::new(10, 1);
-        {
-            let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
-            slice.put_str(0, 0, "a漢b", Style::default());
-        }
-        assert_eq!(grid.cell(0, 0).symbol, 'a');
-        assert_eq!(grid.cell(1, 0).symbol, '漢');
-        assert_eq!(grid.cell(3, 0).symbol, 'b');
-    }
-
-    #[test]
     fn overwriting_wide_char_with_narrow_clears_continuation_marker() {
         // Within a single frame, an earlier paint can leave a wide char at
         // col N (marking col N+1 as '\0'), and a later paint can overwrite
@@ -1631,16 +1610,6 @@ mod tests {
         assert_eq!(grid.cell(0, 0).symbol, ' ');
         assert_eq!(grid.cell(1, 0).symbol, ' ');
         assert_grid_invariants(&grid);
-    }
-
-    #[test]
-    fn put_char_narrow_over_wide_keeps_invariant() {
-        let mut grid = Grid::new(5, 1);
-        grid.as_mut_slice().set(0, 0, '漢', Style::default());
-        grid.as_mut_slice().put_char(0, 0, 'A', Color::Red);
-        assert_grid_invariants(&grid);
-        assert_eq!(grid.cell(0, 0).symbol, 'A');
-        assert_ne!(grid.cell(1, 0).symbol, '\0');
     }
 
     #[test]

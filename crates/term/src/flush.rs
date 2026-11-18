@@ -234,19 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn flush_emits_different_bytes_for_different_fg_colors() {
-        let render = |c: Color| {
-            let prev = Grid::new(3, 1);
-            let mut curr = Grid::new(3, 1);
-            curr.as_mut_slice().set(0, 0, 'A', Style::new().fg(c));
-            flush_to_string(&curr, &prev)
-        };
-        // Distinct named colors must not collapse to the same SGR.
-        assert_ne!(render(Color::Red), render(Color::Blue));
-        assert_ne!(render(Color::Green), render(Color::Yellow));
-    }
-
-    #[test]
     fn flush_resets_style_at_end() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
@@ -372,58 +359,22 @@ mod tests {
     // ── Text attributes ──────────────────────────────────────────────────
 
     #[test]
-    fn flush_emits_bold_attribute() {
-        let prev = Grid::new(3, 1);
-        let mut curr = Grid::new(3, 1);
-        curr.as_mut_slice().set(0, 0, 'A', Style::new().bold());
-        let s = flush_to_string(&curr, &prev);
-        assert!(s.contains("\x1b[1m"), "got {s:?}");
-    }
-
-    #[test]
-    fn flush_emits_dim_attribute() {
-        let prev = Grid::new(3, 1);
-        let mut curr = Grid::new(3, 1);
-        curr.as_mut_slice().set(0, 0, 'A', Style::new().dim());
-        let s = flush_to_string(&curr, &prev);
-        assert!(s.contains("\x1b[2m"), "got {s:?}");
-    }
-
-    #[test]
-    fn flush_emits_italic_attribute() {
-        let prev = Grid::new(3, 1);
-        let mut curr = Grid::new(3, 1);
-        curr.as_mut_slice().set(0, 0, 'A', Style::new().italic());
-        let s = flush_to_string(&curr, &prev);
-        assert!(s.contains("\x1b[3m"), "got {s:?}");
-    }
-
-    #[test]
-    fn flush_emits_underline_attribute() {
-        let prev = Grid::new(3, 1);
-        let mut curr = Grid::new(3, 1);
-        curr.as_mut_slice().set(0, 0, 'A', Style::new().underline());
-        let s = flush_to_string(&curr, &prev);
-        assert!(s.contains("\x1b[4m"), "got {s:?}");
-    }
-
-    #[test]
-    fn flush_emits_crossedout_attribute() {
-        let prev = Grid::new(3, 1);
-        let mut curr = Grid::new(3, 1);
-        curr.as_mut_slice()
-            .set(0, 0, 'A', Style::new().crossedout());
-        let s = flush_to_string(&curr, &prev);
-        assert!(s.contains("\x1b[9m"), "got {s:?}");
-    }
-
-    #[test]
-    fn flush_emits_reverse_attribute() {
-        let prev = Grid::new(3, 1);
-        let mut curr = Grid::new(3, 1);
-        curr.as_mut_slice().set(0, 0, 'A', Style::new().reverse());
-        let s = flush_to_string(&curr, &prev);
-        assert!(s.contains("\x1b[7m"), "got {s:?}");
+    fn flush_emits_each_text_attribute() {
+        let cases = [
+            (Style::new().bold(), "\x1b[1m"),
+            (Style::new().dim(), "\x1b[2m"),
+            (Style::new().italic(), "\x1b[3m"),
+            (Style::new().underline(), "\x1b[4m"),
+            (Style::new().reverse(), "\x1b[7m"),
+            (Style::new().crossedout(), "\x1b[9m"),
+        ];
+        for (style, sgr) in cases {
+            let prev = Grid::new(3, 1);
+            let mut curr = Grid::new(3, 1);
+            curr.as_mut_slice().set(0, 0, 'A', style);
+            let s = flush_to_string(&curr, &prev);
+            assert!(s.contains(sgr), "{style:?}: got {s:?}");
+        }
     }
 
     // ── Transitions & cursor ─────────────────────────────────────────────

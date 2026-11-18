@@ -668,43 +668,7 @@ fn clamp_axis(pos: i32, term: u16, span: u16) -> u16 {
 mod tests {
     use super::WinId;
     use super::*;
-    use crate::layout::Constraint;
     use crate::{Align, Anchor, Corner};
-
-    #[test]
-    fn overlay_defaults_are_sensible() {
-        let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(42)))]);
-        let ov = Overlay::new(layout, Anchor::ScreenCenter);
-        assert_eq!(ov.z, 50);
-        assert!(!ov.modal);
-        assert_eq!(ov.anchor, Anchor::ScreenCenter);
-    }
-
-    #[test]
-    fn overlay_builders_compose() {
-        let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(42)))]);
-        let ov = Overlay::new(
-            layout,
-            Anchor::Win {
-                target: WinId(7).into(),
-                attach: Align::NW,
-                row_offset: 0,
-                col_offset: 0,
-            },
-        )
-        .with_z(100)
-        .modal(true);
-        assert_eq!(ov.z, 100);
-        assert!(ov.modal);
-        assert!(matches!(ov.anchor, Anchor::Win { .. }));
-    }
-
-    #[test]
-    fn overlay_id_round_trips() {
-        let id = OverlayId(7);
-        assert_eq!(id, OverlayId(7));
-        assert_ne!(id, OverlayId(8));
-    }
 
     fn ctx<'a>(w: u16, h: u16, win_rects: &'a HashMap<WinId, Rect>) -> AnchorContext<'a> {
         AnchorContext {

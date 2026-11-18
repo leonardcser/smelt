@@ -1137,26 +1137,16 @@ mod tests {
 
     #[test]
     fn build_body_tool_message_without_call_id_uses_missing_call_id_marker() {
-        let body = build_body(
-            &[tool_msg(None, "result")],
-            &[],
-            "m",
-            ReasoningEffort::Off,
-            &cfg(),
-        );
-        assert_eq!(body["input"][0]["call_id"], "missing_call_id");
-    }
-
-    #[test]
-    fn build_body_tool_message_with_empty_call_id_uses_missing_call_id_marker() {
-        let body = build_body(
-            &[tool_msg(Some(""), "result")],
-            &[],
-            "m",
-            ReasoningEffort::Off,
-            &cfg(),
-        );
-        assert_eq!(body["input"][0]["call_id"], "missing_call_id");
+        for call_id in [None, Some("")] {
+            let body = build_body(
+                &[tool_msg(call_id, "result")],
+                &[],
+                "m",
+                ReasoningEffort::Off,
+                &cfg(),
+            );
+            assert_eq!(body["input"][0]["call_id"], "missing_call_id");
+        }
     }
 
     #[test]
@@ -1181,27 +1171,27 @@ mod tests {
     }
 
     #[test]
-    fn build_body_sets_temperature_and_top_p_when_provided() {
+    fn build_body_sets_temperature_and_top_p_only_when_provided() {
         let mut c = cfg();
         c.temperature = Some(0.7);
         c.top_p = Some(0.9);
         let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &c);
         assert_eq!(body["temperature"], 0.7);
         assert_eq!(body["top_p"], 0.9);
-    }
 
-    #[test]
-    fn build_body_omits_temperature_and_top_p_when_none() {
         let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
     }
 
     #[test]
-    fn build_body_emits_reasoning_block_when_effort_is_not_off() {
+    fn build_body_emits_reasoning_block_only_when_effort_is_on() {
         let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::High, &cfg());
         assert_eq!(body["reasoning"]["effort"], ReasoningEffort::High.label());
         assert_eq!(body["reasoning"]["summary"], "auto");
+
+        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        assert!(body.get("reasoning").is_none());
     }
 
     #[test]
@@ -1215,12 +1205,6 @@ mod tests {
             let body = build_body(&[user("hi")], &[], "m", effort.clone(), &cfg());
             assert_eq!(body["reasoning"]["effort"], effort.label());
         }
-    }
-
-    #[test]
-    fn build_body_omits_reasoning_block_when_effort_is_off() {
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
-        assert!(body.get("reasoning").is_none());
     }
 
     #[test]

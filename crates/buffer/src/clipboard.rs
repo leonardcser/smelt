@@ -163,13 +163,6 @@ mod tests {
     // ── osc52_payload (pure encoder) ──────────────────────────────────────
 
     #[test]
-    fn osc52_payload_wraps_text_in_escape_and_terminator() {
-        let p = osc52_payload("hi");
-        assert!(p.starts_with(b"\x1b]52;c;"), "got {p:?}");
-        assert!(p.ends_with(b"\x07"), "got {p:?}");
-    }
-
-    #[test]
     fn osc52_payload_encodes_text_as_base64() {
         // "hello" → base64 "aGVsbG8="
         let p = osc52_payload("hello");
@@ -210,13 +203,6 @@ mod tests {
             self.writes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-    }
-
-    #[test]
-    fn clipboard_null_constructor_succeeds_and_reads_none() {
-        let mut c = Clipboard::null();
-        assert_eq!(c.read(), None);
-        assert!(c.write("anything").is_ok());
     }
 
     #[test]

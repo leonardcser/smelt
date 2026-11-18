@@ -36,14 +36,6 @@ impl KeyBind {
     pub(crate) fn char(c: char) -> Self {
         Self::plain(KeyCode::Char(c))
     }
-
-    #[cfg(test)]
-    pub(crate) fn ctrl(c: char) -> Self {
-        Self {
-            code: KeyCode::Char(c),
-            mods: KeyModifiers::CONTROL,
-        }
-    }
 }
 
 /// Window lifecycle / semantic events.
@@ -567,23 +559,5 @@ mod tests {
                 KeyBind::new(code, KeyModifiers::NONE)
             );
         }
-    }
-
-    #[test]
-    fn keybind_constructors() {
-        assert_eq!(
-            KeyBind::char('w'),
-            KeyBind {
-                code: KeyCode::Char('w'),
-                mods: KeyModifiers::NONE,
-            }
-        );
-        assert_eq!(
-            KeyBind::ctrl('a'),
-            KeyBind {
-                code: KeyCode::Char('a'),
-                mods: KeyModifiers::CONTROL,
-            }
-        );
     }
 }

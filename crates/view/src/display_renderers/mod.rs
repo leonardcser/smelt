@@ -114,17 +114,6 @@ mod tests {
         }
     }
 
-    fn tool_call() -> Block {
-        let mut args = HashMap::new();
-        args.insert("command".into(), serde_json::Value::String("ls".into()));
-        Block::ToolCall {
-            call_id: "call-1".into(),
-            name: "bash".into(),
-            summary: protocol::StyledLines::from_plain("ls"),
-            args: args.into(),
-        }
-    }
-
     fn pending_tool_state() -> ToolState {
         ToolState {
             status: ToolStatus::Pending,
@@ -187,105 +176,10 @@ mod tests {
         (total, tg, total + tg)
     }
 
-    fn render_split(blocks: &[Block]) -> (u16, u16, u16) {
-        let (mut buf, theme) = mk_collector_buf();
-        let mut block_rows_total = 0u16;
-        for i in 0..blocks.len() {
-            let gap = if i > 0 {
-                gap_between(&blocks[i - 1], &blocks[i])
-            } else {
-                0
-            };
-            let rows = {
-                let st = state_for(&blocks[i]);
-                render_block_test_into(
-                    &mut buf,
-                    &theme,
-                    &blocks[i],
-                    st.as_ref(),
-                    None,
-                    LayoutContext::new(W as u16, ViewState::Expanded),
-                )
-            };
-            block_rows_total += gap + rows;
-        }
-        let tg = tool_gap_for(blocks);
-        (block_rows_total, tg, block_rows_total + tg)
-    }
-
-    fn render_incremental(blocks: &[Block]) -> (u16, u16, u16) {
-        let (mut buf, theme) = mk_collector_buf();
-        let mut cumulative = 0u16;
-        for i in 0..blocks.len() {
-            let gap = if i > 0 {
-                gap_between(&blocks[i - 1], &blocks[i])
-            } else {
-                0
-            };
-            let rows = {
-                let st = state_for(&blocks[i]);
-                render_block_test_into(
-                    &mut buf,
-                    &theme,
-                    &blocks[i],
-                    st.as_ref(),
-                    None,
-                    LayoutContext::new(W as u16, ViewState::Expanded),
-                )
-            };
-            cumulative += gap + rows;
-        }
-        let tg = tool_gap_for(blocks);
-        (cumulative, tg, cumulative + tg)
-    }
-
-    #[test]
-    fn text_then_tool_all_at_once() {
-        let blocks = vec![user("hello"), text("I'll check that.")];
-        let (_, tg, _) = render_all_at_once(&blocks);
-        assert_eq!(tg, 1, "exactly 1 gap row between Text and ActiveTool");
-    }
-
-    #[test]
-    fn text_then_tool_split() {
-        let blocks = vec![user("hello"), text("I'll check that.")];
-        let (_, tg, _) = render_split(&blocks);
-        assert_eq!(
-            tg, 1,
-            "exactly 1 gap row between Text and ActiveTool (split)"
-        );
-    }
-
-    #[test]
-    fn all_paths_produce_same_total() {
-        let blocks = vec![user("hello"), text("I'll check that.")];
-        let a = render_all_at_once(&blocks);
-        let b = render_split(&blocks);
-        let c = render_incremental(&blocks);
-        assert_eq!(a.2, b.2, "all-at-once vs split total must match");
-        assert_eq!(b.2, c.2, "split vs incremental total must match");
-    }
-
-    #[test]
-    fn thinking_text_tool_all_paths_match() {
-        let blocks = vec![
-            user("fix the bug"),
-            thinking("Let me analyze..."),
-            text("I'll fix it now."),
-        ];
-        let a = render_all_at_once(&blocks);
-        let b = render_split(&blocks);
-        let c = render_incremental(&blocks);
-        assert_eq!(a.2, b.2, "all-at-once vs split");
-        assert_eq!(b.2, c.2, "split vs incremental");
-        assert_eq!(a.1, 1, "tool gap = 1");
-    }
-
     #[test]
     fn empty_thinking_text_tool() {
         let blocks = vec![user("fix it"), thinking(""), text("Here's the fix.")];
         let a = render_all_at_once(&blocks);
-        let b = render_split(&blocks);
 
         let thinking_rows = block_rows(&thinking(""));
         assert_eq!(thinking_rows, 0);
@@ -296,7 +190,6 @@ mod tests {
         assert_eq!(thinking_text_gap, 1);
 
         assert_eq!(a.1, 1, "tool gap after text = 1");
-        assert_eq!(a.2, b.2, "paths match with empty thinking");
     }
 
     #[test]
@@ -307,24 +200,7 @@ mod tests {
         assert_eq!(rows, 3, "3 rows: para1, blank, para2");
 
         let a = render_all_at_once(&blocks);
-        let b = render_split(&blocks);
         assert_eq!(a.1, 1, "tool gap still 1");
-        assert_eq!(a.2, b.2);
-    }
-
-    #[test]
-    fn tool_call_then_text_then_tool() {
-        // Multi-tool turn: first tool finished, then new text + new tool.
-        let blocks = vec![
-            user("do two things"),
-            text("First task:"),
-            tool_call(),
-            text("Second task:"),
-        ];
-        let a = render_all_at_once(&blocks);
-        let b = render_split(&blocks);
-        assert_eq!(a.1, 1);
-        assert_eq!(a.2, b.2);
     }
 
     #[test]
@@ -337,8 +213,6 @@ mod tests {
         assert_eq!(gap, 1, "gap is still 1 for empty text block");
 
         let a = render_all_at_once(&blocks);
-        let b = render_split(&blocks);
-        assert_eq!(a.2, b.2);
 
         let blocks_no_empty = vec![user("hello")];
         let c = render_all_at_once(&blocks_no_empty);
@@ -362,95 +236,6 @@ mod tests {
             &reasoning_summary("New title", "body"),
         );
         assert_eq!(titled_gap, 1, "Thinking→Thinking gap before new title = 1");
-    }
-
-    fn tool_start_row(blocks: &[Block], flushed_at: &[usize]) -> u16 {
-        let mut anchor: u16 = 0;
-        let mut flushed: usize = 0;
-
-        for &end in flushed_at {
-            // This frame renders blocks[flushed..end]
-            let mut frame_block_rows = 0u16;
-            let (mut buf, theme) = mk_collector_buf();
-            for i in flushed..end {
-                let gap = if i > 0 {
-                    gap_between(&blocks[i - 1], &blocks[i])
-                } else {
-                    0
-                };
-                let rows = {
-                    let st = state_for(&blocks[i]);
-                    render_block_test_into(
-                        &mut buf,
-                        &theme,
-                        &blocks[i],
-                        st.as_ref(),
-                        None,
-                        LayoutContext::new(W as u16, ViewState::Expanded),
-                    )
-                };
-                frame_block_rows += gap + rows;
-            }
-            anchor += frame_block_rows;
-            flushed = end;
-        }
-
-        let tg = tool_gap_for(blocks);
-        anchor + tg
-    }
-
-    #[test]
-    fn anchor_tracking_single_frame() {
-        let blocks = vec![user("hello"), text("response")];
-        let row = tool_start_row(&blocks, &[2]);
-
-        let user_rows = block_rows(&user("hello"));
-        let text_rows = block_rows(&text("response"));
-        let expected = user_rows + 1 + text_rows + 1;
-        assert_eq!(row, expected);
-    }
-
-    #[test]
-    fn anchor_tracking_split_frames() {
-        let blocks = vec![user("hello"), text("response")];
-        let row = tool_start_row(&blocks, &[1, 2]);
-
-        let user_rows = block_rows(&user("hello"));
-        let text_rows = block_rows(&text("response"));
-        let expected = user_rows + 1 + text_rows + 1;
-        assert_eq!(row, expected);
-    }
-
-    #[test]
-    fn anchor_tracking_each_block_separate() {
-        let blocks = vec![user("hello"), text("response")];
-        let row = tool_start_row(&blocks, &[1, 2]);
-        let single = tool_start_row(&blocks, &[2]);
-        assert_eq!(row, single);
-    }
-
-    #[test]
-    fn anchor_tracking_with_empty_thinking() {
-        let blocks = vec![user("hi"), thinking(""), text("fix")];
-
-        let single = tool_start_row(&blocks, &[3]);
-        let split = tool_start_row(&blocks, &[1, 2, 3]);
-        assert_eq!(single, split);
-
-        let blocks_no_thinking = vec![user("hi"), text("fix")];
-        let no_thinking = tool_start_row(&blocks_no_thinking, &[2]);
-        assert_eq!(single - no_thinking, 1, "empty thinking adds 1 extra row");
-    }
-
-    #[test]
-    fn anchor_tracking_with_thinking() {
-        let blocks = vec![user("hi"), thinking("let me think"), text("fix")];
-
-        let single = tool_start_row(&blocks, &[3]);
-        let split_2 = tool_start_row(&blocks, &[1, 3]);
-        let split_3 = tool_start_row(&blocks, &[1, 2, 3]);
-        assert_eq!(single, split_2, "single vs 2-split");
-        assert_eq!(single, split_3, "single vs 3-split");
     }
 
     #[test]

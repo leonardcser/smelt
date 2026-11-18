@@ -649,7 +649,7 @@ fn open_sidebar_motion_fixture(app: &mut TestApp) -> WinId {
 }
 
 #[test]
-fn diff_sidebar_motion_shift_g_reaches_bottom() {
+fn diff_sidebar_motion_shift_g_reaches_bottom_and_returns_after_wheel_scroll() {
     let mut app = TestApp::builder().build();
     let sidebar = open_sidebar_motion_fixture(&mut app);
     let window = app.ui_probe().win(sidebar).unwrap();
@@ -659,16 +659,8 @@ fn diff_sidebar_motion_shift_g_reaches_bottom() {
     paint_diff(&mut app);
     let window = app.ui_probe().win(sidebar).unwrap();
     assert_eq!(window.cursor_abs_row(), total - 1);
-    assert_eq!(window.scroll_top(), total - height);
-}
-
-#[test]
-fn diff_sidebar_motion_g_returns_to_bottom_after_wheel_scroll() {
-    let mut app = TestApp::builder().build();
-    let sidebar = open_sidebar_motion_fixture(&mut app);
-    app.type_char('G');
-    paint_diff(&mut app);
-    let bottom = app.ui_probe().win(sidebar).unwrap().scroll_top();
+    let bottom = window.scroll_top();
+    assert_eq!(bottom, total - height);
     for _ in 0..3 {
         wheel_diff(&mut app, sidebar, false);
     }

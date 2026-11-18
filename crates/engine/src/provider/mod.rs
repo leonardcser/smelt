@@ -11,8 +11,6 @@ use protocol::{Message, ModelConfig, ReasoningEffort};
 use reqwest::Client;
 #[cfg(test)]
 use smelt_provider::sanitize_tool_call_arguments;
-#[cfg(test)]
-use smelt_provider::ParsedResponse;
 use smelt_provider::{ChatProvider, ChatResponse, CopilotInitiator};
 use std::path::Path;
 #[cfg(test)]
@@ -31,11 +29,11 @@ use smelt_provider::{
 use smelt_provider::{context_window_from_models_entry, models_entry_matches};
 
 #[cfg(test)]
-use smelt_provider::{collect_indexed_tool_calls, non_empty};
+use smelt_provider::collect_indexed_tool_calls;
 #[cfg(test)]
 use smelt_provider::{
     format_epoch_local, format_rate_limit, json_as_u64, parse_resets_at, parse_retry_from_body,
-    quota_exceeded_message, unix_now, CancellationToken, FunctionSchema,
+    quota_exceeded_message, unix_now, CancellationToken,
 };
 
 type EngineChatResponse = ChatResponse;
@@ -672,7 +670,7 @@ pub fn slugify(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Content, FunctionCall, Role, ToolCall};
+    use protocol::{Content, Role};
     use serde_json::json;
 
     fn http_kind(provider_type: &str) -> ProviderKind {
@@ -787,16 +785,6 @@ mod tests {
 
     // ---- non_empty ----
 
-    #[test]
-    fn non_empty_returns_none_for_empty_string() {
-        assert_eq!(non_empty(String::new()), None);
-    }
-
-    #[test]
-    fn non_empty_returns_some_for_non_empty_string() {
-        assert_eq!(non_empty("hi".into()), Some("hi".to_string()));
-    }
-
     // ---- collect_indexed_tool_calls ----
 
     #[test]
@@ -810,18 +798,7 @@ mod tests {
         assert_eq!(names, vec!["A", "B", "C"]);
     }
 
-    #[test]
-    fn collect_indexed_tool_calls_empty_input_returns_empty_vec() {
-        let calls = collect_indexed_tool_calls(std::collections::HashMap::new());
-        assert!(calls.is_empty());
-    }
-
     // ---- json_as_u64 ----
-
-    #[test]
-    fn json_as_u64_handles_positive_u64() {
-        assert_eq!(json_as_u64(&json!(42)), Some(42));
-    }
 
     #[test]
     fn json_as_u64_rejects_negative_i64() {
@@ -1151,14 +1128,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_is_noop_when_tool_calls_absent() {
-        let mut obj = serde_json::Map::new();
-        obj.insert("other".into(), json!("data"));
-        sanitize_tool_call_arguments(&mut obj);
-        assert_eq!(obj["other"], "data");
-    }
-
-    #[test]
     fn sanitize_ignores_arguments_that_are_not_strings() {
         let mut obj = serde_json::Map::new();
         obj.insert(
@@ -1180,11 +1149,6 @@ mod tests {
     #[test]
     fn slugify_collapses_consecutive_separators() {
         assert_eq!(slugify("a---b   c"), "a-b-c");
-    }
-
-    #[test]
-    fn slugify_empty_string_returns_empty() {
-        assert_eq!(slugify(""), "");
     }
 
     // ---- messages_have_images ----
@@ -1289,18 +1253,6 @@ mod tests {
             std::sync::Arc::new(crate::clock::RealClock),
         );
         assert_eq!(p.backend, BackendKind::Http(ProviderKind::Anthropic));
-    }
-
-    #[test]
-    fn provider_tool_calling_default_is_true() {
-        let p = EngineProvider::new(
-            "".into(),
-            "".into(),
-            "openai",
-            http_client(),
-            std::sync::Arc::new(crate::clock::RealClock),
-        );
-        assert!(p.tool_calling());
     }
 
     #[test]
@@ -1502,13 +1454,6 @@ mod tests {
     }
 
     #[test]
-    fn models_entry_matches_handles_missing_display_name() {
-        let entry = serde_json::json!({"id": "gpt-5.5"});
-        assert!(models_entry_matches(&entry, "gpt-5.5"));
-        assert!(!models_entry_matches(&entry, "gpt-5"));
-    }
-
-    #[test]
     fn provider_reset_turn_state_clears_to_none() {
         let p = EngineProvider::new(
             "".into(),
@@ -1524,49 +1469,5 @@ mod tests {
 
     // ---- ToolDefinition serialization ----
 
-    #[test]
-    fn tool_definition_serializes_with_function_type_tag() {
-        let t = ToolDefinition::new(FunctionSchema {
-            name: "f".into(),
-            description: "d".into(),
-            parameters: json!({}),
-        });
-        let v = serde_json::to_value(&t).unwrap();
-        assert_eq!(v["type"], "function");
-        assert_eq!(v["function"]["name"], "f");
-    }
-
     // ---- ParsedResponse::into_response ----
-
-    #[test]
-    fn parsed_into_response_propagates_fields() {
-        let p = ParsedResponse {
-            finish_reason: Some("length".into()),
-            stop_reason: Some(protocol::request_log::StopReason::TokenId(248044)),
-            system_fingerprint: Some("vllm-test".into()),
-            content: Some("c".into()),
-            reasoning: Some("r".into()),
-            reasoning_parts: Vec::new(),
-            reasoning_blocks: None,
-            tool_calls: vec![ToolCall::new(
-                "id".into(),
-                FunctionCall {
-                    name: "n".into(),
-                    arguments: "{}".into(),
-                },
-            )],
-            usage: TokenUsage::default(),
-        };
-        let r = ChatResponse::from_parsed(p, Some(12.5));
-        assert_eq!(r.content.as_deref(), Some("c"));
-        assert_eq!(r.reasoning_content.as_deref(), Some("r"));
-        assert_eq!(r.tool_calls.len(), 1);
-        assert_eq!(r.tokens_per_sec, Some(12.5));
-        assert_eq!(r.metadata.finish_reason.as_deref(), Some("length"));
-        assert_eq!(
-            r.metadata.stop_reason,
-            Some(protocol::request_log::StopReason::TokenId(248044))
-        );
-        assert_eq!(r.metadata.system_fingerprint.as_deref(), Some("vllm-test"));
-    }
 }

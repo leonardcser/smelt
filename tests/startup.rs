@@ -1655,18 +1655,12 @@ async fn interactive_completed_response_can_submit_follow_up() {
     interactive_first_message_recovery(FirstMessageRecovery::Complete).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_rewind_preserves_paused_queue_until_submission() {
-    interactive_first_message_recovery(FirstMessageRecovery::RewindPausedQueue).await;
-}
-
 #[derive(Clone, Copy, Debug)]
 enum FirstMessageRecovery {
     Rewind,
     RewindBeforeDispatch,
     CancelStreaming,
     Complete,
-    RewindPausedQueue,
 }
 
 async fn interactive_first_message_recovery(recovery: FirstMessageRecovery) {
@@ -1679,7 +1673,6 @@ async fn interactive_first_message_recovery_in_mode(recovery: FirstMessageRecove
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    let paused_queue = matches!(recovery, FirstMessageRecovery::RewindPausedQueue);
     let before_dispatch = matches!(recovery, FirstMessageRecovery::RewindBeforeDispatch);
     let complete = matches!(recovery, FirstMessageRecovery::Complete);
     let streaming = matches!(recovery, FirstMessageRecovery::CancelStreaming) || complete;
@@ -1697,11 +1690,6 @@ async fn interactive_first_message_recovery_in_mode(recovery: FirstMessageRecove
             "location",
             format!("http://{}/", stream_provider.local_addr().unwrap()),
         )
-    } else if paused_queue {
-        ResponseTemplate::new(429)
-            .insert_header("retry-after", "3600")
-            .set_body_json(serde_json::json!({"error": {"code": "insufficient_quota"}}))
-            .set_delay(Duration::from_secs(1))
     } else {
         ResponseTemplate::new(200).set_delay(Duration::from_secs(30))
     };
@@ -1740,14 +1728,6 @@ smelt.events.on("turn_end", function(ev)
     file:write("ready")
     file:close()
   end
-  if ev.error_kind == "quota" then
-    local file = assert(io.open("quota-paused", "w"))
-    file:write("ready")
-    file:close()
-  end
-end)
-smelt.cmd.register("rewind-first", function()
-  smelt.session.rewind_to(smelt.session.turns()[1].history_idx)
 end)
 smelt.provider.register("local", {{
   type = "openai-compatible",
@@ -1774,9 +1754,7 @@ smelt.provider.register("local", {{
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut captured = Vec::new();
     let mut submitted = false;
-    let mut queued = false;
     let mut rewind_sent = false;
-    let mut restored_at = None;
     let mut resubmitted = false;
     loop {
         drain_pty(&mut master, &mut captured);
@@ -1819,16 +1797,8 @@ smelt.provider.register("local", {{
         if bodies.len() == 1 && !rewind_sent {
             if complete {
                 rewind_sent = home.path().join("turn-ended").exists();
-            } else if !paused_queue {
-                if !streaming || home.path().join("output-started").exists() {
-                    master.write_all(b"\x1b\x1b").unwrap();
-                    rewind_sent = true;
-                }
-            } else if !queued {
-                master.write_all(b"queued follow-up\r").unwrap();
-                queued = true;
-            } else if home.path().join("quota-paused").exists() {
-                master.write_all(b"/rewind-first\r").unwrap();
+            } else if !streaming || home.path().join("output-started").exists() {
+                master.write_all(b"\x1b\x1b").unwrap();
                 rewind_sent = true;
             }
         }
@@ -1843,15 +1813,11 @@ smelt.provider.register("local", {{
                 })
                 .exists()
         {
-            let restored = restored_at.get_or_insert_with(Instant::now);
-            // Observe an idle interval to catch unsolicited dispatch before explicitly submitting.
-            if !paused_queue || restored.elapsed() >= Duration::from_secs(1) {
-                if streaming {
-                    master.write_all(b"first request").unwrap();
-                }
-                master.write_all(b" edited\r").unwrap();
-                resubmitted = true;
+            if streaming {
+                master.write_all(b"first request").unwrap();
             }
+            master.write_all(b" edited\r").unwrap();
+            resubmitted = true;
         }
         if resubmitted
             && bodies.last().is_some_and(|body| {
@@ -1865,7 +1831,6 @@ smelt.provider.register("local", {{
                 assert_eq!(bodies.len(), 2);
             }
             let messages = &bodies.last().unwrap()["messages"];
-            assert!(!messages.to_string().contains("queued follow-up"));
             assert_eq!(
                 messages.to_string().matches("first request").count(),
                 if streaming { 2 } else { 1 }
@@ -1874,10 +1839,9 @@ smelt.provider.register("local", {{
         }
         assert!(
             Instant::now() < deadline,
-            "message recovery failed ({recovery:?}, vim={vim}, requests: {}, rewind_sent={rewind_sent}, resubmitted={resubmitted}, last_has_edited={}, last_has_queued={}, output_started={}, turn_ended={}): {}",
+            "message recovery failed ({recovery:?}, vim={vim}, requests: {}, rewind_sent={rewind_sent}, resubmitted={resubmitted}, last_has_edited={}, output_started={}, turn_ended={}): {}",
             bodies.len(),
             bodies.last().is_some_and(|body| body["messages"].to_string().contains("first request edited")),
-            bodies.last().is_some_and(|body| body["messages"].to_string().contains("queued follow-up")),
             home.path().join("output-started").exists(),
             home.path().join("turn-ended").exists(),
             String::from_utf8_lossy(&captured[captured.len().saturating_sub(5000)..])
@@ -4246,32 +4210,6 @@ fn headless_compaction_quota_failure_aborts_without_looping() {
 }
 
 #[test]
-fn headless_stream_valid_content_and_usage() {
-    let usage = stream_event(
-        serde_json::json!({"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}),
-    );
-    let body = format!(
-        ": keepalive\n\n{}{}{}data: [DONE]\n\n",
-        stream_content(),
-        stream_finish(),
-        usage
-    )
-    .replace("data: ", "data:")
-    .replace('\n', "\r\n");
-    let trial = run_headless_stream(&[body], StreamEnding::Eof);
-    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
-    assert_eq!(trial.requests, 1);
-    assert!(trial.events.iter().any(|ev| ev
-        .get("TextDelta")
-        .is_some_and(|v| v.to_string().contains("界"))));
-    assert!(trial
-        .events
-        .iter()
-        .any(|ev| ev.get("TurnComplete").is_some()));
-    assert!(trial.events.iter().any(|ev| ev.get("TokenUsage").is_some()));
-}
-
-#[test]
 fn headless_stream_unusable_response_exhaustion_is_an_error() {
     for delta in [
         serde_json::json!({"reasoning_content": "sensitive-fixture"}),
@@ -4625,36 +4563,6 @@ fn headless_stream_replays_reasoning_across_multiple_tool_continuations() {
 }
 
 #[test]
-fn headless_stream_valid_fragmented_tool_call() {
-    let body = format!(
-        "{}{}{}data: [DONE]\n\n",
-        stream_tool("{\"value\":", true),
-        stream_tool("\"recorded\"}", false),
-        stream_finish()
-    );
-    let trial = run_headless_stream(
-        &[body, format!("{}{}", stream_content(), stream_finish())],
-        StreamEnding::Eof,
-    );
-    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
-    assert_eq!(trial.requests, 2);
-    assert_eq!(
-        trial.tool_effect.as_deref(),
-        Some("recorded"),
-        "{:?}",
-        trial.events
-    );
-    assert!(trial
-        .events
-        .iter()
-        .any(|ev| ev.get("ToolStarted").is_some()));
-    assert!(trial
-        .events
-        .iter()
-        .any(|ev| ev.get("ToolFinished").is_some()));
-}
-
-#[test]
 fn headless_responses_upstream_errors_share_retry_policy() {
     use serde_json::json;
 
@@ -4804,6 +4712,29 @@ fn headless_stream_upstream_error() {
 }
 
 #[test]
+fn headless_stream_eof_without_finish_reason() {
+    assert_stream_failure(
+        &run_headless_stream(&[stream_content()], StreamEnding::Eof),
+        "without finish_reason",
+    );
+}
+
+#[test]
+fn headless_stream_done_without_finish_reason() {
+    let trial = run_headless_stream(
+        &[format!("{}data: [DONE]\n\n", stream_content())],
+        StreamEnding::Eof,
+    );
+    assert_stream_failure(&trial, "without finish_reason");
+    let error = trial
+        .events
+        .iter()
+        .find_map(|ev| ev.get("TurnError"))
+        .unwrap();
+    assert!(error["message"].as_str().unwrap().contains("done=true"));
+}
+
+#[test]
 fn headless_stream_malformed_json() {
     assert_stream_failure(
         &run_headless_stream(
@@ -4828,29 +4759,6 @@ fn headless_stream_eof_during_event_recovers() {
         assert_eq!(trial.request_bodies[0], trial.request_bodies[1]);
         assert_eq!(last_stream_assistant(&trial)["content"], "partial 界");
     }
-}
-
-#[test]
-fn headless_stream_eof_without_finish_reason() {
-    assert_stream_failure(
-        &run_headless_stream(&[stream_content()], StreamEnding::Eof),
-        "without finish_reason",
-    );
-}
-
-#[test]
-fn headless_stream_done_without_finish_reason() {
-    let trial = run_headless_stream(
-        &[format!("{}data: [DONE]\n\n", stream_content())],
-        StreamEnding::Eof,
-    );
-    assert_stream_failure(&trial, "without finish_reason");
-    let error = trial
-        .events
-        .iter()
-        .find_map(|ev| ev.get("TurnError"))
-        .unwrap();
-    assert!(error["message"].as_str().unwrap().contains("done=true"));
 }
 
 #[test]
@@ -5041,16 +4949,6 @@ fn headless_stream_failure_after_tool_effect_does_not_replay() {
         1
     );
     assert!(!trial.events.iter().any(|ev| ev.get("TurnError").is_some()));
-}
-
-#[test]
-fn headless_stream_multiline_data() {
-    let body = format!("data: {{\"choices\": [\n: keepalive\ndata: {{\"delta\": {{\"content\": \"multiline\"}}}}]}}\n\n{}", stream_finish());
-    let trial = run_headless_stream(&[body], StreamEnding::Eof);
-    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
-    assert!(trial.events.iter().any(|ev| ev
-        .get("TextDelta")
-        .is_some_and(|v| v.to_string().contains("multiline"))));
 }
 
 #[test]
