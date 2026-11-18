@@ -350,7 +350,7 @@ while True:
         send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
         SCENARIO = "text"
         continue
-    if SCENARIO in ("steer", "steer-cancel"):
+    if SCENARIO in ("steer", "steer-cancel", "steer-taken"):
         assistant([{"type": "tool_use", "id": "steer-tool", "name": "ToolSearch", "input": {"query": "x"}}], "steer-tool")
         steer = receive()
         while steer.get("type") != "user":
@@ -362,7 +362,11 @@ while True:
         else:
             cancel = receive()
             assert cancel["request"] == {"subtype": "cancel_async_message", "message_uuid": steer["uuid"]}, cancel
-            send({"type": "control_response", "response": {"subtype": "success", "request_id": cancel["request_id"], "response": {"cancelled": True}}})
+            # A steer Claude Code already took is no longer its to cancel.
+            taken = SCENARIO == "steer-taken"
+            send({"type": "control_response", "response": {"subtype": "success", "request_id": cancel["request_id"], "response": {"cancelled": not taken}}})
+            if taken:
+                send({"type": "user", "isReplay": True, "uuid": steer["uuid"], "message": steer["message"], "parent_tool_use_id": None})
             tool_result("steer-tool", "found")
     if SCENARIO == "peer-message":
         peer_message()

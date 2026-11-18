@@ -112,6 +112,25 @@ impl InvocationId {
     }
 }
 
+/// Session-unique identity for one message the host steered into a turn.
+///
+/// The engine answers each steer once: `Steered` when it joins the
+/// conversation, or `Withdrawn` when the host takes it back first. Steers a
+/// turn ends without either answer were never committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SteerId(u64);
+
+impl SteerId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolVisibility {
     #[default]
@@ -481,11 +500,15 @@ pub enum EngineEvent {
         arguments: String,
     },
 
-    /// Queued inputs were consumed and committed to canonical history.
+    /// The steers `ids` were committed to canonical history as `delta`.
     Steered {
         turn_id: u64,
+        ids: Vec<SteerId>,
         delta: CanonicalHistoryDelta,
     },
+
+    /// The steers `ids` were withdrawn and never join the conversation.
+    Withdrawn { turn_id: u64, ids: Vec<SteerId> },
 
     /// A tool call has started.
     ToolStarted {
@@ -602,7 +625,9 @@ pub enum EngineEvent {
         update: CanonicalHistoryDelta,
     },
 
-    /// The agent turn completed (successfully or after cancellation).
+    /// The agent turn completed (successfully or after cancellation). The
+    /// engine commits none of the turn's steers after it: a steer it did not
+    /// report `Steered` returns to the host.
     TurnComplete {
         turn_id: u64,
         /// Final canonical suffix replacement when completion must repair or
@@ -917,11 +942,12 @@ pub enum UiCommand {
     /// Start a new agent turn.
     StartTurn(Box<StartTurnPayload>),
 
-    /// Inject a message mid-turn (steering / type-ahead).
-    Steer { input: StartTurnInput },
+    /// Inject a message into the active turn (steering / type-ahead).
+    Steer { id: SteerId, input: StartTurnInput },
 
-    /// Remove the last `count` steered messages (user unqueued them).
-    Unsteer { count: usize },
+    /// Take back steers the engine has not committed. It answers those it
+    /// withdrew with `Withdrawn`; the others are `Steered`, or end with the turn.
+    Withdraw { ids: Vec<SteerId> },
 
     /// Reply to a `RequestPermission` event.
     PermissionDecision {

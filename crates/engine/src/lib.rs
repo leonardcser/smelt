@@ -20,6 +20,7 @@ pub mod provider;
 mod request_log;
 pub(crate) mod result_dedup;
 pub(crate) mod skills;
+mod steer;
 pub mod tools;
 pub(crate) mod trim;
 pub mod usage;

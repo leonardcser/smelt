@@ -803,14 +803,24 @@ impl TuiApp {
                 self.append_active_output_line(invocation_id, line);
                 SessionControl::Continue
             }
-            EngineEvent::Steered { turn_id: id, delta } => {
+            EngineEvent::Steered {
+                turn_id: id,
+                ids,
+                delta,
+            } => {
                 if id == turn_id {
                     self.flush_streaming_thinking();
                     self.flush_streaming_text();
-                    let count =
+                    // Input leaves the queue only once its history joined the
+                    // transcript, so a rejected delta loses nothing.
+                    let appended =
                         self.append_engine_history_items(delta.first_index.get(), delta.items);
-                    let drained = self.prompt.acknowledge_requests(count);
-                    for queued in &drained {
+                    let committed = if appended > 0 {
+                        self.prompt.steered(&ids)
+                    } else {
+                        Vec::new()
+                    };
+                    for queued in &committed {
                         if let crate::app::QueuedInput::Command {
                             line, sent_at_ms, ..
                         } = queued
@@ -818,7 +828,15 @@ impl TuiApp {
                             self.run_queued_command_line(line, *sent_at_ms);
                         }
                     }
+                    self.restore_returned_inputs();
                     self.save_session();
+                }
+                SessionControl::Continue
+            }
+            EngineEvent::Withdrawn { turn_id: id, ids } => {
+                if id == turn_id {
+                    self.prompt.withdrawn(&ids);
+                    self.restore_returned_inputs();
                 }
                 SessionControl::Continue
             }

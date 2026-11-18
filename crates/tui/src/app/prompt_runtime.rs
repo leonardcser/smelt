@@ -1,7 +1,7 @@
 use crossterm::event::Event;
 use smelt_core::history::History;
 
-use super::queue::{InputQueues, QueueStage, QueuedInput, QueuedRow};
+use super::queue::{InputQueues, InterruptedQueue, QueueStage, QueuedInput, QueuedRow};
 use super::{PlaceholderOpts, PlaceholderState, PromptHeightState, PromptResizeDrag};
 use crate::input::{Action, PromptCtx, PromptCtxRef, PromptCut, PromptState};
 use crate::smelt_edit::{AttachedText, BufId, Buffer, Clipboard, VimMode, WinId, Window};
@@ -49,21 +49,6 @@ impl PendingPromptRecovery {
             removed.buffer_id = buf.id();
             removed.source_tick = buf.source_tick();
         }
-    }
-}
-
-/// Queue state held outside the prompt runtime only while turn cancellation runs.
-/// Its private payload prevents callers from inspecting or reordering queued input.
-#[must_use = "interrupted prompt queues must be restored"]
-pub(super) struct InterruptedQueues {
-    unsteer_count: usize,
-    next: Option<QueuedInput>,
-    remaining: InputQueues,
-}
-
-impl InterruptedQueues {
-    pub(super) fn unsteer_count(&self) -> usize {
-        self.unsteer_count
     }
 }
 
@@ -259,6 +244,7 @@ impl PromptRuntime {
         queued
     }
 
+    /// Queues `queued` for the active turn's next request.
     pub(crate) fn try_queue_request(&mut self, queued: QueuedInput) -> bool {
         let queued = self.queues.try_push_request(queued);
         if queued {
@@ -280,55 +266,71 @@ impl PromptRuntime {
         queued
     }
 
-    pub(crate) fn promote_turn_to_request(&mut self) -> Option<&QueuedInput> {
-        if self.queues.front_turn_is_request() {
+    /// Moves the next turn into the active turn's next request.
+    pub(crate) fn promote_turn_to_request(&mut self) -> bool {
+        let promoted = self.queues.promote_turn_to_request();
+        if promoted {
             self.bump_queue_revision();
         }
-        self.queues.promote_turn_to_request()
+        promoted
     }
 
-    pub(super) fn suspend_for_interrupt(&mut self) -> InterruptedQueues {
+    /// The steers to send the active turn: every request it does not have.
+    pub(crate) fn steer_requests(&mut self) -> Vec<(protocol::SteerId, protocol::StartTurnInput)> {
+        self.queues.steer_requests()
+    }
+
+    pub(super) fn suspend_for_interrupt(&mut self) -> InterruptedQueue {
         if !self.queues.is_empty() {
             self.bump_queue_revision();
         }
-        let (unsteer_count, next, remaining) = self.queues.take_for_interrupt();
-        InterruptedQueues {
-            unsteer_count,
-            next,
-            remaining,
-        }
+        self.queues.take_for_interrupt()
     }
 
     pub(super) fn restore_after_interrupt(
         &mut self,
-        interrupted: InterruptedQueues,
+        interrupted: InterruptedQueue,
     ) -> Option<QueuedInput> {
-        let queue_changed = !self.queues.is_empty() || !interrupted.remaining.is_empty();
-        self.queues = interrupted.remaining;
-        if queue_changed {
-            self.bump_queue_revision();
-        }
-        interrupted.next
+        self.bump_queue_revision();
+        self.queues.restore_interrupted(interrupted)
     }
 
-    pub(crate) fn drain_for_prompt(&mut self) -> (usize, Vec<QueuedInput>) {
-        if !self.queues.is_empty() {
-            self.bump_queue_revision();
-        }
-        self.queues.drain_for_prompt()
+    /// Sends every queued input back toward the prompt. Returns the steers to
+    /// withdraw from the engine.
+    pub(crate) fn return_to_prompt(&mut self) -> Vec<protocol::SteerId> {
+        let withdraw = self.queues.return_to_prompt();
+        self.bump_queue_revision();
+        withdraw
     }
 
-    pub(crate) fn acknowledge_requests(&mut self, count: usize) -> Vec<QueuedInput> {
-        let acknowledged = self.queues.drain_request_ack(count);
-        if !acknowledged.is_empty() {
+    /// The input that returned to the prompt, once the engine answered for it.
+    pub(crate) fn take_returned(&mut self) -> Vec<QueuedInput> {
+        let returned = self.queues.take_returned();
+        if !returned.is_empty() {
             self.bump_queue_revision();
         }
-        acknowledged
+        returned
+    }
+
+    pub(crate) fn steered(&mut self, ids: &[protocol::SteerId]) -> Vec<QueuedInput> {
+        let committed = self.queues.steered(ids);
+        if !committed.is_empty() {
+            self.bump_queue_revision();
+        }
+        committed
+    }
+
+    pub(crate) fn withdrawn(&mut self, ids: &[protocol::SteerId]) {
+        self.queues.withdrawn(ids);
+    }
+
+    /// The active turn ended, so its steers wait for the next turn again.
+    pub(crate) fn settle_turn(&mut self) {
+        self.queues.settle_turn();
     }
 
     pub(crate) fn clear_queue(&mut self) {
-        if !self.queues.is_empty() {
-            self.queues.clear();
+        if self.queues.clear() {
             self.bump_queue_revision();
         }
     }
@@ -343,12 +345,6 @@ impl PromptRuntime {
 
     pub(crate) fn queue_is_empty(&self) -> bool {
         self.queues.is_empty()
-    }
-
-    pub(crate) fn queued_request_inputs(
-        &self,
-    ) -> impl Iterator<Item = protocol::StartTurnInput> + '_ {
-        self.queues.request_inputs()
     }
 
     pub(crate) fn has_queued_request(&self) -> bool {
@@ -367,6 +363,11 @@ impl PromptRuntime {
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn queued_request_len(&self) -> usize {
         self.queues.request_len()
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn queued_steer_ids(&self) -> Vec<protocol::SteerId> {
+        self.queues.request_ids()
     }
 
     pub(crate) fn queued_rows(&self) -> Vec<QueuedRow> {

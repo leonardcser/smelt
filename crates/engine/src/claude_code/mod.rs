@@ -38,7 +38,7 @@ use crate::{agent, log, EngineConfig, EngineEventSender, HostCallSender};
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
 use protocol::{
     Content, Decision, EngineAskError, EngineAskErrorKind, EngineEvent, HistoryItem,
-    ReasoningEffort, StartTurnInput, StartTurnPayload, ToolEvaluation, UiCommand,
+    ReasoningEffort, StartTurnInput, StartTurnPayload, SteerId, ToolEvaluation, UiCommand,
 };
 use serde_json::{json, Value};
 use smelt_provider::CancellationToken;
@@ -91,6 +91,13 @@ struct ToolCall {
     args: HashMap<String, Value>,
 }
 
+/// A message a turn sends Claude Code after its prompt: a steer of the host,
+/// which it may withdraw, or a note about the session.
+struct Followup {
+    steer: Option<SteerId>,
+    input: StartTurnInput,
+}
+
 /// A smelt turn on the native session: one prompt and Claude Code's answer.
 struct OpenTurn {
     id: u64,
@@ -107,7 +114,7 @@ enum Stage {
     /// what it works on, such as a reply to a monitor event.
     Taking(String),
     Sent,
-    /// Claude Code answered with steers still queued, which it answers next.
+    /// Claude Code answered with follow-ups still queued, which it answers next.
     Steering,
     /// Claude Code answered; headless turns still wait for its work to settle.
     Answered,
@@ -244,10 +251,10 @@ struct Runtime<'a> {
     history: protocol::HistoryIdentity,
     transcript: Transcript,
     side_results: FuturesUnordered<BoxFuture<'a, (u64, crate::tools::ToolResult)>>,
-    /// Steers waiting for the turn's prompt to be sent.
-    deferred: Vec<StartTurnInput>,
-    /// Steers Claude Code holds until its next step, by message UUID.
-    steers: Vec<(String, HistoryItem)>,
+    /// Follow-ups waiting for the turn's prompt to be taken.
+    deferred: Vec<Followup>,
+    /// Follow-ups Claude Code holds until its next step, by message UUID.
+    held: Vec<(String, Followup)>,
     /// The held notes the host last heard of.
     held_notes: Vec<protocol::HistoryNote>,
 }
@@ -292,7 +299,7 @@ pub(crate) async fn run_session(
         history: protocol::HistoryIdentity::default(),
         side_results: FuturesUnordered::new(),
         deferred: Vec::new(),
-        steers: Vec::new(),
+        held: Vec::new(),
         held_notes: Vec::new(),
     };
     let result = match runtime.open().await {
@@ -406,7 +413,7 @@ impl Runtime<'_> {
         let (mut content, catalog, plans_directory) = match setup {
             Ok(setup) => setup,
             Err(message) => {
-                self.turn = None;
+                self.close_turn();
                 emit_error(self.tx, message);
                 return Ok(self.native.process.is_some());
             }
@@ -618,29 +625,76 @@ impl Runtime<'_> {
         if let Some(turn) = &mut self.turn {
             turn.stage = Stage::Sent;
         }
-        self.send_steers().await
+        self.send_followups().await
     }
 
-    /// Sends steers once Claude Code took the prompt. It takes each at its next
-    /// step boundary, as smelt's own loop does, and echoes it back then.
-    async fn send_steers(&mut self) -> Result<(), String> {
+    /// Sends follow-ups once Claude Code took the prompt. It takes each at its
+    /// next step boundary, as smelt's own loop does, and echoes it back then.
+    async fn send_followups(&mut self) -> Result<(), String> {
         let Some(turn) = &mut self.turn else {
             return Ok(());
         };
         if self.deferred.is_empty() || !turn.stage.taken() || self.native.moving.is_some() {
             return Ok(());
         }
-        // An answered turn continues with Claude Code's answer to the steers.
+        // An answered turn continues with Claude Code's answer to the follow-ups.
         turn.stage = Stage::Sent;
-        for input in std::mem::take(&mut self.deferred) {
+        for followup in std::mem::take(&mut self.deferred) {
             let uuid = uuid::Uuid::new_v4().to_string();
-            let mut message = user_message(user_content(&input.provider_content())?);
+            let mut message = user_message(user_content(&followup.input.provider_content())?);
             message["priority"] = json!("next");
             message["uuid"] = json!(uuid);
             self.write(message).await?;
-            self.steers.push((uuid, input_history(&input)));
+            self.held.push((uuid, followup));
         }
         Ok(())
+    }
+
+    /// Withdraws the steers of `ids` the turn still has: those waiting here
+    /// at once, and those Claude Code holds once it confirms it dropped them.
+    /// The others were committed, or ended with their turn.
+    async fn withdraw(&mut self, ids: &[SteerId]) -> Result<(), String> {
+        let mut withdrawn = Vec::new();
+        self.deferred.retain(|followup| match followup.steer {
+            Some(id) if ids.contains(&id) => {
+                withdrawn.push(id);
+                false
+            }
+            _ => true,
+        });
+        self.withdrawn(withdrawn);
+        let held: Vec<_> = self
+            .held
+            .iter()
+            .filter(|(_, followup)| followup.steer.is_some_and(|id| ids.contains(&id)))
+            .map(|(uuid, _)| uuid.clone())
+            .collect();
+        for uuid in held {
+            self.write(control(
+                &format!("smelt-withdraw-{uuid}"),
+                json!({"subtype":"cancel_async_message", "message_uuid":uuid}),
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Tells the host the steers of `ids` never join the conversation.
+    fn withdrawn(&self, ids: Vec<SteerId>) {
+        if let Some(turn) = self.turn.as_ref().filter(|_| !ids.is_empty()) {
+            let _ = self.tx.send(EngineEvent::Withdrawn {
+                turn_id: turn.id,
+                ids,
+            });
+        }
+    }
+
+    /// Ends the open turn. Its follow-ups end with it: the host takes back
+    /// the steers it was not told were committed.
+    fn close_turn(&mut self) -> Option<OpenTurn> {
+        self.deferred.clear();
+        self.held.clear();
+        self.turn.take()
     }
 
     /// Cancels the open turn and what Claude Code is answering. The process
@@ -654,8 +708,6 @@ impl Runtime<'_> {
         // Queued messages go back to the prompt. The interrupt withdraws those
         // Claude Code has, with the events queued meanwhile, which would
         // otherwise wake it at once.
-        self.deferred.clear();
-        self.steers.clear();
         if answering && !self.native.interrupting {
             self.write(control(
                 "smelt-interrupt",
@@ -673,7 +725,7 @@ impl Runtime<'_> {
             // It may have done more than smelt saw, so it is never resumed past.
             session::invalidate(&self.payload.artifact_dir);
         }
-        if let Some(turn) = self.turn.take() {
+        if let Some(turn) = self.close_turn() {
             emit_complete(self.tx, turn.id, turn.started.elapsed(), true);
             self.transcript.route(self.session_tx());
         }
@@ -698,7 +750,7 @@ impl Runtime<'_> {
             return self.send_cwd(false).await;
         }
         if self.transcript.settled()
-            && self.steers.is_empty()
+            && self.held.is_empty()
             && self.native.active_controls.is_empty()
             && self.native.gates.is_empty()
             && self.native.tool_results.is_empty()
@@ -794,7 +846,7 @@ impl Runtime<'_> {
     }
 
     fn complete(&mut self) {
-        let Some(turn) = self.turn.take() else {
+        let Some(turn) = self.close_turn() else {
             return;
         };
         self.commit();
@@ -820,7 +872,7 @@ impl Runtime<'_> {
         };
         self.native.agents.finish(error);
         self.transcript.finish();
-        self.steers.clear();
+        self.held.clear();
         let prompted = self.turn.as_ref().is_some_and(|turn| turn.stage.prompted());
         if error.is_some() || prompted || !self.quiet() || self.native.moving.is_some() {
             if !self.payload.ephemeral {
@@ -869,7 +921,7 @@ impl Runtime<'_> {
         // The outcome comes before the end report, since the host drops a
         // session's events once it ends. Without a turn, a failure, such as a
         // wake that hits a limit, is the session's.
-        match (self.turn.take(), error) {
+        match (self.close_turn(), error) {
             (Some(turn), None) => emit_complete(self.tx, turn.id, turn.started.elapsed(), true),
             (Some(_), Some(failure)) => emit_failure(self.tx, failure),
             (None, Some(failure)) => emit_failure(&self.session_tx(), failure),
@@ -886,7 +938,7 @@ impl Runtime<'_> {
     async fn drive(&mut self) -> Result<(), Failure> {
         loop {
             self.advance_move().await?;
-            self.send_steers().await?;
+            self.send_followups().await?;
             // A turn ends once Claude Code is idle, which it reports after its
             // result. Only a non-interactive turn also waits for background tasks.
             let done = if self.payload.tool_visibility == protocol::ToolVisibility::Interactive {
@@ -1112,12 +1164,18 @@ impl Runtime<'_> {
                     self.native.init_deadline = None;
                 } else if let Some(uuid) = frame["response"]["request_id"]
                     .as_str()
-                    .and_then(|id| id.strip_prefix("smelt-unsteer-"))
+                    .and_then(|id| id.strip_prefix("smelt-withdraw-"))
                 {
-                    if frame["response"]["response"]["cancelled"] == true {
-                        self.steers.retain(|(steer, _)| steer != uuid);
+                    // Claude Code keeps a message it already took, which
+                    // then joins the conversation when it echoes it.
+                    let at = self.held.iter().position(|(held, _)| held == uuid);
+                    if let Some(at) =
+                        at.filter(|_| frame["response"]["response"]["cancelled"] == true)
+                    {
+                        let (_, followup) = self.held.remove(at);
+                        self.withdrawn(followup.steer.into_iter().collect());
                         if let Some(turn) = &mut self.turn {
-                            if matches!(turn.stage, Stage::Steering) && self.steers.is_empty() {
+                            if matches!(turn.stage, Stage::Steering) && self.held.is_empty() {
                                 turn.stage = Stage::Answered;
                             }
                         }
@@ -1200,7 +1258,7 @@ impl Runtime<'_> {
                     return Ok(());
                 }
                 match &mut self.turn {
-                    Some(turn) if sent && !self.steers.is_empty() => turn.stage = Stage::Steering,
+                    Some(turn) if sent && !self.held.is_empty() => turn.stage = Stage::Steering,
                     Some(turn) if sent => turn.stage = Stage::Answered,
                     _ => self.commit(),
                 }
@@ -1217,7 +1275,7 @@ impl Runtime<'_> {
                     return Ok(self.take().await?);
                 }
                 let Some(at) = self
-                    .steers
+                    .held
                     .iter()
                     .position(|(uuid, _)| frame["uuid"] == uuid.as_str())
                 else {
@@ -1226,8 +1284,12 @@ impl Runtime<'_> {
                     self.transcript.frame(&frame, now_ms);
                     return Ok(());
                 };
-                let (_, item) = self.steers.remove(at);
-                self.transcript.steer(item);
+                let (_, followup) = self.held.remove(at);
+                let item = input_history(&followup.input);
+                match followup.steer {
+                    Some(id) => self.transcript.steer(id, item),
+                    None => self.transcript.note(item),
+                }
                 if let Some(turn) = &mut self.turn {
                     turn.stage = Stage::Sent;
                 }
@@ -1300,27 +1362,14 @@ impl Runtime<'_> {
                     self.write(request).await?;
                 }
             }
-            UiCommand::Steer { input } => self.deferred.push(input),
-            UiCommand::Unsteer { count } => {
-                // The newest steers go: unsent ones here, and sent ones Claude
-                // Code drops if it has not taken them yet.
-                let unsent = count.min(self.deferred.len());
-                self.deferred.truncate(self.deferred.len() - unsent);
-                let sent: Vec<_> = self
-                    .steers
-                    .iter()
-                    .rev()
-                    .take(count - unsent)
-                    .map(|(uuid, _)| uuid.clone())
-                    .collect();
-                for uuid in sent {
-                    self.write(control(
-                        &format!("smelt-unsteer-{uuid}"),
-                        json!({"subtype":"cancel_async_message", "message_uuid":uuid}),
-                    ))
-                    .await?;
-                }
-            }
+            // A steer that finds no turn arrived after it ended, and the host
+            // takes it back with the turn.
+            UiCommand::Steer { .. } if self.turn.is_none() => {}
+            UiCommand::Steer { id, input } => self.deferred.push(Followup {
+                steer: Some(id),
+                input,
+            }),
+            UiCommand::Withdraw { ids } => self.withdraw(&ids).await?,
             UiCommand::PermissionDecision {
                 request_id,
                 approved,
@@ -1458,12 +1507,12 @@ impl Runtime<'_> {
                 }
             }
             UiCommand::AppendHistoryItem { .. } if self.turn.is_none() => {}
-            UiCommand::AppendHistoryItem { append } => {
-                self.deferred
-                    .push(StartTurnInput::note(protocol::HistoryNote::context(
-                        serde_json::to_string(&append.item).unwrap_or_default(),
-                    )));
-            }
+            UiCommand::AppendHistoryItem { append } => self.deferred.push(Followup {
+                steer: None,
+                input: StartTurnInput::note(protocol::HistoryNote::context(
+                    serde_json::to_string(&append.item).unwrap_or_default(),
+                )),
+            }),
             other => self.background(other),
         }
         Ok(true)

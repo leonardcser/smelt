@@ -551,7 +551,7 @@ impl TestApp {
         self.drain_cmd();
     }
 
-    /// Push text that has already been promoted into the active turn's request queue.
+    /// Push text that the engine already holds as a steer of the active turn.
     pub fn steer(&mut self, text: &str) {
         if !text.is_empty() {
             self.tui
@@ -561,12 +561,56 @@ impl TestApp {
                     text.to_string(),
                     engine::clock::unix_time_ms(self.tui.core.clock.as_ref()),
                 ));
+            let _ = self.tui.prompt.steer_requests();
         }
     }
 
-    /// Remove up to `count` request-queued messages from the front.
-    pub fn unsteer(&mut self, count: usize) {
-        self.tui.prompt.acknowledge_requests(count);
+    /// The id the app sent its steer of `text` under.
+    pub fn sent_steer_id(&self, text: &str) -> protocol::SteerId {
+        self.actions
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    UiCommand::Steer { id, input }
+                        if input.provider_content().text_content() == text =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no steer of {text:?} was sent"))
+    }
+
+    /// Answers the app's last `Withdraw` as an engine that committed none of
+    /// its steers.
+    pub fn answer_withdraw(&mut self) {
+        let ids = self
+            .actions
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    UiCommand::Withdraw { ids } => Some(ids.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("the app withdrew steers");
+        let turn_id = self.current_turn_id().expect("an active turn");
+        self.feed_one(SourceEvent::engine(protocol::EngineEvent::Withdrawn {
+            turn_id,
+            ids,
+        }));
+    }
+
+    /// Commit up to `count` of the oldest request-queued steers, as the
+    /// engine's `Steered` would, without their history items.
+    pub fn commit_steers(&mut self, count: usize) {
+        let ids = self.queued_steer_ids();
+        self.tui.prompt.steered(&ids[..count.min(ids.len())]);
     }
 
     /// Send a `CallCoreTool` UiCommand to the engine channel.

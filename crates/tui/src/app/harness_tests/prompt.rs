@@ -674,7 +674,7 @@ fn queued_timestamp_survives_waiting_and_promotion() {
             .find_map(|action| match action {
                 Action::EngineSend(cmd) => match cmd.as_ref() {
                     protocol::UiCommand::StartTurn(payload) => Some(&payload.input),
-                    protocol::UiCommand::Steer { input } => Some(input),
+                    protocol::UiCommand::Steer { input, .. } => Some(input),
                     _ => None,
                 },
                 _ => None,
@@ -761,7 +761,7 @@ fn request_queue_bindings_steer_running_turn() {
         let steered = app.actions().iter().any(|action| match action {
             Action::EngineSend(cmd) => matches!(
                 cmd.as_ref(),
-                protocol::UiCommand::Steer { input }
+                protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "steer this turn"
             ),
             _ => false,
@@ -860,6 +860,7 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
     let transcript_blocks_before_ack = app.transcript_block_count();
     app.feed_one(SourceEvent::engine(EngineEvent::Steered {
         turn_id: 1,
+        ids: vec![app.sent_steer_id("queued follow-up")],
         delta: protocol::CanonicalHistoryDelta::new(
             0,
             vec![
@@ -897,6 +898,7 @@ fn steering_waits_for_transcript_work_before_acknowledging_input() {
         });
         app.dispatch_engine_event(EngineEvent::Steered {
             turn_id: app.current_turn_id().expect("active turn"),
+            ids: vec![app.sent_steer_id("keep this visible")],
             delta: protocol::CanonicalHistoryDelta::new(
                 before,
                 vec![
@@ -932,6 +934,7 @@ fn replayed_stale_or_invalid_steering_keeps_the_next_request_queued() {
     let first_index = app.session_message_count();
     app.type_text("first follow-up");
     app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    let first_id = app.sent_steer_id("first follow-up");
     let delta = protocol::CanonicalHistoryDelta::new(
         first_index,
         vec![
@@ -941,6 +944,7 @@ fn replayed_stale_or_invalid_steering_keeps_the_next_request_queued() {
     );
     app.feed_one(SourceEvent::engine(EngineEvent::Steered {
         turn_id,
+        ids: vec![first_id],
         delta: delta.clone(),
     }));
     app.type_text("next follow-up");
@@ -949,14 +953,17 @@ fn replayed_stale_or_invalid_steering_keeps_the_next_request_queued() {
     for event in [
         EngineEvent::Steered {
             turn_id,
+            ids: vec![first_id],
             delta: delta.clone(),
         },
         EngineEvent::Steered {
             turn_id: turn_id + 1,
+            ids: vec![first_id],
             delta: protocol::CanonicalHistoryDelta::new(first_index + 1, delta.items.clone()),
         },
         EngineEvent::Steered {
             turn_id,
+            ids: vec![first_id],
             delta: protocol::CanonicalHistoryDelta::new(first_index + 2, delta.items),
         },
     ] {
@@ -966,6 +973,102 @@ fn replayed_stale_or_invalid_steering_keeps_the_next_request_queued() {
         assert_eq!(app.transcript_block_count(), block_count);
         assert!(app.render_to_frame().text().contains("next follow-up"));
     }
+}
+
+fn user_item(text: &str) -> protocol::HistoryItem {
+    protocol::HistoryItem::user(protocol::Content::text(text)).with_sent_at_ms(1_742_567_823_000)
+}
+
+fn turn_complete(turn_id: u64) -> SourceEvent {
+    SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id,
+        history: None,
+        meta: None,
+    })
+}
+
+#[test]
+fn unqueueing_a_steer_the_engine_already_took_leaves_it_in_the_transcript_only() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.type_text("taken follow-up");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    let id = app.sent_steer_id("taken follow-up");
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    assert_eq!(
+        app.state().prompt_text,
+        "",
+        "the prompt waits for the engine's answer"
+    );
+    assert_eq!(app.state().queued_inputs, vec!["taken follow-up"]);
+
+    app.feed_one(SourceEvent::engine(EngineEvent::Steered {
+        turn_id: 1,
+        ids: vec![id],
+        delta: protocol::CanonicalHistoryDelta::new(
+            app.session_message_count(),
+            vec![user_item("taken follow-up")],
+        ),
+    }));
+
+    assert_eq!(app.state().prompt_text, "");
+    assert!(app.state().queued_inputs.is_empty());
+    let frame = app.render_to_frame().text();
+    assert_eq!(frame.matches("taken follow-up").count(), 1, "{frame}");
+}
+
+#[test]
+fn a_turn_that_ends_during_an_unqueue_returns_its_input_to_the_prompt() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.start_turn(1);
+    app.type_text("steered follow-up");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    app.type_text("next turn");
+    app.press(KeyCode::Enter);
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    assert_eq!(app.state().prompt_text, "");
+
+    app.feed_one(turn_complete(1));
+
+    assert_eq!(app.state().prompt_text, "steered follow-up\nnext turn");
+    assert!(app.state().queued_inputs.is_empty());
+    assert!(!app.agent_running(), "unqueued input starts no turn");
+}
+
+#[test]
+fn a_steer_its_turn_did_not_take_starts_the_next_turn_once() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.type_text("untaken follow-up");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    app.clear_actions();
+
+    app.feed_one(turn_complete(1));
+    app.wait_for_turn_dispatch();
+    app.feed_one(SourceEvent::Tick(0));
+
+    let sent: Vec<_> = app
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::EngineSend(cmd) => match cmd.as_ref() {
+                protocol::UiCommand::StartTurn(payload) => Some((
+                    "turn",
+                    payload.input.provider_content().text_content().into_owned(),
+                )),
+                protocol::UiCommand::Steer { input, .. } => Some((
+                    "steer",
+                    input.provider_content().text_content().into_owned(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, [("turn", "untaken follow-up".to_string())]);
 }
 
 #[test]
@@ -996,6 +1099,7 @@ fn rewind_steered_message_restores_input_and_preserves_prior_transcript() {
         app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
         let appended = EngineEvent::Steered {
             turn_id,
+            ids: vec![app.sent_steer_id("changed my mind")],
             delta: protocol::CanonicalHistoryDelta::new(
                 history_idx,
                 vec![
@@ -1128,6 +1232,7 @@ fn steering_during_streamed_tool_call_leaves_one_completed_transcript_row() {
     );
     app.feed_one(SourceEvent::engine(EngineEvent::Steered {
         turn_id: 1,
+        ids: Vec::new(),
         delta: protocol::CanonicalHistoryDelta::new(
             0,
             vec![
@@ -1349,6 +1454,7 @@ fn queue_unqueue_and_stash_keep_transcript_pinned_to_bottom() {
     pin_transcript_bottom_with_click(&mut app);
     app.press(KeyCode::Esc);
     app.press(KeyCode::Esc);
+    app.answer_withdraw();
     app.render_to_frame();
     assert_transcript_is_pinned_to_bottom(&app, "unqueue");
 
@@ -1466,6 +1572,9 @@ fn multiline_queued_preview_keeps_prompt_chrome_visible() {
 
             app.press(KeyCode::Esc);
             app.press(KeyCode::Esc);
+            if modifiers == KeyModifiers::CONTROL {
+                app.answer_withdraw();
+            }
             assert_eq!(app.state().prompt_text, draft);
             assert!(app.state().queued_inputs.is_empty());
             assert!(app.agent_running());
@@ -2530,7 +2639,7 @@ fn vim_gg_reveals_top_of_prompt_scrolled_to_bottom() {
 fn steered_text(app: &TestApp) -> Option<String> {
     app.actions().iter().find_map(|action| match action {
         Action::EngineSend(cmd) => match cmd.as_ref() {
-            protocol::UiCommand::Steer { input } => {
+            protocol::UiCommand::Steer { input, .. } => {
                 Some(input.provider_content().text_content().into_owned())
             }
             _ => None,

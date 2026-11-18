@@ -255,6 +255,7 @@ pub(crate) async fn engine_task(
                     session_id,
                     started_at,
                     tps_samples: Vec::new(),
+                    steers: Default::default(),
                 };
                 turn.install_history(input, history.items);
                 turn.run_prepared().await;
@@ -327,10 +328,28 @@ pub(crate) struct BackgroundCtx<'a> {
     pub bg_cancel: CancellationToken,
 }
 
+/// Withdraws the steers of `ids` the turn has not committed, and tells the
+/// host which. A free function, as the turn's command loops hold borrows of
+/// other fields.
+fn withdraw_steers(
+    ledger: &mut crate::steer::SteerLedger,
+    event_tx: &crate::EngineEventSender,
+    turn_id: u64,
+    ids: &[protocol::SteerId],
+) {
+    let ids = ledger.withdraw(ids);
+    if !ids.is_empty() {
+        let _ = event_tx.send(EngineEvent::Withdrawn { turn_id, ids });
+    }
+}
+
 enum ActiveTurnCommand {
     Cancel,
     HistoryAppend(protocol::HistoryAppend),
     Injection(UiCommand),
+    /// Applied at once, so the host gets its steers back without waiting for
+    /// the turn's next step.
+    Withdraw(Vec<protocol::SteerId>),
     ConfigUpdate(UiCommand),
     Other(UiCommand),
 }
@@ -340,7 +359,8 @@ impl ActiveTurnCommand {
         match cmd {
             UiCommand::Cancel => Self::Cancel,
             UiCommand::AppendHistoryItem { append } => Self::HistoryAppend(append),
-            cmd @ (UiCommand::Steer { .. } | UiCommand::Unsteer { .. }) => Self::Injection(cmd),
+            cmd @ UiCommand::Steer { .. } => Self::Injection(cmd),
+            UiCommand::Withdraw { ids } => Self::Withdraw(ids),
             cmd @ (UiCommand::SetReasoningEffort { .. }
             | UiCommand::SetFastMode { .. }
             | UiCommand::SetMode { .. }
@@ -354,6 +374,7 @@ impl ActiveTurnCommand {
         match self {
             Self::Cancel => UiCommand::Cancel,
             Self::HistoryAppend(append) => UiCommand::AppendHistoryItem { append },
+            Self::Withdraw(ids) => UiCommand::Withdraw { ids },
             Self::Injection(cmd) | Self::ConfigUpdate(cmd) | Self::Other(cmd) => cmd,
         }
     }
@@ -939,6 +960,8 @@ struct Turn<'a> {
     session_id: String,
     started_at: Instant,
     tps_samples: Vec<f64>,
+    /// The steers the host sent this turn.
+    steers: crate::steer::SteerLedger,
 }
 
 enum HostCallResult<T> {
@@ -999,7 +1022,7 @@ impl<'a> Turn<'a> {
     /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`.
     ///
     /// Commands received while waiting are handled immediately except for
-    /// `Steer`/`Unsteer` injections. The caller applies those only after
+    /// `Steer` injections. The caller applies those only after
     /// installing any replacement history and deciding to continue the turn.
     async fn host_call<Reply, F>(&mut self, build: F) -> HostCallResult<Reply>
     where
@@ -1471,7 +1494,10 @@ impl<'a> Turn<'a> {
 
     fn handle_turn_cmd(&mut self, cmd: UiCommand) -> bool {
         match cmd {
-            UiCommand::Steer { input } => {
+            UiCommand::Steer { id, input } => {
+                if !self.steers.commit(id) {
+                    return true;
+                }
                 let sent_at_ms = input
                     .sent_at_ms()
                     .unwrap_or_else(|| crate::clock::unix_time_ms(self.config.clock.as_ref()));
@@ -1481,22 +1507,13 @@ impl<'a> Turn<'a> {
                 let delta = self.history_append_delta_from(first_index);
                 self.emit(EngineEvent::Steered {
                     turn_id: self.turn_id,
+                    ids: vec![id],
                     delta,
                 });
                 true
             }
-            UiCommand::Unsteer { count } => {
-                for _ in 0..count {
-                    if let Some(pos) = self
-                        .history
-                        .iter()
-                        .rposition(|i| matches!(i, HistoryItem::User { .. }))
-                    {
-                        self.mark_history_changed_from(pos.saturating_sub(1));
-                        self.history.remove(pos);
-                    }
-                }
-                self.emit_messages_snapshot();
+            UiCommand::Withdraw { ids } => {
+                withdraw_steers(&mut self.steers, self.event_tx, self.turn_id, &ids);
                 true
             }
             UiCommand::AppendHistoryItem { append } => {
@@ -2485,6 +2502,9 @@ impl<'a> Turn<'a> {
                             self.bg_cancel.cancel();
                         }
                         ActiveTurnCommand::Injection(cmd) => speculative.push(cmd),
+                        ActiveTurnCommand::Withdraw(ids) => {
+                            withdraw_steers(&mut self.steers, self.event_tx, self.turn_id, &ids);
+                        }
                         ActiveTurnCommand::HistoryAppend(append) => {
                             deferred.push(UiCommand::AppendHistoryItem { append });
                         }
@@ -2695,8 +2715,8 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Call the LLM while retaining steer/unsteer commands for the response's
-    /// canonical commit boundary.
+    /// Call the LLM while retaining steers for the response's canonical commit
+    /// boundary.
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
@@ -2705,9 +2725,9 @@ impl<'a> Turn<'a> {
         // Config updates received while the provider is borrowed are replayed
         // in channel order after the request resolves.
         let mut deferred_config_updates: Vec<UiCommand> = Vec::new();
-        // Speculative steer/unsteer commands received while the request is
-        // in flight. Applied only if the request succeeds so the app can
-        // preserve its queue on failure.
+        // Speculative steers received while the request is in flight. Applied
+        // only if the request succeeds so the app can preserve its queue on
+        // failure.
         let mut deferred_turn_cmds: Vec<UiCommand> = Vec::new();
         // History appends (e.g. process status) are factual and are applied
         // regardless of whether the request succeeds or fails.
@@ -2815,6 +2835,9 @@ impl<'a> Turn<'a> {
                             deferred_appends.push(append);
                         }
                         ActiveTurnCommand::Injection(cmd) => deferred_turn_cmds.push(cmd),
+                        ActiveTurnCommand::Withdraw(ids) => {
+                            withdraw_steers(&mut self.steers, self.event_tx, self.turn_id, &ids);
+                        }
                         ActiveTurnCommand::ConfigUpdate(cmd) => {
                             deferred_config_updates.push(cmd);
                         }
@@ -2881,6 +2904,9 @@ impl<'a> Turn<'a> {
                         self.queue_history_item(append);
                     }
                     ActiveTurnCommand::Injection(cmd) => deferred_turn_cmds.push(cmd),
+                    ActiveTurnCommand::Withdraw(ids) => {
+                        withdraw_steers(&mut self.steers, self.event_tx, self.turn_id, &ids);
+                    }
                     ActiveTurnCommand::ConfigUpdate(cmd) => {
                         self.handle_turn_cmd(cmd);
                     }
@@ -3786,6 +3812,7 @@ mod tests {
             session_id: "s".into(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
+            steers: Default::default(),
         };
 
         turn.push_turn_content(
@@ -3929,8 +3956,17 @@ mod tests {
             ActiveTurnCommand::Cancel
         ));
         assert!(matches!(
-            ActiveTurnCommand::classify(UiCommand::Unsteer { count: 1 }),
+            ActiveTurnCommand::classify(UiCommand::Steer {
+                id: protocol::SteerId::new(1),
+                input: protocol::StartTurnInput::user(Content::text("steer")),
+            }),
             ActiveTurnCommand::Injection(_)
+        ));
+        assert!(matches!(
+            ActiveTurnCommand::classify(UiCommand::Withdraw {
+                ids: vec![protocol::SteerId::new(1)],
+            }),
+            ActiveTurnCommand::Withdraw(_)
         ));
         assert!(matches!(
             ActiveTurnCommand::classify(UiCommand::AppendHistoryItem {
@@ -4003,6 +4039,7 @@ mod tests {
             session_id: "s".into(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
+            steers: Default::default(),
         };
 
         cmd_tx

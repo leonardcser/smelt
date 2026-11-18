@@ -539,7 +539,7 @@ fn vim_visual_ctrl_q_steers_selection_only() {
     assert_eq!(app.state().prompt_text, "alpha  gamma");
     assert!(app.actions().iter().any(|action| matches!(
         action,
-        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "beta")
     )));
 }
@@ -567,12 +567,13 @@ fn vim_visual_ctrl_q_with_image_steers_and_restores_selection() {
     assert_eq!(app.prompt_attachment_count(), 1);
     assert!(app.actions().iter().any(|action| matches!(
         action,
-        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
             if input.provider_content().image_count() == 1)
     )));
 
     app.press(KeyCode::Esc);
     app.press(KeyCode::Esc);
+    app.answer_withdraw();
     assert_eq!(app.queued_request_count(), 0);
     assert_eq!(
         app.state().prompt_text,

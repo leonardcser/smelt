@@ -229,6 +229,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                 app,
                 EngineEvent::Steered {
                     turn_id: model.active_turn.expect("active turn"),
+                    ids: Vec::new(),
                     delta: CanonicalHistoryDelta::new(model.history.len(), items.clone()),
                 },
             );

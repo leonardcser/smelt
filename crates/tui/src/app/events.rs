@@ -975,14 +975,8 @@ impl TuiApp {
     }
 
     fn promote_next_queued_turn_to_request(&mut self) {
-        let Some(queued) = self.prompt.promote_turn_to_request() else {
-            return;
-        };
-        let Some(input) = queued.steer_input() else {
-            return;
-        };
-        if !input.provider_content().is_empty() {
-            self.core.engine.send(protocol::UiCommand::Steer { input });
+        if self.prompt.promote_turn_to_request() {
+            self.steer_queued_requests();
         }
     }
 
@@ -990,12 +984,8 @@ impl TuiApp {
         if self.defer_queued_compaction_handoff() {
             return;
         }
+        // The cancel ends every steer of the turn, which the next turns take up.
         let interrupted = self.prompt.suspend_for_interrupt();
-        if interrupted.unsteer_count() > 0 {
-            self.core.engine.send(protocol::UiCommand::Unsteer {
-                count: interrupted.unsteer_count(),
-            });
-        }
         self.discard_turn(crate::app::TurnEnd::Cancelled);
         if let Some(queued) = self.prompt.restore_after_interrupt(interrupted) {
             self.conversation.set_turn_pause(None);
@@ -2326,7 +2316,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "check this first")
         )));
     }
@@ -2361,7 +2351,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "check this first")
         )));
         assert!(!app.actions().iter().any(|action| matches!(
@@ -2388,7 +2378,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                 if input.provider_content().image_count() == 1)
         )));
     }
@@ -2429,7 +2419,7 @@ mod tests {
         assert_eq!(app.state().prompt_text, "");
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                 if matches!(input, protocol::StartTurnInput::User {
                     content,
                     display: Some(display),
@@ -2446,6 +2436,19 @@ mod tests {
         app.press(KeyCode::Esc);
         app.press(KeyCode::Esc);
 
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Withdraw { ids } if ids.len() == 1)
+        )));
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["see [pic.png]".to_string()],
+            "the steer stays queued until the engine gives it back"
+        );
+        assert_eq!(app.state().prompt_text, "");
+
+        app.answer_withdraw();
+
         assert!(app.agent_running());
         assert!(app.state().queued_inputs.is_empty());
         assert_eq!(
@@ -2460,10 +2463,6 @@ mod tests {
                 .image_count(),
             1
         );
-        assert!(app.actions().iter().any(|action| matches!(
-            action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Unsteer { count: 1 })
-        )));
     }
 
     #[test]
@@ -2517,7 +2516,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                 if input.provider_content().image_count() == 1)
         )));
     }
@@ -2726,7 +2725,7 @@ mod tests {
         );
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "right now")
         )));
     }
@@ -2764,7 +2763,7 @@ mod tests {
         );
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "expanded now"
                         && matches!(input, protocol::StartTurnInput::User { command: true, .. }))
         )));
@@ -2786,10 +2785,13 @@ mod tests {
 
         assert!(app.agent_running());
         assert!(app.state().queued_inputs.is_empty());
-        assert!(app.actions().iter().any(|action| matches!(
-            action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Unsteer { count } if *count == 1)
-        )));
+        assert!(
+            !app.actions().iter().any(|action| matches!(
+                action,
+                Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Withdraw { .. })
+            )),
+            "the cancel ends the turn's steers, so none is withdrawn"
+        );
         assert!(app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Cancel)
@@ -3076,7 +3078,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "custom body"
                         && matches!(input, protocol::StartTurnInput::User { command: true, .. }))
         )));
@@ -3111,7 +3113,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "expanded arg"
                         && matches!(input, protocol::StartTurnInput::User { command: true, .. }))
         )));
@@ -3259,6 +3261,7 @@ mod tests {
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
             protocol::EngineEvent::Steered {
                 turn_id: 1,
+                ids: vec![app.sent_steer_id("request now")],
                 delta: protocol::CanonicalHistoryDelta::new(
                     app.session_message_count(),
                     vec![
@@ -3279,7 +3282,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input, .. }
                     if input.provider_content().text_content() == "next turn")
         )));
     }

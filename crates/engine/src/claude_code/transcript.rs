@@ -1,7 +1,7 @@
 use crate::EngineEventSender;
 use protocol::{
     displayed_tool_name, AssistantStep, Content, EngineEvent, HistoryItem, InvocationId,
-    ReasoningKind, ToolInvocation, ToolOutcome,
+    ReasoningKind, SteerId, ToolInvocation, ToolOutcome,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -27,7 +27,7 @@ pub(super) struct Transcript {
     reasoning_id: String,
     thinking: HashMap<u64, (String, String)>,
     drafts: HashMap<u64, (String, String, String)>,
-    steers: Vec<HistoryItem>,
+    steers: Vec<(SteerId, HistoryItem)>,
     notes: Vec<HistoryItem>,
     tx: EngineEventSender,
     provider: String,
@@ -177,8 +177,8 @@ impl Transcript {
 
     /// Records a steer Claude Code took. It joins the conversation after the
     /// steps still waiting for their tool results, which it accompanies.
-    pub(super) fn steer(&mut self, item: HistoryItem) {
-        self.steers.push(item);
+    pub(super) fn steer(&mut self, id: SteerId, item: HistoryItem) {
+        self.steers.push((id, item));
         self.flush();
     }
 
@@ -501,9 +501,11 @@ impl Transcript {
             self.append(item);
         }
         if !self.steers.is_empty() {
-            let items = std::mem::take(&mut self.steers);
+            let (ids, items): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.steers).into_iter().unzip();
             self.emit(EngineEvent::Steered {
                 turn_id: self.turn_id,
+                ids,
                 delta: protocol::CanonicalHistoryDelta::new(self.next_index, items.clone()),
             });
             self.next_index += items.len();

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use protocol::Content;
+use protocol::{Content, SteerId};
 
 use crate::input::{PromptReplay, PromptState, PromptSubmission};
 
@@ -46,15 +46,47 @@ pub(crate) struct QueuedRow {
     pub(crate) text: String,
 }
 
-#[derive(Clone, Default)]
+/// Input waiting for the agent: requests that join the active turn's next
+/// request, and turns that start once it ends.
+///
+/// A request steered into the turn belongs to the engine until it answers: it
+/// is committed (`Steered`) or withdrawn (`Withdrawn`), and the turn's end
+/// returns it uncommitted. The queue never guesses either outcome.
+#[derive(Default)]
 pub(crate) struct InputQueues {
-    request: VecDeque<QueuedInput>,
+    request: VecDeque<QueuedRequestEntry>,
+    turn: VecDeque<QueuedInput>,
+    /// Input on its way back to the prompt, oldest first. It returns at once
+    /// when every steer among it is answered.
+    returning: Vec<Returning>,
+    next_steer: u64,
+}
+
+struct QueuedRequestEntry {
+    id: SteerId,
+    input: QueuedInput,
+    /// Whether the engine has it as a steer of the active turn.
+    steered: bool,
+}
+
+struct Returning {
+    stage: QueueStage,
+    input: QueuedInput,
+    /// The steer whose answer it waits for.
+    awaiting: Option<SteerId>,
+}
+
+/// The queue taken out while a turn is interrupted: the input that starts the
+/// next turn and the turns after it.
+#[must_use = "an interrupted queue must be restored"]
+pub(crate) struct InterruptedQueue {
+    next: Option<QueuedInput>,
     turn: VecDeque<QueuedInput>,
 }
 
 impl InputQueues {
     pub(crate) fn len(&self) -> usize {
-        self.request.len() + self.turn.len()
+        self.request.len() + self.turn.len() + self.returning.len()
     }
 
     #[cfg(any(test, feature = "harness"))]
@@ -62,6 +94,13 @@ impl InputQueues {
         self.request.len()
     }
 
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn request_ids(&self) -> Vec<SteerId> {
+        self.request.iter().map(|entry| entry.id).collect()
+    }
+
+    /// Whether no input waits for the agent. Input returning to the prompt
+    /// waits for the engine's answer instead.
     pub(crate) fn is_empty(&self) -> bool {
         self.request.is_empty() && self.turn.is_empty()
     }
@@ -70,19 +109,24 @@ impl InputQueues {
         !self.request.is_empty()
     }
 
-    pub(crate) fn request_inputs(&self) -> impl Iterator<Item = protocol::StartTurnInput> + '_ {
-        self.request.iter().filter_map(QueuedInput::steer_input)
-    }
-
     pub(crate) fn front_turn_is_request(&self) -> bool {
         self.turn
             .front()
             .is_some_and(QueuedInput::can_queue_for_request)
     }
 
-    pub(crate) fn clear(&mut self) {
+    /// Drops every input, returning or not. Returns whether there was any.
+    pub(crate) fn clear(&mut self) -> bool {
+        let had_input = !self.is_empty() || !self.returning.is_empty();
         self.request.clear();
         self.turn.clear();
+        self.returning.clear();
+        had_input
+    }
+
+    fn next_steer_id(&mut self) -> SteerId {
+        self.next_steer += 1;
+        SteerId::new(self.next_steer)
     }
 
     pub(crate) fn try_push_turn(&mut self, queued: QueuedInput) -> bool {
@@ -93,22 +137,48 @@ impl InputQueues {
         true
     }
 
+    /// Queues `queued` for the active turn's next request. It waits here
+    /// until `steer_requests` hands it to the engine.
     pub(crate) fn try_push_request(&mut self, queued: QueuedInput) -> bool {
         if self.len() >= MAX_QUEUED_MESSAGES || !queued.can_queue_for_request() {
             return false;
         }
-        self.request.push_back(queued);
+        let id = self.next_steer_id();
+        self.request.push_back(QueuedRequestEntry {
+            id,
+            input: queued,
+            steered: false,
+        });
         true
     }
 
-    pub(crate) fn promote_turn_to_request(&mut self) -> Option<&QueuedInput> {
-        let queued = self.turn.pop_front()?;
-        if !queued.can_queue_for_request() {
-            self.turn.push_front(queued);
-            return None;
+    /// Moves the next turn into the active turn's next request.
+    pub(crate) fn promote_turn_to_request(&mut self) -> bool {
+        if !self.front_turn_is_request() {
+            return false;
         }
-        self.request.push_back(queued);
-        self.request.back()
+        let Some(input) = self.turn.pop_front() else {
+            return false;
+        };
+        let id = self.next_steer_id();
+        self.request.push_back(QueuedRequestEntry {
+            id,
+            input,
+            steered: false,
+        });
+        true
+    }
+
+    /// Steers every request the engine does not have yet into the active turn.
+    pub(crate) fn steer_requests(&mut self) -> Vec<(SteerId, protocol::StartTurnInput)> {
+        let mut steers = Vec::new();
+        for entry in self.request.iter_mut().filter(|entry| !entry.steered) {
+            if let Some(input) = entry.input.steer_input() {
+                entry.steered = true;
+                steers.push((entry.id, input));
+            }
+        }
+        steers
     }
 
     pub(crate) fn pop_next_for_turn(&mut self) -> Option<QueuedInput> {
@@ -119,7 +189,7 @@ impl InputQueues {
     pub(crate) fn pop_next_for_turn_with_stage(&mut self) -> Option<(QueueStage, QueuedInput)> {
         self.request
             .pop_front()
-            .map(|queued| (QueueStage::Request, queued))
+            .map(|entry| (QueueStage::Request, entry.input))
             .or_else(|| {
                 self.turn
                     .pop_front()
@@ -129,45 +199,126 @@ impl InputQueues {
 
     pub(crate) fn push_front(&mut self, stage: QueueStage, queued: QueuedInput) {
         match stage {
-            QueueStage::Request => self.request.push_front(queued),
+            QueueStage::Request => {
+                let id = self.next_steer_id();
+                self.request.push_front(QueuedRequestEntry {
+                    id,
+                    input: queued,
+                    steered: false,
+                });
+            }
             QueueStage::Turn => self.turn.push_front(queued),
         }
     }
 
-    pub(crate) fn drain_request_ack(&mut self, count: usize) -> Vec<QueuedInput> {
-        let n = count.min(self.request.len());
-        self.request.drain(..n).collect()
+    /// Removes the steers the engine committed, wherever they wait, and
+    /// returns them in queue order.
+    pub(crate) fn steered(&mut self, ids: &[SteerId]) -> Vec<QueuedInput> {
+        let (committed, returning): (Vec<_>, Vec<_>) = std::mem::take(&mut self.returning)
+            .into_iter()
+            .partition(|returning| returning.awaiting.is_some_and(|id| ids.contains(&id)));
+        self.returning = returning;
+        let (requests, request): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.request)
+            .into_iter()
+            .partition(|entry| ids.contains(&entry.id));
+        self.request = request;
+        committed
+            .into_iter()
+            .map(|returning| returning.input)
+            .chain(requests.into_iter().map(|entry| entry.input))
+            .collect()
     }
 
-    pub(crate) fn take_for_interrupt(&mut self) -> (usize, Option<QueuedInput>, InputQueues) {
-        let unsteer_count = self.request.len();
-        let next = self.pop_next_for_turn();
-        self.demote_requests_to_turn_front();
-        let remaining = std::mem::take(self);
-        (unsteer_count, next, remaining)
-    }
-
-    fn demote_requests_to_turn_front(&mut self) {
-        while let Some(queued) = self.request.pop_back() {
-            self.turn.push_front(queued);
+    /// Releases the input that waited for the engine to withdraw `ids`.
+    pub(crate) fn withdrawn(&mut self, ids: &[SteerId]) {
+        for returning in &mut self.returning {
+            if returning.awaiting.is_some_and(|id| ids.contains(&id)) {
+                returning.awaiting = None;
+            }
         }
     }
 
-    pub(crate) fn drain_for_prompt(&mut self) -> (usize, Vec<QueuedInput>) {
-        let unsteer_count = self.request.len();
-        let mut queued = Vec::with_capacity(self.len());
-        queued.extend(self.request.drain(..));
-        queued.extend(self.turn.drain(..));
-        (unsteer_count, queued)
+    /// The active turn ended, so the engine commits none of its steers
+    /// beyond those it reported. They wait for the next turn again.
+    pub(crate) fn settle_turn(&mut self) {
+        for entry in &mut self.request {
+            entry.steered = false;
+        }
+        for returning in &mut self.returning {
+            returning.awaiting = None;
+        }
+    }
+
+    /// Sends every queued input back toward the prompt. Returns the steers to
+    /// withdraw from the engine; until it answers, their input waits here.
+    pub(crate) fn return_to_prompt(&mut self) -> Vec<SteerId> {
+        let mut withdraw = Vec::new();
+        for entry in self.request.drain(..) {
+            let awaiting = entry.steered.then_some(entry.id);
+            withdraw.extend(awaiting);
+            self.returning.push(Returning {
+                stage: QueueStage::Request,
+                input: entry.input,
+                awaiting,
+            });
+        }
+        self.returning
+            .extend(self.turn.drain(..).map(|input| Returning {
+                stage: QueueStage::Turn,
+                input,
+                awaiting: None,
+            }));
+        withdraw
+    }
+
+    /// The returning input, once none of it waits for the engine.
+    pub(crate) fn take_returned(&mut self) -> Vec<QueuedInput> {
+        if self
+            .returning
+            .iter()
+            .any(|returning| returning.awaiting.is_some())
+        {
+            return Vec::new();
+        }
+        self.returning
+            .drain(..)
+            .map(|returning| returning.input)
+            .collect()
+    }
+
+    /// Takes the queue out for an interrupt, which ends the turn and every
+    /// steer with it. The next input starts the next turn; the requests after
+    /// it become turns of their own.
+    pub(crate) fn take_for_interrupt(&mut self) -> InterruptedQueue {
+        let next = self.pop_next_for_turn();
+        let mut turn: VecDeque<_> = self.request.drain(..).map(|entry| entry.input).collect();
+        turn.extend(self.turn.drain(..));
+        InterruptedQueue { next, turn }
+    }
+
+    /// Restores the turns of an interrupt ahead of input queued since, and
+    /// returns the input that starts the next turn.
+    pub(crate) fn restore_interrupted(
+        &mut self,
+        interrupted: InterruptedQueue,
+    ) -> Option<QueuedInput> {
+        let InterruptedQueue { next, mut turn } = interrupted;
+        turn.extend(self.turn.drain(..));
+        self.turn = turn;
+        next
     }
 
     pub(crate) fn display_rows(&self) -> Vec<QueuedRow> {
-        self.request
+        self.returning
             .iter()
-            .map(|queued| QueuedRow {
-                stage: QueueStage::Request,
-                text: queued.display(),
+            .map(|returning| QueuedRow {
+                stage: returning.stage,
+                text: returning.input.display(),
             })
+            .chain(self.request.iter().map(|entry| QueuedRow {
+                stage: QueueStage::Request,
+                text: entry.input.display(),
+            }))
             .chain(self.turn.iter().map(|queued| QueuedRow {
                 stage: QueueStage::Turn,
                 text: queued.display(),
@@ -347,6 +498,8 @@ impl QueuedInput {
         }
     }
 
+    /// The steer that sends this input to the active turn, when it has
+    /// content for the model.
     pub(crate) fn steer_input(&self) -> Option<protocol::StartTurnInput> {
         let input = match self {
             QueuedInput::Request(req) if self.is_command() => {
@@ -365,6 +518,9 @@ impl QueuedInput {
             }
             QueuedInput::ProcessStatus(_) => return None,
         };
+        if input.provider_content().is_empty() {
+            return None;
+        }
         Some(input.with_sent_at_ms(self.sent_at_ms()?))
     }
 

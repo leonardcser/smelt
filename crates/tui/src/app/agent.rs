@@ -1147,9 +1147,7 @@ impl TuiApp {
             );
             return None;
         }
-        for input in self.prompt.queued_request_inputs() {
-            self.core.engine.send(UiCommand::Steer { input });
-        }
+        self.steer_queued_requests();
         smelt_perf::perf::record_value("agent:dispatch:start_turn:turn_id", turn_id);
         smelt_perf::perf::record_value(
             "agent:dispatch:start_turn:at_us",
@@ -1706,6 +1704,10 @@ impl TuiApp {
         use crate::app::TurnEnd;
 
         let turn_id = self.conversation.active().map(|turn| turn.turn_id);
+        // The turn's steers end with it: the engine reported each one it
+        // committed, so the rest wait for the next turn again.
+        self.prompt.settle_turn();
+        self.restore_returned_inputs();
 
         match end {
             TurnEnd::Cancelled => self.cancel_turn_work(),

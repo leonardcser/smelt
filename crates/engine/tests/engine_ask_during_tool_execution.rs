@@ -244,6 +244,7 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
     let mut history = vec![protocol::HistoryItem::user(Content::text(
         "initial request",
     ))];
+    let mut withdrawn = Vec::new();
     loop {
         match handle.recv_output().await {
             Some(engine::EngineOutput::HostCall(engine::HostCall::PrepareRequest {
@@ -259,10 +260,13 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
                 callbacks += 1;
                 if callbacks == 1 {
                     handle.send(UiCommand::Steer {
+                        id: protocol::SteerId::new(1),
                         input: protocol::StartTurnInput::user(Content::text("hook follow-up")),
                     });
                     if case == ResponseSteeringCase::Withdrawn {
-                        handle.send(UiCommand::Unsteer { count: 1 });
+                        handle.send(UiCommand::Withdraw {
+                            ids: vec![protocol::SteerId::new(1)],
+                        });
                     }
                     handle.send(barrier(2));
                     reply = Some(response);
@@ -275,6 +279,7 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
                     first_delta = false;
                     if case == ResponseSteeringCase::ProviderAndHook {
                         handle.send(UiCommand::Steer {
+                            id: protocol::SteerId::new(2),
                             input: protocol::StartTurnInput::user(Content::text(
                                 "provider follow-up",
                             )),
@@ -299,6 +304,7 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
                     history.truncate(update.first_index.get());
                     history.extend(update.items);
                 }
+                EngineEvent::Withdrawn { ids, .. } => withdrawn.extend(ids),
                 EngineEvent::ResponseDraftRejected => panic!("valid answer was rejected: {case:?}"),
                 EngineEvent::TurnError { message, .. } => panic!("{message}"),
                 EngineEvent::TurnComplete {
@@ -315,6 +321,12 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
             _ => panic!("unexpected engine output"),
         }
     }
+    let expected_withdrawn = if case == ResponseSteeringCase::Withdrawn {
+        vec![protocol::SteerId::new(1)]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(withdrawn, expected_withdrawn, "{case:?}");
     let mut expected = vec![
         (protocol::Role::User, "initial request"),
         (protocol::Role::Assistant, "sub-answer"),
@@ -730,6 +742,7 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
 
     draft_streamed_rx.await.unwrap();
     handle.send(UiCommand::Steer {
+        id: protocol::SteerId::new(3),
         input: protocol::StartTurnInput::user(Content::text("queued follow-up"))
             .with_sent_at_ms(1_742_567_823_000),
     });
@@ -798,7 +811,7 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
     tokio::time::timeout(TEST_DEADLINE, async {
         loop {
             match handle.recv().await {
-                Some(EngineEvent::Steered { turn_id, delta }) => {
+                Some(EngineEvent::Steered { turn_id, delta, .. }) => {
                     assert_eq!(turn_id, 1);
                     assert!(matches!(
                         delta.items.as_slice(),
@@ -899,6 +912,7 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
     .expect("parallel tools should start");
 
     handle.send(UiCommand::Steer {
+        id: protocol::SteerId::new(4),
         input: protocol::StartTurnInput::user(Content::text("queued follow-up")),
     });
     release_a.add_permits(1);
@@ -1214,6 +1228,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         system_prompt: "switched system with Lua fragment".into(),
     });
     handle.send(UiCommand::Steer {
+        id: protocol::SteerId::new(5),
         input: protocol::StartTurnInput::user(Content::text("use the new target")),
     });
     release_first_tx.send(()).unwrap();
@@ -1330,6 +1345,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
                     system_prompt: "sequential switched system".into(),
                 });
                 handle.send(UiCommand::Steer {
+                    id: protocol::SteerId::new(6),
                     input: protocol::StartTurnInput::user(Content::text("queued during tool")),
                 });
                 handle.send(UiCommand::ToolResult {

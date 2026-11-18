@@ -200,6 +200,11 @@ impl TestApp {
         self.tui.prompt.queued_request_len()
     }
 
+    /// The steer ids of the request queue, oldest first.
+    pub fn queued_steer_ids(&self) -> Vec<protocol::SteerId> {
+        self.tui.prompt.queued_steer_ids()
+    }
+
     /// The id the app allocates to its next turn.
     pub fn next_turn_id(&self) -> u64 {
         self.tui.conversation.next_turn_id()

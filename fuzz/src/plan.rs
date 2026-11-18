@@ -162,8 +162,11 @@ pub(crate) fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck
             let n = usize::from(count);
             let item = protocol::HistoryItem::user(protocol::Content::text(text))
                 .with_sent_at_ms(1_742_567_823_000);
+            let mut ids = app.queued_steer_ids();
+            ids.truncate(n);
             let ev = SourceEvent::engine(EngineEvent::Steered {
                 turn_id: app.current_turn_id().unwrap_or(0),
+                ids,
                 delta: protocol::CanonicalHistoryDelta::new(
                     app.session_message_count(),
                     vec![item; n],
@@ -585,7 +588,7 @@ pub(crate) fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result
             app.steer(&text);
         }
         FuzzOp::Unsteer { count } => {
-            app.unsteer(usize::from(count));
+            app.commit_steers(usize::from(count));
         }
         FuzzOp::CallCoreTool { tool_name, args } => {
             app.call_core_tool(&tool_name, args.into_map());

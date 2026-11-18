@@ -300,12 +300,13 @@ fn goal_creation_while_running_waits_until_its_queued_request_is_consumed() {
                     action,
                     Action::EngineSend(cmd) if matches!(
                         cmd.as_ref(),
-                        protocol::UiCommand::Steer { input }
+                        protocol::UiCommand::Steer { input, .. }
                             if input.provider_content().text_content() == command
                     )
                 )));
                 app.feed_one(SourceEvent::engine(EngineEvent::Steered {
                     turn_id,
+                    ids: vec![app.sent_steer_id(&command)],
                     delta: protocol::CanonicalHistoryDelta::new(
                         app.session_message_count(),
                         vec![

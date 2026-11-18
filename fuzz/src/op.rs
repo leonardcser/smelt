@@ -413,7 +413,7 @@ pub enum FuzzOp {
     Steer {
         text: String,
     },
-    /// Side channel: remove up to `count` queued messages from the front.
+    /// Side channel: commit up to `count` of the oldest queued steers.
     /// Exercises the mid-turn steering queue shrink path.
     Unsteer {
         count: u8,

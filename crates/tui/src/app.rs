@@ -1481,27 +1481,44 @@ impl TuiApp {
         if !self.turn_input_is_active() {
             return self.prompt.try_queue_turn(queued);
         }
-        let input = queued.steer_input();
         if !self.prompt.try_queue_request(queued) {
             return false;
         }
-        if let Some(input) = input.filter(|input| !input.provider_content().is_empty()) {
-            self.core.engine.send(protocol::UiCommand::Steer { input });
-        }
+        self.steer_queued_requests();
         true
     }
 
-    pub(crate) fn drain_queued_inputs_into_prompt(&mut self) -> bool {
-        let (request_count, queued) = self.prompt.drain_for_prompt();
-        if request_count > 0 {
-            self.core.engine.send(protocol::UiCommand::Unsteer {
-                count: request_count,
-            });
+    /// Hands the active turn every queued request it does not have yet.
+    pub(crate) fn steer_queued_requests(&mut self) {
+        for (id, input) in self.prompt.steer_requests() {
+            self.core
+                .engine
+                .send(protocol::UiCommand::Steer { id, input });
         }
-        if queued.is_empty() {
+    }
+
+    /// Sends every queued input back to the prompt. Steers the engine holds
+    /// return once it withdraws them; those it commits stay in the transcript
+    /// instead. Returns whether any input was queued.
+    pub(crate) fn drain_queued_inputs_into_prompt(&mut self) -> bool {
+        if self.prompt.queue_is_empty() {
             return false;
         }
+        let ids = self.prompt.return_to_prompt();
+        if !ids.is_empty() {
+            self.core.engine.send(protocol::UiCommand::Withdraw { ids });
+        }
+        self.restore_returned_inputs();
+        true
+    }
 
+    /// Puts the input returning to the prompt there, once the engine answered
+    /// for every steer among it.
+    pub(crate) fn restore_returned_inputs(&mut self) {
+        let queued = self.prompt.take_returned();
+        if queued.is_empty() {
+            return;
+        }
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         let mut text = crate::smelt_edit::AttachedText::default();
         for (index, input) in queued.into_iter().enumerate() {
@@ -1512,7 +1529,6 @@ impl TuiApp {
         }
         let cpos = text.text().len();
         self.prompt.restore_attached(&mut pctx, text, cpos);
-        true
     }
 
     pub(crate) fn clear_prompt_prediction(&mut self) {

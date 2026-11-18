@@ -14,7 +14,7 @@ use engine::{EngineConfig, EngineHandle, HostCallbacks};
 use protocol::{
     AgentMode, Content, Decision, EngineEvent, HistoryItem, InvocationId, ModelConfig,
     ModelHistorySource, ModelTarget, ReasoningEffort, RequestRuntimeConfig, StartTurnInput,
-    StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
+    StartTurnPayload, SteerId, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
     ToolVisibility, TurnHistory, UiCommand,
 };
 use serde_json::{json, Value};
@@ -446,6 +446,12 @@ enum Pending {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SteerAnswer {
+    Steered,
+    Withdrawn,
+}
+
 struct Sim {
     policy: Policy,
     ops: Vec<Op>,
@@ -457,14 +463,12 @@ struct Sim {
     tools: HashMap<InvocationId, ToolPhase>,
     active_turn: Option<u64>,
     next_turn: u64,
-    steer_markers: Vec<String>,
-    steered: Vec<String>,
-    /// Retractions requested; an idle engine ignores any that arrive late.
-    unsteer_requests: usize,
-    /// Steers reported and retractions sent during the active turn; a
-    /// retraction only ever targets the turn's own steered inputs.
-    turn_steers: usize,
-    turn_unsteers: usize,
+    /// Every steer sent, with the marker its text starts with.
+    steers: Vec<(SteerId, String)>,
+    /// The engine's answer to each steer: committed or withdrawn, once.
+    answers: HashMap<SteerId, SteerAnswer>,
+    /// The steers of the active turn, which a withdrawal targets.
+    turn_steers: Vec<SteerId>,
     turn_markers: Vec<String>,
     mode: AgentMode,
     record_trace: bool,
@@ -501,11 +505,9 @@ impl Sim {
             tools: HashMap::new(),
             active_turn: None,
             next_turn: 1,
-            steer_markers: Vec::new(),
-            steered: Vec::new(),
-            unsteer_requests: 0,
-            turn_steers: 0,
-            turn_unsteers: 0,
+            steers: Vec::new(),
+            answers: HashMap::new(),
+            turn_steers: Vec::new(),
             turn_markers: Vec::new(),
             mode: AgentMode::normal(),
             record_trace: std::env::var_os("SMELT_SIM_TRACE").is_some(),
@@ -531,21 +533,29 @@ impl Sim {
             }
             Op::Steer { words } => {
                 if self.active_turn.is_some() {
-                    let marker = format!("steer-{}", self.steer_markers.len());
+                    let id = SteerId::new(self.steers.len() as u64 + 1);
+                    let marker = format!("steer-{}", self.steers.len());
                     self.handle.send(UiCommand::Steer {
+                        id,
                         input: StartTurnInput::user(Content::text(format!(
                             "{marker} {}",
                             words_text(words)
                         ))),
                     });
-                    self.steer_markers.push(marker);
+                    self.steers.push((id, marker));
+                    self.turn_steers.push(id);
                 }
             }
             Op::Unsteer => {
-                if self.active_turn.is_some() && self.turn_unsteers < self.turn_steers {
-                    self.handle.send(UiCommand::Unsteer { count: 1 });
-                    self.unsteer_requests += 1;
-                    self.turn_unsteers += 1;
+                // The newest steer the engine has not answered yet.
+                let unanswered = self
+                    .turn_steers
+                    .iter()
+                    .rev()
+                    .find(|id| !self.answers.contains_key(id))
+                    .filter(|_| self.active_turn.is_some());
+                if let Some(&id) = unanswered {
+                    self.handle.send(UiCommand::Withdraw { ids: vec![id] });
                 }
             }
             Op::Cancel => self.handle.send(UiCommand::Cancel),
@@ -579,8 +589,7 @@ impl Sim {
         let turn_id = self.next_turn;
         self.next_turn += 1;
         self.active_turn = Some(turn_id);
-        self.turn_steers = 0;
-        self.turn_unsteers = 0;
+        self.turn_steers.clear();
         let marker = format!("turn-{turn_id}");
         let text = format!("{marker} {}", words_text(words));
         self.turn_markers.push(marker);
@@ -672,9 +681,8 @@ impl Sim {
     }
 
     /// Inputs reach the provider and the canonical history exactly once: every
-    /// started turn is recorded once, a steered input is recorded at most once
-    /// and only if the engine reported consuming it, and no steered input
-    /// disappears without a retraction request.
+    /// started turn is recorded once, a committed steer is recorded once, and
+    /// a steer the engine did not commit never reaches history or the provider.
     fn check_final_history(&self) {
         let history = serde_json::to_string(&self.history).expect("serialize history");
         let occurrences = |marker: &str| history.matches(&format!("\"{marker} ")).count();
@@ -687,29 +695,31 @@ impl Sim {
                 occurrences(marker)
             );
         }
-        let mut missing = 0;
-        for marker in &self.steer_markers {
-            let steered = self.steered.contains(marker);
+        for (id, marker) in &self.steers {
+            let committed = self.answers.get(id) == Some(&SteerAnswer::Steered);
             let copies = occurrences(marker);
             let sent_to_provider = wire
                 .bodies
                 .iter()
                 .any(|body| body.contains(&format!("{marker} ")));
-            assert!(
-                copies <= usize::from(steered),
-                "steered input {marker}: reported={steered}, history copies={copies}: {history}"
+            assert_eq!(
+                copies,
+                usize::from(committed),
+                "steer {marker}: answer={:?}, history copies={copies}: {history}",
+                self.answers.get(id)
             );
-            missing += usize::from(steered && copies == 0);
             assert!(
-                steered || !sent_to_provider,
-                "steered input {marker} reached the provider but was never reported as steered"
+                committed || !sent_to_provider,
+                "steer {marker} reached the provider but was never reported as steered"
             );
         }
-        assert!(
-            missing <= self.unsteer_requests,
-            "{missing} steered inputs vanished after {} retractions: {history}",
-            self.unsteer_requests
-        );
+    }
+
+    /// Records the engine's answer to a steer, which it gives once.
+    fn answer(&mut self, id: SteerId, answer: SteerAnswer) {
+        if let Some(previous) = self.answers.insert(id, answer) {
+            panic!("steer {id:?} was answered {answer:?} after {previous:?}");
+        }
     }
 
     fn apply_policies(&mut self) -> bool {
@@ -848,20 +858,32 @@ impl Sim {
                 self.expect_active(turn_id, "history update");
                 self.apply_delta(update);
             }
-            EngineEvent::Steered { turn_id, delta } => {
+            EngineEvent::Steered {
+                turn_id,
+                ids,
+                delta,
+            } => {
                 self.expect_active(turn_id, "steering");
                 let text = serde_json::to_string(&delta.items).expect("serialize steered items");
-                for marker in &self.steer_markers {
-                    if text.contains(&format!("\"{marker} ")) {
-                        assert!(
-                            !self.steered.contains(marker),
-                            "steered input {marker} was reported twice"
-                        );
-                        self.steered.push(marker.clone());
-                        self.turn_steers += 1;
-                    }
+                for id in ids {
+                    self.answer(id, SteerAnswer::Steered);
+                    let (_, marker) = self
+                        .steers
+                        .iter()
+                        .find(|(steer, _)| *steer == id)
+                        .expect("the engine committed a steer it was sent");
+                    assert!(
+                        text.contains(&format!("\"{marker} ")),
+                        "steer {marker} was committed without its text: {text}"
+                    );
                 }
                 self.apply_delta(delta);
+            }
+            EngineEvent::Withdrawn { turn_id, ids } => {
+                self.expect_active(turn_id, "withdrawal");
+                for id in ids {
+                    self.answer(id, SteerAnswer::Withdrawn);
+                }
             }
             EngineEvent::TurnComplete {
                 turn_id, history, ..

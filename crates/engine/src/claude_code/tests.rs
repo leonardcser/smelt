@@ -138,16 +138,38 @@ async fn output(handle: &mut crate::EngineHandle) -> EngineOutput {
     }
 }
 
+/// The answers a turn gave its steers.
+#[derive(Debug, Default, PartialEq)]
+struct SteerAnswers {
+    steered: Vec<protocol::SteerId>,
+    withdrawn: Vec<protocol::SteerId>,
+}
+
 async fn finish(
     handle: &mut crate::EngineHandle,
     history: &mut Vec<HistoryItem>,
 ) -> protocol::TurnMeta {
+    finish_steering(handle, history, &mut SteerAnswers::default()).await
+}
+
+async fn finish_steering(
+    handle: &mut crate::EngineHandle,
+    history: &mut Vec<HistoryItem>,
+    answers: &mut SteerAnswers,
+) -> protocol::TurnMeta {
     loop {
         match output(handle).await {
-            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. })
-            | EngineOutput::Event(EngineEvent::Steered { delta, .. }) => {
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
                 assert_eq!(delta.first_index.get(), history.len());
                 history.extend(delta.items);
+            }
+            EngineOutput::Event(EngineEvent::Steered { ids, delta, .. }) => {
+                assert_eq!(delta.first_index.get(), history.len());
+                history.extend(delta.items);
+                answers.steered.extend(ids);
+            }
+            EngineOutput::Event(EngineEvent::Withdrawn { ids, .. }) => {
+                answers.withdrawn.extend(ids);
             }
             EngineOutput::Event(EngineEvent::TurnComplete { meta, .. }) => return meta.unwrap(),
             EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
@@ -629,6 +651,7 @@ async fn queued_input_is_acknowledged_and_committed_exactly_once() {
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, Vec::new()));
     handle.send(UiCommand::Steer {
+        id: protocol::SteerId::new(1),
         input: StartTurnInput::user(Content::text("queued")),
     });
     let mut history = Vec::new();
@@ -688,6 +711,7 @@ async fn steers_reach_claude_code_mid_turn_and_follow_the_step_they_join() {
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, Vec::new()));
     handle.send(UiCommand::Steer {
+        id: protocol::SteerId::new(2),
         input: StartTurnInput::user(Content::text("steered")),
     });
     let mut history = Vec::new();
@@ -712,26 +736,26 @@ async fn steers_reach_claude_code_mid_turn_and_follow_the_step_they_join() {
 
 #[tokio::test]
 #[serial(claude_code)]
-async fn unsteered_input_is_withdrawn_from_claude_code() {
+async fn a_withdrawn_steer_is_dropped_by_claude_code_and_never_committed() {
     let fixture = Fixture::new("steer-cancel");
     let mut handle = fixture.handle();
     let mut history = Vec::new();
-    handle.send(payload(fixture.root.path(), 1, history.clone()));
-    loop {
-        match output(&mut handle).await {
-            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
-                history.extend(delta.items);
-            }
-            EngineOutput::Event(EngineEvent::ToolStarted { .. }) => break,
-            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
-            _ => {}
-        }
-    }
+    wait_for_tool(&fixture, &mut handle, &mut history).await;
+    let id = protocol::SteerId::new(3);
     handle.send(UiCommand::Steer {
+        id,
         input: StartTurnInput::user(Content::text("withdrawn")),
     });
-    handle.send(UiCommand::Unsteer { count: 1 });
-    finish(&mut handle, &mut history).await;
+    handle.send(UiCommand::Withdraw { ids: vec![id] });
+    let mut answers = SteerAnswers::default();
+    finish_steering(&mut handle, &mut history, &mut answers).await;
+    assert_eq!(
+        answers,
+        SteerAnswers {
+            steered: Vec::new(),
+            withdrawn: vec![id],
+        }
+    );
     assert_eq!(
         history
             .iter()
@@ -740,6 +764,81 @@ async fn unsteered_input_is_withdrawn_from_claude_code() {
         1,
         "a withdrawn steer never joins the conversation"
     );
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn a_steer_claude_code_took_before_its_withdrawal_joins_the_conversation_once() {
+    let fixture = Fixture::new("steer-taken");
+    let mut handle = fixture.handle();
+    let mut history = Vec::new();
+    wait_for_tool(&fixture, &mut handle, &mut history).await;
+    let id = protocol::SteerId::new(4);
+    handle.send(UiCommand::Steer {
+        id,
+        input: StartTurnInput::user(Content::text("taken")),
+    });
+    handle.send(UiCommand::Withdraw { ids: vec![id] });
+    let mut answers = SteerAnswers::default();
+    finish_steering(&mut handle, &mut history, &mut answers).await;
+    assert_eq!(
+        answers,
+        SteerAnswers {
+            steered: vec![id],
+            withdrawn: Vec::new(),
+        },
+        "the host learns the steer was committed, never that it was withdrawn"
+    );
+    let taken = history
+        .iter()
+        .filter(|item| {
+            matches!(item, HistoryItem::User { content, .. } if content.text_content() == "taken")
+        })
+        .count();
+    assert_eq!(taken, 1);
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn a_steer_that_arrives_after_its_turn_never_reaches_the_next_one() {
+    let fixture = Fixture::new("text");
+    let mut handle = fixture.handle();
+    let mut history = Vec::new();
+    handle.send(payload(fixture.root.path(), 1, history.clone()));
+    finish(&mut handle, &mut history).await;
+    handle.send(UiCommand::Steer {
+        id: protocol::SteerId::new(5),
+        input: StartTurnInput::user(Content::text("LATE_STEER")),
+    });
+    handle.send(payload(fixture.root.path(), 2, history.clone()));
+    let mut answers = SteerAnswers::default();
+    finish_steering(&mut handle, &mut history, &mut answers).await;
+    assert_eq!(answers, SteerAnswers::default());
+    let late = fixture
+        .calls()
+        .into_iter()
+        .filter(|call| call["type"] == "user" && call.to_string().contains("LATE_STEER"))
+        .count();
+    assert_eq!(late, 0, "the host takes a late steer back with its turn");
+}
+
+/// Starts a steer scenario's turn and waits until its tool runs.
+async fn wait_for_tool(
+    fixture: &Fixture,
+    handle: &mut crate::EngineHandle,
+    history: &mut Vec<HistoryItem>,
+) {
+    handle.send(payload(fixture.root.path(), 1, history.clone()));
+    loop {
+        match output(handle).await {
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
+                history.extend(delta.items);
+            }
+            EngineOutput::Event(EngineEvent::ToolStarted { .. }) => return,
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
 }
 
 #[tokio::test]

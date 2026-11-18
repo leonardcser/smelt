@@ -725,7 +725,7 @@ fn quota_retry_resumes_original_work_without_consuming_the_turn_queue() {
     assert!(cmds.iter().any(|cmd| matches!(cmd, protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().is_empty())));
     assert!(cmds
         .iter()
-        .any(|cmd| matches!(cmd, protocol::UiCommand::Steer { input }
+        .any(|cmd| matches!(cmd, protocol::UiCommand::Steer { input, .. }
         if input.provider_content().text_content() == "pending steering"
             && input.sent_at_ms() == Some(sent_at_ms))));
     assert_eq!(app.state().queued_inputs.len(), 2);
@@ -1508,6 +1508,9 @@ fn withdrawing_queued_goal_creation_does_not_activate_or_replace_a_goal() {
             app.press_mod(KeyCode::Enter, modifiers);
             app.press(KeyCode::Esc);
             app.press(KeyCode::Esc);
+            if modifiers == KeyModifiers::CONTROL {
+                app.answer_withdraw();
+            }
             assert_eq!(app.state().prompt_text, "/goal withdrawn objective");
             app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert!(app.state().prompt_text.is_empty());
