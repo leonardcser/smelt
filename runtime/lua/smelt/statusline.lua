@@ -1,9 +1,9 @@
 -- The statusline: a strip bar at the bottom of the screen.
 --
 -- The built-in sources (`slug`, `vim_mode`, `agent_mode`, `tps`,
--- `permission`, `keymap`, `procs`, `worktree`, `vim_pending`, `cursor`) read
--- engine state from signals plus `smelt.session.status()` for values that
--- carry pending/stale markers. Plugins add sources with
+-- `permission`, `keymap`, `agents`, `procs`, `worktree`, `vim_pending`,
+-- `cursor`) read engine state from signals plus `smelt.session.status()` for
+-- values that carry pending/stale markers. Plugins add sources with
 -- `smelt.statusline:add(name, fn)`, and replace or remove a built-in one by
 -- its name.
 
@@ -103,6 +103,17 @@ define("keymap", { "keymap_pending" }, function()
   }
 end)
 
+define("agents", { "running_agents" }, function()
+  local agents = signal("running_agents") or 0
+  if agents <= 0 then return nil end
+  return {
+    text = agents == 1 and "1 agent" or (agents .. " agents"),
+    style = { fg = "SmeltAgent", italic = false },
+    priority = 2,
+    separated = true,
+  }
+end)
+
 define("procs", { "running_procs" }, function()
   local procs = signal("running_procs") or 0
   if procs <= 0 then return nil end
@@ -157,8 +168,8 @@ end)
 
 --- The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
 --- sources: `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`,
---- `procs`, `worktree`, `vim_pending` and `cursor`. Items with `row = 2` or
---- more make it taller.
+--- `agents`, `procs`, `worktree`, `vim_pending` and `cursor`. Items with
+--- `row = 2` or more make it taller.
 ---@tier ui_host
 ---@type smelt.bar.Bar
 smelt.statusline = bar.new({

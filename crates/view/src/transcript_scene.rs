@@ -179,6 +179,9 @@ impl Default for TranscriptDefaultViewPolicy {
             .insert("process_status".to_string(), ViewState::Collapsed);
         policy
             .block_kinds
+            .insert("agent_message".to_string(), ViewState::Peek);
+        policy
+            .block_kinds
             .insert("compaction_preview".to_string(), ViewState::Peek);
         for tool in [
             "load_skill",

@@ -222,6 +222,7 @@ pub fn transcript_role(kind: &str) -> &'static str {
         "user" => "user",
         "mode" => "mode",
         "process_status" => "process_status",
+        "agent_message" => "agent_message",
         _ => "assistant",
     }
 }
@@ -301,7 +302,10 @@ pub fn transcript_text_extent_profile(
     indexed_text: &str,
     estimated_text_bytes: u64,
 ) -> TranscriptExtentProfile {
-    let compact = matches!(kind, "tool" | "thinking" | "process_status" | "mode");
+    let compact = matches!(
+        kind,
+        "tool" | "thinking" | "process_status" | "agent_message" | "mode"
+    );
     let text = if matches!(kind, "tool" | "thinking") && !preview_text.is_empty() {
         preview_text
             .lines()

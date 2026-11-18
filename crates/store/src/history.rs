@@ -47,6 +47,7 @@ fn note_kind_name(kind: HistoryNoteKind) -> &'static str {
         HistoryNoteKind::ModeChange => "mode_change",
         HistoryNoteKind::Context => "context",
         HistoryNoteKind::ProcessStatus => "process_status",
+        HistoryNoteKind::AgentMessage => "agent_message",
         HistoryNoteKind::Compaction => "compaction",
     }
 }
@@ -59,6 +60,7 @@ pub(crate) fn note_projection(
         "mode_change" => HistoryNoteKind::ModeChange,
         "context" => HistoryNoteKind::Context,
         "process_status" => HistoryNoteKind::ProcessStatus,
+        "agent_message" => HistoryNoteKind::AgentMessage,
         "compaction" => HistoryNoteKind::Compaction,
         _ => return None,
     };

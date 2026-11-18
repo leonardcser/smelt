@@ -1,8 +1,12 @@
 //! Read-only projections of Claude-owned tasks. Execution stays in the native session.
 
+use super::native_id;
 use super::transcript::Transcript;
 use crate::EngineEventSender;
-use protocol::{AgentCapabilities, AgentInfo, AgentOwner, AgentStatus, EngineEvent};
+use protocol::{
+    AgentCapabilities, AgentInfo, AgentMessageEvent, AgentOwner, AgentStatus, EngineEvent,
+    HistoryItem, HistoryNote, ToolOutcome,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -21,6 +25,8 @@ struct Child {
     info: AgentInfo,
     launch_id: Option<String>,
     transcript: Transcript,
+    /// Whether the end of its background work was reported to its owner.
+    reported: bool,
 }
 
 struct Stop {
@@ -47,6 +53,26 @@ pub(super) struct Agents {
     pending: Vec<PendingFrame>,
     pending_bytes: usize,
     stops: HashMap<String, Stop>,
+    /// What agents add to the main agent's transcript.
+    deliveries: Vec<Delivery>,
+}
+
+/// What an agent adds to the transcript of the agent that launched it.
+#[derive(Debug, PartialEq)]
+pub(super) enum Delivery {
+    /// A background agent's report, when it ends.
+    Report(HistoryNote),
+    /// What a waited-for agent works on, as a line of the call that waits.
+    Activity { call_id: String, line: String },
+}
+
+impl Delivery {
+    pub(super) fn apply(self, transcript: &mut Transcript) {
+        match self {
+            Self::Report(note) => transcript.note(HistoryItem::note(note)),
+            Self::Activity { call_id, line } => transcript.printed(&call_id, vec![line]),
+        }
+    }
 }
 
 impl Agents {
@@ -69,7 +95,13 @@ impl Agents {
             pending: Vec::new(),
             pending_bytes: 0,
             stops: HashMap::new(),
+            deliveries: Vec::new(),
         }
+    }
+
+    /// What agents added to the main agent's transcript since the last call.
+    pub(super) fn deliveries(&mut self) -> Vec<Delivery> {
+        std::mem::take(&mut self.deliveries)
     }
 
     /// Returns true for child frames and task telemetry, including buffered frames.
@@ -189,7 +221,7 @@ impl Agents {
         let launch = launch_id.and_then(|id| self.launches.get(id));
         let parent = launch
             .and_then(|launch| launch.owner.as_ref())
-            .map(|id| native_id(id));
+            .map(|id| native_id(&self.provider, id));
         let title = frame["description"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -221,7 +253,7 @@ impl Agents {
             None => 1,
         };
         let info = AgentInfo {
-            id: native_id(task),
+            id: native_id(&self.provider, task),
             ephemeral: self.ephemeral,
             generation,
             parent_agent_id: parent,
@@ -229,6 +261,8 @@ impl Agents {
             title,
             task: prompt,
             status: AgentStatus::Running,
+            // Claude Code registers a task in the background unless it says otherwise.
+            background: frame["is_backgrounded"] != false,
             activity: String::new(),
             result: None,
             error: None,
@@ -258,6 +292,7 @@ impl Agents {
                 info,
                 launch_id: launch_id.map(str::to_owned),
                 transcript,
+                reported: false,
             },
         );
         if let Some(id) = launch_id {
@@ -310,7 +345,10 @@ impl Agents {
             else {
                 continue;
             };
-            let owner = launch.owner.as_ref().map(|id| native_id(id));
+            let owner = launch
+                .owner
+                .as_ref()
+                .map(|id| native_id(&self.provider, id));
             let prompt = launch.task.as_deref().filter(|s| !s.is_empty());
             if owner != child.info.parent_agent_id
                 || (child.info.task.is_empty() && prompt.is_some())
@@ -380,15 +418,94 @@ impl Agents {
                 }
             }
         }
+        if patch["is_backgrounded"] == true {
+            child.info.background = true;
+        }
+        let mut deliveries = Vec::new();
+        let launch_id = child.launch_id.clone();
         if let Some(description) = frame["description"].as_str() {
+            if let Some(call_id) = launch_id.clone().filter(|_| {
+                frame["subtype"] == "task_progress"
+                    && !child.info.background
+                    && child.info.activity != description
+            }) {
+                deliveries.push(Delivery::Activity {
+                    call_id,
+                    line: description.to_owned(),
+                });
+            }
             child.info.activity = description.into();
         }
         if let Some(tokens) = frame["usage"]["total_tokens"].as_u64() {
             child.info.total_tokens = Some(tokens);
         }
+        // Claude Code reports a task's end in its notification, after the
+        // status. Only background work reports to its owner: a foreground
+        // agent's report is the result of the call that waits for it.
+        if frame["subtype"] == "task_notification"
+            && child.info.background
+            && child.info.status.is_terminal()
+            && !child.reported
+        {
+            child.reported = true;
+            deliveries.push(Delivery::Report(HistoryNote::agent_message(
+                AgentMessageEvent::BackgroundAgentEnded {
+                    agent_id: child.info.id.clone(),
+                    title: child.info.title.clone(),
+                    status: child.info.status,
+                },
+                child
+                    .info
+                    .error
+                    .as_deref()
+                    .or(child.info.result.as_deref())
+                    .unwrap_or_default(),
+            )));
+        }
         if child.info != previous {
             self.announce(task);
         }
+        let owner = launch_id
+            .as_ref()
+            .and_then(|id| self.launches.get(id))
+            .and_then(|launch| launch.owner.clone());
+        for delivery in deliveries {
+            self.deliver(owner.as_deref(), delivery);
+        }
+    }
+
+    /// Adds `delivery` to the transcript of agent `owner`, or of the main
+    /// agent when there is no owner.
+    fn deliver(&mut self, owner: Option<&str>, delivery: Delivery) {
+        match owner {
+            None => self.deliveries.push(delivery),
+            Some(owner) => {
+                if let Some(child) = self.children.get_mut(owner) {
+                    delivery.apply(&mut child.transcript);
+                }
+            }
+        }
+    }
+
+    /// Moves the main agent's foreground agents to the background, so it stops
+    /// waiting for them.
+    pub(super) fn background_requests(&self) -> Vec<Value> {
+        self.children
+            .values()
+            .filter(|child| !child.info.status.is_terminal() && !child.info.background)
+            .filter_map(|child| child.launch_id.as_deref())
+            .filter(|id| {
+                self.launches
+                    .get(*id)
+                    .is_some_and(|launch| launch.owner.is_none())
+            })
+            .map(|id| {
+                super::transport::control(
+                    &format!("smelt-background-{id}"),
+                    json!({"subtype":"background_tasks", "tool_use_id":id}),
+                )
+            })
+            .collect()
     }
 
     fn announce(&self, task: &str) {
@@ -540,8 +657,50 @@ impl Agents {
     }
 }
 
-fn native_id(task: &str) -> String {
-    format!("claude-code:{task}")
+/// Whether Claude Code's tool `name` launches an agent.
+pub(super) fn launches(name: &str) -> bool {
+    matches!(name, "Agent" | "Task")
+}
+
+/// The result of a call that launched an agent, read from Claude Code's
+/// structured result: the report of an agent the call waited for, or the
+/// note that the agent works in the background. The model keeps `content`.
+pub(super) fn launch_result(content: &str, result: &Value) -> Option<ToolOutcome> {
+    if result["isAsync"] == true || result["status"] == "async_launched" {
+        return ToolOutcome::try_from_parts(
+            content.into(),
+            false,
+            Some(json!({"background": true})),
+            Vec::new(),
+            None,
+        )
+        .ok();
+    }
+    let report = result["content"]
+        .as_array()?
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .filter(|text| !text.trim_start().starts_with("<tools-used-before-summary>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let metadata: serde_json::Map<_, _> = [
+        ("totalTokens", "tokens"),
+        ("totalToolUseCount", "tool_uses"),
+    ]
+    .into_iter()
+    .filter_map(|(key, name)| Some((name.to_owned(), result[key].as_u64()?.into())))
+    .collect();
+    ToolOutcome::try_from_parts(
+        content.into(),
+        false,
+        (!metadata.is_empty()).then_some(Value::Object(metadata)),
+        vec![protocol::ToolDisplayContent::new(
+            "report",
+            report.trim().to_owned(),
+        )],
+        None,
+    )
+    .ok()
 }
 
 #[cfg(test)]
@@ -968,5 +1127,153 @@ mod tests {
             agents.children["live"].info.error.as_deref(),
             Some("Transport failed")
         );
+    }
+
+    fn launch(agents: &mut Agents, launch: &str) {
+        agents
+            .frame(
+                &assistant(None, launch, json!([
+                    {"type":"tool_use", "id":launch, "name":"Agent", "input":{"description":"Review", "prompt":"Review"}}
+                ])),
+                0,
+            )
+            .unwrap();
+    }
+
+    fn started(task: &str, launch: &str, background: bool) -> Value {
+        json!({"type":"system", "subtype":"task_started", "task_id":task, "tool_use_id":launch,
+            "task_type":"local_agent", "description":"Review", "is_backgrounded":background})
+    }
+
+    fn progress(task: &str, description: &str) -> Value {
+        json!({"type":"system", "subtype":"task_progress", "task_id":task, "description":description})
+    }
+
+    fn notified(task: &str, summary: &str) -> Value {
+        json!({"type":"system", "subtype":"task_notification", "task_id":task,
+            "status":"completed", "summary":summary})
+    }
+
+    #[test]
+    fn a_waited_for_agent_reports_its_activity_to_the_waiting_call() {
+        let (mut agents, _rx) = registry();
+        launch(&mut agents, "call");
+        agents.frame(&started("task", "call", false), 1).unwrap();
+        agents.frame(&progress("task", "Reading files"), 2).unwrap();
+        agents.frame(&progress("task", "Reading files"), 3).unwrap();
+        agents.frame(&progress("task", "Running tests"), 4).unwrap();
+        let activity = |line: &str| Delivery::Activity {
+            call_id: "call".into(),
+            line: line.into(),
+        };
+        assert_eq!(
+            agents.deliveries(),
+            [activity("Reading files"), activity("Running tests")]
+        );
+        // Its report is the call's result, not a message of its own.
+        agents.frame(&notified("task", "Done"), 5).unwrap();
+        assert!(agents.deliveries().is_empty());
+    }
+
+    #[test]
+    fn a_background_agent_reports_its_end_once() {
+        let (mut agents, _rx) = registry();
+        launch(&mut agents, "call");
+        agents.frame(&started("task", "call", true), 1).unwrap();
+        agents.frame(&progress("task", "Reading files"), 2).unwrap();
+        assert!(agents.deliveries().is_empty());
+        agents
+            .frame(
+                &json!({"type":"system", "subtype":"task_updated", "task_id":"task",
+            "patch":{"status":"completed"}}),
+                3,
+            )
+            .unwrap();
+        assert!(
+            agents.deliveries().is_empty(),
+            "the notification carries the report"
+        );
+        agents.frame(&notified("task", "All good"), 4).unwrap();
+        agents.frame(&notified("task", "All good"), 5).unwrap();
+        let [Delivery::Report(report)] = &agents.deliveries()[..] else {
+            panic!("one report");
+        };
+        assert_eq!(report.text(), "background agent Review finished");
+        assert_eq!(report.agent_message_body(), Some("All good"));
+    }
+
+    #[test]
+    fn moving_an_agent_to_the_background_makes_it_report() {
+        let (mut agents, _rx) = registry();
+        launch(&mut agents, "call");
+        agents.frame(&started("task", "call", false), 1).unwrap();
+        let requests = agents.background_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["request"],
+            json!({"subtype":"background_tasks", "tool_use_id":"call"})
+        );
+        agents
+            .frame(
+                &json!({"type":"system", "subtype":"task_updated", "task_id":"task",
+            "patch":{"is_backgrounded":true}}),
+                2,
+            )
+            .unwrap();
+        assert!(agents.children["task"].info.background);
+        assert!(agents.background_requests().is_empty());
+        agents.frame(&notified("task", "Late report"), 3).unwrap();
+        assert!(matches!(&agents.deliveries()[..], [Delivery::Report(_)]));
+    }
+
+    #[test]
+    fn only_the_main_agents_waits_move_to_the_background() {
+        let (mut agents, _rx) = registry();
+        launch(&mut agents, "outer-call");
+        agents
+            .frame(&started("outer", "outer-call", true), 1)
+            .unwrap();
+        agents
+            .frame(
+                &assistant(Some("outer-call"), "nested", json!([
+                    {"type":"tool_use", "id":"nested-call", "name":"Agent", "input":{"prompt":"Nested"}}
+                ])),
+                2,
+            )
+            .unwrap();
+        agents
+            .frame(&started("nested", "nested-call", false), 3)
+            .unwrap();
+        assert!(agents.background_requests().is_empty());
+    }
+
+    #[test]
+    fn a_foreground_report_shows_the_report_without_claude_codes_frame() {
+        let content = "[Subagent hand-back] The report follows:\n  42\nagentId: a83\n<usage>subagent_tokens: 20130</usage>";
+        let structured = json!({"status":"completed", "agentId":"a83", "totalTokens":20130, "totalToolUseCount":1,
+            "content":[{"type":"text", "text":"<tools-used-before-summary>Bash</tools-used-before-summary>\n"},
+                {"type":"text", "text":"The command printed:\n```\n42\n```"}]});
+        let result = launch_result(content, &structured).unwrap();
+        assert_eq!(result.content, content, "the model keeps the whole result");
+        assert_eq!(result.display_content[0].name, "report");
+        assert_eq!(
+            result.display_content[0].content.as_str(),
+            "The command printed:\n```\n42\n```"
+        );
+        assert_eq!(
+            result.metadata,
+            Some(json!({"tokens":20130, "tool_uses":1}))
+        );
+    }
+
+    #[test]
+    fn an_async_launch_result_says_the_agent_works_in_the_background() {
+        let result = launch_result(
+            "Async agent launched successfully.\nagentId: a1",
+            &json!({"isAsync":true}),
+        )
+        .unwrap();
+        assert_eq!(result.metadata, Some(json!({"background":true})));
+        assert!(result.display_content.is_empty());
     }
 }

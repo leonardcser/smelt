@@ -17,6 +17,7 @@
 
 local bar = require("smelt._bar")
 local tips = require("smelt.tips")
+local detach = require("smelt._detach")
 
 local TOKEN_PRIORITY = 0
 local INDICATOR_PRIORITY = 1
@@ -32,6 +33,8 @@ local tip_signals = { "input_epoch", "notification_visible", "prompt_queue_revis
 
 -- The last two rows of the queue, below every queued message.
 local MORE_ROW, STASH_ROW = -2, -1
+-- Cells a steer preview keeps before the background hint gives way to it.
+local HINT_MIN_PREVIEW = 12
 
 local function stash_source()
   if not smelt.prompt.has_stash() then return nil end
@@ -50,12 +53,24 @@ local function queued_source(ctx)
     hidden = #queued - shown
   end
   local items = {}
+  -- A steer waits while the agent waits for a command or agent; say how to
+  -- stop waiting, on the first steer.
+  local key = smelt.signal.get("foreground_work") and detach.key_label()
+  local hint = key and key .. " to background"
   for i = #queued - shown + 1, #queued do
     local row = queued[i]
     local marker = row.kind == "request" and "»" or "›"
     -- Each queued message owns one row. Normalize preview whitespace so line
     -- breaks and tabs cannot displace the prompt chrome.
     local preview = (row.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+    -- The hint keeps its place at the right; the preview gives up the room.
+    -- Beside the marker and its space, a one-cell gap before the hint.
+    local cells = hint and ctx.width and ctx.width - smelt.text.width(marker) - 2 - smelt.text.width(hint)
+    if row.kind == "request" and cells and cells >= HINT_MIN_PREVIEW then
+      preview = smelt.text.fit(preview, cells, { suffix = "…" })
+      items[#items + 1] = { text = hint, style = COMMENT_DIM_STYLE, selectable = false, align_right = true, row = i }
+      hint = nil
+    end
     items[#items + 1] = {
       runs = {
         { text = marker .. " ", style = { fg = "Comment" }, selectable = false },
@@ -82,7 +97,7 @@ smelt.prompt.queue = bar.new({
   -- The stash goes first so it keeps its row when the queue folds.
   sources = {
     { "stash", { render = stash_source, signals = { "prompt_stashed" } } },
-    { "queued", { render = queued_source, signals = input_signals } },
+    { "queued", { render = queued_source, signals = { "input_epoch", "prompt_queue_revision", "foreground_work" } } },
   },
   win_opts = { pad_left = 2, pad_right = 2, focus_on_click = smelt.prompt.win },
 })

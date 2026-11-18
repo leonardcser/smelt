@@ -472,10 +472,23 @@ smelt.permissions.extend({ default = { tools = { allow = { "Agent" }, deny = { "
             .count(),
         1
     );
-    assert!(events
+    // The child's transcript stays its own; the parent receives its summary once.
+    let appended: Vec<_> = events
         .iter()
         .filter(|event| event.get("HistoryAppended").is_some())
-        .all(|event| !event.to_string().contains("CHILD_")));
+        .map(|event| event.to_string())
+        .collect();
+    assert!(appended.iter().all(|event| !event.contains("CHILD_READ")));
+    let reports: Vec<_> = appended
+        .iter()
+        .filter(|event| event.contains("CHILD_REPORT_ONLY"))
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(
+        reports[0].contains(r#""note_kind":"agent_message""#),
+        "{}",
+        reports[0]
+    );
 }
 
 #[test]

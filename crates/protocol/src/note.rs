@@ -68,6 +68,22 @@ pub fn process_status_note(note: &str) -> String {
     )
 }
 
+/// Marker prefix on synthetic user messages that carry what another agent
+/// added to the conversation.
+pub const AGENT_MESSAGE_NOTE_PREFIX: &str = "[smelt:agent] ";
+
+/// Build the model-visible form of another agent's message or report: what
+/// it is, then its body.
+pub fn agent_message_note(note: &str, body: &str) -> String {
+    let note = text::trim_whitespace(note);
+    let body = text::trim_whitespace(body);
+    if body.is_empty() {
+        format!("{AGENT_MESSAGE_NOTE_PREFIX}{note}")
+    } else {
+        format!("{AGENT_MESSAGE_NOTE_PREFIX}{note}:\n{body}")
+    }
+}
+
 /// Marker prefix on synthetic user messages that record a compaction a native
 /// agent performed on its own context.
 pub const COMPACTION_NOTE_PREFIX: &str = "[smelt:compaction] ";

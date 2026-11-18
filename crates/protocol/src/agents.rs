@@ -25,6 +25,18 @@ impl AgentStatus {
     pub fn is_terminal(self) -> bool {
         !matches!(self, Self::Queued | Self::Running | Self::Waiting)
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
+            Self::Blocked => "blocked",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +58,10 @@ pub struct AgentInfo {
     pub title: String,
     pub task: String,
     pub status: AgentStatus,
+    /// Whether the agent works on its own. Otherwise the agent that launched
+    /// it waits for its report.
+    #[serde(default)]
+    pub background: bool,
     pub activity: String,
     pub result: Option<String>,
     pub error: Option<String>,

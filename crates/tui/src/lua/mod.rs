@@ -3255,7 +3255,10 @@ mod tests {
             let chord: String = row.get("chord").unwrap();
             let desc: Option<String> = row.get("desc").unwrap();
             if chord == "<C-g>" {
-                assert_eq!(desc.as_deref(), Some("move running command to background"));
+                assert_eq!(
+                    desc.as_deref(),
+                    Some("move running command or agent to background")
+                );
                 found = true;
             }
         }

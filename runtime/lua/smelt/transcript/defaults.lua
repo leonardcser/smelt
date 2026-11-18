@@ -108,7 +108,7 @@ end
 
 local block_parts = {
   group = true, tool = true, user = true, assistant = true, thinking = true,
-  exec = true, mode = true, process_status = true, compacted = true,
+  exec = true, mode = true, process_status = true, agent_message = true, compacted = true,
   compaction_preview = true, code = true,
 }
 
@@ -796,6 +796,42 @@ function M.render_process_status(block, ctx)
     })
   end
   return layout.vbox({ header, layout.gutter(output, { text = "  " }) })
+end
+
+--- Render what another agent added to the conversation: who it is from, then
+--- its message or report, capped at its head when peeked.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+function M.render_agent_message(block, ctx)
+  local failed = block.agent_status == "failed" or block.agent_status == "blocked"
+  local hl = failed and "ErrorMsg" or "SmeltAgent"
+  local header = layout.runs({ {
+    { text = block.sender_before or "", fg = hl, italic = true },
+    { text = block.sender or "", fg = hl, italic = true, bold = true },
+    { text = block.sender_after or "", fg = hl, italic = true },
+  } })
+  if not block.output_id then return header end
+  if ctx and ctx.view_state == "collapsed" then
+    local count = block.output_lines or 0
+    return layout.vbox({
+      header,
+      layout.gutter(layout.line({ {
+        text = tostring(count) .. (count == 1 and " line" or " lines"),
+        dim = true,
+        selectable = false,
+      } }), { text = "  " }),
+    })
+  end
+
+  local body = layout.content(block.output_id, { format = "markdown" })
+  if ctx and ctx.view_state == "peek" then
+    body = layout.cap(body, {
+      rows = (ctx.limits and ctx.limits.tool_output_rows) or 20,
+      keep = "head",
+      marker = "below",
+      total_rows = block.output_lines,
+    })
+  end
+  return layout.vbox({ header, layout.gutter(body, { text = "  " }) })
 end
 
 local function render_compaction_summary(label, block, ctx)

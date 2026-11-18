@@ -247,7 +247,7 @@ local interaction_tips = {
   {
     id = "process.detach",
     key = "ctrl+g",
-    text = "move a running bash command to the background so the agent can continue",
+    text = "move a running command or agent the agent waits for to the background so it can continue",
   },
 }
 

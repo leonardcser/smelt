@@ -401,6 +401,10 @@ pub enum EngineEvent {
     },
     /// The shell commands the native session runs, replacing the previous list.
     NativeProcesses { processes: Vec<NativeProcess> },
+    /// The notes the native session holds until the steps before them
+    /// finish, in the order they will join the history, replacing the
+    /// previous list. Each one later arrives in `HistoryAppended`.
+    NativeHeldNotes { notes: Vec<crate::HistoryNote> },
     AgentOutput {
         session_id: String,
         agent_id: String,
@@ -886,6 +890,9 @@ pub struct NativeProcess {
     pub started_at_ms: u64,
     /// Whether the agent left it running rather than waiting for it.
     pub background: bool,
+    /// The agent that runs it, when that is not the session's main agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     /// The end of what it printed so far.
     pub output: String,
 }

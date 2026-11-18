@@ -2278,6 +2278,18 @@ impl ConversationRuntime {
         self.turn.pending_history_revision()
     }
 
+    pub(crate) fn held_native_notes(&self) -> &[protocol::HistoryNote] {
+        self.turn.held_native_notes()
+    }
+
+    pub(crate) fn set_held_native_notes(&mut self, notes: Vec<protocol::HistoryNote>) {
+        self.turn.set_held_native_notes(notes);
+    }
+
+    pub(crate) fn release_held_native_note(&mut self, item: &protocol::HistoryItem) {
+        self.turn.release_held_native_note(item);
+    }
+
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn pending_history_append_count(&self) -> usize {
         self.turn.pending_history_append_count()

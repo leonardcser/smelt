@@ -68,8 +68,8 @@ smelt.spawn = nil
 
 --- The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
 --- sources: `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`,
---- `procs`, `worktree`, `vim_pending` and `cursor`. Items with `row = 2` or
---- more make it taller.
+--- `agents`, `procs`, `worktree`, `vim_pending` and `cursor`. Items with
+--- `row = 2` or more make it taller.
 ---@see smelt.bar.Bar
 ---@type smelt.bar.Bar
 smelt.statusline = nil

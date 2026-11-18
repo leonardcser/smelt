@@ -1060,8 +1060,8 @@
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
----@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
----@field text? string User/mode/process text.
+---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"agent_message"|"compacted"|"compaction_preview" Block kind.
+---@field text? string User/mode/process/agent message text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
 ---@field sent_at_ms? integer User-message submission time as Unix epoch milliseconds; absent for undated history.
 ---@field content? string Code content.
@@ -1070,7 +1070,7 @@
 ---@field content_bytes? integer Shared content size in bytes.
 ---@field content_lines? integer Shared content logical line count.
 ---@field content_preview? string Bounded preview for labels and fallback UI, not complete content.
----@field title? string Latest structured reasoning-summary title.
+---@field title? string Latest structured reasoning-summary title, or the title of the background agent an agent message reports.
 ---@field summary_titles? string[] Ordered structured reasoning-summary title history.
 ---@field reasoning_kind? "summary"|"raw" Reasoning source for thinking blocks.
 ---@field image_labels? string[] User image labels.
@@ -1100,7 +1100,13 @@
 ---@field event_data? table Full typed process status event payload.
 ---@field process_id? string Background process id for process status events.
 ---@field exit_code? integer Background process exit code when known.
----@field output_id? integer Stable shared-content id for exec or process-status output.
+---@field sender? string Agent message sender: the agent that sent it, or the background agent that ended.
+---@field sender_before? string Agent message header text before `sender`; `text` is `sender_before .. sender .. sender_after`.
+---@field sender_after? string Agent message header text after `sender`.
+---@field from? string Sender of a received agent message.
+---@field agent_id? string Background agent that ended, for agent messages.
+---@field agent_status? "completed"|"blocked"|"failed"|"cancelled" How the background agent ended, for agent messages.
+---@field output_id? integer Stable shared-content id for exec, process-status output, or an agent message body.
 ---@field output_revision? integer Shared output revision.
 ---@field output_bytes? integer Shared output size in bytes.
 ---@field output_lines? integer Shared output logical line count.
@@ -1433,7 +1439,7 @@
 
 --- Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_stashed"|"reasoning"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_autoupgrade"|"settings_terminal_title"|"task_label"|"tokens_used"|"tps"|"transcript_pending_revision"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"foreground_work"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_stashed"|"reasoning"|"running_agents"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_autoupgrade"|"settings_terminal_title"|"task_label"|"tokens_used"|"tps"|"transcript_pending_revision"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Which side of a cell a color paints, for `smelt.theme.rgb`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1449,13 +1455,13 @@
 
 --- Semantic stages in the bundled transcript composition pipeline.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.transcript.RendererPart "root"|"group"|"tool"|"tool_header"|"tool_header_content"|"user"|"user_content"|"assistant"|"thinking"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview"|"code"|"unknown"
+---@alias smelt.transcript.RendererPart "root"|"group"|"tool"|"tool_header"|"tool_header_content"|"user"|"user_content"|"assistant"|"thinking"|"exec"|"mode"|"process_status"|"agent_message"|"compacted"|"compaction_preview"|"code"|"unknown"
 
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.transcript.RevealAlign "top"
 
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.transcript.Role "user"|"mode"|"process_status"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"
+---@alias smelt.transcript.Role "user"|"mode"|"process_status"|"agent_message"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"
 
 --- Vim mode string literal.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

@@ -21,6 +21,8 @@ pub enum LuaTranscriptRole {
     Mode,
     #[lua(rename = "process_status")]
     ProcessStatus,
+    #[lua(rename = "agent_message")]
+    AgentMessage,
     Assistant,
     Thinking,
     Tool,
@@ -37,6 +39,7 @@ impl LuaTranscriptRole {
             Self::User => "user",
             Self::Mode => "mode",
             Self::ProcessStatus => "process_status",
+            Self::AgentMessage => "agent_message",
             Self::Assistant => "assistant",
             Self::Thinking => "thinking",
             Self::Tool => "tool",
@@ -614,7 +617,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "pending_blocks",
-        "Return the blocks that wait to join the transcript, oldest first. A note that arrives during a turn, such as a finished background process, joins the transcript at the next request boundary. Each entry has the shape block renderers get, without `id` and `index`; `kind` is the block kind, such as `process_status`. The `transcript_pending_revision` signal changes whenever this list changes.",
+        "Return the blocks that wait to join the transcript. A note that arrives during a turn, such as a finished background process or another agent's message, joins the transcript at the next request boundary, or once the native session finishes the steps before it. Notes the app stages come first, then notes the native session holds; each part is in the order it joins, where agent messages follow every other kind. Each entry has the shape block renderers get, without `id` and `index`; `kind` is the block kind, such as `process_status`. The `transcript_pending_revision` signal changes whenever this list changes.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let blocks = crate::lua::try_with_conversation_host(|host| host.pending_transcript_blocks())

@@ -13,6 +13,7 @@ fn observed(app: &mut TestApp, status: protocol::AgentStatus) -> String {
             title: "Review fixture".into(),
             task: "Read-only review".into(),
             status,
+            background: false,
             activity: "Reviewing".into(),
             result: None,
             error: None,
@@ -49,6 +50,7 @@ fn agent_observation_viewer_shows_nested_order_owner_usage_and_control_errors() 
                 title: title.into(),
                 task: "Review".into(),
                 status: protocol::AgentStatus::Running,
+                background: false,
                 activity: String::new(),
                 result: None,
                 error: (id == "z").then(|| "Stop refused".into()),
@@ -402,6 +404,7 @@ fn native_shell(started_at_ms: u64, background: bool) -> EngineEvent {
             command: "npm run dev".into(),
             started_at_ms,
             background,
+            agent_id: None,
             output: "ready\n".into(),
         }],
     }
@@ -481,6 +484,18 @@ fn native_shells_join_the_process_list_and_stop_through_their_agent() {
     assert!(app.run_lua("assert(smelt.process.detach_foreground())"));
     assert!(sent(&mut app, |command| matches!(command,
         protocol::UiCommand::BackgroundNativeProcesses { session_id: to } if *to == session_id)));
+
+    // A subagent waits for its own shell; the main agent has nothing to leave.
+    let EngineEvent::NativeProcesses { mut processes } = native_shell(now, false) else {
+        unreachable!()
+    };
+    processes[0].agent_id = Some("claude-code:agent".into());
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
+        processes,
+    }));
+    app.tick_signals();
+    assert!(app.run_lua(r#"assert(not smelt.signal.get("foreground_work"))"#));
+    assert!(app.run_lua("assert(not smelt.process.detach_foreground())"));
 
     app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
         processes: Vec::new(),
@@ -622,4 +637,118 @@ fn claude_code_turns_carry_the_history_identity_and_the_host_serves_its_items() 
     changed.len -= 1;
     assert!(model_history(&mut app, payload.turn_id, changed).is_err());
     assert!(model_history(&mut app, payload.turn_id + 1, identity).is_err());
+}
+
+fn agent_message(from: &str, body: &str) -> protocol::HistoryItem {
+    protocol::HistoryItem::note(protocol::HistoryNote::agent_message(
+        protocol::AgentMessageEvent::MessageReceived { from: from.into() },
+        body,
+    ))
+}
+
+#[test]
+fn an_agent_message_shows_its_sender_and_body() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 30);
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("hi")));
+    app.session_append_history(agent_message("worker", "Tests pass on **main**."));
+    app.restore_screen();
+    app.render_silent();
+    let screen = app.presented_frame().text();
+    assert!(screen.contains("message from worker"), "{screen}");
+    assert!(screen.contains("Tests pass on main."), "{screen}");
+}
+
+#[test]
+fn agent_messages_that_arrive_together_group_by_sender() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 30);
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("hi")));
+    app.session_append_history(agent_message("worker", "first"));
+    app.session_append_history(agent_message("worker", "second"));
+    app.session_append_history(protocol::HistoryItem::note(
+        protocol::HistoryNote::agent_message(
+            protocol::AgentMessageEvent::BackgroundAgentEnded {
+                agent_id: "claude-code:a1".into(),
+                title: "Review".into(),
+                status: protocol::AgentStatus::Completed,
+            },
+            "No issues found",
+        ),
+    ));
+    app.restore_screen();
+    app.render_silent();
+    let screen = app.presented_frame().text();
+    assert!(
+        screen.contains("agent messages: 3 from worker, Review"),
+        "{screen}"
+    );
+    assert!(!screen.contains("No issues found"), "{screen}");
+}
+
+#[test]
+fn the_statusline_counts_running_agents() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 30);
+    observed(&mut app, protocol::AgentStatus::Running);
+    app.render_silent();
+    assert!(app.presented_frame().text().contains("1 agent"));
+    observed(&mut app, protocol::AgentStatus::Completed);
+    app.render_silent();
+    assert!(!app.presented_frame().text().contains("1 agent"));
+}
+
+#[test]
+fn notes_the_native_session_holds_wait_dimmed_in_the_order_they_join() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(90, 24);
+    app.start_turn(7);
+    let process = protocol::HistoryNote::process_status_event(
+        protocol::ProcessStatusEvent::background_process_completed(
+            "claude-code:shell",
+            Some(0),
+            protocol::JobTermination::Exited,
+        ),
+    );
+    let message = protocol::HistoryNote::agent_message(
+        protocol::AgentMessageEvent::MessageReceived {
+            from: "worker".into(),
+        },
+        "Tests pass.",
+    );
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeHeldNotes {
+        notes: vec![process.clone(), message.clone()],
+    }));
+    let frame = app.render_to_frame();
+    let (process_col, process_row) = app
+        .screen_position("background process claude-code:shell finished")
+        .unwrap_or_else(|| panic!("{}", frame.text()));
+    let (message_col, message_row) = app
+        .screen_position("message from worker")
+        .unwrap_or_else(|| panic!("{}", frame.text()));
+    assert_eq!(message_row, process_row + 1, "{}", frame.text());
+    assert!(frame.styles[process_row as usize][process_col as usize].dim);
+    assert!(frame.styles[message_row as usize][message_col as usize].dim);
+
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id: 7,
+        delta: protocol::CanonicalHistoryDelta::new(
+            app.session_snapshot().history.len(),
+            vec![
+                protocol::HistoryItem::note(process),
+                protocol::HistoryItem::note(message),
+            ],
+        ),
+    }));
+    let frame = app.render_to_frame();
+    assert_eq!(
+        frame.text().matches("message from worker").count(),
+        1,
+        "the message left the pending strip: {}",
+        frame.text()
+    );
+    let (col, row) = app
+        .screen_position("message from worker")
+        .unwrap_or_else(|| panic!("{}", frame.text()));
+    assert!(!frame.styles[row as usize][col as usize].dim);
 }

@@ -216,10 +216,43 @@ local function render_background_process_completed_group(group, ctx)
   return process_summary_line(M.background_process_summary(children, group.child_count))
 end
 
+--- One-line summary of agent messages: their count and up to three senders.
+--- `messages` carry `sender`, or `summary_text` as grouped children do; `count`
+--- defaults to their number.
+---@param messages table[]
+---@param count? integer
+---@return string text
+function M.agent_message_summary(messages, count)
+  local senders, seen = {}, {}
+  for _, message in ipairs(messages) do
+    local sender = message.sender or message.summary_text
+    if sender and sender ~= "" and not seen[sender] then
+      seen[sender] = true
+      senders[#senders + 1] = sender
+    end
+  end
+  local names = {}
+  for i = 1, math.min(#senders, 3) do names[i] = senders[i] end
+  if #senders > #names then names[#names + 1] = "+" .. tostring(#senders - #names) .. " more" end
+  local text = "agent messages: " .. tostring(count or #messages)
+  if #names > 0 then text = text .. " from " .. table.concat(names, ", ") end
+  return text
+end
+
+local function render_agent_message_group(group, ctx)
+  if group.view_state == "expanded" then return defaults.render_group_children(group, ctx) end
+
+  local text = M.agent_message_summary(defaults.group_children(group), group.child_count)
+  return layout.runs({ { { text = text, fg = "SmeltAgent", italic = true } } })
+end
+
 function M.render(group, ctx)
   local kind = group.group_kind or group.name
   if kind == "background_process_completed" then
     return render_background_process_completed_group(group, ctx)
+  end
+  if kind == "agent_messages" then
+    return render_agent_message_group(group, ctx)
   end
   if kind == "explore" or kind == "lsp" or kind == "web" then
     return render_terminal_tool_group(group, ctx)
@@ -238,6 +271,15 @@ function M.register()
     min = 2,
     default_view = "collapsed",
     selector = { kind = "process_status", event = "background_process_completed" },
+  })
+
+  smelt.transcript.groups.register({
+    name = "agent_messages",
+    cache_key = "smelt.transcript.group.agent_messages:v1",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = { kind = "agent_message" },
   })
 
   smelt.transcript.groups.register({

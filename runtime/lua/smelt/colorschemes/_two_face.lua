@@ -75,6 +75,7 @@ local function build(p)
   local add_inline = p.light and mix(p.success, bg0, 0.55) or mix(p.success, bg0, 0.65)
   local del_inline = p.light and mix(p.error, bg0, 0.60) or mix(p.error, bg0, 0.65)
   local ultra = p.light and rgb(145, 35, 140) or rgb(218, 112, 214)
+  local agent = p.light and rgb(190, 45, 135) or rgb(245, 135, 205)
   local groups = {
     Normal              = fg(color(fg0)),
     Comment             = fg(color(p.muted), { italic = true }),
@@ -92,6 +93,7 @@ local function build(p)
     SmeltHeading        = fg(color(p.heading), { bold = true }),
     SmeltLink           = fg(color(p.link), { underline = true }),
     SmeltProcess        = fg(color(p.heading)),
+    SmeltAgent          = fg(agent),
     SmeltGoalBanner     = { fg = color(bg0), bg = color(p.heading) },
     SmeltGoalBannerLabel = { fg = color(bg0), bg = color(p.heading), bold = true },
     SmeltGoalBannerMode = { fg = color(bg0), bg = color(p.heading), bold = true },

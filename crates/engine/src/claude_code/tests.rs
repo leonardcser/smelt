@@ -296,7 +296,7 @@ async fn foreground_child_isolated_transcript_and_policy_callbacks() {
 
 #[tokio::test]
 #[serial(claude_code)]
-async fn background_child_outlives_parent_result_without_polluting_parent_history() {
+async fn background_child_outlives_parent_result_and_reports_only_its_summary_to_the_parent() {
     let fixture = Fixture::new("subagent-background");
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, Vec::new()));
@@ -311,9 +311,6 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
         match output(&mut handle).await {
             EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
                 assert_eq!(delta.first_index.get(), history.len());
-                assert!(!serde_json::to_string(&delta.items)
-                    .unwrap()
-                    .contains("CHILD_REPORT_ONLY"));
                 history.extend(delta.items);
             }
             EngineOutput::Event(EngineEvent::TurnComplete { .. }) => completions += 1,
@@ -365,6 +362,29 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
     let parent = serde_json::to_string(&history).unwrap();
     assert_eq!(parent.matches("BACKGROUND_WAKE_REPLY").count(), 1);
     assert!(!parent.contains("CHILD_READ_DENIED"));
+    // The child's transcript stays its own; the parent receives its summary once.
+    let reports: Vec<_> = history
+        .iter()
+        .filter(|item| {
+            serde_json::to_string(item)
+                .unwrap()
+                .contains("CHILD_REPORT_ONLY")
+        })
+        .collect();
+    assert!(
+        matches!(
+            reports.as_slice(),
+            [HistoryItem::Note(protocol::HistoryNote::AgentMessage {
+                event: protocol::AgentMessageEvent::BackgroundAgentEnded {
+                    status: protocol::AgentStatus::Completed,
+                    ..
+                },
+                body,
+                ..
+            })] if body == "CHILD_REPORT_ONLY"
+        ),
+        "{reports:?}"
+    );
     assert_eq!((prompt_tokens, completion_tokens), (7, 11));
 
     assert!(
@@ -622,6 +642,37 @@ async fn queued_input_is_acknowledged_and_committed_exactly_once() {
             .filter(|call| call["type"] == "user")
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn another_agents_message_joins_the_conversation_before_the_answer_to_it() {
+    let fixture = Fixture::new("peer-message");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut history = Vec::new();
+    finish(&mut handle, &mut history).await;
+    let message = history
+        .iter()
+        .position(|item| {
+            matches!(item, HistoryItem::Note(protocol::HistoryNote::AgentMessage {
+                event: protocol::AgentMessageEvent::MessageReceived { from },
+                body,
+                ..
+            }) if from == "worker" && body == "PEER_BODY")
+        })
+        .expect("the message is in the conversation");
+    let answer = history
+        .iter()
+        .position(|item| matches!(item, HistoryItem::Assistant(_)))
+        .unwrap();
+    assert!(message < answer);
+    assert!(
+        !serde_json::to_string(&history)
+            .unwrap()
+            .contains("cross-session-message"),
+        "the envelope stays out of the conversation"
     );
 }
 

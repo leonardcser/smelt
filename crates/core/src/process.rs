@@ -1456,20 +1456,27 @@ impl JobSupervisor {
         Ok((id, follower))
     }
 
+    /// The detach switch of the latest foreground job a caller follows.
+    fn latest_foreground_detach(&self) -> Option<watch::Sender<bool>> {
+        let jobs = self.0.jobs.lock().unwrap();
+        jobs.values()
+            .filter_map(|job| match &job.visibility {
+                JobVisibility::Foreground {
+                    follower: Some(follower),
+                } => Some((follower.order, follower.detach_tx.as_ref()?.clone())),
+                _ => None,
+            })
+            .max_by_key(|(order, _)| *order)
+            .map(|(_, sender)| sender)
+    }
+
+    /// Whether a caller follows a foreground job it can leave running.
+    pub fn has_detachable_foreground(&self) -> bool {
+        self.latest_foreground_detach().is_some()
+    }
+
     pub fn detach_latest_foreground(&self) -> DetachResult {
-        let sender = {
-            let jobs = self.0.jobs.lock().unwrap();
-            jobs.values()
-                .filter_map(|job| match &job.visibility {
-                    JobVisibility::Foreground {
-                        follower: Some(follower),
-                    } => Some((follower.order, follower.detach_tx.as_ref()?.clone())),
-                    _ => None,
-                })
-                .max_by_key(|(order, _)| *order)
-                .map(|(_, sender)| sender)
-        };
-        let Some(sender) = sender else {
+        let Some(sender) = self.latest_foreground_detach() else {
             return DetachResult::NoForegroundJob;
         };
         if sender.send(true).is_ok() {

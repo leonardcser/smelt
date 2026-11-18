@@ -71,11 +71,16 @@ impl Shells {
                     .as_ref()
                     .and_then(|id| self.commands.remove(id))
                     .unwrap_or_else(|| description(frame));
+                let agent_id = frame["parent_task_id"]
+                    .as_str()
+                    .filter(|_| frame["owned_by_subagent"] != false)
+                    .map(|parent| super::native_id(&self.provider, parent));
                 // A background shell joins the level before it starts.
                 let shell = self.track(task, now_ms);
                 shell.process.command = command;
                 shell.process.background = frame["is_backgrounded"] == true;
                 shell.tool_use_id = tool_use_id;
+                shell.process.agent_id = agent_id;
                 self.changed = true;
                 true
             }
@@ -93,7 +98,8 @@ impl Shells {
                 };
                 self.reading.remove(task);
                 self.changed = true;
-                if shell.process.background {
+                // An agent's own background shell reports to that agent.
+                if shell.process.background && shell.process.agent_id.is_none() {
                     self.finished.push(finished(frame, shell.process));
                 }
                 true
@@ -134,10 +140,11 @@ impl Shells {
         }
         self.live.entry(task.into()).or_insert_with(|| Shell {
             process: NativeProcess {
-                id: format!("{}:{task}", self.provider),
+                id: super::native_id(&self.provider, task),
                 command: String::new(),
                 started_at_ms: now_ms,
                 background: false,
+                agent_id: None,
                 output: String::new(),
             },
             tool_use_id: None,
@@ -255,12 +262,12 @@ impl Shells {
         self.live.keys().map(|task| stop(task)).collect()
     }
 
-    /// Moves each foreground shell to the background, leaving foreground
-    /// subagents waited for.
+    /// Moves each foreground shell of the main agent to the background. An
+    /// agent it launched keeps waiting for its own.
     pub(super) fn background_requests(&self) -> Vec<Value> {
         self.live
             .values()
-            .filter(|shell| !shell.process.background)
+            .filter(|shell| !shell.process.background && shell.process.agent_id.is_none())
             .filter_map(|shell| shell.tool_use_id.as_deref())
             .map(|tool_use_id| {
                 control(
@@ -339,6 +346,30 @@ mod tests {
     fn read(task: &str, output: &str) -> Value {
         json!({"subtype":"success", "request_id":format!("{OUTPUT_REQUEST}{task}"),
             "response":{"output":output, "total_bytes":output.len(), "truncated":false}})
+    }
+
+    #[test]
+    fn an_agents_own_shells_stay_with_that_agent() {
+        let mut shells = Shells::new("claude-code");
+        let mut owned = started("child-shell", "child-call", false);
+        owned["owned_by_subagent"] = json!(true);
+        owned["parent_task_id"] = json!("agent-task");
+        shells.frame(&owned, 0);
+        shells.frame(&started("root-shell", "root-call", false), 0);
+        let requests = shells.background_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["request"]["tool_use_id"], "root-call");
+
+        let mut owned_background = started("child-bg", "child-bg-call", true);
+        owned_background["owned_by_subagent"] = json!(true);
+        owned_background["parent_task_id"] = json!("agent-task");
+        shells.frame(&owned_background, 0);
+        let ended = json!({"type":"system", "subtype":"task_notification", "task_id":"child-bg", "status":"completed"});
+        shells.frame(&ended, 1);
+        assert!(
+            shells.finished().is_empty(),
+            "the agent hears of it, not the main transcript"
+        );
     }
 
     #[test]

@@ -323,6 +323,13 @@ pub enum Block {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         output: Option<TranscriptContent>,
     },
+    /// What another agent added to the conversation, and its message or report.
+    AgentMessage {
+        text: String,
+        event: protocol::AgentMessageEvent,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        body: Option<TranscriptContent>,
+    },
     Thinking {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
@@ -388,6 +395,7 @@ impl Block {
             Block::User { .. } => "user",
             Block::Mode { .. } => "mode",
             Block::ProcessStatus { .. } => "process_status",
+            Block::AgentMessage { .. } => "agent_message",
             Block::Thinking { .. } => "thinking",
             Block::Text { .. } => "assistant",
             Block::CodeLine { .. } => "code",
@@ -416,6 +424,7 @@ impl Block {
         match self {
             Block::User { text, .. }
             | Block::ProcessStatus { text, .. }
+            | Block::AgentMessage { text, .. }
             | Block::Compacted { summary: text, .. }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(BlockText::Plain(text)),
@@ -474,7 +483,10 @@ impl Block {
         match self {
             Block::User { text, .. } => Some(text.clone()),
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
-            Block::ProcessStatus { text, output, .. } => Some(match output {
+            Block::ProcessStatus { text, output, .. }
+            | Block::AgentMessage {
+                text, body: output, ..
+            } => Some(match output {
                 Some(output) => format!("{text}\n{}", output.snapshot()),
                 None => text.clone(),
             }),
@@ -504,7 +516,10 @@ impl Block {
             | Block::Compacted { summary: text, .. }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(text.len()),
-            Block::ProcessStatus { text, output, .. } => Some(
+            Block::ProcessStatus { text, output, .. }
+            | Block::AgentMessage {
+                text, body: output, ..
+            } => Some(
                 text.len()
                     .saturating_add(output.as_ref().map_or(0, |output| 1 + output.len())),
             ),
@@ -535,7 +550,10 @@ impl Block {
             (Self::Text { content } | Self::Thinking { content, .. }, ContentChannel::Primary) => {
                 Some(content)
             }
-            (Self::ProcessStatus { output, .. }, ContentChannel::Primary) => output.as_ref(),
+            (
+                Self::ProcessStatus { output, .. } | Self::AgentMessage { body: output, .. },
+                ContentChannel::Primary,
+            ) => output.as_ref(),
             (Self::ToolDraft(draft), ContentChannel::DraftArguments) => Some(&draft.raw_arguments),
             (Self::Exec { output, .. }, ContentChannel::ExecOutput) => Some(output),
             _ => None,
@@ -545,7 +563,9 @@ impl Block {
     pub fn registered_contents(&self) -> Vec<&TranscriptContent> {
         match self {
             Self::Text { content } | Self::Thinking { content, .. } => vec![content],
-            Self::ProcessStatus { output, .. } => output.iter().collect(),
+            Self::ProcessStatus { output, .. } | Self::AgentMessage { body: output, .. } => {
+                output.iter().collect()
+            }
             Self::ToolDraft(draft) => draft.contents().collect(),
             Self::ToolCall { args, .. } => args.contents().collect(),
             Self::Exec { output, .. } => vec![output],
@@ -574,6 +594,7 @@ impl Block {
             Self::ProcessStatus {
                 event: Some(event), ..
             } => event.field_value(field),
+            Self::AgentMessage { event, .. } => event.field_value(field),
             _ => None,
         }
     }
@@ -1036,7 +1057,7 @@ fn visit_record_contents_mut(
 ) {
     match &mut record.block {
         Block::Text { content } | Block::Thinking { content, .. } => visit(content),
-        Block::ProcessStatus { output, .. } => {
+        Block::ProcessStatus { output, .. } | Block::AgentMessage { body: output, .. } => {
             if let Some(output) = output {
                 visit(output);
             }
@@ -1320,6 +1341,11 @@ fn append_block_raw_indexed_text(text: &mut BoundedIndexedText, block: &Block) {
         Block::ProcessStatus {
             text: source,
             output,
+            ..
+        }
+        | Block::AgentMessage {
+            text: source,
+            body: output,
             ..
         } => {
             text.append(source);
@@ -1789,6 +1815,9 @@ fn group_child_summary(block: &Block) -> Option<String> {
         Block::ToolCall { summary, .. } => {
             Some(bounded_styled_text(summary, GROUP_CHILD_SUMMARY_MAX_BYTES))
         }
+        Block::AgentMessage { event, .. } => Some(
+            smelt_buffer::text::slice(event.sender(), 0..GROUP_CHILD_SUMMARY_MAX_BYTES).to_string(),
+        ),
         _ => None,
     }
 }
@@ -1845,6 +1874,7 @@ pub enum StoredBlockKind {
     User,
     Mode,
     ProcessStatus,
+    AgentMessage,
     Thinking,
     Assistant,
     Code,
@@ -1860,6 +1890,7 @@ impl StoredBlockKind {
             "user" => Self::User,
             "mode" => Self::Mode,
             "process_status" => Self::ProcessStatus,
+            "agent_message" => Self::AgentMessage,
             "thinking" => Self::Thinking,
             "assistant" => Self::Assistant,
             "code" => Self::Code,
@@ -1876,6 +1907,7 @@ impl StoredBlockKind {
             Self::User => "user",
             Self::Mode => "mode",
             Self::ProcessStatus => "process_status",
+            Self::AgentMessage => "agent_message",
             Self::Thinking => "thinking",
             Self::Assistant => "assistant",
             Self::Code => "code",
@@ -1967,6 +1999,10 @@ impl StoredBlockRef {
                 }),
                 exit_code: event.exit_code(),
                 termination: Some(event.termination()),
+            },
+            Block::AgentMessage { event, .. } => StoredProcessMetadata {
+                event: Some(event.event_type().to_string()),
+                ..StoredProcessMetadata::default()
             },
             _ => StoredProcessMetadata::default(),
         };
@@ -2140,6 +2176,9 @@ fn materialized_group_child_metadata(
             event.exit_code(),
             Some(event.termination()),
         ),
+        Block::AgentMessage { event, .. } => {
+            (Some(event.event_type().to_string()), None, None, None)
+        }
         _ => (None, None, None, None),
     };
     TranscriptGroupChildMetadata {
@@ -2259,6 +2298,18 @@ impl Block {
                 .saturating_add(
                     output
                         .as_ref()
+                        .map_or(0, TranscriptContent::dynamic_retained_bytes),
+                ),
+            Self::AgentMessage { text, event, body } => text
+                .capacity()
+                .saturating_add(match event {
+                    protocol::AgentMessageEvent::MessageReceived { from } => from.capacity(),
+                    protocol::AgentMessageEvent::BackgroundAgentEnded {
+                        agent_id, title, ..
+                    } => agent_id.capacity().saturating_add(title.capacity()),
+                })
+                .saturating_add(
+                    body.as_ref()
                         .map_or(0, TranscriptContent::dynamic_retained_bytes),
                 ),
             Self::Thinking {
@@ -2437,6 +2488,7 @@ impl BlockEntry {
                 Block::ProcessStatus {
                     event: Some(event), ..
                 } => event.field_value(field),
+                Block::AgentMessage { event, .. } => event.field_value(field),
                 _ => None,
             },
         }

@@ -354,6 +354,10 @@ while True:
             assert cancel["request"] == {"subtype": "cancel_async_message", "message_uuid": steer["uuid"]}, cancel
             send({"type": "control_response", "response": {"subtype": "success", "request_id": cancel["request_id"], "response": {"cancelled": True}}})
             tool_result("steer-tool", "found")
+    if SCENARIO == "peer-message":
+        # Another session's message, which Claude Code takes as a prompt of its own.
+        content = "Another Claude session sent a message:\n<cross-session-message from=\"uds:/peer.sock\" from-name=\"worker\">\nPEER_BODY\n</cross-session-message>"
+        send({"type": "user", "isReplay": True, "isSynthetic": True, "uuid": "peer-message", "parent_tool_use_id": None, "message": {"role": "user", "content": content}, "origin": {"kind": "peer", "from": "uds:/peer.sock", "name": "worker", "body": "PEER_BODY"}})
     if SCENARIO in ("compact", "compact-failed"):
         send({"type": "assistant", "uuid": "before-compact", "message": {"id": "before-compact", "content": [{"type": "text", "text": "before"}], "usage": {"input_tokens": 27445, "output_tokens": 0}}, "parent_tool_use_id": None})
         send({"type": "system", "subtype": "status", "status": "compacting", "session_id": SESSION, "uuid": "compacting"})

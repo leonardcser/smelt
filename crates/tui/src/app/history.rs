@@ -773,6 +773,14 @@ pub(crate) fn history_note_to_block(
             event: note.process_status_event_ref().cloned(),
             output: note.process_output().map(Into::into),
         }),
+        protocol::HistoryNoteKind::AgentMessage => {
+            note.agent_message_event_ref()
+                .map(|event| Block::AgentMessage {
+                    text: note.text().to_string(),
+                    event: event.clone(),
+                    body: note.agent_message_body().map(Into::into),
+                })
+        }
         protocol::HistoryNoteKind::Compaction => Some(Block::Compacted {
             summary: note.text().to_string(),
             kept: Vec::new(),
@@ -1642,6 +1650,7 @@ impl TuiApp {
 
         for item in &items {
             self.commit_pending_history_append(item);
+            self.conversation.release_held_native_note(item);
         }
         self.sync_session_snapshot();
         self.publish_history_delta(HistoryDeltaKind::Append);

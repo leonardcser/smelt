@@ -1582,8 +1582,8 @@ Bounded semantic transcript metadata passed to the root renderer.
 | --- | --- | --- | --- |
 | `id` | `integer` | yes | Stable block id within the session. |
 | `index` | `integer` | yes | Zero-based block index in transcript order. |
-| `kind` | `"user"\|"assistant"\|"thinking"\|"tool"\|"group"\|"code"\|"exec"\|"mode"\|"process_status"\|"compacted"\|"compaction_preview"` | yes | Block kind. |
-| `text` | `string` |  | User/mode/process text. |
+| `kind` | `"user"\|"assistant"\|"thinking"\|"tool"\|"group"\|"code"\|"exec"\|"mode"\|"process_status"\|"agent_message"\|"compacted"\|"compaction_preview"` | yes | Block kind. |
+| `text` | `string` |  | User/mode/process/agent message text. |
 | `user_lines` | `table` |  | User text as styled span lines, including slash/ref/image accents. |
 | `sent_at_ms` | `integer` |  | User-message submission time as Unix epoch milliseconds; absent for undated history. |
 | `content` | `string` |  | Code content. |
@@ -1592,7 +1592,7 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `content_bytes` | `integer` |  | Shared content size in bytes. |
 | `content_lines` | `integer` |  | Shared content logical line count. |
 | `content_preview` | `string` |  | Bounded preview for labels and fallback UI, not complete content. |
-| `title` | `string` |  | Latest structured reasoning-summary title. |
+| `title` | `string` |  | Latest structured reasoning-summary title, or the title of the background agent an agent message reports. |
 | `summary_titles` | `string[]` |  | Ordered structured reasoning-summary title history. |
 | `reasoning_kind` | `"summary"\|"raw"` |  | Reasoning source for thinking blocks. |
 | `image_labels` | `string[]` |  | User image labels. |
@@ -1622,7 +1622,13 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `event_data` | `table` |  | Full typed process status event payload. |
 | `process_id` | `string` |  | Background process id for process status events. |
 | `exit_code` | `integer` |  | Background process exit code when known. |
-| `output_id` | `integer` |  | Stable shared-content id for exec or process-status output. |
+| `sender` | `string` |  | Agent message sender: the agent that sent it, or the background agent that ended. |
+| `sender_before` | `string` |  | Agent message header text before `sender`; `text` is `sender_before .. sender .. sender_after`. |
+| `sender_after` | `string` |  | Agent message header text after `sender`. |
+| `from` | `string` |  | Sender of a received agent message. |
+| `agent_id` | `string` |  | Background agent that ended, for agent messages. |
+| `agent_status` | `"completed"\|"blocked"\|"failed"\|"cancelled"` |  | How the background agent ended, for agent messages. |
+| `output_id` | `integer` |  | Stable shared-content id for exec, process-status output, or an agent message body. |
 | `output_revision` | `integer` |  | Shared output revision. |
 | `output_bytes` | `integer` |  | Shared output size in bytes. |
 | `output_lines` | `integer` |  | Shared output logical line count. |
@@ -2129,7 +2135,7 @@ Variants: `"allow"` \| `"ask"` \| `"deny"`
 
 Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 
-Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"auto_continue_status"` \| `"branch"` \| `"confirm_requested"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"fast_mode"` \| `"history_epoch"` \| `"input_epoch"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_queue_revision"` \| `"prompt_resize_active"` \| `"prompt_stashed"` \| `"reasoning"` \| `"running_procs"` \| `"session_epoch"` \| `"session_slug"` \| `"session_title"` \| `"settings_auto_continue"` \| `"settings_autoupgrade"` \| `"settings_terminal_title"` \| `"task_label"` \| `"tokens_used"` \| `"tps"` \| `"transcript_pending_revision"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_continuation_token"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_pause_kind"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
+Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"auto_continue_status"` \| `"branch"` \| `"confirm_requested"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"fast_mode"` \| `"foreground_work"` \| `"history_epoch"` \| `"input_epoch"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_queue_revision"` \| `"prompt_resize_active"` \| `"prompt_stashed"` \| `"reasoning"` \| `"running_agents"` \| `"running_procs"` \| `"session_epoch"` \| `"session_slug"` \| `"session_title"` \| `"settings_auto_continue"` \| `"settings_autoupgrade"` \| `"settings_terminal_title"` \| `"task_label"` \| `"tokens_used"` \| `"tps"` \| `"transcript_pending_revision"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_continuation_token"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_pause_kind"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.theme.Layer`
 
@@ -2161,7 +2167,7 @@ Variants: `"read"` \| `"write"` \| `"network"` \| `"user"` \| `"process"` \| `"c
 
 Semantic stages in the bundled transcript composition pipeline.
 
-Variants: `"root"` \| `"group"` \| `"tool"` \| `"tool_header"` \| `"tool_header_content"` \| `"user"` \| `"user_content"` \| `"assistant"` \| `"thinking"` \| `"exec"` \| `"mode"` \| `"process_status"` \| `"compacted"` \| `"compaction_preview"` \| `"code"` \| `"unknown"`
+Variants: `"root"` \| `"group"` \| `"tool"` \| `"tool_header"` \| `"tool_header_content"` \| `"user"` \| `"user_content"` \| `"assistant"` \| `"thinking"` \| `"exec"` \| `"mode"` \| `"process_status"` \| `"agent_message"` \| `"compacted"` \| `"compaction_preview"` \| `"code"` \| `"unknown"`
 
 ### `smelt.transcript.RevealAlign`
 
@@ -2173,7 +2179,7 @@ Variants: `"top"`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Variants: `"user"` \| `"mode"` \| `"process_status"` \| `"assistant"` \| `"thinking"` \| `"tool"` \| `"code"` \| `"exec"` \| `"compacted"` \| `"compaction_preview"`
+Variants: `"user"` \| `"mode"` \| `"process_status"` \| `"agent_message"` \| `"assistant"` \| `"thinking"` \| `"tool"` \| `"code"` \| `"exec"` \| `"compacted"` \| `"compaction_preview"`
 
 ### `smelt.vim.Mode`
 

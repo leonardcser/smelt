@@ -24,6 +24,8 @@ pub(crate) struct TurnLifecycle {
     pub(super) command: CommandScope,
     pending_meta: Option<protocol::TurnMeta>,
     pending_history_appends: Vec<PendingHistoryAppend>,
+    /// Notes the native session holds until the steps before them finish.
+    held_native_notes: Vec<protocol::HistoryNote>,
     pending_history_revision: u64,
     context_tokens_updated: bool,
     applied_mode: protocol::AgentMode,
@@ -78,6 +80,7 @@ impl TurnLifecycle {
             command: CommandScope::default(),
             pending_meta: None,
             pending_history_appends: Vec::new(),
+            held_native_notes: Vec::new(),
             pending_history_revision: 0,
             context_tokens_updated: false,
             applied_mode,
@@ -173,13 +176,39 @@ impl TurnLifecycle {
         &self.pending_history_appends
     }
 
-    /// Changes whenever the pending append list changes.
+    pub(crate) fn held_native_notes(&self) -> &[protocol::HistoryNote] {
+        &self.held_native_notes
+    }
+
+    pub(crate) fn set_held_native_notes(&mut self, notes: Vec<protocol::HistoryNote>) {
+        if self.held_native_notes != notes {
+            self.bump_pending_history_revision();
+            self.held_native_notes = notes;
+        }
+    }
+
+    /// Drops the held note `item` is, now that it joined the history.
+    pub(crate) fn release_held_native_note(&mut self, item: &HistoryItem) {
+        let Some(note) = item.as_note() else {
+            return;
+        };
+        if let Some(index) = self.held_native_notes.iter().position(|held| held == note) {
+            self.bump_pending_history_revision();
+            self.held_native_notes.remove(index);
+        }
+    }
+
+    /// Changes whenever the pending append list or the held native notes change.
     pub(crate) fn pending_history_revision(&self) -> u64 {
         self.pending_history_revision
     }
 
-    fn pending_history_appends_mut(&mut self) -> &mut Vec<PendingHistoryAppend> {
+    fn bump_pending_history_revision(&mut self) {
         self.pending_history_revision = self.pending_history_revision.wrapping_add(1);
+    }
+
+    fn pending_history_appends_mut(&mut self) -> &mut Vec<PendingHistoryAppend> {
+        self.bump_pending_history_revision();
         &mut self.pending_history_appends
     }
 
@@ -390,6 +419,7 @@ impl TurnLifecycle {
         self.last_terminal_turn_id = None;
         self.pending_meta = None;
         self.pending_history_appends_mut().clear();
+        self.held_native_notes.clear();
         self.context_tokens_updated = false;
         self.pause = None;
         self.command = CommandScope::default();

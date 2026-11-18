@@ -49,6 +49,7 @@ local groups = {
   SmeltHeading        = fg(117),  -- sky blue headings
   SmeltLink           = fg(75),   -- markdown link destinations
   SmeltProcess        = fg(117),  -- background-process notices and counters
+  SmeltAgent          = fg(dl(213, 162)), -- agent-message notices and agent counters
   SmeltGoalBanner     = { fg = dl(0, 0), bg = dl(39, 153) }, -- active-goal top banner row
   SmeltGoalBannerLabel = { fg = dl(0, 0), bg = dl(39, 153), bold = true }, -- active-goal label
   SmeltGoalBannerMode = { fg = dl(0, 0), bg = dl(39, 153), bold = true }, -- right-side goal mode

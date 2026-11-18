@@ -615,6 +615,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("cwd_worktree_path"),
     state("errors"),
     state("fast_mode"),
+    state("foreground_work"),
     event("history"),
     state("history_epoch"),
     state("input_epoch"),
@@ -628,6 +629,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("prompt_resize_active"),
     state("prompt_stashed"),
     state("reasoning"),
+    state("running_agents"),
     state("running_procs"),
     event("session_ended"),
     state("session_epoch"),
@@ -964,6 +966,8 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("tps", 0.0f64);
     signals.declare("task_label", String::new());
     signals.declare("running_procs", 0u32);
+    signals.declare("running_agents", 0u32);
+    signals.declare("foreground_work", false);
     signals.declare("permission_pending", false);
     signals.declare("notification_visible", false);
     signals.declare("prompt_queue_revision", 0u64);

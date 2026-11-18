@@ -305,6 +305,7 @@ mod tests {
             title: "Review".into(),
             task: "Inspect".into(),
             status,
+            background: false,
             activity: String::new(),
             result: None,
             error: None,

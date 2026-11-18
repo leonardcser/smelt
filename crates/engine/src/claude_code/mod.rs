@@ -9,6 +9,7 @@ mod catalog;
 mod context;
 mod interaction;
 mod limit;
+mod messages;
 mod models;
 mod plans;
 pub use catalog::smelt_tool;
@@ -17,6 +18,12 @@ pub use models::{cached as cached_models, refresh as refresh_models, stale as mo
 pub use plans::directory as plan_directory;
 pub use transport::installed;
 pub use usage::usage;
+
+/// The ID smelt gives the agent or shell Claude Code runs as task `task`,
+/// under provider `provider`.
+fn native_id(provider: &str, task: &str) -> String {
+    format!("{provider}:{task}")
+}
 mod session;
 mod shells;
 #[cfg(all(test, unix))]
@@ -239,6 +246,8 @@ struct Runtime<'a> {
     deferred: Vec<StartTurnInput>,
     /// Steers Claude Code holds until its next step, by message UUID.
     steers: Vec<(String, HistoryItem)>,
+    /// The held notes the host last heard of.
+    held_notes: Vec<protocol::HistoryNote>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -282,6 +291,7 @@ pub(crate) async fn run_session(
         side_results: FuturesUnordered::new(),
         deferred: Vec::new(),
         steers: Vec::new(),
+        held_notes: Vec::new(),
     };
     let result = match runtime.open().await {
         Ok(true) => runtime.drive().await,
@@ -338,6 +348,14 @@ impl Runtime<'_> {
     fn publish_shells(&mut self) {
         if let Some(processes) = self.native.shells.changed() {
             let _ = self.tx.send(EngineEvent::NativeProcesses { processes });
+        }
+    }
+
+    fn publish_held_notes(&mut self) {
+        let notes = self.transcript.held_notes();
+        if notes != self.held_notes {
+            self.held_notes = notes.clone();
+            let _ = self.tx.send(EngineEvent::NativeHeldNotes { notes });
         }
     }
 
@@ -818,6 +836,7 @@ impl Runtime<'_> {
                 processes: Vec::new(),
             });
         }
+        self.publish_held_notes();
         self.native = Native::new(self.tx, &self.payload);
         // Every announced process ends with this report. The host ignores the
         // reports of a session it ended until this one arrives.
@@ -875,6 +894,7 @@ impl Runtime<'_> {
             }
             self.report();
             self.publish_shells();
+            self.publish_held_notes();
             let stop_deadline = self.native.agents.stop_deadline();
             let init_deadline = self.native.init_deadline;
             if self.native.shells.is_empty() {
@@ -1047,6 +1067,9 @@ impl Runtime<'_> {
             return Ok(());
         }
         if self.native.agents.frame(&frame, now_ms)? {
+            for delivery in self.native.agents.deliveries() {
+                delivery.apply(&mut self.transcript);
+            }
             return Ok(());
         }
         match frame["type"].as_str() {
@@ -1179,6 +1202,9 @@ impl Runtime<'_> {
                     .iter()
                     .position(|(uuid, _)| frame["uuid"] == uuid.as_str())
                 else {
+                    // A prompt Claude Code took on its own, such as another
+                    // agent's message.
+                    self.transcript.frame(&frame, now_ms);
                     return Ok(());
                 };
                 let (_, item) = self.steers.remove(at);
@@ -1247,7 +1273,11 @@ impl Runtime<'_> {
             UiCommand::BackgroundNativeProcesses { session_id }
                 if session_id == self.payload.session_id =>
             {
-                for request in self.native.shells.background_requests() {
+                let shells = self.native.shells.background_requests();
+                for request in shells
+                    .into_iter()
+                    .chain(self.native.agents.background_requests())
+                {
                     self.write(request).await?;
                 }
             }

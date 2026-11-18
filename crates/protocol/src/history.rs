@@ -160,6 +160,72 @@ impl ProcessStatusEvent {
     }
 }
 
+/// What another agent added to the conversation on its own, outside a tool
+/// call: a message it sent, or the report of work it did in the background.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum AgentMessageEvent {
+    /// Another agent, such as a peer session or a teammate, sent a message.
+    MessageReceived { from: String },
+    /// An agent that worked in the background ended.
+    BackgroundAgentEnded {
+        agent_id: String,
+        title: String,
+        status: crate::AgentStatus,
+    },
+}
+
+impl AgentMessageEvent {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::MessageReceived { .. } => "message_received",
+            Self::BackgroundAgentEnded { .. } => "background_agent_ended",
+        }
+    }
+
+    /// Who the message is from: the sender, or the agent that ended.
+    pub fn sender(&self) -> &str {
+        match self {
+            Self::MessageReceived { from } => from,
+            Self::BackgroundAgentEnded { title, .. } => title,
+        }
+    }
+
+    pub fn field_value(&self, field: &str) -> Option<String> {
+        match (field, self) {
+            ("event" | "event_type", _) => Some(self.event_type().to_string()),
+            ("from", Self::MessageReceived { from }) => Some(from.clone()),
+            ("agent_id", Self::BackgroundAgentEnded { agent_id, .. }) => Some(agent_id.clone()),
+            ("title", Self::BackgroundAgentEnded { title, .. }) => Some(title.clone()),
+            ("status", Self::BackgroundAgentEnded { status, .. }) => {
+                Some(status.as_str().to_string())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn display_text(&self) -> String {
+        let (before, sender, after) = self.display_parts();
+        format!("{before}{sender}{after}")
+    }
+
+    /// [`Self::display_text`] split around its sender.
+    pub fn display_parts(&self) -> (&'static str, &str, &'static str) {
+        match self {
+            Self::MessageReceived { from } => ("message from ", from, ""),
+            Self::BackgroundAgentEnded { title, status, .. } => {
+                let outcome = match status {
+                    crate::AgentStatus::Failed => " failed",
+                    crate::AgentStatus::Cancelled => " was stopped",
+                    crate::AgentStatus::Blocked => " is blocked",
+                    _ => " finished",
+                };
+                ("background agent ", title, outcome)
+            }
+        }
+    }
+}
+
 /// A raw token count as `1.2k`, `3.4m`, or the bare integer under 1000.
 pub fn format_tokens(n: u64) -> String {
     if n >= 1_000_000 {
@@ -207,6 +273,14 @@ pub enum HistoryNote {
         #[serde(skip_serializing_if = "String::is_empty", default)]
         output: String,
     },
+    /// Another agent added to the conversation: what `text` names, and its
+    /// message or report in `body`. The model reads both.
+    AgentMessage {
+        text: String,
+        event: AgentMessageEvent,
+        #[serde(skip_serializing_if = "String::is_empty", default)]
+        body: String,
+    },
     /// A native agent compacted its own context. The agent keeps the summary,
     /// so only the outcome is recorded.
     Compaction { text: String },
@@ -218,6 +292,7 @@ pub enum HistoryNoteKind {
     ModeChange,
     Context,
     ProcessStatus,
+    AgentMessage,
     Compaction,
 }
 
@@ -472,11 +547,20 @@ impl HistoryNote {
         }
     }
 
+    pub fn agent_message(event: AgentMessageEvent, body: impl Into<String>) -> Self {
+        Self::AgentMessage {
+            text: event.display_text(),
+            event,
+            body: body.into(),
+        }
+    }
+
     pub fn kind(&self) -> HistoryNoteKind {
         match self {
             HistoryNote::ModeChange { .. } => HistoryNoteKind::ModeChange,
             HistoryNote::Context { .. } => HistoryNoteKind::Context,
             HistoryNote::ProcessStatus { .. } => HistoryNoteKind::ProcessStatus,
+            HistoryNote::AgentMessage { .. } => HistoryNoteKind::AgentMessage,
             HistoryNote::Compaction { .. } => HistoryNoteKind::Compaction,
         }
     }
@@ -486,6 +570,7 @@ impl HistoryNote {
             HistoryNote::ModeChange { text, .. }
             | HistoryNote::Context { text, .. }
             | HistoryNote::ProcessStatus { text, .. }
+            | HistoryNote::AgentMessage { text, .. }
             | HistoryNote::Compaction { text } => text,
         }
     }
@@ -493,42 +578,48 @@ impl HistoryNote {
     pub fn mode(&self) -> Option<&str> {
         match self {
             HistoryNote::ModeChange { mode, .. } => mode.as_deref(),
-            HistoryNote::Context { .. }
-            | HistoryNote::ProcessStatus { .. }
-            | HistoryNote::Compaction { .. } => None,
+            _ => None,
         }
     }
 
     pub fn base_mode(&self) -> Option<&str> {
         match self {
             HistoryNote::ModeChange { base_mode, .. } => base_mode.as_deref(),
-            HistoryNote::Context { .. }
-            | HistoryNote::ProcessStatus { .. }
-            | HistoryNote::Compaction { .. } => None,
+            _ => None,
         }
     }
 
     pub fn context_name(&self) -> Option<&str> {
         match self {
             HistoryNote::Context { name, .. } => Some(name),
-            HistoryNote::ModeChange { .. }
-            | HistoryNote::ProcessStatus { .. }
-            | HistoryNote::Compaction { .. } => None,
+            _ => None,
         }
     }
 
     pub fn process_status_event_ref(&self) -> Option<&ProcessStatusEvent> {
         match self {
             HistoryNote::ProcessStatus { event, .. } => event.as_ref(),
-            HistoryNote::ModeChange { .. }
-            | HistoryNote::Context { .. }
-            | HistoryNote::Compaction { .. } => None,
+            _ => None,
         }
     }
 
     pub fn process_output(&self) -> Option<&str> {
         match self {
             HistoryNote::ProcessStatus { output, .. } if !output.is_empty() => Some(output),
+            _ => None,
+        }
+    }
+
+    pub fn agent_message_event_ref(&self) -> Option<&AgentMessageEvent> {
+        match self {
+            HistoryNote::AgentMessage { event, .. } => Some(event),
+            _ => None,
+        }
+    }
+
+    pub fn agent_message_body(&self) -> Option<&str> {
+        match self {
+            HistoryNote::AgentMessage { body, .. } if !body.is_empty() => Some(body),
             _ => None,
         }
     }
@@ -549,6 +640,9 @@ impl HistoryNote {
             }
             HistoryNote::Context { text, .. } => crate::note::context_note(text),
             HistoryNote::ProcessStatus { text, .. } => crate::note::process_status_note(text),
+            HistoryNote::AgentMessage { text, body, .. } => {
+                crate::note::agent_message_note(text, body)
+            }
             HistoryNote::Compaction { text } => crate::note::compaction_note(text),
         }
     }
@@ -730,6 +824,17 @@ impl HistoryItem {
         match self {
             HistoryItem::Note(note) => Some(note),
             _ => None,
+        }
+    }
+
+    /// Where the item goes among items that join the conversation at the same
+    /// moment, lowest first: agent messages follow everything else, so each
+    /// kind of arrival forms one run. Sort with a stable sort to keep arrival
+    /// order within a kind.
+    pub fn join_rank(&self) -> u8 {
+        match self.as_note().map(HistoryNote::kind) {
+            Some(HistoryNoteKind::AgentMessage) => 1,
+            _ => 0,
         }
     }
 
@@ -981,6 +1086,7 @@ enum HistoryTranscriptProjection {
     Assistant,
     Mode,
     ProcessStatus,
+    AgentMessage,
     Compacted,
 }
 
@@ -991,6 +1097,7 @@ impl HistoryTranscriptProjection {
             "assistant" | "thinking" | "tool" | "exec" | "code" => Some(Self::Assistant),
             "mode" => Some(Self::Mode),
             "process_status" => Some(Self::ProcessStatus),
+            "agent_message" => Some(Self::AgentMessage),
             "compacted" => Some(Self::Compacted),
             _ => None,
         }
@@ -1013,6 +1120,7 @@ fn history_item_transcript_projection(item: &HistoryItem) -> Option<HistoryTrans
         HistoryItem::Note(note) => match note.kind() {
             HistoryNoteKind::ModeChange => Some(HistoryTranscriptProjection::Mode),
             HistoryNoteKind::ProcessStatus => Some(HistoryTranscriptProjection::ProcessStatus),
+            HistoryNoteKind::AgentMessage => Some(HistoryTranscriptProjection::AgentMessage),
             HistoryNoteKind::Compaction => Some(HistoryTranscriptProjection::Compacted),
             HistoryNoteKind::Context => None,
         },
@@ -1693,6 +1801,25 @@ mod tests {
         assert_eq!(json["event"]["exit_code"], 1);
         let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
         assert_eq!(back, item);
+    }
+
+    #[test]
+    fn agent_message_round_trips_and_the_model_reads_its_body() {
+        let note = HistoryNote::agent_message(
+            AgentMessageEvent::MessageReceived {
+                from: "worker".into(),
+            },
+            "Tests pass.",
+        );
+        let item = HistoryItem::note(note.clone());
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["note_kind"], "agent_message");
+        assert_eq!(json["event"]["event"], "message_received");
+        assert_eq!(serde_json::from_value::<HistoryItem>(json).unwrap(), item);
+        assert_eq!(
+            note.to_model_text(),
+            "[smelt:agent] message from worker:\nTests pass."
+        );
     }
 
     #[test]

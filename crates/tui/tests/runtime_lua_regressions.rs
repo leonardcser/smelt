@@ -1,6 +1,7 @@
 const DIALOG_LUA: &str = include_str!("../../../runtime/lua/smelt/dialog.lua");
 const PS_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/ps.lua");
 const BAR_LUA: &str = include_str!("../../../runtime/lua/smelt/_bar.lua");
+const DETACH_LUA: &str = include_str!("../../../runtime/lua/smelt/_detach.lua");
 const PROMPT_CHROME_LUA: &str = include_str!("../../../runtime/lua/smelt/prompt_chrome.lua");
 const COPY_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/copy.lua");
 const LABEL_VALUE_LUA: &str = include_str!("../../../runtime/lua/smelt/label_value.lua");
@@ -1360,6 +1361,7 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
           },
           model = { current = function() return "model" end },
           reasoning = { current = function() return "off" end },
+          keymap = { list = function() return smelt.__keymaps or {} end },
           signal = {
             get = function(name)
                 if name == "work_state" then return "working" end
@@ -1368,7 +1370,7 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
                 if name == "work_retry_attempt" then return 0 end
                 if name == "work_retry_remaining_ms" then return 0 end
                 if name == "notification_visible" then return false end
-                return nil
+                return smelt.__signals and smelt.__signals[name]
             end,
             subscribe = function(name, fn)
               smelt.__subscribers[name] = fn
@@ -1485,6 +1487,12 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
     preload
         .set("smelt._bar", bar_loader)
         .expect("install bar preload");
+    let detach_loader = lua
+        .create_function(|lua, ()| lua.load(DETACH_LUA).eval::<mlua::Value>())
+        .expect("detach loader");
+    preload
+        .set("smelt._detach", detach_loader)
+        .expect("install detach preload");
 
     lua.load(PROMPT_CHROME_LUA)
         .exec()
@@ -1530,6 +1538,43 @@ fn prompt_queue_previews_are_single_line_before_truncation() {
             end
           end
         end
+        "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
+fn a_steer_waiting_on_foreground_work_shows_how_to_background_it() {
+    let lua = prompt_chrome_lua_fixture();
+    lua.load(
+        r#"
+        local queue = assert(smelt.__wins["smelt.prompt.queue"])
+        queue.rect = function() return { height = 2 } end
+        local steer = "Also, what is 2+2? This steer is far too long to fit beside the hint"
+        smelt.prompt.queued_rows = function()
+          return { { text = "later", kind = "turn" }, { text = steer, kind = "request" } }
+        end
+        local function render(width, waiting)
+          smelt.__signals = { foreground_work = waiting }
+          smelt.prompt.queue:invalidate()
+          queue.content_width = function() return width end
+          queue:renderer()
+          return queue:buf()._lines
+        end
+        smelt.__keymaps = { { mode = "", chord = "<C-g>", desc = require("smelt._detach").DESC } }
+        local lines = render(60, true)
+        assert(lines[1] == "› later" .. string.rep(" ", 53), lines[1])
+        assert(smelt.text.width(lines[2]) == 60, lines[2])
+        assert(lines[2]:find("^» Also, what is 2%+2%?.*… ctrl%+g to background$"), lines[2])
+        assert(not render(60, false)[2]:find("ctrl+g", 1, true))
+        -- Too narrow to keep a useful preview: the preview wins.
+        local narrow = render(30, true)[2]
+        assert(not narrow:find("ctrl+g", 1, true), narrow)
+        assert(narrow:find("^» Also"), narrow)
+        -- No key leaves the work running: no hint.
+        smelt.__keymaps = {}
+        assert(not render(60, true)[2]:find("to background", 1, true))
         "#,
     )
     .exec()

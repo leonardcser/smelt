@@ -495,16 +495,21 @@ impl ConversationLuaHost<'_> {
         );
     }
 
-    /// Blocks that join the transcript at the next request boundary.
+    /// Blocks that wait to join the transcript: notes the app stages for the
+    /// next request boundary, then notes the native session holds.
     pub(crate) fn pending_transcript_blocks(
         &self,
     ) -> Vec<smelt_transcript::transcript_model::Block> {
-        self.app
-            .conversation
+        let conversation = &self.app.conversation;
+        let staged = conversation
             .pending_history_appends()
             .iter()
-            .filter_map(|append| append.transcript_block(&self.app.lua))
-            .collect()
+            .filter_map(|append| append.transcript_block(&self.app.lua));
+        let held = conversation
+            .held_native_notes()
+            .iter()
+            .filter_map(|note| crate::app::history::history_note_to_block(&self.app.lua, note));
+        staged.chain(held).collect()
     }
 
     pub(crate) fn transcript_is_empty(&self) -> bool {

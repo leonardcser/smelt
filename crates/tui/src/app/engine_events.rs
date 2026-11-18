@@ -470,6 +470,10 @@ impl TuiApp {
                 self.core.native_processes = processes;
                 return true;
             }
+            EngineEvent::NativeHeldNotes { notes } => {
+                self.conversation.set_held_native_notes(notes);
+                return true;
+            }
             EngineEvent::NativeSessionEvent { session_id, event } => {
                 if self.core.native_session.as_deref() == Some(&session_id)
                     && session_id == self.conversation.session().id
@@ -725,6 +729,7 @@ impl TuiApp {
             | EngineEvent::NativeSessionState { .. }
             | EngineEvent::NativeSessionEvent { .. }
             | EngineEvent::NativeProcesses { .. }
+            | EngineEvent::NativeHeldNotes { .. }
             | EngineEvent::AgentUpdated { .. }
             | EngineEvent::AgentOutput { .. } => SessionControl::Continue,
             EngineEvent::TokenUsage {

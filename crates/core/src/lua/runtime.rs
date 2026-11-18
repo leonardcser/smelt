@@ -3416,6 +3416,32 @@ fn render_fields_to_lua_table(
                 table.set("event_data", event_data)?;
             }
         }
+        TranscriptRenderFields::AgentMessage { text, event, body } => {
+            table.set("text", text.as_str())?;
+            if let Some(body) = body {
+                set_output_metadata(&table, body)?;
+            }
+            table.set("event", event.event_type())?;
+            table.set("event_type", event.event_type())?;
+            let (before, sender, after) = event.display_parts();
+            table.set("sender", sender)?;
+            table.set("sender_before", before)?;
+            table.set("sender_after", after)?;
+            match event {
+                protocol::AgentMessageEvent::MessageReceived { from } => {
+                    table.set("from", from.as_str())?;
+                }
+                protocol::AgentMessageEvent::BackgroundAgentEnded {
+                    agent_id,
+                    title,
+                    status,
+                } => {
+                    table.set("agent_id", agent_id.as_str())?;
+                    table.set("title", title.as_str())?;
+                    table.set("agent_status", status.as_str())?;
+                }
+            }
+        }
         TranscriptRenderFields::Thinking {
             title,
             summary_titles,
@@ -3710,6 +3736,11 @@ enum TranscriptRenderFields {
         event: Option<TranscriptProcessStatusMetadata>,
         output: Option<TranscriptContentMetadata>,
     },
+    AgentMessage {
+        text: String,
+        event: protocol::AgentMessageEvent,
+        body: Option<TranscriptContentMetadata>,
+    },
     Thinking {
         title: Option<String>,
         summary_titles: Vec<String>,
@@ -3855,6 +3886,11 @@ fn transcript_block_render_fields(
                 exit_code: event.exit_code(),
                 termination: event.termination(),
             }),
+        },
+        Block::AgentMessage { text, event, body } => TranscriptRenderFields::AgentMessage {
+            text: text.clone(),
+            event: event.clone(),
+            body: body.as_ref().map(transcript_content_metadata),
         },
         Block::Thinking {
             title,
@@ -4129,6 +4165,7 @@ fn fallback_transcript_node_layout(node: &TranscriptRenderNode) -> BlockLayout {
         TranscriptRenderFields::User { text, .. }
         | TranscriptRenderFields::Mode { text, .. }
         | TranscriptRenderFields::ProcessStatus { text, .. }
+        | TranscriptRenderFields::AgentMessage { text, .. }
         | TranscriptRenderFields::Code { content: text, .. }
         | TranscriptRenderFields::Summary { summary: text, .. } => text.as_str(),
         TranscriptRenderFields::ToolDraft {

@@ -20,6 +20,7 @@ return {
   { name = "SmeltHeading", role = "foreground", owner = "transcript", description = "Transcript and panel headings." },
   { name = "SmeltLink", role = "style", owner = "transcript", description = "Link destination text." },
   { name = "SmeltProcess", role = "foreground", owner = "processes", description = "Background process notices and counters." },
+  { name = "SmeltAgent", role = "foreground", owner = "agents", description = "Agent message notices and agent counters." },
 
   { name = "SmeltGoalBanner", role = "style", owner = "goal", description = "Active goal banner row." },
   { name = "SmeltGoalBannerLabel", role = "style", owner = "goal", description = "Active goal label." },

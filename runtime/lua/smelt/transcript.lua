@@ -63,8 +63,8 @@ smelt.transcript = smelt.transcript or {}
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
----@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
----@field text? string User/mode/process text.
+---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"agent_message"|"compacted"|"compaction_preview" Block kind.
+---@field text? string User/mode/process/agent message text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
 ---@field sent_at_ms? integer User-message submission time as Unix epoch milliseconds; absent for undated history.
 ---@field content? string Code content.
@@ -73,7 +73,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field content_bytes? integer Shared content size in bytes.
 ---@field content_lines? integer Shared content logical line count.
 ---@field content_preview? string Bounded preview for labels and fallback UI, not complete content.
----@field title? string Latest structured reasoning-summary title.
+---@field title? string Latest structured reasoning-summary title, or the title of the background agent an agent message reports.
 ---@field summary_titles? string[] Ordered structured reasoning-summary title history.
 ---@field reasoning_kind? "summary"|"raw" Reasoning source for thinking blocks.
 ---@field image_labels? string[] User image labels.
@@ -103,7 +103,13 @@ smelt.transcript = smelt.transcript or {}
 ---@field event_data? table Full typed process status event payload.
 ---@field process_id? string Background process id for process status events.
 ---@field exit_code? integer Background process exit code when known.
----@field output_id? integer Stable shared-content id for exec or process-status output.
+---@field sender? string Agent message sender: the agent that sent it, or the background agent that ended.
+---@field sender_before? string Agent message header text before `sender`; `text` is `sender_before .. sender .. sender_after`.
+---@field sender_after? string Agent message header text after `sender`.
+---@field from? string Sender of a received agent message.
+---@field agent_id? string Background agent that ended, for agent messages.
+---@field agent_status? "completed"|"blocked"|"failed"|"cancelled" How the background agent ended, for agent messages.
+---@field output_id? integer Stable shared-content id for exec, process-status output, or an agent message body.
 ---@field output_revision? integer Shared output revision.
 ---@field output_bytes? integer Shared output size in bytes.
 ---@field output_lines? integer Shared output logical line count.
@@ -184,7 +190,8 @@ local internal_transcript = __smelt_internal.transcript
 local parts = {}
 local part_order = {
   "root", "group", "tool", "tool_header", "tool_header_content", "user", "user_content", "assistant",
-  "thinking", "exec", "mode", "process_status", "compacted", "compaction_preview", "code", "unknown",
+  "thinking", "exec", "mode", "process_status", "agent_message", "compacted", "compaction_preview", "code",
+  "unknown",
 }
 local tool_presentations = {}
 local tool_order = {}
@@ -267,7 +274,7 @@ local function rebuild_renderer()
 end
 
 --- Semantic stages in the bundled transcript composition pipeline.
----@alias smelt.transcript.RendererPart "root"|"group"|"tool"|"tool_header"|"tool_header_content"|"user"|"user_content"|"assistant"|"thinking"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview"|"code"|"unknown"
+---@alias smelt.transcript.RendererPart "root"|"group"|"tool"|"tool_header"|"tool_header_content"|"user"|"user_content"|"assistant"|"thinking"|"exec"|"mode"|"process_status"|"agent_message"|"compacted"|"compaction_preview"|"code"|"unknown"
 
 --- Options shared by renderer replacements and middleware.
 ---@class smelt.transcript.RendererOptions
@@ -459,6 +466,7 @@ end
 rebuild_renderer()
 
 require("smelt.transcript.builtins").register()
+require("smelt.transcript.agents").register("claude-code")
 
 package.loaded["smelt.transcript"] = smelt.transcript
 

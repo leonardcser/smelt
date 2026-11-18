@@ -145,6 +145,24 @@ impl Transcript {
         self.committed.push(item);
     }
 
+    /// The notes that wait for the steps before them, in the order they
+    /// will join.
+    pub(super) fn held_notes(&self) -> Vec<protocol::HistoryNote> {
+        let mut notes: Vec<_> = self.notes.iter().collect();
+        notes.sort_by_key(|item| item.join_rank());
+        notes
+            .into_iter()
+            .filter_map(HistoryItem::as_note)
+            .cloned()
+            .collect()
+    }
+
+    fn take_notes(&mut self) -> Vec<HistoryItem> {
+        let mut notes = std::mem::take(&mut self.notes);
+        notes.sort_by_key(HistoryItem::join_rank);
+        notes
+    }
+
     /// Whether every tool call has its result.
     pub(super) fn settled(&self) -> bool {
         self.pending.is_empty()
@@ -169,8 +187,27 @@ impl Transcript {
         match frame["type"].as_str() {
             Some("stream_event") => self.stream(&frame["event"]),
             Some("assistant") => self.assistant(frame, now_ms),
-            Some("user") => self.results(frame, now_ms),
+            Some("user") => {
+                self.results(frame, now_ms);
+                self.received(frame);
+            }
             _ => {}
+        }
+    }
+
+    /// Records the messages other agents sent, once each.
+    fn received(&mut self, frame: &Value) {
+        let notes = super::messages::received(frame);
+        if notes.is_empty() {
+            return;
+        }
+        if let Some(uuid) = frame["uuid"].as_str() {
+            if !self.seen.insert(uuid.to_owned()) {
+                return;
+            }
+        }
+        for note in notes {
+            self.note(HistoryItem::note(note));
         }
     }
 
@@ -406,10 +443,21 @@ impl Transcript {
             if is_error {
                 content = strip_tool_use_error(&content);
             }
+            let launches_agent = self
+                .pending
+                .iter()
+                .flat_map(|step| &step.tools)
+                .any(|tool| tool.call_id == id && super::agents::launches(&tool.name));
             let result = self.retained_results.remove(id).unwrap_or_else(|| {
+                let structured = structured.filter(|_| !is_error);
                 structured
-                    .filter(|_| !is_error)
-                    .and_then(|result| edit_result(&content, result))
+                    .and_then(|result| {
+                        if launches_agent {
+                            super::agents::launch_result(&content, result)
+                        } else {
+                            edit_result(&content, result)
+                        }
+                    })
                     .unwrap_or_else(|| ToolOutcome::new(content, is_error, None))
             });
             let elapsed_ms = self.started.get(id).map(|at| now_ms.saturating_sub(*at));
@@ -449,7 +497,7 @@ impl Transcript {
         if !self.pending.is_empty() {
             return;
         }
-        for item in std::mem::take(&mut self.notes) {
+        for item in self.take_notes() {
             self.append(item);
         }
         if !self.steers.is_empty() {
@@ -686,6 +734,38 @@ mod tests {
         );
         transcript.abandon();
         assert_eq!(transcript.committed, [note]);
+    }
+
+    #[test]
+    fn held_notes_join_by_kind_after_the_running_step() {
+        let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::EngineEventSender {
+            output_tx,
+            route: None,
+        };
+        let mut transcript = Transcript::new(tx, "claude-code".into(), 1, 0);
+        transcript.frame(
+            &serde_json::json!({"type":"assistant", "message":{"id":"step", "content":[
+                {"type":"tool_use", "id":"call", "name":"Bash", "input":{"command":"make"}}
+            ]}}),
+            0,
+        );
+        let first = protocol::HistoryNote::process_status("first done");
+        let message = protocol::HistoryNote::agent_message(
+            protocol::AgentMessageEvent::MessageReceived {
+                from: "worker".into(),
+            },
+            "hello",
+        );
+        let second = protocol::HistoryNote::process_status("second done");
+        for note in [&first, &message, &second] {
+            transcript.note(HistoryItem::note(note.clone()));
+        }
+        let joining = [first, second, message];
+        assert_eq!(transcript.held_notes(), joining);
+        transcript.abandon();
+        assert_eq!(transcript.committed, joining.map(HistoryItem::note));
+        assert!(transcript.held_notes().is_empty());
     }
 
     #[test]

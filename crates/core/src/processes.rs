@@ -75,16 +75,43 @@ impl Core {
     }
 
     /// Leaves the latest foreground job, or else the native session's
-    /// foreground shell commands, running in the background. Returns whether
-    /// it asked for that.
+    /// foreground shell commands and the agents its main agent waits for,
+    /// running in the background. Returns whether it asked for that.
     pub fn detach_foreground_process(&self) -> bool {
         self.jobs.detach_latest_foreground().requested()
-            || (self
-                .native_processes
-                .iter()
-                .any(|process| !process.background)
+            || (self.native_session_has_foreground_work()
                 && self
                     .send_native(|session_id| UiCommand::BackgroundNativeProcesses { session_id }))
+    }
+
+    /// Whether the agent waits for work `detach_foreground_process` can leave
+    /// running: a shell command, or an agent the native session launched.
+    pub fn has_foreground_work(&self) -> bool {
+        self.jobs.has_detachable_foreground() || self.native_session_has_foreground_work()
+    }
+
+    /// Whether the native session's main agent waits for a shell command or
+    /// an agent it launched.
+    fn native_session_has_foreground_work(&self) -> bool {
+        let Some(session) = self.native_session.as_deref() else {
+            return false;
+        };
+        self.native_processes
+            .iter()
+            .any(|process| !process.background && process.agent_id.is_none())
+            || self.agents.runs(session).any(|agent| {
+                !agent.info.status.is_terminal()
+                    && !agent.info.background
+                    && agent.info.parent_agent_id.is_none()
+            })
+    }
+
+    /// How many agents of session `session` run.
+    pub fn running_agent_count(&self, session: &str) -> usize {
+        self.agents
+            .runs(session)
+            .filter(|agent| !agent.info.status.is_terminal())
+            .count()
     }
 
     fn native_process(&self, id: &str) -> Option<&NativeProcess> {

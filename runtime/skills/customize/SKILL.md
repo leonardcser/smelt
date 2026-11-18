@@ -514,7 +514,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan artifacts and approval UI. |
 | `smelt.plugins.predict` | Input prediction plugin. |
-| `smelt.plugins.process_control` | Ctrl-G: stop following a foreground bash job while it keeps running. |
+| `smelt.plugins.process_control` | Ctrl-G: stop waiting for a foreground command or agent while it keeps running. |
 | `smelt.plugins.scroll_pills` | Clickable scroll-pill overlays navigate the transcript. |
 | `smelt.plugins.snake` | /snake (or F11) - snake in a floating window. hjkl or the arrows steer, space starts over, q, Esc or Ctrl-C closes. |
 | `smelt.plugins.terminal_title` | Keeps the terminal window/tab title in sync with smelt. |
