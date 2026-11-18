@@ -24,6 +24,7 @@ pub(crate) struct TurnLifecycle {
     pub(super) command: CommandScope,
     pending_meta: Option<protocol::TurnMeta>,
     pending_history_appends: Vec<PendingHistoryAppend>,
+    pending_history_revision: u64,
     context_tokens_updated: bool,
     applied_mode: protocol::AgentMode,
     applied_reasoning_effort: protocol::ReasoningEffort,
@@ -77,6 +78,7 @@ impl TurnLifecycle {
             command: CommandScope::default(),
             pending_meta: None,
             pending_history_appends: Vec::new(),
+            pending_history_revision: 0,
             context_tokens_updated: false,
             applied_mode,
             applied_reasoning_effort,
@@ -171,22 +173,32 @@ impl TurnLifecycle {
         &self.pending_history_appends
     }
 
+    /// Changes whenever the pending append list changes.
+    pub(crate) fn pending_history_revision(&self) -> u64 {
+        self.pending_history_revision
+    }
+
+    fn pending_history_appends_mut(&mut self) -> &mut Vec<PendingHistoryAppend> {
+        self.pending_history_revision = self.pending_history_revision.wrapping_add(1);
+        &mut self.pending_history_appends
+    }
+
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn pending_history_append_count(&self) -> usize {
         self.pending_history_appends.len()
     }
 
     pub(crate) fn clear_pending_history_appends(&mut self) {
-        self.pending_history_appends.clear();
+        self.pending_history_appends_mut().clear();
     }
 
     pub(crate) fn retain_session_history_appends(&mut self) {
-        self.pending_history_appends
+        self.pending_history_appends_mut()
             .retain(|pending| pending.lifecycle() == PendingHistoryLifecycle::SessionScoped);
     }
 
     pub(crate) fn take_pending_history_appends(&mut self) -> Vec<PendingHistoryAppend> {
-        std::mem::take(&mut self.pending_history_appends)
+        std::mem::take(self.pending_history_appends_mut())
     }
 
     pub(crate) fn take_pending_follow_up_note(&mut self) -> Option<protocol::HistoryNote> {
@@ -194,7 +206,7 @@ impl TurnLifecycle {
         let index = self.pending_history_appends.iter().rposition(|append| {
             append.delivery() == PendingHistoryDelivery::FollowUpIfUnconsumed
         })?;
-        let append = self.pending_history_appends.remove(index);
+        let append = self.pending_history_appends_mut().remove(index);
         match append.item {
             HistoryItem::Note(note) => Some(note),
             _ => unreachable!("follow-up append must contain a history note"),
@@ -230,12 +242,12 @@ impl TurnLifecycle {
             });
             if let Some(index) = existing {
                 if mode_base.is_some_and(|base| base.as_str() == new_mode) {
-                    self.pending_history_appends.remove(index);
+                    self.pending_history_appends_mut().remove(index);
                 } else {
-                    self.pending_history_appends[index] = append;
+                    self.pending_history_appends_mut()[index] = append;
                 }
             } else if mode_base.is_none_or(|base| base.as_str() != new_mode) {
-                self.pending_history_appends.push(append);
+                self.pending_history_appends_mut().push(append);
             }
             return;
         }
@@ -245,7 +257,7 @@ impl TurnLifecycle {
     pub(crate) fn replace_or_push_history_append(&mut self, append: PendingHistoryAppend) {
         if append.coalescing_note_kind().is_some() {
             if let Some(existing) = self
-                .pending_history_appends
+                .pending_history_appends_mut()
                 .iter_mut()
                 .find(|pending| pending.same_coalescing_target(&append))
             {
@@ -253,11 +265,11 @@ impl TurnLifecycle {
                 return;
             }
         }
-        self.pending_history_appends.push(append);
+        self.pending_history_appends_mut().push(append);
     }
 
     pub(crate) fn remove_matching_history_append(&mut self, append: &PendingHistoryAppend) {
-        self.pending_history_appends
+        self.pending_history_appends_mut()
             .retain(|pending| !pending.same_coalescing_target(append));
     }
 
@@ -269,7 +281,7 @@ impl TurnLifecycle {
             .pending_history_appends()
             .iter()
             .position(|append| append.matches_history_item(item))?;
-        Some(self.pending_history_appends.remove(index))
+        Some(self.pending_history_appends_mut().remove(index))
     }
 
     pub(crate) fn active_id(&self) -> Option<u64> {
@@ -377,7 +389,7 @@ impl TurnLifecycle {
     pub(crate) fn reset_session(&mut self) {
         self.last_terminal_turn_id = None;
         self.pending_meta = None;
-        self.pending_history_appends.clear();
+        self.pending_history_appends_mut().clear();
         self.context_tokens_updated = false;
         self.pause = None;
         self.command = CommandScope::default();

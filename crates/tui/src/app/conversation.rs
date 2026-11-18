@@ -2274,6 +2274,10 @@ impl ConversationRuntime {
         self.turn.pending_history_appends()
     }
 
+    pub(crate) fn pending_history_revision(&self) -> u64 {
+        self.turn.pending_history_revision()
+    }
+
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn pending_history_append_count(&self) -> usize {
         self.turn.pending_history_append_count()

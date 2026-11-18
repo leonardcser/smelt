@@ -646,6 +646,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     event("tool_end"),
     event("tool_start"),
     state("tps"),
+    state("transcript_pending_revision"),
     event("turn_complete"),
     event("turn_end"),
     event("turn_error"),
@@ -968,6 +969,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("prompt_queue_revision", 0u64);
     signals.declare("prompt_resize_active", false);
     signals.declare("prompt_stashed", false);
+    signals.declare("transcript_pending_revision", 0u64);
     signals.declare("cursor_pos", CursorPos::default());
     signals.declare("viewport_pos", ViewportPos::default());
 

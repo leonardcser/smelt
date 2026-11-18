@@ -613,6 +613,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "pending_blocks",
+        "Return the blocks that wait to join the transcript, oldest first. A note that arrives during a turn, such as a finished background process, joins the transcript at the next request boundary. Each entry has the shape block renderers get, without `id` and `index`; `kind` is the block kind, such as `process_status`. The `transcript_pending_revision` signal changes whenever this list changes.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let blocks = crate::lua::try_with_conversation_host(|host| host.pending_transcript_blocks())
+                .unwrap_or_default();
+            let out = lua.create_table_with_capacity(blocks.len(), 0)?;
+            for (i, block) in blocks.iter().enumerate() {
+                out.set(i + 1, smelt_core::lua::runtime::transcript_block_lua_table(lua, block)?)?;
+            }
+            Ok(out)
+        },
+    )?;
+    m.fn_(
         "is_empty",
         "Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `loaded_blocks_expensive()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).",
         &[],

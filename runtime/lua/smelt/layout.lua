@@ -1,6 +1,7 @@
 -- Default main TUI layout composer, top to bottom:
 --   * `smelt.headerline`  (its rows while a header source shows items)
 --   * the transcript       (fill)
+--   * `smelt.transcript.pending` (its rows while blocks wait to join the transcript)
 --   * `smelt.prompt.node` or the active dialog
 --   * `smelt.statusline`   (its rows, at least 1)
 --
@@ -23,6 +24,10 @@
 -- to grow.
 local MIN_TRANSCRIPT_ROWS = 2
 
+-- Rows between the transcript and the pending blocks under it: the gap the
+-- transcript keeps between blocks.
+local PENDING_GAP_ROWS = 1
+
 local M = {}
 
 function M.compose(state)
@@ -32,12 +37,22 @@ function M.compose(state)
 
   local content = state.dialog
   if not content then
+    -- Pending blocks sit one gap row below the transcript, where they land.
+    local transcript = layout.leaf(smelt.transcript.win)
+    local pending, pending_rows = smelt.transcript.pending:node()
+    if pending_rows > 0 then
+      transcript = layout.vbox({
+        { height = "fill", transcript },
+        { height = pending_rows, pending },
+      }, { gap = PENDING_GAP_ROWS })
+      pending_rows = pending_rows + PENDING_GAP_ROWS
+    end
     local prompt, prompt_rows = smelt.prompt.node({
       input_rows = state.prompt_input_rows or 1,
-      max_rows = (state.term_h or 24) - header_rows - status_rows - MIN_TRANSCRIPT_ROWS,
+      max_rows = (state.term_h or 24) - header_rows - status_rows - pending_rows - MIN_TRANSCRIPT_ROWS,
     })
     content = layout.vbox({
-      { height = "fill", layout.leaf(smelt.transcript.win) },
+      { height = "fill", transcript },
       { height = prompt_rows, prompt },
     })
   end

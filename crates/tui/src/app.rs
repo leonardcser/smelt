@@ -2292,6 +2292,10 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("prompt_stashed", self.prompt.has_stash());
+        self.core.signals.publish_if_changed(
+            "transcript_pending_revision",
+            self.conversation.pending_history_revision(),
+        );
         let now_secs = self
             .core
             .clock

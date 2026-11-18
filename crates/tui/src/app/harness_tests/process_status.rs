@@ -862,6 +862,66 @@ fn job_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
 }
 
 #[test]
+fn mid_turn_job_completions_wait_dimmed_under_the_transcript() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(90, 24);
+    app.start_turn(7);
+    let mut notes = Vec::new();
+    for (id, code) in [("4242", 0), ("4243", 1)] {
+        app.tui
+            .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
+                smelt_core::process::JobCompletion {
+                    id: id.into(),
+                    exit_code: Some(code),
+                    termination: protocol::JobTermination::Exited,
+                    output: String::new(),
+                },
+            ));
+        notes.push(protocol::HistoryItem::note(
+            protocol::HistoryNote::process_status_event(
+                protocol::ProcessStatusEvent::background_process_completed(
+                    id,
+                    Some(code),
+                    protocol::JobTermination::Exited,
+                ),
+            ),
+        ));
+        let frame = app.render_to_frame();
+        let expected = if code == 0 {
+            "background process 4242 finished successfully"
+        } else {
+            "background processes finished: 2, 1 failed: 4243 exited with code 1"
+        };
+        let (col, row) = app
+            .screen_position(expected)
+            .unwrap_or_else(|| panic!("{}", frame.text()));
+        assert!(frame.styles[row as usize][col as usize].dim);
+        assert_eq!(
+            frame.text().matches("background process").count(),
+            1,
+            "pending notes share one row: {}",
+            frame.text()
+        );
+    }
+    assert!(transcript_viewport_lines(&app)
+        .iter()
+        .all(|line| !line.contains("background process")));
+
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id: 7,
+        delta: protocol::CanonicalHistoryDelta::new(app.session_snapshot().history.len(), notes),
+    }));
+    let frame = app.render_to_frame();
+    let (col, row) = app
+        .screen_position("background processes finished: 2, 1 failed: 4243 exited with code 1")
+        .unwrap_or_else(|| panic!("{}", frame.text()));
+    assert!(!frame.styles[row as usize][col as usize].dim);
+    assert!(transcript_viewport_lines(&app)
+        .iter()
+        .any(|line| line.contains("background processes finished: 2")));
+}
+
+#[test]
 fn ps_opens_while_the_agent_is_working() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);

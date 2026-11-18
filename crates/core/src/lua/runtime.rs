@@ -144,6 +144,7 @@ pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
     BootstrapChunk::ui("statusline.lua"),
     BootstrapChunk::ui("headerline.lua"),
     BootstrapChunk::ui("scroll_pills.lua"),
+    BootstrapChunk::ui("transcript_pending.lua"),
     BootstrapChunk::ui("layout.lua"),
     BootstrapChunk::ui("splits.lua"),
     BootstrapChunk::host("modes.lua"),
@@ -3339,11 +3340,31 @@ fn transcript_render_node_to_lua_table(
     lua: &Lua,
     node: &TranscriptRenderNode,
 ) -> LuaResult<mlua::Table> {
-    let table = lua.create_table()?;
+    let table = render_fields_to_lua_table(lua, node.kind, &node.fields)?;
     table.set("id", node.id)?;
     table.set("index", node.index)?;
-    table.set("kind", node.kind)?;
-    match &node.fields {
+    Ok(table)
+}
+
+/// The renderer table of a block that is not in the transcript, such as a note
+/// that waits to join it: the shape block renderers get, without `id` and
+/// `index`.
+pub fn transcript_block_lua_table(lua: &Lua, block: &Block) -> LuaResult<mlua::Table> {
+    render_fields_to_lua_table(
+        lua,
+        block.kind(),
+        &transcript_block_render_fields(block, None),
+    )
+}
+
+fn render_fields_to_lua_table(
+    lua: &Lua,
+    kind: &'static str,
+    fields: &TranscriptRenderFields,
+) -> LuaResult<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("kind", kind)?;
+    match fields {
         TranscriptRenderFields::User {
             text,
             user_lines,
@@ -3788,7 +3809,19 @@ pub fn transcript_block_render_node(
     block: &Block,
     state: Option<&ToolState>,
 ) -> TranscriptRenderNode {
-    let fields = match block {
+    TranscriptRenderNode {
+        id: id.0,
+        index,
+        kind: block.kind(),
+        fields: transcript_block_render_fields(block, state),
+    }
+}
+
+fn transcript_block_render_fields(
+    block: &Block,
+    state: Option<&ToolState>,
+) -> TranscriptRenderFields {
+    match block {
         Block::User {
             text,
             image_labels,
@@ -3909,12 +3942,6 @@ pub fn transcript_block_render_node(
             summary: summary.clone(),
             kept: Vec::new(),
         },
-    };
-    TranscriptRenderNode {
-        id: id.0,
-        index,
-        kind: block.kind(),
-        fields,
     }
 }
 

@@ -190,6 +190,29 @@ fun(row: integer): table?
 
 Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 
+## `smelt.transcript.pending`
+
+```lua
+smelt.bar.Bar
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+The strip of blocks that wait to join the transcript. It takes no rows
+while nothing is pending. Its built-in source is `process_status`.
+
+## `smelt.transcript.pending_blocks`
+
+```lua
+fun(): table
+```
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Return the blocks that wait to join the transcript, oldest first. A note that arrives during a turn, such as a finished background process, joins the transcript at the next request boundary. Each entry has the shape block renderers get, without `id` and `index`; `kind` is the block kind, such as `process_status`. The `transcript_pending_revision` signal changes whenever this list changes.
+
 ## `smelt.transcript.pills`
 
 ```lua

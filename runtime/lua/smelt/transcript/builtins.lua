@@ -189,21 +189,31 @@ local function failed_process_summary(failed)
   return ": " .. table.concat(parts, ", ")
 end
 
+--- One-line summary of finished background processes. `processes` carry
+--- `process_id` and `exit_code`, directly or in `event_data`; `count` defaults
+--- to their number. Returns the text and whether any process failed.
+---@param processes table[]
+---@param count? integer
+---@return string text
+---@return boolean failed
+function M.background_process_summary(processes, count)
+  local failed = {}
+  for _, process in ipairs(processes) do
+    if process_failed(process) then failed[#failed + 1] = process end
+  end
+
+  local text = "background processes finished: " .. tostring(count or #processes)
+  if #failed > 0 then
+    text = text .. ", " .. tostring(#failed) .. " failed" .. failed_process_summary(failed)
+  end
+  return text, #failed > 0
+end
+
 local function render_background_process_completed_group(group, ctx)
   if group.view_state == "expanded" then return defaults.render_group_children(group, ctx) end
 
   local children = defaults.group_children(group)
-  local count = group.child_count or #children
-  local failed = {}
-  for _, child in ipairs(children) do
-    if process_failed(child) then failed[#failed + 1] = child end
-  end
-
-  local text = "background processes finished: " .. tostring(count)
-  if #failed > 0 then
-    text = text .. ", " .. tostring(#failed) .. " failed" .. failed_process_summary(failed)
-  end
-  return process_summary_line(text, #failed > 0)
+  return process_summary_line(M.background_process_summary(children, group.child_count))
 end
 
 function M.render(group, ctx)

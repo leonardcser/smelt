@@ -495,6 +495,18 @@ impl ConversationLuaHost<'_> {
         );
     }
 
+    /// Blocks that join the transcript at the next request boundary.
+    pub(crate) fn pending_transcript_blocks(
+        &self,
+    ) -> Vec<smelt_transcript::transcript_model::Block> {
+        self.app
+            .conversation
+            .pending_history_appends()
+            .iter()
+            .filter_map(|append| append.transcript_block(&self.app.lua))
+            .collect()
+    }
+
     pub(crate) fn transcript_is_empty(&self) -> bool {
         self.app.conversation.transcript().is_empty()
     }

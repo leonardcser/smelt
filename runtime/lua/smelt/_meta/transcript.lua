@@ -94,6 +94,17 @@ transcript.move_block = nil
 transcript.node_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- The strip of blocks that wait to join the transcript. It takes no rows
+--- while nothing is pending. Its built-in source is `process_status`.
+---@type smelt.bar.Bar
+transcript.pending = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the blocks that wait to join the transcript, oldest first. A note that arrives during a turn, such as a finished background process, joins the transcript at the next request boundary. Each entry has the shape block renderers get, without `id` and `index`; `kind` is the block kind, such as `process_status`. The `transcript_pending_revision` signal changes whenever this list changes.
+---@type fun(): table
+transcript.pending_blocks = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Transcript-anchored bars with a built-in `label` source. Sources, view
 --- factories and press handlers receive ctx.state = { label, target?, view }.
 ---@type { top: smelt.bar.Bar, bottom: smelt.bar.Bar }
