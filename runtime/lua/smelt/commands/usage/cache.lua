@@ -77,7 +77,7 @@ function M.refresh(key, fetch_fn)
     local ok, report, err = pcall(fetch_fn, key)
     if ok and type(report) == "table" then
       entry.report = report
-      if report.resetCredits and report.resetCredits.count == 0 then entry.request_id = nil end
+      if report.resetCredits and report.resetCredits.count == 0 then entry.request_ids = nil end
       entry.fetched_at_ms = smelt.time.monotonic_ms()
       entry.error = nil
       entry.retry_at_ms = nil
@@ -99,21 +99,24 @@ function M.prefetch(key, fetch_fn)
   M.refresh(key, fetch_fn)
 end
 
---- Serialize credit redemption per account. Keep the id after uncertain failures.
-function M.redeem(key, redeem_fn, done)
+--- Serialize credit redemption per account. `credit_id` names the reset to
+--- spend, or nil when every credit is alike. Each credit keeps its request id
+--- after uncertain failures, so a retry never spends twice.
+function M.redeem(key, credit_id, redeem_fn, done)
   local previous = ensure(key)
   if not fresh(previous) then return end
-  local entry = {
-    subscribers = previous.subscribers, redeeming = true,
-    request_id = previous.request_id or string.format("smelt-%d-%d-%d", os.time(), math.floor(os.clock() * 1000), math.random(100000000, 999999999)),
-  }
+  local slot = credit_id or ""
+  local request_ids = previous.request_ids or {}
+  request_ids[slot] = request_ids[slot]
+    or string.format("smelt-%d-%d-%d", os.time(), math.floor(os.clock() * 1000), math.random(100000000, 999999999))
+  local entry = { subscribers = previous.subscribers, redeeming = true, request_ids = request_ids }
   cache[key] = entry
   notify(key)
   smelt.spawn(function()
-    local ok, message, err = pcall(redeem_fn, entry.request_id)
+    local ok, message, err = pcall(redeem_fn, request_ids[slot])
     if not ok then err, message = tostring(message), nil end
     entry.redeeming = false
-    if message then entry.request_id = nil end
+    if message then request_ids[slot] = nil end
     entry.error = err
     notify(key)
     done(message, err)

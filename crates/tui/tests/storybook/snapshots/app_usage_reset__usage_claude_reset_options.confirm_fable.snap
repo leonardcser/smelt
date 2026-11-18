@@ -1,0 +1,34 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+          ┌ usage limit reset ───────────────────────────────────┐
+          │                                                      │
+          │ Redeem one Claude Code Fable reset?                  │
+          │ Refills your Fable allowance.                        │
+          │ Gives back what Fable used of your 7d limit.         │
+          │ It does not reset your whole week.                   │
+─ usage ──│ This spends one of your available reset credits.     │──────────
+ cost $0.0│ Available: 1                                         │
+          │                                                      │
+ Claude Co│                Use a reset     Cancel                │
+   resets │                                                      │
+     full └──────────────────────────────────────────────────────┘mits
+     Fable reset       1 left  expires Jan 31   refills Fable allowance
+   5h limit  |██████████████████|  100% used  resets Jan 01 00:00
+   7d limit  |███████████▌░░░░░░|  64% used   resets Jan 06 00:00
+
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1. Refresh usage
+  2. Redeem full usage reset
+  3. Redeem Fable reset
+ ○ normal                                                           1:1 100%

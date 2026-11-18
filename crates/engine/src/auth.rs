@@ -226,7 +226,7 @@ pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<
 }
 
 /// Login identity for usage reports, independent of routine token rotation.
-pub fn usage_scope(provider: AuthProvider) -> Option<String> {
+pub(crate) fn usage_scope(provider: AuthProvider) -> Option<String> {
     match provider {
         AuthProvider::KimiCode => provider::kimi_code::load_tokens()
             .map(|tokens| provider::kimi_code::account_scope(&tokens)),
@@ -243,7 +243,7 @@ fn codex_account_scope(tokens: &smelt_provider::codex::CodexTokens) -> String {
     }
 }
 
-pub async fn redeem_usage_reset(
+pub(crate) async fn redeem_usage_reset(
     scope: &str,
     request_id: &str,
     client: &reqwest::Client,
@@ -267,11 +267,20 @@ pub(crate) fn model_cache_fingerprint(
     identity_kind: &str,
     identity: &str,
 ) -> String {
+    account_fingerprint(provider.provider_type(), identity_kind, identity)
+}
+
+/// A one-way hash of a provider login's identity, safe to log and cache by.
+pub(crate) fn account_fingerprint(
+    provider_type: &str,
+    identity_kind: &str,
+    identity: &str,
+) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write;
 
     let mut hasher = Sha256::new();
-    hasher.update(provider.provider_type().as_bytes());
+    hasher.update(provider_type.as_bytes());
     hasher.update([0]);
     hasher.update(identity_kind.as_bytes());
     hasher.update([0]);
@@ -310,7 +319,7 @@ pub async fn authenticated_request(
 
 mod usage;
 
-pub async fn managed_usage(
+pub(crate) async fn managed_usage(
     provider: AuthProvider,
     client: &reqwest::Client,
 ) -> Result<smelt_provider::usage::ManagedUsageReport, String> {

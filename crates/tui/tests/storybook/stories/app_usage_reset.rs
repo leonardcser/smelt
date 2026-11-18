@@ -202,3 +202,43 @@ app_story!(usage_codex_reset_action_unavailable, |ctx| {
     ctx.press_char('q');
     ctx.assert_snapshot_named("closed_by_q");
 });
+
+app_story!(usage_claude_reset_options, |ctx| {
+    ctx.set_viewport(76, 30);
+    ctx.run_lua(
+        r#"
+        smelt.model.capabilities = function() return { provider_type = "claude-code" } end
+        smelt.model.pricing = function() return { source = "none" } end
+        smelt.auth.usage_scope = function() return "storybook-claude" end
+        local expires = smelt.time.parse_iso8601("2030-01-31T00:00:00Z")
+        smelt.auth.managed_usage = function(provider)
+          assert(provider == "claude-code")
+          return {
+            resetCredits = {
+              count = 3,
+              inventory = { {}, {}, { expires_at = expires } },
+              options = {
+                { id = "full", label = "full usage reset", count = 2,
+                  refills = "5h + 7d limits",
+                  description = "Refills your 5h and 7d limits." },
+                { id = "fable", label = "Fable reset", count = 1, expires_at = expires,
+                  refills = "Fable allowance",
+                  description = "Refills your Fable allowance.\nGives back what Fable used of your 7d limit.\nIt does not reset your whole week." },
+              },
+            },
+            limits = {
+              { label = "5h limit", used = 100, limit = 100, resetAt = 1893456000 },
+              { label = "7d limit", used = 64, limit = 100, resetAt = 1893888000 },
+            },
+          }
+        end
+        "#,
+    );
+    ctx.run_command("usage");
+    ctx.assert_snapshot();
+
+    ctx.press_char('j');
+    ctx.press_char('j');
+    ctx.press_enter();
+    ctx.assert_snapshot_named("confirm_fable");
+});

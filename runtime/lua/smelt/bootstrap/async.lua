@@ -299,18 +299,24 @@ end
 --- provider-neutral rows with `{ label, used, limit, resetAt? }`.
 --- `resetAt` is Unix seconds, formatted by the consumer.
 --- Supported for `codex`, `kimi-code`, and `claude-code` (asks the installed
---- Claude Code without a model request). Codex also reports plan, credits,
---- and resetCredits `{ count, inventory? }` with `{ expires_at? }` entries.
+--- Claude Code without a model request). Codex also reports plan and credits.
+--- Codex and Claude Code report resetCredits `{ count, inventory?, options? }`:
+--- `inventory` holds `{ expires_at? }` entries, and Claude Code lists the reset
+--- kinds to choose from as `options` of `{ id, label, description, count, expires_at? }`.
 ---@type fun(provider: string): { summary: table?, limits: table[], plan: string?, credits: string?, resetCredits: table? }?, string?
 function smelt.auth.managed_usage(provider)
   return external_or_err(function(id) internal.auth.__start_managed_usage(id, provider) end)
 end
 
---- Redeem one Codex reset credit using credentials matching `usage_scope("codex")`.
+--- Redeem one usage limit reset credit of `provider` (`codex` or `claude-code`)
+--- using credentials matching `usage_scope(provider)`. `credit_id` names the
+--- reset option to spend when the report lists `resetCredits.options`.
 --- Reuse `request_id` when retrying an uncertain outcome to avoid a second redemption.
----@type fun(scope: string, request_id: string): string?, string?
-function smelt.auth.redeem_usage_reset(scope, request_id)
-  local result, err = external_or_err(function(id) internal.auth.__start_redeem_usage_reset(id, scope, request_id) end)
+---@type fun(provider: string, scope: string, request_id: string, credit_id: string?): string?, string?
+function smelt.auth.redeem_usage_reset(provider, scope, request_id, credit_id)
+  local result, err = external_or_err(function(id)
+    internal.auth.__start_redeem_usage_reset(id, provider, scope, request_id, credit_id)
+  end)
   return result and result.message, err
 end
 

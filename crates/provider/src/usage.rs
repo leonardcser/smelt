@@ -27,6 +27,25 @@ pub struct ManagedUsageReport {
 pub struct UsageResetCredits {
     pub count: u64,
     pub inventory: Option<Vec<UsageResetCredit>>,
+    /// The kinds of reset to choose from, when each clears different limits.
+    /// Empty when every credit clears the same windows.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<UsageResetOption>,
+}
+
+/// One kind of reset and the credit that redeeming it spends.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UsageResetOption {
+    pub id: String,
+    /// Names the reset and its family, such as "5h usage reset" or "Fable reset".
+    pub label: String,
+    /// What the reset refills, in a few words.
+    pub refills: String,
+    /// What redeeming it does, one short sentence per line.
+    pub description: String,
+    pub count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

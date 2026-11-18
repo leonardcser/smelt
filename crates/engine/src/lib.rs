@@ -7,7 +7,6 @@ pub use claude_code::models_stale as claude_code_models_stale;
 pub use claude_code::plan_directory as claude_code_plan_directory;
 pub use claude_code::refresh_models as claude_code_refresh_models;
 pub use claude_code::smelt_tool as claude_code_smelt_tool;
-pub use claude_code::usage as claude_code_usage;
 pub mod clock;
 pub mod env;
 pub mod host;
@@ -23,6 +22,7 @@ pub(crate) mod result_dedup;
 pub(crate) mod skills;
 pub mod tools;
 pub(crate) mod trim;
+pub mod usage;
 
 pub use agent::{normalize_reasoning_summary, ReasoningSummaryPhase};
 pub use host::{HostCall, HostRequestDecision, PreparedRequestMessages};

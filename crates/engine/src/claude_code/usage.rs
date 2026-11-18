@@ -1,14 +1,15 @@
 //! The plan usage limits Claude Code reports for its account, as `/usage`
-//! shows them.
+//! shows them, and the reset credits that clear them.
 
-use super::transport::Process;
+use super::account;
+use super::transport::{self, Process};
 use serde_json::{json, Value};
 use smelt_provider::usage::{parse_iso_time, ManagedUsageReport, ManagedUsageRow};
 use std::time::Duration;
 
-/// Asks the installed Claude Code for its account's usage limits. It starts
-/// Claude Code without sending a model request.
-pub async fn usage() -> Result<ManagedUsageReport, String> {
+/// Asks the installed Claude Code for its account's usage report without
+/// sending a model request. Reporting usage refreshes its login.
+async fn probe() -> Result<Value, String> {
     let mut process = Process::spawn_bare("default")?;
     let usage = tokio::time::timeout(Duration::from_secs(30), async {
         process
@@ -23,8 +24,68 @@ pub async fn usage() -> Result<ManagedUsageReport, String> {
     })
     .await;
     process.close().await;
-    let usage = usage.map_err(|_| "usage was not reported in time".to_string())??;
-    parse(&usage)
+    usage.map_err(|_| "usage was not reported in time".to_string())?
+}
+
+/// The account's usage limits, as Claude Code reports them, and the reset
+/// credits it banks.
+pub async fn usage(client: &reqwest::Client) -> Result<ManagedUsageReport, String> {
+    let usage = probe().await?;
+    let mut report = parse(&usage)?;
+    report.reset_credits = account::reset_credits(client, scoped_model(&usage)).await;
+    Ok(report)
+}
+
+/// The model with its own weekly limit, whose allowance model resets refill.
+fn scoped_model(usage: &Value) -> &str {
+    let limits = &usage["rate_limits"];
+    limits["model_scoped"]
+        .as_array()
+        .and_then(|models| {
+            models
+                .iter()
+                .find_map(|model| model["display_name"].as_str())
+        })
+        .or_else(|| {
+            limits["limits"]
+                .as_array()?
+                .iter()
+                .find_map(|limit| limit["scope"]["model"]["display_name"].as_str())
+        })
+        .unwrap_or("model")
+}
+
+/// Redeems one reset of grant `credit_id` for the account `scope` names.
+/// Reuse `request_id` to retry an uncertain outcome without spending twice.
+pub async fn redeem_reset(
+    client: &reqwest::Client,
+    scope: &str,
+    credit_id: &str,
+    request_id: &str,
+) -> Result<String, String> {
+    let login = match account::login() {
+        Ok(login) if login.lasts() => login,
+        // Claude Code refreshes its login while it reports usage.
+        _ => {
+            probe().await?;
+            account::login()?
+        }
+    };
+    let version = transport::version().await?;
+    if account::usage_scope().as_deref() != Some(scope) {
+        return Err("Account changed - reopen usage before redeeming a reset.".into());
+    }
+    let claimed = account::claim(
+        client,
+        account::API_BASE,
+        &login,
+        &version,
+        credit_id,
+        request_id,
+    )
+    .await;
+    account::forget_credits();
+    claimed
 }
 
 fn parse(usage: &Value) -> Result<ManagedUsageReport, String> {
@@ -131,6 +192,25 @@ mod tests {
                 ("7d limit", 18, None)
             ]
         );
+    }
+
+    #[test]
+    fn model_resets_name_the_model_with_its_own_weekly_limit() {
+        let scoped = |rate_limits: Value| json!({"rate_limits": rate_limits});
+        assert_eq!(
+            scoped_model(&scoped(
+                json!({"model_scoped": [{"display_name": "Fable"}]})
+            )),
+            "Fable"
+        );
+        assert_eq!(
+            scoped_model(&scoped(json!({"limits": [
+                {"scope": null},
+                {"scope": {"model": {"display_name": "Opus"}}},
+            ]}))),
+            "Opus"
+        );
+        assert_eq!(scoped_model(&scoped(json!({}))), "model");
     }
 
     #[test]

@@ -124,8 +124,52 @@ local function expiry_group_text(group)
   return tostring(group.count) .. verb .. (format_time(group.expires_at, "%b %d") or "unknown")
 end
 
+local function reset_options(credits)
+  local options = credits and credits.options
+  return type(options) == "table" and options or {}
+end
+
+-- The resets `credits` lets the user choose from: each reported option, or
+-- one reset of any credit. `id` names the credit to spend, nil for any.
+local function reset_choices(credits)
+  if not credits then return {} end
+  local choices = {}
+  for _, option in ipairs(reset_options(credits)) do
+    choices[#choices + 1] = { id = option.id, label = option.label, description = option.description, count = option.count or 0 }
+  end
+  if #choices == 0 then choices[1] = { label = "usage limit reset", count = credits.count or 0 } end
+  return choices
+end
+
+-- One aligned line per reset: its name, credits left, expiry and what it refills.
+local function add_reset_option_lines(lines, options)
+  local rows = {}
+  local widths = { 0, 0, 0 }
+  for _, option in ipairs(options) do
+    local cells = {
+      tostring(option.label),
+      tostring(option.count) .. " left",
+      option.expires_at and ("expires " .. (format_time(option.expires_at, "%b %d") or "unknown")) or "does not expire",
+    }
+    for i, cell in ipairs(cells) do widths[i] = math.max(widths[i], #cell) end
+    rows[#rows + 1] = { cells = cells, refills = option.refills }
+  end
+  lines[#lines + 1] = text_row("  resets", DIM)
+  for _, item in ipairs(rows) do
+    local function cell(i) return string.format("%-" .. widths[i] .. "s", item.cells[i]) end
+    local line = row(span("    " .. cell(1) .. "  ", DIM), span(cell(2), VALUE), span("  " .. cell(3), DIM))
+    if item.refills then line[#line + 1] = span("  refills " .. item.refills, DIM) end
+    lines[#lines + 1] = line
+  end
+end
+
 local function add_reset_credit_lines(lines, credits)
   if not credits then return end
+  local options = reset_options(credits)
+  if #options > 0 then
+    add_reset_option_lines(lines, options)
+    return
+  end
   local count = credits.count
   local label = count == 1 and "1 available" or tostring(count) .. " available"
   local line = row(span("  usage limit resets ", DIM), span(label, VALUE))
@@ -248,13 +292,14 @@ end
 local function open_usage()
   local provider, title, api_base = usage_provider()
   local key = provider and usage_key(provider, api_base)
-  local is_codex = provider == "codex"
 
   local buf = smelt.buf.new({ readonly = true })
   local content_leaf = smelt.dialog.content({ buf = buf, wrap = false })
 
   local callback
   local closed = false
+  -- Credits from the account's last report, kept while a redemption or refresh is in flight.
+  local shown_credits
   local function fetch(fetch_key)
     return fetch_usage(provider, api_base, fetch_key)
   end
@@ -264,6 +309,7 @@ local function open_usage()
     local current = usage_key(provider, api_base)
     if current == key then return end
     cache.unsubscribe(key, callback)
+    shown_credits = nil
     key = current
     cache.subscribe(key, callback)
     callback(cache.get(key))
@@ -274,16 +320,23 @@ local function open_usage()
     if key and not closed then cache.refresh(key, fetch) end
   end
 
-  local function reset_count()
+  local function fresh_credits()
     local entry = key and cache.get(key)
-    if not entry or not entry.fresh then return 0 end
-    local credits = entry.report and entry.report.resetCredits
-    return credits and credits.count or 0
+    return entry and entry.fresh and entry.report.resetCredits or nil
   end
 
-  local function open_reset_confirmation()
+  -- Credits left for the choice `credit_id` names, as fresh usage reports them.
+  local function reset_count(credit_id)
+    for _, choice in ipairs(reset_choices(fresh_credits())) do
+      if choice.id == credit_id then return choice.count end
+    end
+    return 0
+  end
+
+  local function open_reset_confirmation(choice)
     sync_scope()
-    local count = reset_count()
+    local credit_id = choice.id
+    local count = reset_count(credit_id)
     if count <= 0 then
       smelt.notify.info("No usage limit reset credits are available.", "usage")
       return
@@ -291,13 +344,15 @@ local function open_usage()
 
     local confirmation_key = key
     local scope = smelt.auth.usage_scope(provider)
+    local lines = { { span("Redeem one " .. title .. " " .. choice.label .. "?", HEAD) } }
+    for sentence in tostring(choice.description or ""):gmatch("[^\n]+") do
+      lines[#lines + 1] = { span(sentence, DIM) }
+    end
+    lines[#lines + 1] = { span("This spends one of your available reset credits.", DIM) }
+    lines[#lines + 1] = { span("Available: ", DIM), span(tostring(count), VALUE) }
     modal.open({
       title = "usage limit reset",
-      lines = {
-        { span("Redeem one Codex usage limit reset credit?", HEAD) },
-        { span("This spends one of your available reset credits.", DIM) },
-        { span("Available resets: ", DIM), span(tostring(count), VALUE) },
-      },
+      lines = lines,
       actions = {
         { label = "Use a reset", value = "redeem" },
         { label = "Cancel", value = "cancel" },
@@ -305,13 +360,13 @@ local function open_usage()
       on_submit = function(value)
         if value ~= "redeem" or closed then return end
         sync_scope()
-        if key ~= confirmation_key or reset_count() <= 0 then
+        if key ~= confirmation_key or reset_count(credit_id) <= 0 then
           smelt.notify.info("Usage changed - refresh usage before redeeming a reset.", "usage")
           cache.prefetch(key, fetch)
           return
         end
-        cache.redeem(key, function(request_id)
-          return smelt.auth.redeem_usage_reset(scope, request_id)
+        cache.redeem(key, credit_id, function(request_id)
+          return smelt.auth.redeem_usage_reset(provider, scope, request_id, credit_id)
         end, function(message, err)
           if message then smelt.notify.info(message, "usage")
           else smelt.notify.error(err or "Reset unavailable - try again later.", "usage") end
@@ -321,15 +376,17 @@ local function open_usage()
     })
   end
 
+  -- One redeem action per reset the report offers. Only fresh usage can spend one.
   local function usage_actions()
     local entry = key and cache.get(key)
     local redeeming = entry and entry.redeeming
     local actions = { { label = "Refresh usage", action = "refresh", disabled = not provider or redeeming } }
-    if is_codex then
+    for _, choice in ipairs(reset_choices(shown_credits)) do
       actions[#actions + 1] = {
-        label = "Redeem usage limit reset",
+        label = "Redeem " .. choice.label,
         action = "redeem",
-        disabled = redeeming or reset_count() <= 0,
+        choice = choice,
+        disabled = redeeming or reset_count(choice.id) <= 0,
       }
     end
     return actions
@@ -341,7 +398,7 @@ local function open_usage()
       if action == "refresh" then
         refresh_usage()
       elseif action == "redeem" then
-        open_reset_confirmation()
+        open_reset_confirmation(ctx.item.choice)
       end
     end,
   })
@@ -363,6 +420,7 @@ local function open_usage()
 
   callback = function(entry)
     if closed then return end
+    if entry and entry.report then shown_credits = entry.report.resetCredits end
     render_dialog(buf, entry, title, provider ~= nil)
     if actions_ctrl then actions_ctrl:set_items(usage_actions()) end
   end

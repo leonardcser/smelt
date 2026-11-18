@@ -413,13 +413,13 @@ fn usage_cache_deduplicates_retains_failures_and_serializes_mutations() {
       assert(cache.get(key).report.limits[1] == 42)
       assert(cache.get(key).error:find("broken"))
       cache.refresh(key, function() return { limits = { 99 } } end)
-      cache.redeem(key, function() error("redemption raced a read") end, function() end)
+      cache.redeem(key, nil, function() error("redemption raced a read") end, function() end)
       assert(#jobs == 1, "redemption started while usage was refreshing")
       table.remove(jobs, 1)()
       assert(cache.get(key).report.limits[1] == 99 and cache.get(key).error == nil)
       local redemptions = 0
-      cache.redeem(key, function() redemptions = redemptions + 1; return "redeemed" end, function() end)
-      cache.redeem(key, function() error("duplicate redemption") end, function() end)
+      cache.redeem(key, nil, function() redemptions = redemptions + 1; return "redeemed" end, function() end)
+      cache.redeem(key, nil, function() error("duplicate redemption") end, function() end)
       cache.refresh(key, fetch)
       assert(#jobs == 1 and cache.get(key).redeeming, "redemption was not serialized")
       table.remove(jobs, 1)()
@@ -456,7 +456,7 @@ fn usage_command_scopes_cached_reports_to_credentials() {
       end
       assert(not text:find("old-account", 1, true), text)
       assert(text:find("not logged in", 1, true), text)
-      assert(smelt.__actions[2].disabled)
+      assert(#smelt.__actions == 1, "a failed report offers no reset")
     "#,
     )
     .exec()
@@ -478,11 +478,11 @@ fn usage_command_redeems_from_report_and_refreshes_after_mutation() {
       local modal
       package.loaded["smelt.modal"].open = function(opts) modal = opts end
       assert(not smelt.__actions[2].disabled)
-      smelt.__submit({ item = { action = "redeem" } })
+      smelt.__submit({ item = smelt.__actions[2] })
       assert(modal)
       local consumed, fetched = 0, 0
-      smelt.auth.redeem_usage_reset = function(scope, request_id)
-        assert(scope == "test-account" and request_id:find("smelt-", 1, true))
+      smelt.auth.redeem_usage_reset = function(provider, scope, request_id)
+        assert(provider == "codex" and scope == "test-account" and request_id:find("smelt-", 1, true))
         assert(smelt.__actions[2].disabled, "redemption remained enabled in flight")
         consumed = consumed + 1
         return "Redeemed reset credit."
@@ -499,6 +499,67 @@ fn usage_command_redeems_from_report_and_refreshes_after_mutation() {
     )
     .exec()
     .expect("redeem credit once and refresh cached report");
+}
+
+#[test]
+fn usage_command_redeems_the_chosen_claude_code_reset() {
+    let (lua, rendered) = render_usage(
+        "claude-code",
+        r#"{
+      auth = { managed_usage = function()
+        return { limits = {}, resetCredits = { count = 3, inventory = {}, options = {
+          { id = "session", label = "5h usage reset", refills = "5h limit",
+            description = "Refills your 5h limit.", count = 2 },
+          { id = "fable", label = "Fable reset", refills = "Fable allowance",
+            description = "Refills your Fable allowance.\nIt does not reset your whole week.",
+            count = 1, expires_at = 1700086400 },
+        } } }
+      end },
+    }"#,
+    );
+    assert!(rendered.contains("  resets\n"), "{rendered}");
+    assert!(
+        rendered.contains("5h usage reset  2 left  does not expire  refills 5h limit"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Fable reset     1 left  expires Nov 15   refills Fable allowance"),
+        "{rendered}"
+    );
+    lua.load(
+        r#"
+      local modal
+      package.loaded["smelt.modal"].open = function(opts) modal = opts end
+      local actions = smelt.__actions
+      assert(#actions == 3, "each reset kind is one action")
+      assert(actions[2].label == "Redeem 5h usage reset" and not actions[2].disabled)
+      assert(actions[3].label == "Redeem Fable reset" and not actions[3].disabled)
+      local ids = {}
+      smelt.auth.redeem_usage_reset = function(provider, scope, request_id, credit_id)
+        assert(provider == "claude-code" and scope == "test-account")
+        ids[#ids + 1] = { credit = credit_id, request = request_id }
+        if #ids == 1 then error("lost connection") end
+        return "Redeemed reset credit."
+      end
+      smelt.__submit({ item = actions[3] })
+      local text = {}
+      for _, line in ipairs(modal.lines) do
+        local row = ""
+        for _, span in ipairs(line) do row = row .. span.text end
+        text[#text + 1] = row
+      end
+      assert(text[1] == "Redeem one Claude Code Fable reset?", text[1])
+      assert(text[2] == "Refills your Fable allowance." and text[3] == "It does not reset your whole week.",
+        "each sentence of the description is its own line")
+      modal.on_submit("redeem")
+      smelt.__submit({ item = smelt.__actions[2] })
+      modal.on_submit("redeem")
+      assert(#ids == 2 and ids[1].credit == "fable" and ids[2].credit == "session")
+      assert(ids[1].request ~= ids[2].request, "different resets shared one claim")
+    "#,
+    )
+    .exec()
+    .expect("redeem the chosen Claude Code reset");
 }
 
 #[test]
@@ -586,15 +647,15 @@ fn usage_command_recovers_from_redemption_exceptions_with_same_request_id() {
     lua.load(r#"
       local modal, requests = nil, {}
       package.loaded["smelt.modal"].open = function(opts) modal = opts end
-      smelt.auth.redeem_usage_reset = function(scope, id)
+      smelt.auth.redeem_usage_reset = function(provider, scope, id)
         requests[#requests + 1] = id
         if #requests == 1 then error("lost connection") end
         return "This reset request was already redeemed."
       end
-      smelt.__submit({ item = { action = "redeem" } })
+      smelt.__submit({ item = smelt.__actions[2] })
       modal.on_submit("redeem")
       assert(not smelt.__actions[1].disabled and not smelt.__actions[2].disabled, "exception left usage locked")
-      smelt.__submit({ item = { action = "redeem" } })
+      smelt.__submit({ item = smelt.__actions[2] })
       modal.on_submit("redeem")
       assert(#requests == 2 and requests[1] == requests[2], "retry can spend a second credit")
     "#).exec().expect("recover uncertain redemption without double spending");
@@ -650,7 +711,7 @@ fn usage_redemption_unwinds_cancellation_after_origin_dialog_closes() {
       local close_origin = smelt.__close
       package.loaded["smelt.modal"].open = function(opts) modal = opts end
       smelt.spawn = function(fn) jobs[#jobs + 1] = coroutine.create(fn) end
-      smelt.auth.redeem_usage_reset = function(scope, id)
+      smelt.auth.redeem_usage_reset = function(provider, scope, id)
         ids[#ids + 1] = id
         if #ids == 1 then
           coroutine.yield()
@@ -658,17 +719,17 @@ fn usage_redemption_unwinds_cancellation_after_origin_dialog_closes() {
         end
         return "This reset request was already redeemed."
       end
-      smelt.__submit({ item = { action = "redeem" } })
+      smelt.__submit({ item = smelt.__actions[2] })
       modal.on_submit("redeem")
       assert(coroutine.resume(jobs[1]))
       smelt.__command()
-      assert(smelt.__actions[1].disabled and smelt.__actions[2].disabled, "second dialog ignored in-flight redemption")
+      assert(smelt.__actions[1].disabled and #smelt.__actions == 1, "second dialog ignored in-flight redemption")
       close_origin()
       assert(coroutine.resume(jobs[1]))
       assert(not smelt.__actions[1].disabled and #jobs == 1, "closed origin restarted work or left account locked")
       smelt.__submit({ item = { action = "refresh" } })
       assert(coroutine.resume(jobs[2]))
-      smelt.__submit({ item = { action = "redeem" } })
+      smelt.__submit({ item = smelt.__actions[2] })
       modal.on_submit("redeem")
       assert(coroutine.resume(jobs[3]))
       assert(#ids == 2 and ids[1] == ids[2], "uncertain outcome lost its id across dialogs")

@@ -21,16 +21,20 @@ Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
 provider-neutral rows with `{ label, used, limit, resetAt? }`.
 `resetAt` is Unix seconds, formatted by the consumer.
 Supported for `codex`, `kimi-code`, and `claude-code` (asks the installed
-Claude Code without a model request). Codex also reports plan, credits,
-and resetCredits `{ count, inventory? }` with `{ expires_at? }` entries.
+Claude Code without a model request). Codex also reports plan and credits.
+Codex and Claude Code report resetCredits `{ count, inventory?, options? }`:
+`inventory` holds `{ expires_at? }` entries, and Claude Code lists the reset
+kinds to choose from as `options` of `{ id, label, description, count, expires_at? }`.
 
 ## `smelt.auth.redeem_usage_reset`
 
 ```lua
-fun(scope: string, request_id: string): string?, string?
+fun(provider: string, scope: string, request_id: string, credit_id: string?): string?, string?
 ```
 
-Redeem one Codex reset credit using credentials matching `usage_scope("codex")`.
+Redeem one usage limit reset credit of `provider` (`codex` or `claude-code`)
+using credentials matching `usage_scope(provider)`. `credit_id` names the
+reset option to spend when the report lists `resetCredits.options`.
 Reuse `request_id` when retrying an uncertain outcome to avoid a second redemption.
 
 ## `smelt.auth.request`

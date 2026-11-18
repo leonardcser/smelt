@@ -11,6 +11,7 @@ struct Fixture {
     previous_scenario: Option<std::ffi::OsString>,
     previous_log: Option<std::ffi::OsString>,
     previous_cache: Option<std::ffi::OsString>,
+    previous_config: Option<std::ffi::OsString>,
 }
 
 impl Fixture {
@@ -30,6 +31,7 @@ impl Fixture {
             previous_scenario: std::env::var_os("SMELT_CLAUDE_FIXTURE"),
             previous_log: std::env::var_os("SMELT_CLAUDE_FIXTURE_LOG"),
             previous_cache: std::env::var_os("XDG_CACHE_HOME"),
+            previous_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
         };
         std::env::set_var("SMELT_CLAUDE_CODE_EXECUTABLE", executable);
         std::env::set_var("SMELT_CLAUDE_FIXTURE", scenario);
@@ -38,6 +40,8 @@ impl Fixture {
             fixture.root.path().join("calls.jsonl"),
         );
         std::env::set_var("XDG_CACHE_HOME", fixture.root.path().join("cache"));
+        // No stored login, so nothing reaches Anthropic's API.
+        std::env::set_var("CLAUDE_CONFIG_DIR", fixture.root.path().join("config"));
         fixture
     }
 
@@ -76,6 +80,7 @@ impl Drop for Fixture {
             ("SMELT_CLAUDE_FIXTURE", self.previous_scenario.take()),
             ("SMELT_CLAUDE_FIXTURE_LOG", self.previous_log.take()),
             ("XDG_CACHE_HOME", self.previous_cache.take()),
+            ("CLAUDE_CONFIG_DIR", self.previous_config.take()),
         ] {
             if let Some(value) = value {
                 std::env::set_var(key, value);
@@ -996,13 +1001,17 @@ async fn models_are_listed_by_claude_code_and_cached_until_it_changes() {
 #[serial(claude_code)]
 async fn usage_is_reported_by_claude_code_without_a_model_request() {
     let fixture = Fixture::new("text");
-    let usage = super::usage().await.unwrap();
+    let usage = super::usage(&smelt_provider::http_client()).await.unwrap();
     let rows: Vec<_> = usage
         .limits
         .iter()
         .map(|row| (row.label.as_str(), row.used, row.limit))
         .collect();
     assert_eq!(rows, [("5h limit", 42, 100)]);
+    assert_eq!(
+        usage.reset_credits, None,
+        "signed out of Claude, so no resets"
+    );
     assert!(fixture.calls().iter().all(|call| call["type"] != "user"));
 }
 

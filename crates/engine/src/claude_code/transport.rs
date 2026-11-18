@@ -88,6 +88,22 @@ pub(super) fn locate() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// The installed Claude Code's version, asked without starting a session.
+pub(super) async fn version() -> Result<String, String> {
+    let path = locate().ok_or("Claude Code is not installed")?;
+    let mut command = tokio::process::Command::new(path);
+    command.arg("--version").kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "Claude Code did not report its version in time")?
+        .map_err(|error| format!("Claude Code could not start: {error}"))?;
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .ok_or_else(|| "Claude Code did not report its version".into())
+}
+
 /// Whether the Claude Code executable exists, without starting it.
 pub fn installed() -> bool {
     locate().is_some()

@@ -4,6 +4,7 @@
 //! Anthropic's HTTP API. Authentication, model requests, context management,
 //! and native tool execution stay inside Claude Code.
 
+mod account;
 mod agents;
 mod catalog;
 mod context;
@@ -12,12 +13,13 @@ mod limit;
 mod messages;
 mod models;
 mod plans;
+pub use account::usage_scope;
 pub use catalog::smelt_tool;
 pub use context::context_window;
 pub use models::{cached as cached_models, refresh as refresh_models, stale as models_stale};
 pub use plans::directory as plan_directory;
 pub use transport::installed;
-pub use usage::usage;
+pub use usage::{redeem_reset, usage};
 
 /// The ID smelt gives the agent or shell Claude Code runs as task `task`,
 /// under provider `provider`.

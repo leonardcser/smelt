@@ -19,11 +19,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "usage_scope",
         "Return an opaque login scope for account-usage caches, or nil when managed credentials are unavailable (including externally authenticated providers). Never contains credentials.",
         &["provider"],
-        |_, provider: String| {
-            if provider == "claude-code" { return Ok(None); }
-            let provider = parse_provider(&provider)?;
-            Ok(engine::auth::usage_scope(provider))
-        },
+        |_, provider: String| Ok(engine::usage::scope(parse_usage_provider(&provider)?)),
     )?;
 
     {
@@ -45,15 +41,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "__start_managed_usage",
             &["task_id", "provider"],
             move |_, (task_id, provider): (u64, String)| -> LuaResult<()> {
-                if provider == "claude-code" {
-                    spawn_auth_result(&shared, task_id, engine::claude_code_usage());
-                } else {
-                    let provider = parse_provider(&provider)?;
-                    spawn_auth_result(&shared, task_id, async move {
-                        let client = smelt_provider::http_client();
-                        engine::auth::managed_usage(provider, &client).await
-                    });
-                }
+                let provider = parse_usage_provider(&provider)?;
+                spawn_auth_result(&shared, task_id, engine::usage::report(provider));
                 Ok(())
             },
         )?;
@@ -63,15 +52,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared = Arc::clone(shared);
         auth.private_live_only_fn(
             "__start_redeem_usage_reset",
-            &["task_id", "scope", "request_id"],
-            move |_, (task_id, scope, request_id): (u64, String, String)| -> LuaResult<()> {
+            &["task_id", "provider", "scope", "request_id", "credit_id"],
+            move |_,
+                  (task_id, provider, scope, request_id, credit_id): (
+                u64,
+                String,
+                String,
+                String,
+                Option<String>,
+            )|
+                  -> LuaResult<()> {
+                let provider = parse_usage_provider(&provider)?;
                 spawn_auth_result(&shared, task_id, async move {
-                    let message = engine::auth::redeem_usage_reset(
-                        &scope,
-                        &request_id,
-                        &smelt_provider::http_client(),
-                    )
-                    .await?;
+                    let message =
+                        engine::usage::redeem(provider, &scope, credit_id.as_deref(), &request_id)
+                            .await?;
                     Ok(serde_json::json!({ "message": message }))
                 });
                 Ok(())
@@ -86,6 +81,10 @@ struct AuthRequest {
     method: String,
     path: String,
     body: Option<Vec<u8>>,
+}
+
+fn parse_usage_provider(provider: &str) -> LuaResult<engine::usage::UsageProvider> {
+    engine::usage::UsageProvider::parse(provider).map_err(mlua::Error::external)
 }
 
 fn parse_provider(provider: &str) -> LuaResult<engine::auth::AuthProvider> {

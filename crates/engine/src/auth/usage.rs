@@ -138,6 +138,7 @@ fn parse_codex(payload: &Value) -> Result<ManagedUsageReport, String> {
         report.reset_credits = Some(UsageResetCredits {
             count: count.as_u64().ok_or_else(invalid_usage)?,
             inventory: None,
+            options: Vec::new(),
         });
     }
     add_windows(&mut report.limits, &payload["rate_limit"], "")?;
