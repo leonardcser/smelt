@@ -20,9 +20,11 @@ Editor concepts like buffers, Vim, and overlays live in sibling crates.
 
 ```toml
 [dependencies]
-smelt-term = "0.6"
+smelt-term = "0.9"
 crossterm = "0.29" # event types
 ```
+
+See the [changelog](CHANGELOG.md) for release notes and migration guidance.
 
 ## Quick start
 

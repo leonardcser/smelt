@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-term"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "compact_str",
  "crossterm",

@@ -23,7 +23,7 @@ smelt-worktree = { path = "crates/worktree" }
 smelt-transcript = { path = "crates/transcript" }
 smelt-view = { path = "crates/view" }
 smelt-buffer = { path = "crates/buffer" }
-smelt-term = { path = "crates/term", version = "0.8.0" }
+smelt-term = { path = "crates/term", version = "0.9.0" }
 smelt-edit = { path = "crates/edit" }
 smelt-core = { path = "crates/core" }
 smelt-store = { path = "crates/store" }
