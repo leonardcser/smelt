@@ -14,8 +14,8 @@ use engine::{EngineConfig, EngineHandle, HostCallbacks};
 use protocol::{
     AgentMode, Content, Decision, EngineEvent, HistoryItem, InvocationId, ModelConfig,
     ModelHistorySource, ModelTarget, ReasoningEffort, RequestRuntimeConfig, StartTurnInput,
-    StartTurnPayload, SteerId, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
-    ToolVisibility, TurnHistory, UiCommand,
+    StartTurnPayload, SteerId, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags,
+    ToolMetadata, ToolVisibility, TurnHistory, UiCommand,
 };
 use serde_json::{json, Value};
 use smelt_provider::ChatTransport;
