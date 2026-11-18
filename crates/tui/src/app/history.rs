@@ -1654,6 +1654,14 @@ impl TuiApp {
         let HistoryItem::Note(note) = item else {
             return None;
         };
+        let staged = self
+            .conversation
+            .pending_history_appends()
+            .iter()
+            .any(|append| append.matches_history_item(item));
+        if staged {
+            return None;
+        }
         history_note_to_block(&self.lua, note)
     }
 
