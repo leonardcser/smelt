@@ -7,6 +7,7 @@ not listed. Releases are also published on
 <!-- >>> RELEASES -->
 | Version | Date | Highlights |
 | --- | --- | --- |
+| [0.8.1](0.8.1.md) | 2026-11-18 | Image attachment previews, Claude Code quota reset credits, and faster editing for large pastes. |
 | [0.8.0](0.8.0.md) | 2026-11-08 | SQLite session storage, a file finder, content search, branch review in the diff view, inline images and Mermaid diagrams, a faster startup and idle, and opt-in goals. |
 | [0.7.0](0.7.0.md) | 2026-11-02 | Whole-screen plugin effects, a plugin gallery, one bar API, one color format, sturdier saves and upgrades. |
 | [0.6.5](0.6.5.md) | 2026-10-30 | /donut and see-through overlays, smoother math streaming, steadier block jumps. |
