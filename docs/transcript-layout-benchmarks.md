@@ -250,6 +250,10 @@ comparisons.
 timeout. Resume must stay bounded by the loaded tail, not history length or
 database size.
 
+Without a session fixture, set `SMELT_LIFECYCLE_BENCH_READY_TEXT=local/test-model`
+to measure startup. Set `SMELT_LIFECYCLE_BENCH_WARM_CACHE=1` to prime smelt's
+on-disk caches before each measured launch. This does not control OS disk caches.
+
 ### Generated quit scaling
 
 ```bash

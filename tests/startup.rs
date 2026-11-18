@@ -2763,9 +2763,17 @@ smelt.provider.register("local", {
         timeout,
     };
 
+    let warm_cache = std::env::var_os("SMELT_LIFECYCLE_BENCH_WARM_CACHE").is_some();
+    assert!(
+        !warm_cache || fixture.is_none(),
+        "warm-cache runs require a fresh session"
+    );
     let mut samples = Vec::with_capacity(runs);
     for run in 1..=runs {
         let run_root = root.path().join(format!("run-{run:03}"));
+        if warm_cache {
+            benchmark.run_sample(&run_root);
+        }
         let sample = benchmark.run_sample(&run_root);
         std::fs::remove_dir_all(run_root).expect("remove lifecycle benchmark run directory");
         let first_frame_ms = sample
