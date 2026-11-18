@@ -656,7 +656,15 @@ impl TuiApp {
                 self.save_session();
             }
             EngineEvent::NativeModeChanged { mode, .. } => self.sync_native_mode(mode),
-            EngineEvent::TurnError { message, .. } => self.notify_turn_error_sticky(message),
+            // The session's error does not pause a turn that started after it.
+            EngineEvent::TurnError { message, kind, .. } if self.conversation.is_active() => {
+                self.report_turn_error(message, kind)
+            }
+            EngineEvent::TurnError {
+                message,
+                kind,
+                retry_at_ms,
+            } => self.record_idle_turn_error(message, kind, retry_at_ms),
             EngineEvent::TurnComplete { .. }
             | EngineEvent::NativeSessionState { .. }
             | EngineEvent::NativeSessionEvent { .. } => {}
@@ -1361,18 +1369,27 @@ impl TuiApp {
                 message,
                 kind,
                 retry_at_ms,
-            } => {
-                self.working.finish(TurnOutcome::Errored);
-                if crate::app::agent::is_resumable_turn_error(kind) {
-                    self.record_turn_end(crate::app::TurnEnd::Errored { kind, retry_at_ms });
-                    self.save_session();
-                }
-                self.report_turn_error(message, kind);
-            }
+            } => self.record_idle_turn_error(message, kind, retry_at_ms),
             EngineEvent::RequestAuditError { message } => {
                 self.notify_warn(message);
             }
             _ => {}
         }
+    }
+
+    /// An error without an open turn. A limit pauses the last turn so it can
+    /// resume like a turn the limit stopped.
+    fn record_idle_turn_error(
+        &mut self,
+        message: String,
+        kind: Option<protocol::EngineAskErrorKind>,
+        retry_at_ms: Option<u64>,
+    ) {
+        self.working.finish(TurnOutcome::Errored);
+        if crate::app::agent::is_resumable_turn_error(kind) {
+            self.record_turn_end(crate::app::TurnEnd::Errored { kind, retry_at_ms });
+            self.save_session();
+        }
+        self.report_turn_error(message, kind);
     }
 }

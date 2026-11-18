@@ -2220,6 +2220,71 @@ async fn background_shell_keeps_claude_code_until_it_wakes_smelt() {
     assert_eq!(history.matches("SHELL_WAKE_REPLY").count(), 1);
 }
 
+/// Runs a turn after which Claude Code wakes on its own and hits the plan's
+/// limit. Returns the notes the host heard before the error, and the error.
+async fn limit_hit_between_turns(
+    scenario: &str,
+) -> (Vec<protocol::HistoryNoteKind>, Option<EngineEvent>) {
+    let fixture = Fixture::new(scenario);
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut notes = Vec::new();
+    let mut error = None;
+    loop {
+        let output = tokio::time::timeout(Duration::from_secs(8), handle.recv_output())
+            .await
+            .expect("engine output timed out")
+            .expect("engine disconnected");
+        match output {
+            EngineOutput::Event(EngineEvent::TurnComplete { .. }) => handle.send(read_shell()),
+            EngineOutput::Event(EngineEvent::NativeSessionEvent { session_id, event }) => {
+                assert_eq!(session_id, "test-session");
+                match *event {
+                    EngineEvent::HistoryAppended { delta, .. } if error.is_none() => {
+                        notes.extend(delta.items.iter().filter_map(HistoryItem::note_kind));
+                    }
+                    event @ EngineEvent::TurnError { .. } => error = Some(event),
+                    _ => {}
+                }
+            }
+            EngineOutput::Event(EngineEvent::NativeSessionState { active: false, .. }) => break,
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            EngineOutput::HostCall(HostCall::NativeToolEvaluation { reply, .. }) => allow(reply),
+            _ => {}
+        }
+    }
+    (notes, error)
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn limit_hit_between_turns_reaches_the_host_before_the_session_ends() {
+    for (scenario, trigger) in [
+        (
+            "shell-background-limited",
+            protocol::HistoryNoteKind::ProcessStatus,
+        ),
+        (
+            "peer-message-limited",
+            protocol::HistoryNoteKind::AgentMessage,
+        ),
+    ] {
+        let (notes, error) = limit_hit_between_turns(scenario).await;
+        assert!(notes.contains(&trigger), "{scenario}: {notes:?}");
+        assert!(
+            matches!(
+                error,
+                Some(EngineEvent::TurnError {
+                    kind: Some(EngineAskErrorKind::Quota),
+                    retry_at_ms: Some(_),
+                    ..
+                })
+            ),
+            "{scenario}: {error:?}"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial(claude_code)]
 async fn headless_turns_wait_for_background_shells_and_their_wake() {

@@ -804,11 +804,19 @@ impl Runtime<'_> {
         self.transcript.route(self.session_tx());
     }
 
+    /// Stops the process and reports that it ended.
+    async fn retire(&mut self, error: Option<&str>) {
+        if self.release(error).await {
+            self.report_released();
+        }
+    }
+
     /// Stops the process and forgets everything scoped to it. Unfinished native
     /// work unlinks the session, so it is never resumed with unseen effects.
-    async fn retire(&mut self, error: Option<&str>) {
+    /// Returns false when no process ran.
+    async fn release(&mut self, error: Option<&str>) -> bool {
         let Some(mut process) = self.native.process.take() else {
-            return;
+            return false;
         };
         self.native.agents.finish(error);
         self.transcript.finish();
@@ -840,8 +848,12 @@ impl Runtime<'_> {
         }
         self.publish_held_notes();
         self.native = Native::new(self.tx, &self.payload);
-        // Every announced process ends with this report. The host ignores the
-        // reports of a session it ended until this one arrives.
+        true
+    }
+
+    /// Every announced process ends with this report. The host ignores the
+    /// reports of a session it ended until this one arrives.
+    fn report_released(&self) {
         let _ = self.tx.send(EngineEvent::NativeSessionState {
             session_id: self.payload.session_id.clone(),
             active: false,
@@ -851,15 +863,20 @@ impl Runtime<'_> {
 
     async fn end(mut self, result: Result<(), Failure>) {
         let error = result.err();
-        self.retire(error.as_ref().map(|failure| failure.message.as_str()))
+        let released = self
+            .release(error.as_ref().map(|failure| failure.message.as_str()))
             .await;
-        if let Some(turn) = self.turn.take() {
-            match error {
-                None => emit_complete(self.tx, turn.id, turn.started.elapsed(), true),
-                Some(failure) => emit_failure(self.tx, failure),
-            }
-        } else if let Some(failure) = error {
-            emit_failure(&self.session_tx(), failure);
+        // The outcome comes before the end report, since the host drops a
+        // session's events once it ends. Without a turn, a failure, such as a
+        // wake that hits a limit, is the session's.
+        match (self.turn.take(), error) {
+            (Some(turn), None) => emit_complete(self.tx, turn.id, turn.started.elapsed(), true),
+            (Some(_), Some(failure)) => emit_failure(self.tx, failure),
+            (None, Some(failure)) => emit_failure(&self.session_tx(), failure),
+            (None, None) => {}
+        }
+        if released {
+            self.report_released();
         }
         if let Some(turn_id) = self.dispatcher_turn {
             self.dispatcher.end_turn(turn_id);

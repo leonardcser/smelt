@@ -1758,6 +1758,53 @@ fn failed_native_compaction_returns_to_working() {
     assert!(app.state().notification.is_some(), "the failure is shown");
 }
 
+/// Asserts that the limit paused the last turn and that it resumes on its own.
+fn assert_quota_pause_resumes(app: &mut TestApp) {
+    app.drain_signals_pending();
+    let status: Option<String> = app
+        .eval_lua(r#"local s = smelt.signal.get("auto_continue_status"); return s and (s.kind .. "/" .. s.phase)"#)
+        .unwrap();
+    assert!(
+        status.as_deref().is_some_and(|s| s.starts_with("quota/")),
+        "{status:?}"
+    );
+    assert!(has_started_turn(&run_due_timers(app, 1300)));
+}
+
+/// Completes a canonical turn whose Claude Code session stays open.
+fn complete_native_turn(app: &mut TestApp) -> String {
+    let turn_id = start_canonical_turn(app);
+    let session_id = app.session_snapshot().id;
+    native_state(app, &session_id, true, false);
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id,
+        history: None,
+        meta: None,
+    }));
+    app.wait_for_turn_dispatch();
+    assert!(!app.agent_running());
+    session_id
+}
+
+fn native_state(app: &mut TestApp, session_id: &str, active: bool, working: bool) {
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeSessionState {
+        session_id: session_id.into(),
+        active,
+        working,
+    }));
+}
+
+fn native_quota_error(app: &mut TestApp, session_id: &str) {
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeSessionEvent {
+        session_id: session_id.into(),
+        event: Box::new(EngineEvent::TurnError {
+            message: "quota exceeded".into(),
+            kind: Some(protocol::EngineAskErrorKind::Quota),
+            retry_at_ms: Some(0),
+        }),
+    }));
+}
+
 #[test]
 fn quota_error_between_turns_pauses_and_resumes() {
     let mut app = isolated_app();
@@ -1771,14 +1818,34 @@ fn quota_error_between_turns_pauses_and_resumes() {
     assert!(!app.agent_running());
 
     quota_error(&mut app, Some(0));
-    app.drain_signals_pending();
+    assert_quota_pause_resumes(&mut app);
+}
 
-    let status: Option<String> = app
-        .eval_lua(r#"local s = smelt.signal.get("auto_continue_status"); return s and (s.kind .. "/" .. s.phase)"#)
-        .unwrap();
-    assert!(
-        status.as_deref().is_some_and(|s| s.starts_with("quota/")),
-        "{status:?}"
-    );
-    assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
+#[test]
+fn native_wake_that_hits_quota_pauses_and_resumes() {
+    let mut app = isolated_app();
+    let session_id = complete_native_turn(&mut app);
+
+    // Claude Code wakes on its own, such as for a finished background shell or
+    // another agent's message, and its request hits the quota. The session
+    // ends after the error.
+    native_state(&mut app, &session_id, true, true);
+    native_quota_error(&mut app, &session_id);
+    native_state(&mut app, &session_id, false, false);
+    app.wait_for_turn_dispatch();
+    assert_quota_pause_resumes(&mut app);
+}
+
+#[test]
+fn native_session_error_does_not_pause_a_turn_started_after_it() {
+    let mut app = isolated_app();
+    let session_id = complete_native_turn(&mut app);
+    app.type_text("next request");
+    app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_dispatch();
+    assert!(app.agent_running());
+
+    native_quota_error(&mut app, &session_id);
+    assert!(app.agent_running());
+    assert!(app.tui.conversation.turn_pause().is_none());
 }

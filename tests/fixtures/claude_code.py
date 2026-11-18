@@ -97,6 +97,24 @@ def tool_result(call_id, content, is_error=False):
     send({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call_id, "content": content, "is_error": is_error}]}})
 
 
+def hit_usage_limit():
+    """Fails the request on the plan's limit, the way Claude Code reports it."""
+    resets_in = int(os.environ.get("SMELT_CLAUDE_FIXTURE_RESET_SECS", "1"))
+    info = {"status": "rejected", "resetsAt": int(time.time()) + resets_in, "rateLimitType": "five_hour", "isUsingOverage": False}
+    send({"type": "rate_limit_event", "rate_limit_info": info, "session_id": SESSION})
+    text = "You've hit your 5-hour limit · resets 12:50pm (Europe/Zurich)"
+    send({"type": "assistant", "uuid": "limit", "message": {"id": "limit", "model": "<synthetic>", "content": [{"type": "text", "text": text}]},
+          "parent_tool_use_id": None, "error": "rate_limit", "is_api_error_message": True, "api_error_status": 429,
+          "api_error": "usage_limit_reached", "api_error_params": {"rate_limit_info": info}})
+    send({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "session_id": SESSION, "result": text})
+
+
+def peer_message():
+    """Another session's message, which Claude Code takes as a prompt of its own."""
+    content = "Another Claude session sent a message:\n<cross-session-message from=\"uds:/peer.sock\" from-name=\"worker\">\nPEER_BODY\n</cross-session-message>"
+    send({"type": "user", "isReplay": True, "isSynthetic": True, "uuid": "peer-message", "parent_tool_use_id": None, "message": {"role": "user", "content": content}, "origin": {"kind": "peer", "from": "uds:/peer.sock", "name": "worker", "body": "PEER_BODY"}})
+
+
 log({"argv": sys.argv[1:], "cwd": os.getcwd(), "pid": os.getpid(), "control": {key: os.environ[key] for key in ("SMELT_CONTROL_SOCKET", "SMELT_SESSION_ID", "SMELT_TURN_ID") if key in os.environ}})
 assert "--input-format" in sys.argv and "stream-json" in sys.argv
 assert "--permission-prompt-tool" in sys.argv and "stdio" in sys.argv
@@ -147,17 +165,9 @@ while True:
         send({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in. Run claude auth login."})
         continue
     if SCENARIO == "usage-limit" and TOOLS_ENABLED and not os.path.exists(LOG + ".limited"):
-        # Hits the plan's limit once, the way Claude Code reports it, and
-        # answers normally after the reset.
+        # Hits the plan's limit once and answers normally after the reset.
         open(LOG + ".limited", "w").close()
-        resets_in = int(os.environ.get("SMELT_CLAUDE_FIXTURE_RESET_SECS", "1"))
-        info = {"status": "rejected", "resetsAt": int(time.time()) + resets_in, "rateLimitType": "five_hour", "isUsingOverage": False}
-        send({"type": "rate_limit_event", "rate_limit_info": info, "session_id": SESSION})
-        text = "You've hit your 5-hour limit · resets 12:50pm (Europe/Zurich)"
-        send({"type": "assistant", "uuid": "limit", "message": {"id": "limit", "model": "<synthetic>", "content": [{"type": "text", "text": text}]},
-              "parent_tool_use_id": None, "error": "rate_limit", "is_api_error_message": True, "api_error_status": 429,
-              "api_error": "usage_limit_reached", "api_error_params": {"rate_limit_info": info}})
-        send({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "session_id": SESSION, "result": text})
+        hit_usage_limit()
         continue
     if SCENARIO == "permission-native-cancel" and TOOLS_ENABLED:
         args = {"command": "echo fixture-native-tool"}
@@ -355,9 +365,7 @@ while True:
             send({"type": "control_response", "response": {"subtype": "success", "request_id": cancel["request_id"], "response": {"cancelled": True}}})
             tool_result("steer-tool", "found")
     if SCENARIO == "peer-message":
-        # Another session's message, which Claude Code takes as a prompt of its own.
-        content = "Another Claude session sent a message:\n<cross-session-message from=\"uds:/peer.sock\" from-name=\"worker\">\nPEER_BODY\n</cross-session-message>"
-        send({"type": "user", "isReplay": True, "isSynthetic": True, "uuid": "peer-message", "parent_tool_use_id": None, "message": {"role": "user", "content": content}, "origin": {"kind": "peer", "from": "uds:/peer.sock", "name": "worker", "body": "PEER_BODY"}})
+        peer_message()
     if SCENARIO in ("compact", "compact-failed"):
         send({"type": "assistant", "uuid": "before-compact", "message": {"id": "before-compact", "content": [{"type": "text", "text": "before"}], "usage": {"input_tokens": 27445, "output_tokens": 0}}, "parent_tool_use_id": None})
         send({"type": "system", "subtype": "status", "status": "compacting", "session_id": SESSION, "uuid": "compacting"})
@@ -400,7 +408,7 @@ while True:
         send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
         assistant([{"type": "text", "text": "BACKGROUND_WAKE_REPLY"}], "wake-reply")
         send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "BACKGROUND_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
-    if SCENARIO == "shell-background" and TOOLS_ENABLED:
+    if SCENARIO in ("shell-background", "shell-background-limited") and TOOLS_ENABLED:
         send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
         task_output("shell-task", "tick 1\n")
         # Claude Code wakes to report a background shell that ended.
@@ -411,8 +419,19 @@ while True:
         send({"type": "system", "subtype": "task_notification", "task_id": "shell-task", "tool_use_id": "shell-call", "status": "failed", "output_file": output_file, "summary": "Serve"})
         send({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
         send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
-        assistant([{"type": "text", "text": "SHELL_WAKE_REPLY"}], "shell-wake")
-        send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "SHELL_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
+        if SCENARIO == "shell-background-limited":
+            # The wake's request hits the plan's limit.
+            hit_usage_limit()
+        else:
+            assistant([{"type": "text", "text": "SHELL_WAKE_REPLY"}], "shell-wake")
+            send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "SHELL_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
+    if SCENARIO == "peer-message-limited":
+        # Another session's message wakes Claude Code, whose request hits the
+        # plan's limit.
+        send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
+        peer_message()
+        send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
+        hit_usage_limit()
     if SCENARIO in ("monitor-wake", "monitor-wake-held"):
         # A monitor event wakes Claude Code, which thinks until it is
         # interrupted or, unless held, a prompt arrives. The prompt waits in its
