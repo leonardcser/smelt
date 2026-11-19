@@ -17,7 +17,6 @@ pub(crate) mod notify;
 mod overlay;
 pub(crate) mod overlay_layout;
 mod paint;
-mod permissions;
 mod picker;
 mod prompt;
 mod render;
@@ -104,7 +103,6 @@ pub(super) fn register_host_extensions(
     engine::register(lua, smelt, shared)?;
     keymap::register(lua, keymap, shared)?;
     model::register(lua, smelt)?;
-    permissions::register(lua, smelt, shared)?;
     settings::register(lua, smelt, shared)?;
     text::register(lua, smelt)?;
     theme::register(lua, smelt)?;

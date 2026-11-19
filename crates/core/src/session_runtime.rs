@@ -1208,19 +1208,19 @@ mod tests {
         let history = vec![
             HistoryItem::user(protocol::Content::text("hello")),
             HistoryItem::Note(protocol::HistoryNote::mode_change_for_transition(
-                "normal", "plan", "switch",
+                "read", "plan", "switch",
             )),
             HistoryItem::user(protocol::Content::text("after mode")),
         ];
-        let address = seed_store(dir.path(), SESSION_ID, Some("normal"), history);
+        let address = seed_store(dir.path(), SESSION_ID, Some("read"), history);
         let live = stored_live(address, 3, 2);
 
         assert!(live.any_transcript_visible_before(2).unwrap());
         assert!(live.any_transcript_visible_before(3).unwrap());
         assert!(live.any_transcript_visible_before(usize::MAX).unwrap());
         assert!(!live.any_transcript_visible_before(0).unwrap());
-        assert_eq!(live.effective_mode_at(3, "normal").unwrap(), "plan");
-        assert_eq!(live.effective_mode_at(0, "normal").unwrap(), "normal");
+        assert_eq!(live.effective_mode_at(3, "read").unwrap(), "plan");
+        assert_eq!(live.effective_mode_at(0, "read").unwrap(), "read");
     }
 
     #[test]
@@ -1232,7 +1232,7 @@ mod tests {
         history.extend(
             (0..130).map(|index| HistoryItem::user(protocol::Content::text(index.to_string()))),
         );
-        let address = seed_store(dir.path(), SESSION_ID, Some("normal"), history.clone());
+        let address = seed_store(dir.path(), SESSION_ID, Some("read"), history.clone());
         let mut live = stored_live(address, history.len(), 130);
 
         let duplicate_context = protocol::HistoryAppend::set_context(
@@ -1259,11 +1259,11 @@ mod tests {
 
         let plan = protocol::HistoryAppend::mode_change(
             HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-                "normal",
+                "read",
                 "plan",
                 "plan mode",
             )),
-            protocol::AgentMode::normal(),
+            protocol::AgentMode::read(),
         );
         let mode_plan = live.plan_history_append(&plan).unwrap();
         assert_eq!(mode_plan, HistoryAppendPlan::Push);
@@ -1276,20 +1276,20 @@ mod tests {
         history = planned;
         live.append_history(plan.item.clone());
 
-        let normal = protocol::HistoryAppend::mode_change(
+        let read = protocol::HistoryAppend::mode_change(
             HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-                "normal",
-                "normal",
-                "normal mode",
+                "read",
+                "read",
+                "read mode",
             )),
-            protocol::AgentMode::normal(),
+            protocol::AgentMode::read(),
         );
-        let normal_plan = live.plan_history_append(&normal).unwrap();
-        assert_eq!(normal_plan, HistoryAppendPlan::RemoveLast);
+        let read_plan = live.plan_history_append(&read).unwrap();
+        assert_eq!(read_plan, HistoryAppendPlan::RemoveLast);
         let mut canonical = history.clone();
-        let canonical_result = protocol::apply_history_append(&mut canonical, &normal);
+        let canonical_result = protocol::apply_history_append(&mut canonical, &read);
         let mut planned = history;
-        let planned_result = apply_planned_append(&mut planned, &normal, normal_plan);
+        let planned_result = apply_planned_append(&mut planned, &read, read_plan);
         assert_eq!(planned_result, canonical_result);
         assert_eq!(planned, canonical);
     }

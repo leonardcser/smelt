@@ -43,23 +43,21 @@ cycle them; the current one is shown in the status bar.
 
 | Mode       | What it does |
 | ---------- | ------------ |
-| **Normal** | Default. Asks before editing files or running commands. Read tools are auto-allowed. |
+| **Read**   | Default. Reads run freely, and commands run in a sandbox that may write only temp files. Asks before changing the project. |
 | **Plan**   | Read-only. The agent drafts a plan with `present_plan`; writes are denied except saved plan drafts. |
-| **Apply**  | File edits are auto-approved. Shell commands still ask. |
-| **Yolo**   | Everything is auto-approved. You can still deny specific patterns in config. |
+| **Write**  | Edits and sandboxed commands inside the workspace run without asking. Anything outside it asks. |
+| **Yolo**   | Everything runs without asking and without a sandbox. |
 
 Start in a mode with `--mode`, and choose which modes the cycle includes with
 `--mode-cycle`. A good habit for bigger changes is to start in **Plan**, read the
-plan, then switch to **Apply**.
+plan, then switch to **Write**.
 
-When a tool needs permission, a **confirm dialog** shows what it wants to do, with
-a diff for edits. Approve once, for the session, or for the workspace. Session and
-workspace approvals save you from confirming the same safe call again and again,
-for example every `git status` in a repo you trust. Press `Tab` to attach a note
-to your decision that the agent will see.
+When a call needs more than the mode allows, a **confirm dialog** shows it, with
+a diff for edits. Allow it once, deny it, or allow the tool or the path for the
+rest of the session. `Tab` adds a note for the agent.
 
-See [Permissions](../reference/permissions.md) for the rules behind each mode and
-approval scope, and [Tools](../reference/tools.md) for what the agent can call.
+See [Permissions](../reference/permissions.md) for access levels, the sandbox and
+session approvals, and [Tools](../reference/tools.md) for what the agent can call.
 
 ## Review changes and open files
 
@@ -112,16 +110,19 @@ Copying any part of a diagram copies its Mermaid source.
 
 Pick how much to trust the agent:
 
-- **Narrow:** add allow rules for specific commands, so only those stop asking.
+- **Narrow:** switch to **Write** mode, where edits and commands inside the
+  workspace run in the sandbox without asking.
   [Recipes](../customize/recipes.md#let-the-agent-work-on-its-own) has a ready
-  set.
+  setup.
 
 - **Broad:** switch to **Yolo** mode (`Shift+Tab` or `--mode yolo`).
 - **Unattended:** run [headless](headless.md) in scripts and CI, where nothing can
-  ask and anything that would ask is denied unless a rule allows it.
+  ask and anything that would ask is denied.
 
-Permissions guard against mistakes, not against a hostile agent. For untrusted
-prompts, models or MCP servers, run smelt in a container or VM.
+The sandbox guards files against mistakes and keeps credentials out of reach
+(see [path rules](../reference/permissions.md#path-rules)). The network stays
+open, so for untrusted prompts, models or MCP servers, run smelt in a container
+or VM.
 
 ## Change course mid-task
 
@@ -324,7 +325,8 @@ Or create, pick and enter them from a running session:
 Names are normalized and deduplicated. Worktrees live in `<repo>/.worktrees/` by
 default; change that with `smelt.settings.worktree_root`. Entering one switches
 smelt's working directory and reloads project instructions, skills, trusted
-`.smelt/` config and workspace permissions for the new checkout.
+`.smelt/` config and the workspace roots the sandbox may write for the new
+checkout.
 
 An agent in a managed worktree does not push, open a pull request, merge into the
 base checkout, or remove the worktree unless you explicitly ask. If you ask it to

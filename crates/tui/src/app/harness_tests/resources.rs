@@ -1621,7 +1621,7 @@ fn custom_command_starts_after_replaced_synthetic_history() {
 
     let mut app = TestApp::builder()
         .with_vim(true)
-        .with_mode(AgentMode::normal())
+        .with_mode(AgentMode::read())
         .build();
     app.start_exec("");
     app.render_silent();

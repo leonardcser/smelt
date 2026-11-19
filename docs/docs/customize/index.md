@@ -21,7 +21,8 @@ only when you need them.
 Everything starts in `init.lua`, in the config directory: `~/.config/smelt` on
 Linux and macOS, `%APPDATA%\smelt` on Windows (`$XDG_CONFIG_HOME` overrides it).
 It is plain Lua evaluated at startup, so one file can set options, register
-providers and MCP servers, add permission rules, commands, keymaps and tools.
+providers and MCP servers, customize the permission policy, add commands, keymaps
+and tools.
 
 ```lua
 -- ~/.config/smelt/init.lua
@@ -40,7 +41,7 @@ Start with [Recipes](recipes.md) for common setups. Use the topic guides for
 
 ## Project config
 
-Put repo-specific keymaps, commands, permission rules or MCP servers in
+Put repo-specific keymaps, commands, permission policy or MCP servers in
 `.smelt/` inside the project. A fresh clone then carries the project's
 conventions with it.
 
@@ -88,7 +89,7 @@ smelt.builtins.disable({ tools = { "web_fetch" } })
 ```lua
 -- ~/.config/smelt/init.lua
 if smelt.cli.get("ci") then
-  smelt.settings.restrict_to_workspace = false
+  smelt.settings.autoupgrade = "off"
 end
 ```
 

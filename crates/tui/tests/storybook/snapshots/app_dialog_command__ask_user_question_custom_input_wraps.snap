@@ -19,4 +19,4 @@ expression: frame.text()
  Use OAuth for browser sign-in, but keep an
  API-key fallback for automation and support
  scripts.
- ○ normal                                  1:96 100%
+ ○ read                                    1:96 100%

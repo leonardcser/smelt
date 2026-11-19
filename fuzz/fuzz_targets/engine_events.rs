@@ -298,7 +298,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     call_id: format!("evaluation-{}", model.sequence),
                     tool_name: small_text(name),
                     args: HashMap::new(),
-                    mode: AgentMode::normal(),
+                    mode: AgentMode::read(),
                 },
             );
             assert_eq!(
@@ -517,7 +517,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     tool_name: small_text(name),
                     provider: None,
                     args: HashMap::new(),
-                    approval_patterns: Vec::new(),
+                    access: protocol::Access::Write,
                     summary: protocol::style::StyledLines::from_plain("permission".to_string()),
                     called_at_ms: model.sequence,
                 },

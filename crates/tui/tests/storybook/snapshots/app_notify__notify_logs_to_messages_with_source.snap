@@ -15,4 +15,4 @@ expression: frame.text()
 
  [info] upgrade
    update available: v0.6.0
- ○ normal                                                       1:1 0%
+ ○ read                                                         1:1 0%

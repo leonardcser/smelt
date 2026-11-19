@@ -157,9 +157,9 @@ mod tests {
             tool("custom", json!(null)),
         ];
         let catalog = build_catalog(&tools).unwrap();
-        assert!(!catalog.exposes(&tools[0], &AgentMode::normal()));
-        assert!(catalog.exposes(&tools[1], &AgentMode::normal()));
-        assert!(catalog.exposes(&tools[2], &AgentMode::normal()));
+        assert!(!catalog.exposes(&tools[0], &AgentMode::read()));
+        assert!(catalog.exposes(&tools[1], &AgentMode::read()));
+        assert!(catalog.exposes(&tools[2], &AgentMode::read()));
         assert!(catalog.disabled_native.is_empty());
     }
 
@@ -172,8 +172,8 @@ mod tests {
         let tools = [replacement, complementary];
         let catalog = Catalog::new(&tools, protocol::ToolVisibility::Headless).unwrap();
         assert!(catalog.owns("Bash"));
-        assert!(!catalog.exposes(&tools[0], &AgentMode::normal()));
-        assert!(catalog.exposes(&tools[1], &AgentMode::normal()));
+        assert!(!catalog.exposes(&tools[0], &AgentMode::read()));
+        assert!(catalog.exposes(&tools[1], &AgentMode::read()));
         let mut conflict = tools[0].clone();
         conflict.name = "other_shell".into();
         conflict.headless = true;
@@ -188,7 +188,7 @@ mod tests {
     fn replacements_disable_native_tools_and_conflicts_fail_closed() {
         let replacement = tool("my_shell", json!({"enabled":true,"replaces":["Bash"]}));
         let catalog = build_catalog(std::slice::from_ref(&replacement)).unwrap();
-        assert!(catalog.exposes(&replacement, &AgentMode::normal()));
+        assert!(catalog.exposes(&replacement, &AgentMode::read()));
         assert!(catalog.owns("Bash"));
         assert!(build_catalog(&[
             replacement,

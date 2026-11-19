@@ -212,7 +212,7 @@ mod tests {
     /// Build a scenario with `n` ops; op `i` is `{ "id": i }`.
     fn scenario_of_ids(n: usize) -> Value {
         let ops: Vec<Value> = (0..n).map(|i| json!({ "id": i })).collect();
-        json!({ "vim": false, "mode": "normal", "ops": ops })
+        json!({ "vim": false, "mode": "read", "ops": ops })
     }
 
     fn ids_of(v: &Value) -> Vec<u64> {
@@ -271,7 +271,7 @@ mod tests {
         let predicate_ids: &[u64] = &[1, 4];
         let scenario = json!({
             "vim": false,
-            "mode": "normal",
+            "mode": "read",
             "ops": [
                 { "id": 0, "payload": "aaaaaaaaaa" },
                 { "id": 1, "payload": "bbbbbbbbbb" },
@@ -320,7 +320,7 @@ mod tests {
         };
         let scenario = json!({
             "vim": false,
-            "mode": "normal",
+            "mode": "read",
             "ops": [{ "id": 0, "payload": "abcdefghij" }]
         });
         assert!(crashes(&scenario));
@@ -346,7 +346,7 @@ mod tests {
         };
         let scenario = json!({
             "vim": false,
-            "mode": "normal",
+            "mode": "read",
             "ops": [
                 { "id": 0, "payload": "noise-a" },
                 { "id": 1, "payload": "noise-b" },

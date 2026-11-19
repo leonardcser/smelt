@@ -51,7 +51,7 @@
     {
       "kind": "set_agent_mode",
       "data": {
-        "mode": "normal"
+        "mode": "read"
       }
     },
     {
@@ -61,7 +61,7 @@
     {
       "kind": "set_agent_mode",
       "data": {
-        "mode": "normal"
+        "mode": "read"
       }
     },
     {

@@ -128,8 +128,8 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Install ripgrep and bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y ripgrep bubblewrap
 
       - name: Run tests
         run: cargo nextest run --workspace --features smelt-tui/harness
@@ -158,8 +158,8 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Install ripgrep and bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y ripgrep bubblewrap
 
       - name: Run tests with coverage floor
         env:
@@ -293,6 +293,24 @@ jobs:
 
       - name: Check packaged crate
         run: cargo +${{ matrix.rust }} check --manifest-path /tmp/msrv-package/Cargo.toml ${{ matrix.targets }}
+
+  macos-sandbox:
+    name: macOS sandbox
+    if: github.event_name != 'pull_request_target'
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust
+        run: rustup toolchain install
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test the Seatbelt sandbox
+        run: cargo test --locked -p smelt-sandbox
 
   windows-install:
     name: Windows install smoke test

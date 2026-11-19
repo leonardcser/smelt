@@ -1,7 +1,7 @@
 {
   "_about": "Window::mouse_up committed drag_endpoint to cpos without snapping. The endpoint was computed at mouse-down against an earlier buffer state; by mouse-up the transcript (readonly) had been re-laid-out by a resize and an interleaved thinking delta, so the stored byte offset landed mid-codepoint inside a '│' chrome glyph in the joined display text.",
   "_fix": "fix(edit): snap cpos in Window::mouse_up to text() / source()",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "data": 109,

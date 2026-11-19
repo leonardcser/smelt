@@ -2017,20 +2017,6 @@ impl ConversationRuntime {
         self.turn.set_applied_reasoning_effort(reasoning_effort);
     }
 
-    pub(crate) fn active_permissions(
-        &self,
-        fallback: Arc<smelt_permissions::Permissions>,
-    ) -> Arc<smelt_permissions::Permissions> {
-        self.turn.active_permissions(fallback)
-    }
-
-    pub(crate) fn refresh_active_permissions(
-        &mut self,
-        permissions: Arc<smelt_permissions::Permissions>,
-    ) {
-        self.turn.refresh_active_permissions(permissions);
-    }
-
     fn coalesce_context_history_append(
         &mut self,
         append: &super::PendingHistoryAppend,

@@ -27,7 +27,6 @@ pub use lua::{
     is_release_build, BUILD_SHA, BUILD_TAG, BUILD_TARGET, DISPLAY, SOURCE_BUILD_VERSION,
 };
 pub use smelt_core::mcp;
-pub use smelt_permissions;
 pub(crate) mod persist;
 pub(crate) mod picker;
 pub mod prompt_inputs;

@@ -55,8 +55,7 @@ smelt.tools.register({
   name = "write_file",
   description = "Writes a file to the local filesystem. This tool will overwrite the existing file if there is one at the provided path.",
   override = true,
-  permission_defaults = { apply = "allow" },
-  effect = "write",
+  access = "write",
   parameters = {
     type = "object",
     properties = {
@@ -74,9 +73,8 @@ smelt.tools.register({
   summary = function(args, ctx)
     return smelt.tools.path_summary(args.file_path or "", ctx)
   end,
-  paths_for_workspace = function(args)
-    local p = args.file_path or ""
-    return p ~= "" and { { path = p, kind = "file" } } or {}
+  paths = function(args)
+    return { args.file_path or "" }
   end,
   preview = function(args)
     return argument_file_view(args)

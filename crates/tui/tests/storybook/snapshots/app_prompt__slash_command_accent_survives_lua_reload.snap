@@ -3,12 +3,12 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
                                14:37:03
- /permissions
+ /changelog
 
 
 
- /permissions  manage session permissio…
+ /changelog  show release notes of rece…
 ────────────────────────────────────────
- /permissions
+ /changelog
 ────────────────────────────────────────
- ○ normal                      1:13 100%
+ ○ read                        1:11 100%

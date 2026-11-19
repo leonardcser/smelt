@@ -41,7 +41,6 @@ impl AppStoryCtx {
             .build();
         app.run_lua_result("smelt.time.format = smelt.time.format_utc; smelt.theme.use('default')")
             .expect("pin storybook time formatting and theme");
-        app.allow_permissions_outside_cwd();
         Self {
             app,
             name: name.to_string(),
@@ -97,14 +96,6 @@ impl AppStoryCtx {
             std::fs::create_dir_all(parent).expect("create story workspace directory");
         }
         std::fs::write(path, content).expect("write story workspace file");
-    }
-
-    pub fn restrict_permissions_to_cwd(&mut self) {
-        assert_eq!(
-            self.turn_id, 0,
-            "configure permissions before starting a turn"
-        );
-        self.app.restrict_permissions_to_cwd();
     }
 
     pub fn approve_tool_for_session(&mut self, tool: &str) {
@@ -429,14 +420,12 @@ impl AppStoryCtx {
         &mut self,
         tool_name: &str,
         args: std::collections::HashMap<String, serde_json::Value>,
-        approval_patterns: Vec<String>,
     ) {
         let summary = self.app.tool_summary(tool_name, &args);
-        self.app
-            .require_tool_confirmation(tool_name, &approval_patterns);
+        self.app.require_tool_confirmation(tool_name);
         self.start_turn();
         self.app
-            .request_permission(1, "call-1", tool_name, args, approval_patterns, summary);
+            .request_permission(1, "call-1", tool_name, args, summary);
     }
 
     /// Write `contents` to `<cwd>/<rel_path>` and return the relative

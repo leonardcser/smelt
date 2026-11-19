@@ -150,7 +150,7 @@ fn claude_code_explicit_replacement_owns_native_capability() {
     let (output, calls) = run(
         "replacement",
         r#"
-smelt.tools.register({ name = "my_shell", description = "custom shell", parameters = { type = "object" }, claude_code = { replaces = { "Bash" } }, permission_defaults = { normal = "allow" }, execute = function() return "replacement ran" end })
+smelt.tools.register({ name = "my_shell", description = "custom shell", parameters = { type = "object" }, claude_code = { replaces = { "Bash" } }, access = "read", execute = function() return "replacement ran" end })
 "#,
     );
     assert!(
@@ -265,11 +265,17 @@ fn claude_code_hidden_tools_cannot_be_called_through_mcp() {
 }
 
 #[test]
-fn claude_code_plan_artifact_grants_do_not_override_explicit_denies() {
+fn claude_code_plan_artifact_writes_respect_user_policy() {
     for (config, expected) in [
         ("", "allow"),
         (
-            r#"smelt.permissions.extend({ plan = { tools = { deny = { "write_file" } } } })"#,
+            r#"
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  if call.tool == "write_file" then return "deny" end
+  return check(call)
+end
+"#,
             "deny",
         ),
     ] {
@@ -293,8 +299,8 @@ fn claude_code_plan_artifact_grants_do_not_override_explicit_denies() {
             .find(|call| call["response"]["request_id"] == "plan-write")
             .unwrap();
         assert_eq!(
-            response["response"]["response"]["hookSpecificOutput"]["permissionDecision"],
-            expected
+            response["response"]["response"]["hookSpecificOutput"]["permissionDecision"], expected,
+            "{response}"
         );
     }
 }
@@ -385,7 +391,12 @@ fn claude_code_foreground_child_uses_policy_and_has_an_isolated_transcript() {
     let (output, calls) = run(
         "subagent-foreground",
         r#"
-smelt.permissions.extend({ default = { tools = { allow = { "Agent" }, deny = { "read_file" } } } })
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  if call.tool == "Agent" then return "allow" end
+  if call.tool == "read_file" then return "deny" end
+  return check(call)
+end
 "#,
     );
     assert!(
@@ -427,7 +438,12 @@ fn claude_code_headless_waits_for_background_child_and_wake_reply() {
     let (output, calls) = run(
         "subagent-background",
         r#"
-smelt.permissions.extend({ default = { tools = { allow = { "Agent" }, deny = { "read_file" } } } })
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  if call.tool == "Agent" then return "allow" end
+  if call.tool == "read_file" then return "deny" end
+  return check(call)
+end
 "#,
     );
     assert!(
@@ -496,11 +512,23 @@ fn claude_code_native_tools_pass_through_smelt_policy() {
     for (expected, config) in [
         (
             "deny",
-            r#"smelt.permissions.extend({ default = { patterns = { bash = { deny = { "echo fixture-native-tool" } } } } })"#,
+            r#"
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  if call.tool == "bash" and call.args.command == "echo fixture-native-tool" then return "deny" end
+  return check(call)
+end
+"#,
         ),
         (
             "allow",
-            r#"smelt.permissions.extend({ default = { patterns = { bash = { allow = { "echo fixture-native-tool" } } } } })"#,
+            r#"
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  if call.tool == "bash" and call.args.command == "echo fixture-native-tool" then return "allow" end
+  return check(call)
+end
+"#,
         ),
     ] {
         let (output, calls) = run("permission", config);
@@ -523,8 +551,19 @@ fn claude_code_native_tools_pass_through_smelt_policy() {
 }
 
 #[test]
-fn claude_code_relative_paths_use_native_cwd_without_expanding_workspace_trust() {
-    let (output, calls) = run("cwd-permission", "");
+fn claude_code_relative_paths_resolve_against_the_native_cwd() {
+    // The policy sees the absolute path and denies exactly that file.
+    let (output, calls) = run(
+        "cwd-permission",
+        r#"
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  local expected = os.getenv("SMELT_CLAUDE_FIXTURE_CWD") .. "/probe.txt"
+  if call.tool == "read_file" and call.args.file_path == expected then return "deny" end
+  return check(call)
+end
+"#,
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -546,10 +585,9 @@ fn claude_code_mcp_bridge_executes_registered_smelt_tool() {
         "mcp-parallel",
         r#"
 smelt.tools.register({
-  name = "fixture_tool", description = "fixture", parameters = { type = "object", properties = { text = { type = "string" } } },
+  name = "fixture_tool", description = "fixture", access = "read", parameters = { type = "object", properties = { text = { type = "string" } } },
   execute = function(args) return { content = args.text, metadata = { fixture = args.text }, display_content = { summary = "display " .. args.text } } end,
 })
-smelt.permissions.extend({ default = { tools = { allow = { "fixture_tool" } } } })
 "#,
     );
     assert!(

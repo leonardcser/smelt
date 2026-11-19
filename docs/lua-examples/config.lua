@@ -33,7 +33,7 @@
 -- CLI flags, recent choices, then the first registered provider/model.
 smelt.defaults.set({
   model = nil,             -- example: "openai/gpt-5.5"
-  mode = nil,              -- possible: "normal", "plan", "apply", "yolo"
+  mode = nil,              -- possible: "read", "plan", "write", "yolo"
   reasoning_effort = nil,  -- possible: "off", "low", "medium", "high", "xhigh", "max", "ultra"
 })
 
@@ -94,9 +94,6 @@ smelt.settings.show_slug = true
 
 -- Keep the terminal window/tab title in sync with the current session title.
 smelt.settings.terminal_title = true
-
--- Downgrade `Allow` to `Ask` for paths outside the workspace.
-smelt.settings.restrict_to_workspace = true
 
 -- Watch Lua config inputs (init.lua, plugins/, commands/, completers/, tools/, dialogs/, runtime overrides) and dispatch `/reload` when any of them changes. Prompt inputs such as AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`.
 smelt.settings.auto_reload = true
@@ -194,16 +191,14 @@ smelt.settings.transcript = {
 --   enabled = true,
 -- })
 
--- Permission rules
--- Default is to ask for tools that require permission. Uncomment to customize.
--- smelt.permissions.extend({
---   default = {
---     patterns = { bash = { allow = { "git status *", "git diff *" } } },
---   },
---   apply = {
---     patterns = { bash = { allow = { "git commit *" } } },
---   },
--- })
+-- Permissions
+-- Each mode allows calls up to its access level and asks above it.
+-- Wrap smelt.permissions.check to customize. Uncomment to try.
+-- local check = smelt.permissions.check
+-- smelt.permissions.check = function(call)
+--   if call.tool == "bash" and call.args.command:match("^git status") then return "allow" end
+--   return check(call)
+-- end
 
 -- Theme
 -- smelt.lifecycle.on_ready(function()

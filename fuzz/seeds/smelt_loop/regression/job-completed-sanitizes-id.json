@@ -1,6 +1,6 @@
 {
   "_about": "Job status seed: background job ids are displayed in transcript/history and must not carry raw control bytes into wrapped rows.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "job_completed",

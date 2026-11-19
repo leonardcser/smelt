@@ -120,7 +120,7 @@ async fn run_responses(
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("clean up")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target,
         request_config: RequestRuntimeConfig {
             request_audit: protocol::RequestAuditMode::Off,
@@ -133,7 +133,6 @@ async fn run_responses(
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),

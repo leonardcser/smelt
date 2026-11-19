@@ -9,6 +9,9 @@ use smelt_transcript::transcript_model::ConfirmRequest;
 
 pub struct ConfirmEntry {
     pub req: ConfirmRequest,
+    /// The directory "allow for this session" approves, when the call
+    /// names a path.
+    pub scope: Option<std::path::PathBuf>,
 }
 
 pub struct Confirms {
@@ -26,10 +29,10 @@ impl Confirms {
         }
     }
 
-    pub fn register(&mut self, req: ConfirmRequest) -> u64 {
+    pub fn register(&mut self, req: ConfirmRequest, scope: Option<std::path::PathBuf>) -> u64 {
         let id = self.next_handle;
         self.next_handle = self.next_handle.wrapping_add(1);
-        self.pending.insert(id, ConfirmEntry { req });
+        self.pending.insert(id, ConfirmEntry { req, scope });
         self.is_clear_flag
             .store(self.pending.is_empty(), Ordering::Relaxed);
         id
@@ -97,10 +100,7 @@ mod tests {
             tool_name: "test".into(),
             provider: None,
             args: Default::default(),
-            tool_paths: vec![],
-            tool_paths_error: None,
-            approval_candidates: vec![],
-            grant_options: vec![],
+            access: protocol::Access::Full,
             summary: protocol::StyledLines::from_plain("test"),
             request_id: id,
         }
@@ -115,8 +115,8 @@ mod tests {
     #[test]
     fn register_returns_monotonic_handles_and_marks_not_clear() {
         let mut c = Confirms::new();
-        let h1 = c.register(req(1));
-        let h2 = c.register(req(2));
+        let h1 = c.register(req(1), None);
+        let h2 = c.register(req(2), None);
         assert_ne!(h1, h2);
         assert!(!c.is_clear());
         assert!(c.get(h1).is_some());
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn take_removes_entry_and_clears_when_pending_empties() {
         let mut c = Confirms::new();
-        let h = c.register(req(1));
+        let h = c.register(req(1), None);
         let entry = c.take(h);
         assert!(entry.is_some());
         assert!(c.is_clear());
@@ -136,8 +136,8 @@ mod tests {
     #[test]
     fn take_remains_not_clear_while_others_pending() {
         let mut c = Confirms::new();
-        let h1 = c.register(req(1));
-        let _h2 = c.register(req(2));
+        let h1 = c.register(req(1), None);
+        let _h2 = c.register(req(2), None);
         c.take(h1);
         assert!(!c.is_clear());
     }
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn take_unknown_handle_returns_none_and_does_not_alter_state() {
         let mut c = Confirms::new();
-        let h = c.register(req(1));
+        let h = c.register(req(1), None);
         assert!(c.take(999).is_none());
         assert!(!c.is_clear());
         assert!(c.get(h).is_some());
@@ -156,7 +156,7 @@ mod tests {
         let mut c = Confirms::new();
         let flag = c.is_clear_flag();
         assert!(flag.load(Ordering::Relaxed));
-        let h = c.register(req(1));
+        let h = c.register(req(1), None);
         assert!(!flag.load(Ordering::Relaxed));
         c.take(h);
         assert!(flag.load(Ordering::Relaxed));
@@ -165,9 +165,9 @@ mod tests {
     #[test]
     fn register_handle_increments_even_after_take() {
         let mut c = Confirms::new();
-        let h1 = c.register(req(1));
+        let h1 = c.register(req(1), None);
         c.take(h1);
-        let h2 = c.register(req(2));
+        let h2 = c.register(req(2), None);
         assert_ne!(h1, h2);
         assert!(h2 > h1);
     }

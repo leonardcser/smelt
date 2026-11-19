@@ -22,11 +22,11 @@ expression: frame.text()
 replace cell 1 [code] id=load
     3 + print(df.head())
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
- Allow?
+ Edit this file?
   1. allow once
   2. deny
   3. allow edit_notebook for this session
-  4. allow edit_notebook in workspace ~/cwd
+  4. allow ./ for this session
 
   press tab to add a reason…
- ○ normal                                                                 1:1 0%
+ ○ read                                                                   1:1 0%

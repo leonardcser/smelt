@@ -1,6 +1,6 @@
 {
   "_about": "UI invariant regression: the no-horizontal-pan oracle should not fail on extremely narrow terminal widths where transcript chrome and preformatted rows cannot satisfy normal-width wrapping assumptions.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "job_completed",

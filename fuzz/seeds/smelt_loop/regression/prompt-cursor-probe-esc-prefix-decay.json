@@ -1,7 +1,7 @@
 {
   "_about": "A stale global Lua keymap prefix from the first Esc of Esc-Esc must clear when an ordinary prompt key mismatches it; the current key should still edit the prompt after turn/prediction cleanup.",
   "_fix": "Let empty Lua chord decay fall through to the current key instead of consuming it as Noop.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_prompt_cursor_after_turn",

@@ -660,19 +660,15 @@ impl AgentLuaHost<'_> {
         let Some(entry) = self.app.core.confirms.take(handle_id) else {
             return;
         };
-        let choice = crate::lua::api::confirm::parse_decision(decision, &entry.req);
+        let choice = crate::lua::api::confirm::parse_decision(decision);
         self.app.core.signals.emit_dyn(
             "confirm_resolved",
             std::rc::Rc::new(smelt_core::signals::ConfirmResolved {
                 handle_id,
-                decision: crate::lua::api::confirm::decision_label(&choice),
+                decision: crate::lua::api::confirm::decision_label(choice).into(),
             }),
         );
-        let invocation_id = entry.req.invocation_id;
-        let request_id = entry.req.request_id;
-        let tool_name = entry.req.tool_name.clone();
-        self.app
-            .handle_confirm_resolve(choice, message, invocation_id, request_id, &tool_name);
+        self.app.handle_confirm_resolve(choice, message, &entry);
     }
 
     pub(crate) fn unqueue_prompt(&mut self) -> bool {
@@ -979,31 +975,6 @@ impl PlatformLuaHost<'_> {
 
     pub(crate) fn usage_entries(&self) -> Vec<smelt_store::UsageEntry> {
         self.app.core.sessions.store().usage().unwrap_or_default()
-    }
-
-    pub(crate) fn sync_permissions(
-        &mut self,
-        session_entries: Option<Vec<smelt_core::PermissionEntry>>,
-        path_grants: Option<Vec<smelt_permissions::SessionPathGrant>>,
-        workspace: Option<smelt_permissions::store::Replacement>,
-        repository: Option<smelt_permissions::store::Replacement>,
-    ) -> Result<(), String> {
-        self.app
-            .sync_permissions(session_entries, path_grants, workspace, repository)
-    }
-
-    pub(crate) fn revoke_permission(
-        &mut self,
-        scope: &str,
-        tool: &str,
-        pattern: &str,
-    ) -> Result<bool, String> {
-        self.app.revoke_permission(scope, tool, pattern)
-    }
-
-    pub(crate) fn grant_session_path(&mut self, grant: smelt_permissions::SessionPathGrant) {
-        self.app
-            .grant_session_path(grant.mode, grant.tool, grant.access, grant.dir);
     }
 }
 
@@ -1657,16 +1628,12 @@ impl SessionLuaHost<'_> {
             .collect();
         if tools_enabled {
             if let Some(mcp) = &app.core.mcp {
-                let permissions = app.active_permissions();
                 for tool in mcp.tool_defs() {
                     let name = tool.qualified_name();
                     let overridden = plugin_tools
                         .iter()
                         .any(|p| p.override_core && p.name == name);
-                    if !overridden
-                        && permissions.check_subcommand(app.core.config.mode.clone(), "mcp", &name)
-                            != protocol::Decision::Deny
-                    {
+                    if !overridden {
                         tools.push(smelt_provider::ToolDefinition::new(
                             smelt_provider::FunctionSchema {
                                 name,

@@ -32,7 +32,7 @@ smelt.statusline:clear()
 smelt.statusline:add("ready", function()
   return {
     { text = "READY. " .. (on and "█" or " "), style = { fg = LIGHT } },
-    { text = (smelt.signal.get("agent_mode") or "normal") .. " ", style = { fg = LIGHT }, align_right = true },
+    { text = (smelt.signal.get("agent_mode") or "read") .. " ", style = { fg = LIGHT }, align_right = true },
   }
 end)
 smelt.timer.every(500, function()

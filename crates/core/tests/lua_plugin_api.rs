@@ -13,7 +13,6 @@
 use smelt_core::lua::{
     LuaRuntime, LuaShared, TaskDriveOutput, ToolCallIds, ToolEnv, ToolExecResult, ToolVisibility,
 };
-use smelt_permissions::ToolEffectKind;
 use smelt_provider::{
     CacheConfig, CancellationToken, ChatOptions, ChatProvider, ChatRequest, FunctionSchema,
     ProviderClient, ProviderKind, ToolDefinition,
@@ -255,35 +254,174 @@ fn json_encode_rejects_values_it_cannot_represent() {
 // -- tools.register -------------------------------------------------------
 
 #[test]
-fn tools_register_records_effect_metadata() {
+fn permission_policy_resolves_tool_access_per_mode() {
+    let rt = fresh();
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_path = workspace.path().to_str().unwrap().replace('\\', "/");
+    rt.lua
+        .load(format!(
+            r#"
+            smelt.permissions.paths({{ ["{workspace_path}"] = "allow" }})
+            smelt.mode.register({{ name = "review", access = "read", above = "deny" }})
+            smelt.tools.register({{
+                name = "reader",
+                access = "read",
+                execute = function() return "ok" end,
+            }})
+            smelt.tools.register({{
+                name = "writer",
+                access = "write",
+                paths = function(args) return {{ args.path }} end,
+                execute = function() return "ok" end,
+            }})
+            smelt.tools.register({{
+                name = "pathless",
+                execute = function() return "ok" end,
+            }})
+            smelt.tools.register({{
+                name = "chooser",
+                access = function(args, mode) return args.access or mode.access end,
+                paths = function() return {{}} end,
+                execute = function() return "ok" end,
+            }})
+            "#
+        ))
+        .exec()
+        .expect("register tools");
+
+    let check = |tool: &str, args: serde_json::Value, mode: &str| {
+        let args: HashMap<String, serde_json::Value> = serde_json::from_value(args).unwrap();
+        let mode = protocol::AgentMode::parse(mode).unwrap();
+        let check = rt.check_permission(tool, &args, mode, None).unwrap();
+        (check.decision, check.access.as_str())
+    };
+    let inside = serde_json::json!({ "path": format!("{workspace_path}/new/file.txt") });
+    let outside = serde_json::json!({ "path": "/outside-the-workspace/file.txt" });
+    use protocol::Decision::{Allow, Ask, Deny};
+
+    assert_eq!(
+        check("reader", serde_json::json!({}), "read"),
+        (Allow, "read")
+    );
+    assert_eq!(check("writer", inside.clone(), "read"), (Ask, "write"));
+    assert_eq!(check("writer", inside.clone(), "write"), (Allow, "write"));
+    assert_eq!(check("writer", inside, "review"), (Deny, "write"));
+    assert_eq!(check("writer", outside.clone(), "write"), (Ask, "full"));
+    assert_eq!(check("writer", outside, "yolo"), (Allow, "full"));
+    assert_eq!(
+        check("pathless", serde_json::json!({}), "write"),
+        (Ask, "full")
+    );
+    assert_eq!(
+        check("chooser", serde_json::json!({}), "write"),
+        (Allow, "write")
+    );
+    assert_eq!(
+        check("chooser", serde_json::json!({ "access": "full" }), "write"),
+        (Ask, "full")
+    );
+}
+
+#[test]
+fn path_rules_apply_in_every_mode_and_per_mode_layers_override_them() {
+    let rt = fresh();
+    // Outside the temp directories, which are always "allow".
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let home = tempfile::tempdir_in(target).unwrap();
+    let home_path = home.path().to_str().unwrap().replace('\\', "/");
+    rt.lua
+        .load(format!(
+            r#"
+            smelt.permissions.paths({{
+                ["{home_path}/secrets"] = "ask",
+                ["{home_path}/keys"] = "deny",
+                ["{home_path}/other"] = "allow",
+            }})
+            smelt.permissions.paths({{ ["{home_path}/secrets"] = "deny" }}, {{ modes = {{ "yolo" }} }})
+            smelt.mode.register({{ name = "review", access = "read", above = "deny" }})
+            smelt.tools.register({{
+                name = "reader",
+                access = "read",
+                paths = function(args) return {{ args.path }} end,
+                execute = function() return "ok" end,
+            }})
+            smelt.tools.register({{
+                name = "writer",
+                access = "write",
+                paths = function(args) return {{ args.path }} end,
+                execute = function() return "ok" end,
+            }})
+            "#
+        ))
+        .exec()
+        .expect("set rules and register tools");
+
+    let check = |tool: &str, path: &str, mode: &str| {
+        let args = HashMap::from([(
+            "path".to_string(),
+            serde_json::json!(format!("{home_path}/{path}")),
+        )]);
+        let mode = protocol::AgentMode::parse(mode).unwrap();
+        let check = rt.check_permission(tool, &args, mode, None).unwrap();
+        (check.decision, check.access.as_str())
+    };
+    use protocol::Decision::{Allow, Ask, Deny};
+
+    assert_eq!(check("reader", "notes", "read"), (Allow, "read"));
+    assert_eq!(check("reader", "secrets/token", "read"), (Ask, "full"));
+    assert_eq!(check("reader", "secrets/token", "review"), (Deny, "full"));
+    assert_eq!(check("reader", "secrets/token", "yolo").0, Deny);
+    assert_eq!(check("reader", "keys/id", "yolo").0, Deny);
+    assert_eq!(check("writer", "other/a.rs", "write"), (Allow, "write"));
+    assert_eq!(check("writer", "other/a.rs", "read"), (Ask, "write"));
+    assert_eq!(check("writer", "notes", "write"), (Ask, "full"));
+    assert_eq!(check("writer", "notes", "yolo"), (Allow, "full"));
+
+    let rule: Option<String> = rt
+        .lua
+        .load(format!(
+            r#"return smelt.permissions.rule("{home_path}/secrets/token", "read")"#
+        ))
+        .eval()
+        .unwrap();
+    assert_eq!(rule.as_deref(), Some("ask"));
+    let removed: bool = rt
+        .lua
+        .load(format!(
+            r#"local rules = smelt.permissions.paths({{ ["{home_path}/other"] = false }})
+            return rules["{home_path}/other"] == nil"#
+        ))
+        .eval()
+        .unwrap();
+    assert!(removed);
+}
+
+#[test]
+fn wrapped_permission_check_overrides_the_default() {
     let rt = fresh();
     rt.lua
         .load(
             r#"
             smelt.tools.register({
-                name = "test_write_tool",
-                effect = "write",
+                name = "reader",
+                access = "read",
                 execute = function() return "ok" end,
             })
-            smelt.tools.register({
-                name = "test_process_tool",
-                effect = "process",
-                execute = function() return "ok" end,
-            })
+            local check = smelt.permissions.check
+            smelt.permissions.check = function(call)
+              if call.args.secret then return "deny" end
+              return check(call)
+            end
             "#,
         )
         .exec()
-        .expect("register tools with effects");
-
-    let defaults = rt.tool_defaults();
-    assert_eq!(
-        defaults.tool_effects.get("test_write_tool"),
-        Some(&ToolEffectKind::Write)
-    );
-    assert_eq!(
-        defaults.tool_effects.get("test_process_tool"),
-        Some(&ToolEffectKind::Process)
-    );
+        .expect("wrap check");
+    let args: HashMap<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({ "secret": true })).unwrap();
+    let check = rt
+        .check_permission("reader", &args, protocol::AgentMode::read(), None)
+        .unwrap();
+    assert_eq!(check.decision, protocol::Decision::Deny);
 }
 
 #[test]
@@ -311,7 +449,7 @@ fn tools_patch_updates_and_restores_metadata() {
         .exec()
         .expect("patch tool metadata");
 
-    let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+    let defs = rt.tool_defs(protocol::AgentMode::read(), ToolVisibility::Interactive);
     let def = defs
         .iter()
         .find(|def| def.name == "patchable_tool")
@@ -323,7 +461,7 @@ fn tools_patch_updates_and_restores_metadata() {
         .load("reg:remove()")
         .exec()
         .expect("restore tool metadata");
-    let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+    let defs = rt.tool_defs(protocol::AgentMode::read(), ToolVisibility::Interactive);
     let def = defs
         .iter()
         .find(|def| def.name == "patchable_tool")
@@ -360,7 +498,7 @@ async fn lua_tool_schema_reaches_openai_compatible_request_with_array_required_f
         .expect("register schema probe");
 
     let tools: Vec<_> = rt
-        .tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive)
+        .tool_defs(protocol::AgentMode::read(), ToolVisibility::Interactive)
         .into_iter()
         .map(|tool| {
             ToolDefinition::new(FunctionSchema {
@@ -468,7 +606,7 @@ fn tool_invocation_context_survives_a_yield() {
         84,
         "call-yielding-invocation-probe",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -531,7 +669,7 @@ fn execute_tool_does_not_hold_task_mutex_while_stepping_handler() {
             42,
             "call-1",
             ToolEnv {
-                mode: protocol::AgentMode::normal(),
+                mode: protocol::AgentMode::read(),
                 session_id: "sess",
                 artifact_dir: Path::new("/tmp"),
             },
@@ -615,7 +753,7 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
         1,
         "call-1",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -632,7 +770,7 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
         2,
         "call-2",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -691,7 +829,7 @@ fn tool_execute_preserves_result_metadata() {
         3,
         "call-metadata",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -755,7 +893,7 @@ fn lsp_plugin_formats_semantic_results_as_text() {
         4,
         "call-get-file-outline",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -832,7 +970,7 @@ fn lsp_plugin_formats_null_outline_result_as_empty_outline() {
         7,
         "call-null-outline",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -883,7 +1021,7 @@ fn lsp_plugin_registers_agent_friendly_semantic_tools() {
         .expect("stub lsp backend");
     load_lsp_plugin(&rt);
 
-    let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+    let defs = rt.tool_defs(protocol::AgentMode::read(), ToolVisibility::Interactive);
     let outline = defs
         .iter()
         .find(|def| def.name == "outline")
@@ -1002,7 +1140,7 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
         6,
         "call-lsp-references-text",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -1092,7 +1230,7 @@ fn lsp_plugin_truncates_large_structured_results() {
         5,
         "call-lsp-references",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -1141,7 +1279,7 @@ fn evaluation_request(id: u64) -> smelt_core::lua::ToolEvaluationRequest {
         invocation_id: protocol::InvocationId::new(id),
         tool_name: "prepared_tool".into(),
         args: HashMap::new(),
-        mode: protocol::AgentMode::normal(),
+        mode: protocol::AgentMode::read(),
     }
 }
 
@@ -1229,7 +1367,7 @@ fn tool_preparation_yields_and_retains_independent_invocation_snapshots() {
             id,
             "prepared-call",
             ToolEnv {
-                mode: protocol::AgentMode::normal(),
+                mode: protocol::AgentMode::read(),
                 session_id: "sess",
                 artifact_dir: Path::new("/tmp"),
             },
@@ -1308,7 +1446,6 @@ fn tool_preparation_errors_and_invalid_results_fail_closed() {
         "prepare = function() error('preparation failed') end",
         "prepare = function() return 42 end",
         "preflight = function() error('validation failed') end",
-        "approval_patterns = function() return 42 end",
     ] {
         let rt = fresh();
         rt.lua.load(format!("smelt.tools.register({{ name = 'prepared_tool', {hook}, execute = function() return '' end }})")).exec().unwrap();
@@ -1440,7 +1577,7 @@ fn tool_timeout_completes_a_parked_tool_with_error() {
         9,
         "call-timeout",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -1495,7 +1632,7 @@ fn tool_watchdog_uses_explicit_timeout_arg_metadata() {
         10,
         "call-deadline",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -1924,7 +2061,7 @@ fn turn_cancellation_preserves_top_level_spawned_app_tasks() {
         77,
         "call-turn-cancel",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },
@@ -1983,7 +2120,7 @@ fn turn_cancellation_cancels_spawned_child_tasks() {
         78,
         "call-child-turn-cancel",
         ToolEnv {
-            mode: protocol::AgentMode::normal(),
+            mode: protocol::AgentMode::read(),
             session_id: "sess",
             artifact_dir: Path::new("/tmp"),
         },

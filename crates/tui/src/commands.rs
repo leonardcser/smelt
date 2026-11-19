@@ -790,11 +790,12 @@ impl TuiApp {
                 // its next request boundary; otherwise we apply it locally before
                 // the next turn starts.
                 let mode_name = self.core.config.mode.as_str().to_string();
-                let native_builtin =
-                    self.core.config.active_model().is_some_and(|model| {
+                // Claude Code brings its own plan mode instructions.
+                let native_plan = mode == protocol::AgentMode::plan()
+                    && self.core.config.active_model().is_some_and(|model| {
                         smelt_provider::BackendKind::is_claude_code(&model.provider_type)
-                    }) && matches!(mode_name.as_str(), "normal" | "plan" | "apply" | "yolo");
-                let note_text = if native_builtin {
+                    });
+                let note_text = if native_plan {
                     format!("now in {mode_name} mode. smelt's permission policy applies; continue using Claude Code's native tools and smelt's complementary tools.")
                 } else {
                     let lua = self.lua.execution();
@@ -905,10 +906,10 @@ mod tests {
 
     fn normal_app() -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.tui.core.config.mode = AgentMode::parse("normal").unwrap();
+        app.tui.core.config.mode = AgentMode::parse("read").unwrap();
         app.tui
             .conversation
-            .set_session_mode_for_harness(Some("normal".into()));
+            .set_session_mode_for_harness(Some("read".into()));
         app
     }
 
@@ -1137,8 +1138,8 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
 
-        let note = app.mode_note("apply");
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        let note = app.mode_note("write");
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         assert!(mode_blocks(&app.tui).is_empty());
 
         app.feed_one(crate::event_source::SourceEvent::engine(
@@ -1153,7 +1154,7 @@ mod tests {
             },
         ));
 
-        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
     }
 
     #[test]
@@ -1161,7 +1162,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         let note = app.mode_note("yolo");
         app.tui.set_mode(AgentMode::parse("yolo").unwrap(), false);
 
@@ -1188,7 +1189,7 @@ mod tests {
             .replace_history_for_harness(vec![user("hello")]);
         app.start_turn(1);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), true);
 
         assert!(app.mode_pending());
         assert_eq!(pending_mode_appends(&app.tui).len(), 1);
@@ -1202,10 +1203,10 @@ mod tests {
             .replace_history_for_harness(vec![user("hello")]);
         app.start_turn(1);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), true);
         assert!(app.mode_pending());
 
-        app.tui.set_mode(AgentMode::parse("normal").unwrap(), true);
+        app.tui.set_mode(AgentMode::parse("read").unwrap(), true);
         assert!(!app.mode_pending());
         assert!(pending_mode_appends(&app.tui).is_empty());
     }
@@ -1217,9 +1218,9 @@ mod tests {
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), true);
 
-        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
     }
 
     #[test]
@@ -1227,10 +1228,10 @@ mod tests {
         let mut app = normal_app();
         app.start_turn(1);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), true);
         app.discard_turn(crate::app::TurnEnd::Complete);
 
-        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
     }
 
     #[test]
@@ -1466,10 +1467,10 @@ mod tests {
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
-        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
 
-        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("read").unwrap(), false);
 
         assert!(mode_blocks(&app.tui).is_empty());
         assert!(app
@@ -1497,7 +1498,7 @@ mod tests {
             .map(|append| append.history_item())
             .collect::<Vec<_>>();
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         let after_apply = app
             .tui
             .conversation
@@ -1507,15 +1508,15 @@ mod tests {
             .collect::<Vec<_>>();
         let expected_apply =
             protocol::HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-                "normal",
-                "apply",
-                app.mode_note("apply"),
+                "read",
+                "write",
+                app.mode_note("write"),
             ));
         assert_eq!(&after_apply[..before.len()], before.as_slice());
         assert_eq!(&after_apply[before.len()..], [expected_apply]);
         assert_eq!(pending_mode_appends(&app.tui).len(), 1);
 
-        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("read").unwrap(), false);
 
         let after_normal = app
             .tui
@@ -1534,10 +1535,10 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         app.discard_turn(crate::app::TurnEnd::Complete);
 
-        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
     }
 
     #[test]
@@ -1546,14 +1547,14 @@ mod tests {
         set_history(&mut app, vec![user("hello")]);
         app.start_turn(1);
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         assert_eq!(app.tui.conversation.pending_history_appends().len(), 1);
 
         app.discard_turn(crate::app::TurnEnd::Cancelled);
         assert_eq!(app.tui.conversation.pending_history_appends().len(), 1);
         assert_eq!(
             app.tui.conversation.pending_history_appends()[0].mode(),
-            Some("apply")
+            Some("write")
         );
 
         app.tui.apply_pending_history_appends_for_request();
@@ -1565,11 +1566,11 @@ mod tests {
                 .last()
                 .and_then(protocol::HistoryItem::as_note)
                 .and_then(protocol::HistoryNote::mode),
-            Some("apply")
+            Some("write")
         );
         app.restore_screen();
 
-        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
         assert_eq!(
             app.tui
                 .conversation
@@ -1578,7 +1579,7 @@ mod tests {
                 .last()
                 .and_then(protocol::HistoryItem::as_note)
                 .and_then(protocol::HistoryNote::mode),
-            Some("apply")
+            Some("write")
         );
     }
 
@@ -1586,7 +1587,7 @@ mod tests {
     fn mode_change_before_first_user_message_does_not_push_mode_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
 
         assert!(app.tui.conversation.session().history.is_empty());
         assert!(mode_blocks(&app.tui).is_empty());
@@ -1608,7 +1609,7 @@ mod tests {
         let first_turn = app.tui.rewind_turns().unwrap()[0].history_idx;
 
         app.rewind_to_history(first_turn);
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
 
         assert!(mode_blocks(&app.tui).is_empty());
         assert_eq!(
@@ -1631,7 +1632,7 @@ mod tests {
                 assistant("second reply"),
             ],
         );
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         app.tui.conversation.append_history_item(user("third"));
         app.tui
             .conversation
@@ -1643,21 +1644,21 @@ mod tests {
         let restored = app.rewind_to_history(second_turn).expect("second turn");
 
         assert_eq!(restored.0, "second");
-        assert_eq!(app.tui.core.config.mode.as_str(), "normal");
+        assert_eq!(app.tui.core.config.mode.as_str(), "read");
 
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
 
-        assert_eq!(mode_blocks(&app.tui), vec!["now in apply mode"]);
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
     }
 
     #[test]
     fn rewind_to_first_message_restores_session_base_mode() {
         let mut app = normal_app();
         set_history(&mut app, vec![user("first"), assistant("first reply")]);
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         app.tui
             .conversation
-            .set_session_mode_for_harness(Some("apply".into()));
+            .set_session_mode_for_harness(Some("write".into()));
         app.tui.conversation.append_history_item(user("second"));
         app.tui
             .conversation
@@ -1669,14 +1670,14 @@ mod tests {
         let restored = app.rewind_to_history(first_turn).expect("first turn");
 
         assert_eq!(restored.0, "first");
-        assert_eq!(app.tui.core.config.mode.as_str(), "normal");
+        assert_eq!(app.tui.core.config.mode.as_str(), "read");
     }
 
     #[test]
     fn returning_to_mode_note_base_after_rewind_removes_mode_block() {
         let mut app = normal_app();
         set_history(&mut app, vec![user("first"), assistant("first reply")]);
-        app.tui.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         app.tui.conversation.append_history_item(user("second"));
         app.tui
             .conversation
@@ -1686,7 +1687,7 @@ mod tests {
         let second_turn = app.tui.rewind_turns().unwrap()[1].history_idx;
 
         app.rewind_to_history(second_turn);
-        app.tui.set_mode(AgentMode::parse("normal").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("read").unwrap(), false);
 
         assert!(mode_blocks(&app.tui).is_empty());
         assert!(app

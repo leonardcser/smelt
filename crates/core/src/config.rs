@@ -81,7 +81,7 @@ pub enum SettingEffect {
     Prediction,
     FileIcons,
     TerminalTitle,
-    Permissions,
+    Workspace,
     AutoReload,
     FutureRequests,
     Compaction,
@@ -118,15 +118,6 @@ macro_rules! settings {
                 $(#[doc = $doc])*
                 pub $key: settings!(@ty $kind),
             )*
-        }
-
-        impl ResolvedSettings {
-            pub fn workspace_policy(&self) -> smelt_permissions::WorkspacePolicy<'_> {
-                smelt_permissions::WorkspacePolicy {
-                    restrict_to_workspace: self.restrict_to_workspace,
-                    worktree_root: &self.worktree_root,
-                }
-            }
         }
 
         impl Default for ResolvedSettings {
@@ -182,8 +173,7 @@ macro_rules! settings {
     (@effect file_icons) => { SettingEffect::FileIcons };
     (@effect file_icon_colors) => { SettingEffect::FileIcons };
     (@effect terminal_title) => { SettingEffect::TerminalTitle };
-    (@effect restrict_to_workspace) => { SettingEffect::Permissions };
-    (@effect worktree_root) => { SettingEffect::Permissions };
+    (@effect worktree_root) => { SettingEffect::Workspace };
     (@effect auto_reload) => { SettingEffect::AutoReload };
     (@effect fast_mode) => { SettingEffect::FutureRequests };
     (@effect cache_ttl_long) => { SettingEffect::FutureRequests };
@@ -231,8 +221,6 @@ settings! {
     show_slug:             Bool   = true;
     /// Keep the terminal window/tab title in sync with the current session title.
     terminal_title:        Bool   = true;
-    /// Downgrade `Allow` to `Ask` for paths outside the workspace.
-    restrict_to_workspace: Bool   = true;
     /// Watch Lua config inputs (init.lua, plugins/, commands/,
     /// completers/, tools/, dialogs/, runtime overrides) and dispatch
     /// `/reload` when any of them changes. Prompt inputs such as
@@ -969,8 +957,7 @@ mod tests {
             ("file_icons", SettingEffect::FileIcons),
             ("file_icon_colors", SettingEffect::FileIcons),
             ("terminal_title", SettingEffect::TerminalTitle),
-            ("restrict_to_workspace", SettingEffect::Permissions),
-            ("worktree_root", SettingEffect::Permissions),
+            ("worktree_root", SettingEffect::Workspace),
             ("auto_reload", SettingEffect::AutoReload),
             ("fast_mode", SettingEffect::FutureRequests),
             ("cache_ttl_long", SettingEffect::FutureRequests),

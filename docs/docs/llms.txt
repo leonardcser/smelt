@@ -46,7 +46,6 @@ Source: https://github.com/leonardcser/smelt
 - [Keybindings](https://smeltagent.dev/latest/reference/keybindings/)
 - [Built-in tools](https://smeltagent.dev/latest/reference/tools/)
 - [Permissions](https://smeltagent.dev/latest/reference/permissions/)
-- [Permission defaults](https://smeltagent.dev/latest/reference/permission-defaults/)
 - [CLI](https://smeltagent.dev/latest/reference/cli/)
 - [Storage and environment variables](https://smeltagent.dev/latest/reference/storage/)
 - [Lua API reference](https://smeltagent.dev/latest/reference/api/): every `smelt.*` namespace

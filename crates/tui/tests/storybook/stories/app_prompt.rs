@@ -108,8 +108,8 @@ app_story!(slash_command_accent_survives_lua_reload, |ctx| {
     // command semantics keep the transcript accent independent of that catalog.
     ctx.set_viewport(40, 10);
     ctx.reload_lua();
-    ctx.push_command_turn("/permissions");
-    ctx.type_prompt("/permissions");
+    ctx.push_command_turn("/changelog");
+    ctx.type_prompt("/changelog");
     ctx.assert_snapshot();
 });
 

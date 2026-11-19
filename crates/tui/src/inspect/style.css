@@ -2,7 +2,7 @@
   --bg:#0b0c0f; --panel:#101217; --panel2:#151820; --panel3:#191d26;
   --border:#272b33; --border-soft:#1e222a; --text:#d7dde6; --muted:#858b96; --faint:#5e6570;
   --accent:#ff8700; --accent-bg:#2a1706; --ok:#5fd75f; --warn:#ffaf00; --err:#ff5f87;
-  --mode-normal:#808080; --mode-plan:#5fd7af; --mode-apply:#af87ff; --mode-yolo:#ff5f87;
+  --mode-read:#808080; --mode-plan:#5fd7af; --mode-write:#af87ff; --mode-yolo:#ff5f87;
   --user:#87afd7; --assistant:#d7d7d7; --tool:#d7875f; --system:#87d75f;
 }
 * { box-sizing:border-box; }
@@ -46,9 +46,9 @@ main { display:grid; grid-template-columns:360px minmax(0, 1fr); height:calc(100
 .badge.err { color:#ffdce4; background:#32101a; }
 .badge.warn { color:var(--warn); background:#2a1d08; }
 .badge.cache { color:var(--accent); background:var(--accent-bg); }
-.badge.mode-normal { color:var(--mode-normal); background:#191b20; }
+.badge.mode-read { color:var(--mode-read); background:#191b20; }
 .badge.mode-plan { color:var(--mode-plan); background:#0f211c; }
-.badge.mode-apply { color:var(--mode-apply); background:#1c1428; }
+.badge.mode-write { color:var(--mode-write); background:#1c1428; }
 .badge.mode-yolo { color:var(--mode-yolo); background:#2a1018; }
 .card { background:var(--panel); border:0; border-bottom:1px solid var(--border); border-radius:0; margin:0; overflow:hidden; box-shadow:none; }
 .card > h3, .card-title { margin:0; min-height:28px; padding:.24rem .5rem; font-size:.76rem; text-transform:uppercase; letter-spacing:.06em; border-bottom:1px solid var(--border-soft); background:#0d1016; color:var(--muted); display:flex; justify-content:space-between; gap:.75rem; align-items:center; }
@@ -110,7 +110,7 @@ code, pre, .mono { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Cons
 .json-children { padding:.12rem .2rem .2rem .55rem; }
 .j-key { color:var(--accent); }
 .j-str { color:var(--ok); }
-.j-num { color:var(--mode-apply); }
+.j-num { color:var(--mode-write); }
 .j-bool { color:var(--tool); }
 .j-null { color:var(--faint); }
 .load-more { width:100%; border:0; border-bottom:1px solid var(--border-soft); background:#0d1016; color:var(--muted); padding:.45rem; text-align:center; }

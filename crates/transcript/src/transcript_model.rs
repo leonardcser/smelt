@@ -5,7 +5,6 @@
 use crate::content::tool_draft::{ToolArguments, ToolDraft, ToolDraftAppend};
 use crate::paused_timer::PausedTimer;
 use crate::transcript_content::{ContentId, ContentStore, SharedContentSlice, TranscriptContent};
-use smelt_permissions::PermissionGrant;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,12 +51,8 @@ pub struct ConfirmRequest {
     /// The provider that runs this tool natively, when it is not smelt's.
     pub provider: Option<String>,
     pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub tool_paths: Vec<smelt_permissions::ToolPath>,
-    /// A path callback failure carried to confirmation dispatch so a stale or
-    /// synthetic permission request is denied instead of becoming pathless.
-    pub tool_paths_error: Option<String>,
-    pub approval_candidates: Vec<String>,
-    pub grant_options: Vec<ConfirmApprovalOption>,
+    /// The access the permission policy resolved for this call.
+    pub access: protocol::Access,
     /// Styled summary of the pending call. Sole source for the dialog
     /// body header.
     pub summary: protocol::StyledLines,
@@ -648,41 +643,18 @@ fn thinking_markdown_source_len(
         .saturating_add(section_count.saturating_sub(1))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "scope")]
-pub enum ApprovalTarget {
-    Session,
-    Workspace {
-        #[serde(skip)]
-        root: std::path::PathBuf,
-    },
-    Repository {
-        #[serde(skip)]
-        key: std::path::PathBuf,
-    },
-}
-
-#[derive(Clone)]
-pub struct PermissionEntry {
-    pub tool: String,
-    pub pattern: String,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct ConfirmApprovalOption {
-    pub id: String,
-    pub label: String,
-    #[serde(flatten)]
-    pub target: ApprovalTarget,
-    #[serde(skip)]
-    pub grants: Vec<PermissionGrant>,
-}
-
-#[derive(Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ConfirmChoice {
+    /// Run this call.
     Yes,
+    /// Block this call.
     No,
-    Grant(ConfirmApprovalOption),
+    /// Run this call, and let the tool run at up to this call's access
+    /// without asking until the session ends.
+    Session,
+    /// Run this call, and let calls beneath its path run at up to this
+    /// call's access without asking until the session ends.
+    SessionPath,
 }
 
 /// Stable monotonic per-session handle. Mutating a block in place preserves its
@@ -7329,9 +7301,9 @@ mod tests {
     }
     fn mode() -> Block {
         Block::Mode {
-            text: "now in apply mode".into(),
+            text: "now in write mode".into(),
             icon: "● ".into(),
-            hl_group: "SmeltModeApply".into(),
+            hl_group: "SmeltModeWrite".into(),
         }
     }
 

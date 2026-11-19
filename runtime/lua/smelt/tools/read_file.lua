@@ -198,8 +198,10 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "read_file",
   description = "Reads a file from the local filesystem. Supports text files, provider-compatible image files (png, jpg/jpeg, gif, webp), SVG as text, and PDFs when the active model/provider can accept them.",
   override = true,
-  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
-  effect = "read",
+  access = "read",
+  paths = function(args)
+    return { args.file_path or "" }
+  end,
   parameters = {
     type = "object",
     properties = {
@@ -224,10 +226,6 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   },
   summary = function(args, ctx)
     return smelt.tools.read_file_summary(args or {}, nil, ctx)
-  end,
-  paths_for_workspace = function(args)
-    local p = args.file_path or ""
-    return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
   execute = function(args)
     local path = args.file_path or ""

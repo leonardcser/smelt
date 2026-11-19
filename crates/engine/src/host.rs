@@ -87,11 +87,9 @@ pub enum HostCall {
     NativeToolEvaluation {
         turn_id: u64,
         session_id: String,
-        cwd: std::path::PathBuf,
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
         mode: protocol::AgentMode,
-        overrides: Option<protocol::PermissionOverrides>,
         reply: oneshot::Sender<protocol::ToolEvaluation>,
     },
 

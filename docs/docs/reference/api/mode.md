@@ -1,6 +1,6 @@
 ---
 title: "smelt.mode: Lua API reference"
-description: "Agent-mode selector. Lua API reference for smelt.mode in smelt, the Lua-scriptable terminal coding agent."
+description: "Agent modes. Lua API reference for smelt.mode in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.mode`
@@ -9,7 +9,7 @@ description: "Agent-mode selector. Lua API reference for smelt.mode in smelt, th
 
 **Availability:** Some functions need the terminal UI; each function below says which.
 
-Agent-mode selector. `smelt.mode.current()` reads the active mode, `smelt.mode.set(v)` sets it in a TUI session, and `smelt.mode.cycle_list()` lists the configured cycle.
+Agent modes. A mode sets the most a tool call may do without asking (see `smelt.permissions`). `smelt.mode.current()` reads the active mode, `smelt.mode.set(v)` sets it in a TUI session, and `smelt.mode.cycle_list()` lists the cycle.
 
 ## `smelt.mode.current`
 
@@ -40,7 +40,7 @@ fun(): string[]
 
 **Availability:** Everywhere, including headless mode.
 
-Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.
+Return the modes `smelt.mode.cycle()` steps through: the configured cycle, or else every registered mode.
 
 ## `smelt.mode.get`
 
@@ -52,7 +52,7 @@ Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
 
 **Availability:** Everywhere, including headless mode.
 
-Return a copy of the registered mode definition for `name`, or `nil` when unknown.
+Return the mode named `name`, or nil when none is registered.
 
 ## `smelt.mode.list`
 
@@ -64,20 +64,19 @@ Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
 
 **Availability:** Everywhere, including headless mode.
 
-Return copies of registered mode definitions in registration order.
+Return the registered modes in cycle order.
 
 ## `smelt.mode.register`
 
 ```lua
-fun(spec: table): nil
+fun(spec: smelt.mode.Spec): nil
 ```
+
+Types: [`smelt.mode.Spec`](types.md#smeltmodespec)
 
 **Availability:** Everywhere, including headless mode.
 
-Register an agent mode from `{ name, label?, icon?, hl_group?, note?,
-permissions?, after? }`. Registering a new name appends it, or inserts it
-after an existing `after` name. Registering an existing name replaces its
-definition without changing its position. Raises when `name` is missing.
+Register an agent mode. A new name goes at the end of the cycle, or after `spec.after`. Registering an existing name replaces it in place.
 
 ## `smelt.mode.set`
 

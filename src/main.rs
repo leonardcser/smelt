@@ -901,9 +901,6 @@ async fn async_main() {
         );
         (resolved, project_trust)
     };
-    let lua_permission_rules = lua_runtime.permission_rules_snapshot();
-    let lua_tool_defaults = lua_runtime.tool_defaults();
-    let lua_mode_behaviors = lua_runtime.mode_behaviors();
 
     let startup::ResolvedStartup {
         runtime,
@@ -1046,26 +1043,6 @@ async fn async_main() {
         })
     };
 
-    let permission_rules = lua_permission_rules.unwrap_or_default();
-    let permission_store = smelt_permissions::store::PermissionStore::new(env.state_dir().clone());
-    let permission_resolution = smelt_permissions::resolve_permissions(
-        &permission_rules,
-        &lua_tool_defaults,
-        lua_mode_behaviors,
-        runtime.settings.workspace_policy(),
-        smelt_permissions::PermissionRuntimePaths {
-            cwd: &cwd,
-            home: env.home(),
-        },
-        &permission_store,
-        None,
-    )
-    .unwrap_or_else(|error| {
-        eprintln!("error: failed to load persisted permissions: {error}");
-        std::process::exit(1);
-    });
-    let permissions = smelt_permissions::PermissionsHandle::from_resolution(permission_resolution);
-
     // Extra skill search roots (today the empty default; once a Lua API
     // for declaring them lands, plumb the resolved list through here).
     let skill_extra_paths: Vec<std::path::PathBuf> = Vec::new();
@@ -1082,11 +1059,9 @@ async fn async_main() {
     // sees them live without the engine having to restart. Desired slots are
     // published now; process launch and tool discovery continue asynchronously.
     let mcp_manager = smelt_core::mcp::McpManager::start_detached(&runtime.mcp, &cwd);
-    let dispatcher: Box<dyn engine::tools::ToolDispatcher> =
-        Box::new(smelt_core::mcp::dispatcher::McpDispatcher::new(
-            Arc::clone(&mcp_manager),
-            permissions.clone(),
-        ));
+    let dispatcher: Box<dyn engine::tools::ToolDispatcher> = Box::new(
+        smelt_core::mcp::dispatcher::McpDispatcher::new(Arc::clone(&mcp_manager)),
+    );
 
     let engine_handle = engine::start(
         engine::EngineConfig {
@@ -1126,10 +1101,16 @@ async fn async_main() {
             startup_overrides,
             engine_handle,
             smelt_core::FrontendKind::Headless,
-            permissions.clone(),
             Arc::clone(&clock),
             Arc::clone(&env),
         );
+        core.permissions
+            .set_project(&smelt_worktree::project_context(
+                &cwd,
+                Some(std::path::Path::new(&core.config.settings.worktree_root)),
+            ));
+        core.permissions
+            .set_artifacts(core.sessions.store().artifacts_dir());
         core.skills = Some(Arc::clone(&skill_loader));
         core.mcp = Some(Arc::clone(&mcp_manager));
         let fragments = lua_runtime.system_prompt_fragments();
@@ -1211,7 +1192,6 @@ async fn async_main() {
             runtime,
             startup_overrides,
             engine_handle,
-            permissions.clone(),
             shared_session,
             lua_runtime,
             project_trust,

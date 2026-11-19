@@ -387,19 +387,19 @@ fn generation_zero_filters_explicit_mode_cycle_against_final_lua_modes() {
     let init = root.path().join("init.lua");
     std::fs::write(
         &init,
-        r#"smelt.mode.register({ name = "review", after = "normal" })"#,
+        r#"smelt.mode.register({ name = "review", after = "read" })"#,
     )
     .unwrap();
-    let normal = AgentMode::normal();
+    let read = AgentMode::read();
     let review = AgentMode::parse("review").unwrap();
     let unavailable = AgentMode::parse("unavailable").unwrap();
 
     let app = TestApp::builder()
         .with_init_lua(&init)
-        .with_mode_cycle(vec![normal.clone(), review.clone(), unavailable])
+        .with_mode_cycle(vec![read.clone(), review.clone(), unavailable])
         .build();
 
-    assert_eq!(app.core_probe().config.mode_cycle, vec![normal, review]);
+    assert_eq!(app.core_probe().config.mode_cycle, vec![read, review]);
 }
 
 #[test]
@@ -1304,31 +1304,6 @@ fn setting_write_updates_desired_state_before_live_effects() {
 }
 
 #[test]
-fn desired_state_reconstruction_lends_the_tui_host() {
-    let mut app = TestApp::builder().build();
-
-    app.run_lua_result(
-        r#"
-            local original_list = smelt.mode.list
-            smelt.mode.list = function()
-                assert(smelt.session.id() ~= "")
-                return original_list()
-            end
-            smelt.settings.show_slug = false
-            "#,
-    )
-    .expect("reconcile desired state through host-capable mode callback");
-
-    assert!(app
-        .lua_probe()
-        .desired()
-        .modes
-        .cycle
-        .iter()
-        .any(|mode| mode.as_str() == "normal"));
-}
-
-#[test]
 fn shutdown_hooks_and_state_flush_lend_the_tui_host() {
     let mut app = TestApp::builder().build();
     let expected_session_id = app.session_snapshot().id.clone();
@@ -1437,91 +1412,16 @@ fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
 }
 
 #[test]
-fn permission_policy_is_snapshotted_per_turn_while_session_approvals_stay_live() {
-    let mut app = TestApp::builder().build();
-    app.start_turn(7);
-    let turn_permissions = app
-        .conversation_probe()
-        .active()
-        .unwrap()
-        .permissions
-        .clone();
-    assert!(turn_permissions.restrict_to_workspace());
-
-    assert!(app.run_lua("smelt.settings.restrict_to_workspace = false"));
-    let current_permissions = app.core_probe().permissions.snapshot();
-    assert!(!current_permissions.restrict_to_workspace());
-    assert!(
-        turn_permissions.restrict_to_workspace(),
-        "active static policy must not change after a setting reconciliation"
-    );
-    assert!(std::sync::Arc::ptr_eq(
-        &turn_permissions.approvals,
-        &current_permissions.approvals,
-    ));
-
-    let trusted = std::env::temp_dir().join("smelt-phase4-session-approval");
-    app.grant_session_path(
-        None,
-        "read_file".into(),
-        smelt_permissions::PathAccess::Read,
-        trusted.clone(),
-    );
-    assert!(turn_permissions
-        .approvals
-        .read()
-        .unwrap()
-        .session_path_grants()
-        .iter()
-        .any(|grant| grant.dir == trusted));
-}
-
-#[test]
-fn relative_lua_session_path_grant_uses_runtime_cwd() {
-    let mut app = TestApp::builder().build();
-    let relative = std::path::Path::new("permission-fixtures/nested");
-    let expected = std::path::Path::new(app.cwd_str()).join(relative);
-
-    assert!(app.run_lua(
-        r#"
-        smelt.permissions.grant_session({
-          kind = "path",
-          tool = "read_file",
-          access = "read",
-          path_prefix = "permission-fixtures/nested",
-        })
-        "#,
-    ));
-
-    assert!(app.session_path_grants().iter().any(|grant| {
-        grant.tool == "read_file"
-            && grant.access == smelt_permissions::PathAccess::Read
-            && grant.dir == expected
-    }));
-}
-
-#[test]
-fn lua_session_path_grant_survives_rewind_to_start() {
-    let trusted_dir = tempfile::TempDir::new().expect("create trusted directory");
-    let trusted =
-        std::fs::canonicalize(trusted_dir.path()).expect("canonicalize trusted directory");
+fn session_approval_survives_rewind_to_start() {
     let mut app = TestApp::builder().build();
 
     app.start_submitted_turn("read generated artifacts");
-    app.grant_session_path(
-        None,
-        "read_file".into(),
-        smelt_permissions::PathAccess::Read,
-        trusted.clone(),
-    );
+    assert!(app.run_lua(r#"smelt.permissions.allow("read_file", "write")"#));
     app.cancel();
     app.rewind_to_start();
 
-    assert!(app.session_path_grants().iter().any(|grant| {
-        grant.tool == "read_file"
-            && grant.access == smelt_permissions::PathAccess::Read
-            && grant.dir == trusted
-    }));
+    assert!(app.tool_allowed("read_file", protocol::Access::Write));
+    assert!(!app.tool_allowed("read_file", protocol::Access::Full));
 }
 
 #[test]
@@ -1868,7 +1768,7 @@ fn lua_goal_tools_limit_model_state_updates_to_done_or_blocked() {
 
     assert!(app.run_lua(r#"require("smelt.goal").setup()"#));
     let tools = app.lua_probe().tool_defs(
-        protocol::AgentMode::normal(),
+        protocol::AgentMode::read(),
         smelt_core::lua::ToolVisibility::Interactive,
     );
     let get = tools
@@ -2158,7 +2058,6 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
     app.mark_project_trusted(&target).unwrap();
     app.start_turn(42);
     let original_generation = app.lua_probe().id;
-    let original_permissions = app.active_permissions();
     let _ = app.drain_engine_sends();
     app.clear_actions();
 
@@ -2189,15 +2088,7 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
         .iter()
         .any(|tool| tool.name == "target_cwd_probe"));
 
-    let active_permissions = app.active_permissions();
-    assert!(!std::sync::Arc::ptr_eq(
-        &active_permissions,
-        &original_permissions
-    ));
-    assert!(std::sync::Arc::ptr_eq(
-        &active_permissions,
-        &app.core_probe().permissions.snapshot()
-    ));
+    assert!(app.core_probe().permissions.roots().contains(&target));
 
     let commands: Vec<_> = app
         .actions()
@@ -2475,7 +2366,7 @@ fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
     let original_runtime_cwd = app.core_probe().env.cwd();
     let original_process_cwd = std::env::current_dir().unwrap();
     let original_generation = app.lua_probe().id;
-    let original_permissions = app.active_permissions();
+    let original_roots = app.core_probe().permissions.roots().to_vec();
     let _ = app.drain_engine_sends();
     app.clear_actions();
 
@@ -2496,10 +2387,7 @@ fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
     assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
     assert_eq!(app.lua_probe().id, original_generation);
     assert!(!app.workspace_probe().has_pending_change());
-    assert!(std::sync::Arc::ptr_eq(
-        &app.active_permissions(),
-        &original_permissions
-    ));
+    assert_eq!(app.core_probe().permissions.roots(), original_roots);
 
     let commands: Vec<_> = app
         .actions()
@@ -3212,24 +3100,12 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
             assert(picker:selected() == 0, "picker selected reset")
             picker:close()
 
-            local perms = smelt.permissions.list()
-            assert(type(perms.session) == "table", "permission session list")
-            assert(type(perms.workspace) == "table", "permission workspace list")
-            assert(type(perms.repository) == "table", "permission repository list")
-            local tool_decision = smelt.permissions.check_tool("default", "bash")
-            local subcommand_decision = smelt.permissions.check("default", "bash", "git status")
-            assert(type(tool_decision) == "string" and #tool_decision > 0, "permission tool decision")
-            assert(type(subcommand_decision) == "string" and #subcommand_decision > 0, "permission subcommand decision")
-            smelt.permissions.extend({
-                default = {
-                    tools = { ask = { "*" } },
-                    effects = { read = "ask" },
-                    paths = { allow = { "/tmp", "~/.cargo" } },
-                },
-            })
-            assert(not pcall(function()
-                smelt.permissions.extend({ default = { effects = { read = "sometimes" } } })
-            end), "permission effects reject unknown decisions")
+            smelt.permissions.allow("bash", "write")
+            assert(smelt.permissions.allowed("bash", "read"), "approval covers lower access")
+            assert(not smelt.permissions.allowed("bash", "full"), "approval stops at its level")
+            assert(not pcall(smelt.permissions.allow, "bash", "sometimes"), "approval rejects unknown access")
+            smelt.permissions.clear()
+            assert(not smelt.permissions.allowed("bash", "read"), "clear drops approvals")
 
             smelt.notify.info("hello from lua contract", "coverage")
             smelt.notify.warn("careful from lua contract", "coverage")
@@ -4088,13 +3964,8 @@ fn reload_clears_every_lua_surface() {
                 name = "seed_tool",
                 description = "",
                 parameters = { type = "object", properties = {} },
-                permission_defaults = { normal = "deny" },
-                effect = "config",
-                default_allow = { "seed" },
-                subpattern_parser = "bash",
                 execute = function() return "" end,
             })
-            smelt.permissions.extend({ normal = { tools = { deny = { "seed_tool" } } } })
             smelt.process.set_default_shell({ program = "/bin/zsh", args = { "-fc" } })
             smelt.provider.register("seed_provider", {
                 type = "openai",
@@ -4153,13 +4024,6 @@ fn reload_clears_every_lua_surface() {
         .keys()
         .any(|(_, c)| c == "<C-o>"));
     assert!(shared.tools.lock().unwrap().contains_key("seed_tool"));
-    assert!(shared
-        .tool_defaults
-        .lock()
-        .unwrap()
-        .tool_decisions
-        .contains_key("seed_tool"));
-    assert!(shared.permission_rules.lock().unwrap().is_some());
     assert!(shared.default_shell.lock().unwrap().is_some());
     assert!(shared
         .providers
@@ -4207,19 +4071,6 @@ fn reload_clears_every_lua_surface() {
     assert!(
         !shared.tools.lock().unwrap().contains_key("seed_tool"),
         "user tool cleared"
-    );
-    let defaults = shared.tool_defaults.lock().unwrap();
-    assert!(
-        !defaults.tool_decisions.contains_key("seed_tool")
-            && !defaults.tool_effects.contains_key("seed_tool")
-            && !defaults.subcommand_allow.contains_key("seed_tool")
-            && !defaults.subpattern_parsers.contains_key("seed_tool"),
-        "tool defaults cleared"
-    );
-    drop(defaults);
-    assert!(
-        shared.permission_rules.lock().unwrap().is_none(),
-        "permission rules cleared"
     );
     assert!(
         shared.default_shell.lock().unwrap().is_none(),
@@ -4587,7 +4438,7 @@ fn scheduled_reload_runs_after_turn_is_idle() {
 }
 
 #[test]
-fn hot_reload_reconciles_new_mode_cycle_and_permissions() {
+fn hot_reload_registers_mode_with_its_access_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     std::fs::write(&init, "-- initially empty\n").unwrap();
@@ -4599,35 +4450,24 @@ fn hot_reload_reconciles_new_mode_cycle_and_permissions() {
     std::fs::write(
         &init,
         r#"
-        smelt.mode.register({ name = "review", after = "normal" })
-        smelt.permissions.extend({
-          review = {
-            tools = {
-              allow = { "review_result" },
-              deny = { "smelt_reload" },
-            },
-          },
-        })
+        smelt.mode.register({ name = "review", after = "read", access = "read", above = "deny" })
         "#,
     )
     .unwrap();
     app.reload_lua();
 
     assert!(app.core_probe().config.mode_cycle.contains(&review));
-    let outcome = app.core_probe().permissions.evaluate_tool(
-        review.clone(),
-        smelt_permissions::ToolOrigin::Lua,
-        "smelt_reload",
-        &std::collections::HashMap::new(),
-    );
-    assert_eq!(outcome.decision, protocol::Decision::Deny);
-    let outcome = app.core_probe().permissions.evaluate_tool(
-        review,
-        smelt_permissions::ToolOrigin::Lua,
-        "review_result",
-        &std::collections::HashMap::new(),
-    );
-    assert_eq!(outcome.decision, protocol::Decision::Allow);
+    let decide = |app: &mut TestApp, access: &str| {
+        app.eval_lua::<String>(&format!(
+            r#"return smelt.permissions.check({{
+              tool = "smelt_reload", args = {{}}, access = "{access}",
+              mode = smelt.mode.get("review"),
+            }})"#
+        ))
+        .unwrap()
+    };
+    assert_eq!(decide(&mut app, "read"), "allow");
+    assert_eq!(decide(&mut app, "write"), "deny");
 }
 
 #[test]

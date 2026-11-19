@@ -233,8 +233,8 @@ pub fn parse(args: &Args, env: &engine::env::RuntimeEnv) -> StartupInputs {
 
     let parse_mode = |value: &str| {
         AgentMode::parse(value).unwrap_or_else(|| {
-            eprintln!("warning: invalid mode '{value}', defaulting to normal");
-            AgentMode::normal()
+            eprintln!("warning: invalid mode '{value}', defaulting to read");
+            AgentMode::read()
         })
     };
     let mode = args.mode.as_deref().map(parse_mode);

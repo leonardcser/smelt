@@ -97,6 +97,12 @@ local function no_matches_result(mode)
   }
 end
 
+local function search_root(args)
+  local path = args.path or ""
+  if path == "" then return "." end
+  return path
+end
+
 local function run_rg(args)
   local pattern = args.pattern or ""
   local path = args.path or ""
@@ -181,8 +187,10 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "grep",
   description = "Search file contents with ripgrep: full regex, type/glob filters, and output modes.",
   override = true,
-  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
-  effect = "read",
+  access = "read",
+  paths = function(args)
+    return { search_root(args) }
+  end,
   parameters = {
     type = "object",
     properties = {
@@ -217,11 +225,7 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
     if summary == "" then return pattern end
     return summary
   end,
-  paths_for_workspace = function(args)
-    local p = args.path or ""
-    return p ~= "" and { { path = p, kind = "directory" } } or {}
-  end,
-  execute = function(args)
+  execute = function(args, ctx)
     local offset = pick_int(args.offset, 0)
     local head_limit = pick_int(args.head_limit, 250)
     local mode = requested_mode(args)

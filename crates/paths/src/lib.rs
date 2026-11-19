@@ -59,9 +59,14 @@ pub fn data_dir() -> PathBuf {
     xdg_app_dir("XDG_DATA_HOME").unwrap_or_else(default_data_dir)
 }
 
+/// Where providers' credentials live.
+pub fn auth_dir() -> PathBuf {
+    state_dir().join("auth")
+}
+
 /// Where a provider's credentials live, such as `codex.json`.
 pub fn auth_path(file: &str) -> PathBuf {
-    state_dir().join("auth").join(file)
+    auth_dir().join(file)
 }
 
 /// Where a provider's model list is cached, such as `codex.json`.

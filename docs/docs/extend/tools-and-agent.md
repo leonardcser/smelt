@@ -9,7 +9,7 @@ description: "Register agent tools, configure language servers and rewrite provi
 
 `smelt.tools.register({ name, execute, ... })` gives the agent a new tool. Only
 `name` and `execute` are required; the other fields of `smelt.tools.ToolDef`
-control summaries, approvals and per-mode behavior.
+control access, summaries and per-mode behavior.
 
 ```lua
 smelt.tools.register({
@@ -24,10 +24,23 @@ smelt.tools.register({
     },
     required = { "title", "plan" },
   },
-  permission_defaults = { plan = "allow" },
+  access = "read",
   summary = function(args) return args.title end,
   execute = function(args) return args.plan end,
 })
+```
+
+`access` tells the [permission policy](../reference/permissions.md) what a call
+may change: `"read"`, `"write"` (the default), `"full"`, or a function
+`access(args, mode)`. A tool should also declare `paths(args)`, the paths a call
+reads (for a `"read"` tool) or changes, so smelt can check them against the
+[path rules](../reference/permissions.md#path-rules). A `"write"` call without
+`paths`, or with a path outside the workspace and `"allow"` paths, counts as
+`"full"`:
+
+```lua
+  access = "write",
+  paths = function(args) return { args.path } end,
 ```
 
 `execute` returns a string (success) or `{ content, is_error }`. It runs in a
@@ -35,11 +48,17 @@ coroutine, so it can open a [dialog](ui.md#dialogs), call another tool with
 `smelt.tools.call("name", args, parent_call_id)`, or wait for another task. See
 [Tasks and I/O](async.md) for waiting and cancellation.
 
+The commands a call starts with `smelt.process` or `smelt.grep` run in the
+call's [sandbox](../reference/permissions.md#the-sandbox), and
+`smelt.fs.glob_async` leaves out the files the call may not read. Pass
+`sandbox = false` to `smelt.process.run` for a trusted helper that must run
+unconfined.
+
 Set `override = true` to replace a built-in tool with the same name, and use
 `smelt.tools.unregister(name)` to remove yours. The tools under
 [`runtime/lua/smelt/tools/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/tools)
-show the conventions for parameters, `summary`, `approval_patterns`, `preflight`
-and `paths_for_workspace`.
+show the conventions for parameters, `summary`, `access`, `paths` and
+`preflight`.
 
 Tool execution and display are independent. See [Transcript rendering](transcript.md)
 to change a tool's title or body, compose block renderers, or group related calls.
@@ -83,7 +102,7 @@ The plugin adds `language_server_status`, `outline`, `find_symbol`,
 `inspect_symbol`, `inspect_symbol_at`, `find_definition`, `find_references`,
 `diagnostics`, `preview_rename` and `rename_symbol`. Servers start lazily per
 file and project root. Read-only tools are allowed by default. `rename_symbol` is
-allowed in Normal, denied in Plan, asks in Apply and is allowed in Yolo.
+allowed in Read, denied in Plan, asks in Write and is allowed in Yolo.
 
 ## Provider middleware
 

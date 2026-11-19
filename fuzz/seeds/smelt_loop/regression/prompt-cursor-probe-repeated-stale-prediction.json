@@ -1,6 +1,6 @@
 {
   "_about": "Prompt cursor probe isolation seed: repeated stale-prediction subprobes with the same variant must still synthesize changed prediction context instead of assuming every turn_end emits a new EngineAsk.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_prompt_cursor_after_turn",

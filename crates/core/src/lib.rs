@@ -37,9 +37,11 @@ pub mod managed_models;
 pub mod mcp;
 pub mod messages;
 pub mod migrate_v07;
+pub mod modes;
 pub mod notebook;
 pub mod output_limit;
 pub mod path_display;
+pub mod permissions;
 pub mod process;
 pub mod processes;
 pub mod public_status;
@@ -99,7 +101,6 @@ pub use signals::Signals;
 pub use timers::Timers;
 
 pub use smelt_transcript::transcript_model::{
-    ApprovalTarget, Block, BlockId, BlockOrigin, ConfirmChoice, ConfirmRequest, KeptHistoryItem,
-    PermissionEntry, ToolOutput, ToolState, ToolStatus, TranscriptBlockRecord,
-    TranscriptBlockRecordWithId, ViewState,
+    Block, BlockId, BlockOrigin, ConfirmChoice, ConfirmRequest, KeptHistoryItem, ToolOutput,
+    ToolState, ToolStatus, TranscriptBlockRecord, TranscriptBlockRecordWithId, ViewState,
 };

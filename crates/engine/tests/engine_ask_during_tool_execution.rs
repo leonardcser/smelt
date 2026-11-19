@@ -4,8 +4,7 @@
 use engine::EngineConfig;
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ModelConfig, ModelTarget, ReasoningEffort,
-    RequestRuntimeConfig, StartTurnPayload, ToolDef, ToolExecutionMode, ToolHookFlags,
-    ToolMetadata, UiCommand,
+    RequestRuntimeConfig, StartTurnPayload, ToolDef, ToolExecutionMode, ToolMetadata, UiCommand,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -221,7 +220,7 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("initial request")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target.clone(),
         request_config: runtime,
         reasoning_effort: ReasoningEffort::Off,
@@ -231,7 +230,6 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -407,6 +405,14 @@ async fn run_server(
     }
 }
 
+/// Answer the host's permission evaluation for a dispatcher tool.
+fn allow_evaluation(handle: &engine::EngineHandle, request_id: u64) {
+    handle.send(UiCommand::ToolEvaluationResponse {
+        request_id,
+        evaluation: protocol::ToolEvaluation::default(),
+    });
+}
+
 struct BlockingDispatcher {
     releases: HashMap<String, Arc<Semaphore>>,
 }
@@ -418,20 +424,6 @@ impl engine::tools::ToolDispatcher for BlockingDispatcher {
 
     fn contains(&self, name: &str) -> bool {
         self.releases.contains_key(name)
-    }
-
-    fn evaluate_tool_call(
-        &self,
-        _turn_id: u64,
-        name: &str,
-        _args: &HashMap<String, serde_json::Value>,
-        _mode: AgentMode,
-        _permission_overrides: Option<&protocol::PermissionOverrides>,
-    ) -> Option<protocol::ToolEvaluation> {
-        self.contains(name).then(|| protocol::ToolEvaluation {
-            decision: protocol::Decision::Allow,
-            metadata: ToolMetadata::default(),
-        })
     }
 
     fn dispatch<'a>(
@@ -493,7 +485,6 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         modes: None,
         execution_mode: ToolExecutionMode::Concurrent,
         override_core: false,
-        hooks: ToolHookFlags::default(),
         headless: true,
         claude_code: None,
     };
@@ -501,7 +492,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("go")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target.clone(),
         request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
@@ -511,14 +502,6 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: Some(protocol::PermissionOverrides {
-            tools: Some(protocol::RuleSetOverride {
-                allow: vec![TOOL_NAME.into()],
-                ask: Vec::new(),
-                deny: Vec::new(),
-            }),
-            subcommands: Default::default(),
-        }),
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -723,7 +706,7 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("read it")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target.clone(),
         request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
@@ -733,7 +716,6 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -766,6 +748,9 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
             match handle.recv().await {
                 Some(EngineEvent::EngineAskResponse { id, .. }) if id == barrier_id => break,
                 Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before processing the command barrier"),
             }
@@ -794,6 +779,9 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
                     lifecycle.push("steered");
                 }
                 Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before queued message was acknowledged"),
             }
@@ -824,6 +812,9 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
                     break;
                 }
                 Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before queued message was acknowledged"),
             }
@@ -875,7 +866,7 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("run both")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target,
         request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
@@ -885,7 +876,6 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -903,6 +893,9 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
                     started.insert(call_id);
                 }
                 Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before tools started"),
             }
@@ -937,6 +930,9 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
                     lifecycle.push("steered");
                 }
                 Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before queued message was acknowledged"),
             }
@@ -956,6 +952,9 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
             match handle.recv().await {
                 Some(EngineEvent::TurnComplete { .. }) => break,
                 Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before turn completion"),
             }
@@ -1023,7 +1022,7 @@ async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
         handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
             turn_id: 1,
             input: protocol::StartTurnInput::user(Content::text("go")),
-            mode: AgentMode::normal(),
+            mode: AgentMode::read(),
             model_target: target,
             request_config: RequestRuntimeConfig { request_audit: protocol::RequestAuditMode::Off, ..Default::default() },
             reasoning_effort: ReasoningEffort::Off,
@@ -1033,8 +1032,7 @@ async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
             session_id: "sess".into(),
             artifact_dir: PathBuf::from("/tmp"),
             ephemeral: false,
-            permission_overrides: None,
-            native_prompt: None,
+                native_prompt: None,
             tool_visibility: protocol::ToolVisibility::Interactive,
             system_prompt: Some("test system".into()),
             tools: vec![ToolDef {
@@ -1044,7 +1042,6 @@ async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
                 modes: None,
                 execution_mode,
                 override_core: false,
-                hooks: ToolHookFlags::default(),
                 headless: true,
                 claude_code: None,
             }],
@@ -1200,7 +1197,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("first")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: original_target,
         request_config: RequestRuntimeConfig {
             request_audit: protocol::RequestAuditMode::Off,
@@ -1213,7 +1210,6 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -1285,7 +1281,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("go")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: original_target,
         request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
@@ -1295,14 +1291,6 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: Some(protocol::PermissionOverrides {
-            tools: Some(protocol::RuleSetOverride {
-                allow: vec![TOOL_NAME.into()],
-                ask: Vec::new(),
-                deny: Vec::new(),
-            }),
-            subcommands: Default::default(),
-        }),
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -1313,7 +1301,6 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
             modes: None,
             execution_mode: ToolExecutionMode::Sequential,
             override_core: false,
-            hooks: ToolHookFlags::default(),
             headless: true,
             claude_code: None,
         }],

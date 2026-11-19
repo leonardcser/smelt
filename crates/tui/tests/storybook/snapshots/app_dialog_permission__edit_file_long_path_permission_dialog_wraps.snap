@@ -7,9 +7,6 @@ expression: frame.text()
             /20260618-083946-virtual-transcript-performance
             /plan.md
   1 old line, 1 new line
-
-
-
 ──────────────────────────────────────────────────────────────────────
  edit_file: smelt-storybook-session-93e4220e873c55398e6e22ff065d617e
             7efc1a9b326032e323d00a522764901/plans/20260618-083946-vi
@@ -18,11 +15,14 @@ expression: frame.text()
     1 - # Plan
     1 + # Updated plan
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
- Allow?
+ Edit this file?
   1. allow once
   2. deny
   3. allow edit_file for this session
-  4. allow edit_file in workspace ~/cwd
+  4. allow
+     smelt-storybook-session-93e4220e873c55398e6e22ff065d617e27efc1a9
+     b326032e323d00a522764901/plans/20260618-083946-virtual-transcrip
+     t-performance/ for this session
 
   press tab to add a reason…
- ○ normal                                                       1:1 0%
+ ○ read                                                         1:1 0%

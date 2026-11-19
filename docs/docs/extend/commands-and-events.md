@@ -41,7 +41,7 @@ never both, and passing one to the other API raises an error.
 | event  | `tool_end`        | `{ tool, is_error, elapsed_ms }`         | A tool call finished |
 | event  | `input_submit`    | submitted text                           | You submitted a message |
 | event  | `shutdown`        | none                                     | smelt is about to quit |
-| signal | `agent_mode`      | `"normal"`, `"plan"`, `"apply"`, `"yolo"` | The mode changed |
+| signal | `agent_mode`      | `"read"`, `"plan"`, `"write"`, `"yolo"` | The mode changed |
 
 The complete lists are the `smelt.events.Name` and `smelt.signal.Name` aliases in
 [Types](../reference/api/types.md).

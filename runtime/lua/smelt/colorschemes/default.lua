@@ -81,7 +81,7 @@ local groups = {
   SmeltVimInsert      = { fg = 78, bg = dl(236, 254) },
   SmeltVimVisual      = { fg = 176, bg = dl(236, 254) },
   SmeltModePlan       = { fg = 79, bg = dl(234, 255) },
-  SmeltModeApply      = { fg = 141, bg = dl(234, 255) },
+  SmeltModeWrite      = { fg = 141, bg = dl(234, 255) },
   SmeltModeYolo       = { fg = 204, bg = dl(234, 255) },
   SmeltModeDefault    = { fg = dl(244, 240), bg = dl(234, 255) },
 

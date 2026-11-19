@@ -11,7 +11,7 @@ smelt.tools.register({
   name = "load_skill",
   description = "Load a skill by name to get specialized instructions and knowledge. Use this when a task matches one of the available skills listed in the system prompt.",
   override = true,
-  effect = "read",
+  access = "read",
   parameters = {
     type = "object",
     properties = {

@@ -399,13 +399,6 @@ impl TuiApp {
                 }
             };
             let kind = pending.kind;
-            if prepared
-                .as_ref()
-                .is_ok_and(|prepared| !prepared.permissions.is_current())
-            {
-                self.reload_lua_inner(kind);
-                return true;
-            }
             self.lua.reload_preparation = None;
             let error = match prepared {
                 Ok(prepared) => self.bring_up_lua(LuaBringUpKind::Reload(kind), prepared),
@@ -457,27 +450,6 @@ impl TuiApp {
         let runtime_failure =
             match self.resolve_lua_runtime_config_with(self.lua.desired(), &selections, None) {
                 Ok((mut next_runtime, next_managed_models)) => {
-                    let next_permissions = match smelt_permissions::resolve_permissions(
-                        &self.lua.desired().permissions.rules,
-                        &self.lua.desired().permissions.tool_defaults,
-                        self.lua.desired().modes.behaviors.clone(),
-                        next_runtime.settings.workspace_policy(),
-                        smelt_permissions::PermissionRuntimePaths {
-                            cwd: &target_cwd,
-                            home: self.core.env.home(),
-                        },
-                        &self.core.permission_store,
-                        self.core.permissions.paths_fn(),
-                    ) {
-                        Ok(permissions) => permissions,
-                        Err(error) => {
-                            return Some(bring_up_error(
-                                "permissions",
-                                None,
-                                format!("load persisted permissions: {error}"),
-                            ));
-                        }
-                    };
                     let auth_error = startup_auth_error(&mut next_runtime, &next_managed_models);
 
                     if let Err(error) = self.lua.activate_launch() {
@@ -492,12 +464,15 @@ impl TuiApp {
                     self.core.lua_generation = self.lua.id;
 
                     self.managed_models.replace_catalog(next_managed_models);
-                    self.commit_lua_runtime_config(next_runtime, next_permissions);
+                    self.commit_lua_runtime_config(next_runtime);
                     self.startup_auth_error = auth_error;
                     self.conversation.install_startup_runtime(&self.core.config);
                     self.workspace.refresh(std::path::Path::new(
                         &self.core.config.settings.worktree_root,
                     ));
+                    self.core
+                        .permissions
+                        .set_project(&self.workspace.project_context());
                     self.core.engine.send(protocol::UiCommand::SetMode {
                         mode: self.core.config.mode.clone(),
                     });
@@ -634,14 +609,6 @@ impl TuiApp {
                     return Some(bring_up_error("runtime_resolution", None, error));
                 }
             };
-        let next_permissions = prepared.permissions.resolve(
-            &candidate.desired().permissions.rules,
-            &candidate.desired().permissions.tool_defaults,
-            candidate.desired().modes.behaviors.clone(),
-            next_runtime.settings.restrict_to_workspace,
-            self.core.env.home(),
-            self.core.permissions.paths_fn(),
-        );
         for callback in candidate_tui
             .ui
             .finish_lua_generation(smelt_core::lua::LUA_BUF_ID_BASE)
@@ -697,12 +664,12 @@ impl TuiApp {
             self.notify_warn(warning);
         }
         self.managed_models.replace_catalog(next_managed_models);
-        self.commit_lua_runtime_config(next_runtime, next_permissions);
+        self.commit_lua_runtime_config(next_runtime);
         let mut project = prepared.project;
         project.set_worktree_root(Some(std::path::Path::new(
             &self.core.config.settings.worktree_root,
         )));
-        self.workspace.install_context(project);
+        self.install_project_context(project);
         if refresh_agent_inputs {
             self.prompt_inputs = prepared.prompt_inputs;
             self.core.skills = Some(prepared.skills);
@@ -809,23 +776,9 @@ impl TuiApp {
         let (next, managed_models) = self.resolve_lua_runtime_config(&desired)?;
         let mut project = self.workspace.project_context();
         project.set_worktree_root(Some(std::path::Path::new(&next.settings.worktree_root)));
-        let permissions = smelt_permissions::PermissionContext::load(
-            &self.core.env.cwd(),
-            project.clone(),
-            &self.core.permission_store,
-        )
-        .map_err(|error| format!("load persisted permissions: {error}"))?
-        .resolve(
-            &desired.permissions.rules,
-            &desired.permissions.tool_defaults,
-            desired.modes.behaviors,
-            next.settings.restrict_to_workspace,
-            self.core.env.home(),
-            self.core.permissions.paths_fn(),
-        );
         self.managed_models.replace_catalog(managed_models);
-        self.commit_lua_runtime_config(next, permissions);
-        self.workspace.install_context(project);
+        self.commit_lua_runtime_config(next);
+        self.install_project_context(project);
         self.submit_managed_model_refreshes();
         self.reconcile_runtime_controllers(ContextWindowRequest::Reconcile);
         self.publish_diff_signals();
@@ -877,11 +830,13 @@ impl TuiApp {
         Ok((runtime, managed_models))
     }
 
-    fn commit_lua_runtime_config(
-        &mut self,
-        mut next: smelt_core::RuntimeState,
-        permissions: smelt_permissions::PermissionResolution,
-    ) {
+    /// Install `project` as the workspace, and as the roots sandboxed calls may write.
+    pub(super) fn install_project_context(&mut self, project: smelt_worktree::ProjectContext) {
+        self.core.permissions.set_project(&project);
+        self.workspace.install_context(project);
+    }
+
+    fn commit_lua_runtime_config(&mut self, mut next: smelt_core::RuntimeState) {
         let old_settings = self.core.config.settings.clone();
         let old_mode = self.core.config.mode.clone();
         let old_reasoning = self.core.config.reasoning_effort.clone();
@@ -916,8 +871,6 @@ impl TuiApp {
                 self.warn_if_api_base_normalized();
             }
         }
-
-        self.core.permissions.apply_resolution(permissions);
     }
 
     /// Reconcile MCP servers against the post-reload `smelt.mcp.register`
@@ -1111,12 +1064,9 @@ impl TuiApp {
         &mut self,
         choice: ConfirmChoice,
         message: Option<String>,
-        invocation_id: protocol::InvocationId,
-        request_id: u64,
-        tool_name: &str,
+        entry: &smelt_core::confirms::ConfirmEntry,
     ) {
-        let should_cancel =
-            self.resolve_confirm((choice, message), invocation_id, request_id, tool_name);
+        let should_cancel = self.resolve_confirm((choice, message), entry);
         if should_cancel {
             self.finish_turn(crate::app::TurnEnd::Cancelled);
             self.conversation.clear_active();

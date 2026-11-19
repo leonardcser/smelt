@@ -252,7 +252,7 @@ impl Default for TestAppBuilder {
     fn default() -> Self {
         Self {
             vim: None,
-            mode: AgentMode::normal(),
+            mode: AgentMode::read(),
             mode_cycle: None,
             reasoning_cycle: None,
             init_lua: None,
@@ -379,8 +379,6 @@ impl TestAppBuilder {
             }
         };
 
-        let permissions =
-            smelt_permissions::PermissionsHandle::new(smelt_permissions::Permissions::load());
         let settings = smelt_core::config::ResolvedSettings {
             vim: self.vim.unwrap_or_default(),
             ..Default::default()
@@ -390,9 +388,9 @@ impl TestAppBuilder {
         let explicit_mode_cycle = self.mode_cycle.clone();
         let mode_cycle = self.mode_cycle.unwrap_or_else(|| {
             vec![
-                AgentMode::normal(),
+                AgentMode::read(),
                 AgentMode::parse("plan").unwrap(),
-                AgentMode::parse("apply").unwrap(),
+                AgentMode::parse("write").unwrap(),
                 AgentMode::parse("yolo").unwrap(),
             ]
         });
@@ -521,7 +519,6 @@ impl TestAppBuilder {
             config,
             startup_overrides,
             engine,
-            permissions,
             shared_session,
             lua,
             smelt_core::trust::TrustState::NoContent,
@@ -776,22 +773,6 @@ mod runtime_path_tests {
         assert_eq!(std::env::current_dir().unwrap(), process_cwd);
         assert_eq!(std::env::var_os("HOME"), process_home);
         assert_eq!(std::env::var_os("XDG_STATE_HOME"), process_state);
-    }
-
-    #[test]
-    fn ordinary_apps_analyze_shell_paths_with_independent_runtime_homes() {
-        let first = TestApp::builder().build();
-        let second = TestApp::builder().build();
-
-        assert_eq!(
-            first.shell_effect_paths("cat ~/private/config"),
-            vec![first.runtime_home().join("private/config")]
-        );
-        assert_eq!(
-            second.shell_effect_paths("cat \"$HOME/private/config\""),
-            vec![second.runtime_home().join("private/config")]
-        );
-        assert_ne!(first.runtime_home(), second.runtime_home());
     }
 
     #[test]

@@ -120,8 +120,7 @@ See [Session maintenance](../reference/cli.md#session-maintenance).
 
 ## Headless tools are denied
 
-Headless mode cannot show a confirmation dialog, so every permission decision
-that resolves to Ask is denied. Use an appropriate mode or explicit permission
-rules for controlled automation. Interactive-only tools such as
-`ask_user_question`, `enter_worktree`, and `switch_cwd` are omitted entirely.
-See [Headless permissions](headless.md#permissions).
+Headless mode cannot ask, so every call the mode would ask about is denied. Use
+`--mode write` to edit and run commands in the workspace sandbox, `--mode yolo`
+for full autonomy, or wrap `smelt.permissions.check` in `init.lua` to allow
+specific calls. See [Headless permissions](headless.md#permissions).

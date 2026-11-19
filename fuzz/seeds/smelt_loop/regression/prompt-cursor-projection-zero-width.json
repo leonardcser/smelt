@@ -1,6 +1,6 @@
 {
   "_about": "Regression probe for the prompt cursor projection oracle: an isolated U+FE0F variation selector has zero terminal width, so end-of-buffer cpos and byte 0 share the same visual cell and cannot round-trip through cell coordinates.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "key_unicode",

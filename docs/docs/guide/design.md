@@ -34,8 +34,8 @@ lose. We enforce this with limits in the test suite:
   session, and do not slow down as it grows.
 - Scrolling deep into a long file costs the same as scrolling near the top.
 
-Eighteen fuzz targets cover the event loop, the Lua bindings, the editor,
-provider streams, permission rules and the session store. They find odd failures,
+Seventeen fuzz targets cover the event loop, the Lua bindings, the editor,
+provider streams, the engine turn loop and the session store. They find odd failures,
 such as a resize during a stream or a cancelled tool call during a permission
 prompt, before you do.
 

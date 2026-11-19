@@ -16,20 +16,8 @@ shell.check_background_op = nil
 ---@type fun(command: string): string?
 shell.check_interactive = nil
 
---- Extract filesystem paths referenced by `command` for workspace permission checks.
----@type fun(command: string): string[]
-shell.extract_paths = nil
-
---- Return true when `command` contains shell output redirection such as `>` or `>>`.
----@type fun(command: string): boolean
-shell.has_output_redirection = nil
-
---- Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`). Operators themselves are dropped.
+--- Split `command` into the sequence of subcommands separated by shell operators (`;`, `&`, `&&`, `||`, `|`) outside quotes. Operators themselves are dropped.
 ---@type fun(command: string): string[]
 shell.split = nil
-
---- Split `command` into subcommands and pair each with the operator that followed it. Returns rows of `{ command = string, op = string? }`.
----@type fun(command: string): table
-shell.split_with_ops = nil
 
 return shell

@@ -3481,7 +3481,7 @@ mod tests {
     fn vim_insert_plain_less_than_inserts_despite_named_key_prefixes() {
         let mut app = TestApp::builder()
             .with_vim(true)
-            .with_mode(AgentMode::parse("apply").unwrap())
+            .with_mode(AgentMode::parse("write").unwrap())
             .build();
 
         app.press(KeyCode::Char('<'));
@@ -3537,7 +3537,7 @@ mod tests {
             }],
             Vec::new(),
         );
-        assert_eq!(app.tui.core.config.mode, AgentMode::normal());
+        assert_eq!(app.tui.core.config.mode, AgentMode::read());
 
         app.press(KeyCode::BackTab);
 

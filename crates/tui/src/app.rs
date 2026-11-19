@@ -192,6 +192,14 @@ impl SessionPersistence {
         matches!(self, Self::Ephemeral(_))
     }
 
+    /// The directory that holds every session's artifacts.
+    fn artifacts_root(&self, sessions: &smelt_core::session::SessionStorage) -> std::path::PathBuf {
+        match self {
+            Self::Persistent => sessions.store().artifacts_dir(),
+            Self::Ephemeral(ephemeral) => ephemeral.path().to_path_buf(),
+        }
+    }
+
     fn artifact_dir(
         &self,
         sessions: &smelt_core::session::SessionStorage,
@@ -931,7 +939,6 @@ pub enum AppFocus {
 pub(crate) struct TurnState {
     pub(crate) turn_id: u64,
     pub(crate) pending: Vec<PendingTool>,
-    pub(crate) permissions: std::sync::Arc<smelt_permissions::Permissions>,
     pub(crate) submitted_history_idx: usize,
     pub(crate) rewind_history_idx: Option<usize>,
     pub(crate) assistant_output_started: bool,
@@ -1602,14 +1609,14 @@ impl TuiApp {
             .session()
             .mode
             .as_deref()
-            .unwrap_or("normal");
+            .unwrap_or("read");
         let mode = if let Some(live) = self.conversation.live_session() {
             live.effective_mode_at(hist_idx, fallback)?
         } else {
             protocol::effective_mode_at(&self.conversation.session().history, hist_idx, fallback)
                 .to_string()
         };
-        Ok(protocol::AgentMode::parse(&mode).unwrap_or_else(protocol::AgentMode::normal))
+        Ok(protocol::AgentMode::parse(&mode).unwrap_or_else(protocol::AgentMode::read))
     }
 
     pub(crate) fn current_context_note_text(&self) -> String {
@@ -1921,7 +1928,6 @@ impl TuiApp {
         config: smelt_core::RuntimeState,
         startup_overrides: smelt_core::StartupOverrides,
         engine: EngineHandle,
-        permissions: smelt_permissions::PermissionsHandle,
         shared_session: Arc<Mutex<Option<SharedSessionState>>>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
@@ -2100,10 +2106,12 @@ impl TuiApp {
             startup_overrides,
             engine,
             FrontendKind::Tui,
-            permissions,
             clock,
             env,
         );
+        core.permissions.set_project(&workspace.project_context());
+        core.permissions
+            .set_artifacts(session_persistence.artifacts_root(&core.sessions));
         core.skills = skills;
         core.mcp = mcp;
         let sessions = core.sessions.clone();

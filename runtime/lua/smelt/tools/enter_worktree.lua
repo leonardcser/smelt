@@ -16,7 +16,8 @@ smelt.transcript.register_tool("enter_worktree", {
 smelt.tools.register({
   name = "enter_worktree",
   description = "Create or open a managed git worktree and switch smelt's actual process working directory into it. Use this when the user asks to implement in a new worktree.",
-  effect = "write",
+  -- The new worktree may live outside the workspace.
+  access = "full",
   execution_mode = "sequential",
   headless = false,
   claude_code = { replaces = { "EnterWorktree" } },

@@ -15,4 +15,4 @@ expression: frame.text()
   1. Keep session
   2. Retry compaction
   3. Archive and continue
- ○ normal                                                                 1:1 0%
+ ○ read                                                                   1:1 0%

@@ -1,6 +1,6 @@
 {
   "_about": "Prompt input regression: raw control characters delivered as KeyCode::Char must be ignored so they cannot create unwrappable prompt rows in tiny viewports.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "key_shift",

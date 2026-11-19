@@ -1,11 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash for f in *.rs; do                                               14:37:03
          rustfmt "$f"
        done
-
 
 
 
@@ -18,9 +17,10 @@ expression: text
          rustfmt "$f"
        done
 
- Allow?
+ Run this command?
   1. allow once
   2. deny
+  3. allow bash for this session
 
   press tab to add a reason…
- ○ normal                                                                 1:1 0%
+ ○ read                                                                   1:1 0%

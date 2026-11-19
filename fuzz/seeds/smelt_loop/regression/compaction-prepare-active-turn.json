@@ -1,6 +1,6 @@
 {
   "_about": "Compaction fuzz seed: drive HostCall::PrepareRequest through EngineAsk response while an active turn is running, preserving turn phase/state.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_compaction_prepare_request",

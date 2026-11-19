@@ -1,6 +1,6 @@
 ---
 title: "Recipes"
-description: "Short, copy-paste smelt configs for common goals: a local model, API keys, vim with file icons, a cautious or hands-off agent, helper models and per-project rules."
+description: "Short, copy-paste smelt configs for common goals: a local model, API keys, vim with file icons, a cautious or hands-off agent, helper models and per-project policy."
 ---
 
 # Recipes
@@ -114,55 +114,42 @@ such as the accent, see [Themes and keymaps](appearance.md).
 
 ## Run with extra caution
 
-Starts every session read-only in plan mode, lets read-only git commands
-through, and blocks a few destructive ones outright. `deny` always wins over
-`allow`.
+Starts every session read-only in plan mode, and never lets a call run outside
+the sandbox or write outside the workspace, even when you would approve it.
 
 ```lua
 smelt.defaults.set({ mode = "plan" })
 smelt.remember.set({ mode = false }) -- always start in plan, not the last mode
 
-smelt.permissions.extend({
-  default = {
-    patterns = {
-      bash = {
-        allow = { "git status *", "git diff *", "git log *" },
-        deny = { "rm -rf *", "git push --force *", "git reset --hard *", "sudo *" },
-      },
-    },
-  },
-})
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  if call.access == "full" and call.mode.name ~= "yolo" then return "deny" end
+  return check(call)
+end
 ```
+
+On a machine with no sandbox (see `smelt.sandbox.status()`), every `bash` call
+counts as `full`, so this denies all shell commands outside yolo mode.
 
 ## Let the agent work on its own
 
-Starts in apply mode, where edits go through without asking, runs the commands
-you trust without asking, and sends a desktop notification when a turn
-finishes.
+Starts in write mode, where edits and commands inside the workspace run without
+asking, lets the agent work in a second project, and notifies you when a turn
+finishes. The sandbox does not block the network, so this makes `git push` ask
+first.
 
 ```lua
-smelt.defaults.set({ mode = "apply" })
+smelt.defaults.set({ mode = "write" })
 smelt.settings.notifications = { turn_end = true }
+smelt.permissions.paths({ ["~/dev/shared-lib"] = "allow" })
 
-smelt.permissions.extend({
-  apply = {
-    patterns = {
-      bash = {
-        allow = { "git status *", "git diff *", "git commit *", "cargo check *", "cargo test *" },
-      },
-    },
-  },
-  default = {
-    patterns = {
-      bash = { deny = { "rm -rf *", "git push --force *", "sudo *" } },
-    },
-  },
-})
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  local command = call.tool == "bash" and call.args.command or ""
+  if command:find("git push", 1, true) then return "ask" end
+  return check(call)
+end
 ```
-
-Permissions guard against mistakes, not against an agent that tries to escape.
-For untrusted prompts or models, run smelt in a container. See
-[Isolation](../reference/permissions.md#isolation).
 
 ## Quiet the interface
 
@@ -187,13 +174,13 @@ root.
 -- .smelt/init.lua
 smelt.settings.show_tips = false
 
-smelt.permissions.extend({
-  default = {
-    patterns = {
-      bash = { allow = { "git status *", "git diff *", "cargo test *" } },
-    },
-  },
-})
+-- Let the test suite write build output without asking in read mode.
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  local command = call.tool == "bash" and call.args.command or ""
+  if call.access == "write" and command:match("^cargo test") then return "allow" end
+  return check(call)
+end
 ```
 
 For instructions the agent should always follow in a project, such as build

@@ -87,11 +87,23 @@ pub struct McpToolDef {
     pub description: String,
     pub input_schema: serde_json::Value,
     pub timeout: Duration,
+    /// The server marks the tool read-only (`readOnlyHint`).
+    pub read_only: bool,
 }
 
 impl McpToolDef {
     pub fn qualified_name(&self) -> String {
         sanitize_name(&format!("{}_{}", self.server_name, self.tool_name))
+    }
+
+    /// Read-only tools run at `read`. Anything else may change files
+    /// anywhere, so it runs at `full`.
+    pub fn access(&self) -> crate::permissions::Access {
+        if self.read_only {
+            crate::permissions::Access::Read
+        } else {
+            crate::permissions::Access::Full
+        }
     }
 }
 
@@ -481,13 +493,19 @@ impl McpServer {
             .map(|t| {
                 let tool_name = t.name.to_string();
                 let input_schema = t.schema_as_json_value();
-                let description = t.description.unwrap_or_default().to_string();
+                let description = t.description.clone().unwrap_or_default().to_string();
+                let read_only = t
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.read_only_hint)
+                    .unwrap_or(false);
                 McpToolDef {
                     server_name: self.name.clone(),
                     tool_name,
                     description,
                     input_schema,
                     timeout: timeout_dur,
+                    read_only,
                 }
             })
             .collect();
@@ -829,6 +847,15 @@ impl McpManager {
     /// Snapshot of every discovered tool across every connected server.
     /// Sorted by `(server_name, tool_name)` so callers see a stable order
     /// despite the underlying `HashMap`.
+    /// The access level of the MCP tool `qualified_name`, when one exists.
+    pub fn tool_access(&self, qualified_name: &str) -> Option<crate::permissions::Access> {
+        self.servers_snapshot()
+            .iter()
+            .flat_map(|server| server.tools())
+            .find(|def| def.qualified_name() == qualified_name)
+            .map(|def| def.access())
+    }
+
     pub fn tool_defs(&self) -> Vec<McpToolDef> {
         let mut defs: Vec<McpToolDef> = self
             .servers_snapshot()
@@ -1063,6 +1090,7 @@ mod tests {
             description: String::new(),
             input_schema: serde_json::Value::Null,
             timeout: Duration::from_millis(30000),
+            read_only: false,
         }
     }
 

@@ -5,4 +5,4 @@ expression: upgrade_status_dialog(&mut app)
 ─ upgrade status ───────────────────────────────────────────
  No upgrades yet
  Run /upgrade to check and install updates.
- ○ normal                                             1:1 0%
+ ○ read                                               1:1 0%

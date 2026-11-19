@@ -22,11 +22,11 @@ expression: frame.text()
     2 +     a.checked_add(b).expect("overflow")
     3   }
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
- Allow?
+ Edit this file?
   1. allow once
   2. deny
   3. allow edit_file for this session
-  4. allow edit_file in workspace ~/cwd
+  4. allow src/ for this session
 
   press tab to add a reason…
- ○ normal                                                                 1:1 0%
+ ○ read                                                                   1:1 0%

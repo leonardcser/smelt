@@ -9,7 +9,8 @@ your own `init.lua`) to try them out. Copy `plugin.lua` to
   `smelt config default`: built-in settings set to their default values, with
   commented provider, MCP, permission, model preference, and theme examples.
 - **per_project.lua**: example content for a trusted `.smelt/init.lua`: project
-  settings, permission rules, and a project-specific slash command.
+  settings, a permission policy wrapper, an extra sandbox directory, and a
+  project-specific slash command.
 - **plugin.lua**: a small hot-reload-friendly plugin module: registers a slash
   command, keeps module state, and adds a statusline source from
   `smelt.lifecycle.on_ready`.

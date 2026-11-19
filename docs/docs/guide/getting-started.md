@@ -51,6 +51,11 @@ description: "Install smelt on Linux, macOS or Windows, log in with ChatGPT, Git
     cargo install --locked --git https://github.com/leonardcser/smelt.git smelt-agent
     ```
 
+On Linux, install bubblewrap (the `bubblewrap` package; most desktop
+distributions have it) so the agent's commands run in the
+[sandbox](../reference/permissions.md#the-sandbox). Without it, every command
+asks first.
+
 ### Updates
 
 smelt checks for a new release at startup and every hour. It installs the
@@ -151,7 +156,7 @@ shows what it wants to do. Choose **allow once**, allow for the **session** or
 
 A few keys to know:
 
-- `Shift+Tab` cycles the mode (Normal, Plan, Apply, Yolo). The status bar shows
+- `Shift+Tab` cycles the mode (Read, Plan, Write, Yolo). The status bar shows
   the current one.
 - Keep typing while it works: `Enter` queues a message, `Ctrl+Enter` steers.
 - `Esc Esc` cancels, or rewinds when idle. `/` opens the command picker and `F1`
@@ -175,6 +180,6 @@ Switch models at any time with `/model`. Config changes reload automatically.
 ## Next
 
 - [Common workflows](workflows.md): modes, approvals, steering, sessions, goals
-- [Recipes](../customize/recipes.md): copy-paste configs for a local model, vim keys, permissions
+- [Recipes](../customize/recipes.md): copy-paste configs for a local model, vim keys, a cautious or hands-off agent
 - [Customize](../customize/index.md): providers, settings, themes, commands
 - [Troubleshooting](troubleshooting.md): startup, terminal and config problems

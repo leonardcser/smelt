@@ -470,8 +470,8 @@ pub struct TurnError {
     pub message: String,
 }
 
-/// Payload for the `confirm_resolved` signal. `decision` is a stable string matching the
-/// resolved `ConfirmChoice` variant + scope (e.g. `"yes"`, `"always_session"`).
+/// Payload for the `confirm_resolved` signal. `decision` is the resolved
+/// `ConfirmChoice`: `"yes"`, `"no"` or `"session"`.
 #[derive(Debug, Clone)]
 pub struct ConfirmResolved {
     pub handle_id: u64,
@@ -525,7 +525,16 @@ pub struct ConfirmRequested {
     /// Styled summary - the sole source of truth for the dialog body header.
     pub summary: protocol::StyledLines,
     pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub grant_options: Vec<smelt_transcript::transcript_model::ConfirmApprovalOption>,
+    /// The access the call needs; "allow for this session" approves the tool up to it.
+    pub access: protocol::Access,
+    /// The path the call touches that needs the most access, for display.
+    pub path: Option<String>,
+    /// `"read"` or `"write"`: what the call does to `path`.
+    pub intent: Option<&'static str>,
+    /// An `ask` rule protects `path`.
+    pub protected: bool,
+    /// The directory "allow for this session" can approve, for display.
+    pub scope: Option<String>,
 }
 
 /// Single entry in the `work_busy` signal payload. One per live
@@ -917,16 +926,11 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         let _ = t.set("handle_id", r.handle_id);
         let _ = t.set("tool_name", r.tool_name.as_str());
         let _ = t.set("summary", styled_lines_to_lua(lua, &r.summary));
-        if let Ok(options) = lua.create_table() {
-            for (i, option) in r.grant_options.iter().enumerate() {
-                if let Ok(option_tbl) = lua.create_table() {
-                    let _ = option_tbl.set("id", option.id.as_str());
-                    let _ = option_tbl.set("label", option.label.as_str());
-                    let _ = options.set(i + 1, option_tbl);
-                }
-            }
-            let _ = t.set("grant_options", options);
-        }
+        let _ = t.set("access", r.access.as_str());
+        let _ = t.set("path", r.path.as_deref());
+        let _ = t.set("intent", r.intent);
+        let _ = t.set("protected", r.protected);
+        let _ = t.set("scope", r.scope.as_deref());
         if let Ok(args) = lua.create_table() {
             for (k, v) in &r.args {
                 if let Ok(lv) = crate::lua::value::from_json(lua, v) {
@@ -1027,7 +1031,7 @@ mod tests {
     fn builtin_signal_metadata_matches_declarations() {
         let signals = build_with_builtins(SignalSeeds {
             vim_mode: "insert".into(),
-            agent_mode: "normal".into(),
+            agent_mode: "read".into(),
             model: Some("model".into()),
             reasoning: "off".into(),
             cwd: "/tmp".into(),
@@ -1337,7 +1341,7 @@ mod tests {
         let lua = Lua::new();
         let signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
-            agent_mode: "normal".into(),
+            agent_mode: "read".into(),
             model: Some("anthropic/claude-opus-4-7".into()),
             reasoning: "off".into(),
             cwd: "/tmp/work".into(),
@@ -1348,7 +1352,7 @@ mod tests {
         // Stateful signals with primitive projectors return their seeds.
         for (name, expected) in [
             ("vim_mode", "Insert"),
-            ("agent_mode", "normal"),
+            ("agent_mode", "read"),
             ("model", "anthropic/claude-opus-4-7"),
             ("reasoning", "off"),
             ("cwd", "/tmp/work"),
@@ -1460,7 +1464,7 @@ mod tests {
         let lua = Lua::new();
         let signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
-            agent_mode: "normal".into(),
+            agent_mode: "read".into(),
             model: Some("m".into()),
             reasoning: "off".into(),
             cwd: "/".into(),
@@ -1504,7 +1508,7 @@ mod tests {
             "confirm_resolved",
             Rc::new(ConfirmResolved {
                 handle_id: 7,
-                decision: "always_session".into(),
+                decision: "session".into(),
             }),
         );
         signals.emit_dyn(
@@ -1522,12 +1526,8 @@ mod tests {
                 tool_name: "bash".into(),
                 summary: protocol::StyledLines::from_plain("ls"),
                 args: std::collections::HashMap::new(),
-                grant_options: vec![smelt_transcript::transcript_model::ConfirmApprovalOption {
-                    id: "grant_0_session".into(),
-                    label: "allow bash for this session".into(),
-                    target: smelt_transcript::transcript_model::ApprovalTarget::Session,
-                    grants: Vec::new(),
-                }],
+                access: protocol::Access::Write,
+                ..Default::default()
             }),
         );
 
@@ -1567,7 +1567,7 @@ mod tests {
         match projected("confirm_resolved") {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("handle_id").unwrap(), 7);
-                assert_eq!(t.get::<String>("decision").unwrap(), "always_session");
+                assert_eq!(t.get::<String>("decision").unwrap(), "session");
             }
             other => panic!("expected Table, got {other:?}"),
         }
@@ -1590,13 +1590,7 @@ mod tests {
                 let line: mlua::Table = summary.get(1).unwrap();
                 let span: mlua::Table = line.get(1).unwrap();
                 assert_eq!(span.get::<String>("text").unwrap(), "ls");
-                let options: mlua::Table = t.get("grant_options").unwrap();
-                let option: mlua::Table = options.get(1).unwrap();
-                assert_eq!(option.get::<String>("id").unwrap(), "grant_0_session");
-                assert_eq!(
-                    option.get::<String>("label").unwrap(),
-                    "allow bash for this session"
-                );
+                assert_eq!(t.get::<String>("access").unwrap(), "write");
             }
             other => panic!("expected Table, got {other:?}"),
         }
@@ -1609,7 +1603,7 @@ mod tests {
         let lua = Lua::new();
         let mut signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
-            agent_mode: "normal".into(),
+            agent_mode: "read".into(),
             model: Some("m".into()),
             reasoning: "off".into(),
             cwd: "/".into(),
@@ -1633,7 +1627,7 @@ mod tests {
                 .expect("builtin signal should be declared");
         }
 
-        signals.set_dyn("agent_mode", Rc::new("apply".to_string()));
+        signals.set_dyn("agent_mode", Rc::new("write".to_string()));
         signals.emit_dyn(
             "turn_complete",
             Rc::new(TurnMeta {
@@ -1678,7 +1672,8 @@ mod tests {
                 tool_name: "bash".into(),
                 summary: protocol::StyledLines::from_plain("ls"),
                 args: std::collections::HashMap::new(),
-                grant_options: vec![],
+                access: protocol::Access::Full,
+                ..Default::default()
             }),
         );
         signals.emit_dyn(

@@ -10,7 +10,8 @@ smelt.transcript.register_tool("switch_cwd", {
 smelt.tools.register({
   name = "switch_cwd",
   description = "Switch smelt's actual process working directory. Use this when you need smelt itself, future relative tool calls, session metadata, prompt context, and workspace permissions to move to a different checkout or directory. This is different from running `cd` in bash, which only affects that one shell command.",
-  effect = "write",
+  -- The cwd decides the workspace, so moving outside it counts as "full".
+  access = "write",
   execution_mode = "sequential",
   headless = false,
   parameters = {
@@ -26,9 +27,8 @@ smelt.tools.register({
   summary = function(args, ctx)
     return smelt.tools.path_summary(trim(args.path or ""), ctx)
   end,
-  paths_for_workspace = function(args)
-    local path = trim(args.path or "")
-    return path ~= "" and { { path = smelt.path.resolve(path), kind = "directory" } } or {}
+  paths = function(args)
+    return { trim(args.path or "") }
   end,
   execute = function(args)
     local path = trim(args.path or "")

@@ -560,7 +560,7 @@ Spec for `smelt.engine.ask`.
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
+Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -573,8 +573,6 @@ Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors w
 | `min_p` | `number` |  | Minimum-probability cutoff override. |
 | `repeat_penalty` | `number` |  | Repeat-penalty override. |
 | `reasoning_effort` | `string` |  | Reasoning-effort override. Known and provider-defined string labels are accepted. |
-| `tools` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn. |
-| `[string]` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-subcommand pattern buckets keyed by tool name. |
 
 ### `smelt.engine.ContinuationState`
 
@@ -636,18 +634,6 @@ Request object passed to `smelt.engine.on_prepare_request`.
 | `estimated_tokens` | `integer` | yes | Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions. |
 | `estimated_context_tokens` | `integer` | yes | Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the matching token snapshot. After a compaction checkpoint and before the next provider usage report, this starts from the checkpoint's post-compaction estimate. Before either baseline exists, it equals `estimated_tokens`. |
 | `context_estimate` | [smelt.engine.PrepareContextEstimate](types.md#smeltenginepreparecontextestimate) | yes | Structured breakdown explaining how `estimated_context_tokens` was computed. |
-
-### `smelt.engine.RuleOverride`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-matter `{ allow?, ask?, deny? }` shape.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `allow` | `string[]` |  | Patterns that auto-allow. |
-| `ask` | `string[]` |  | Patterns that always prompt. |
-| `deny` | `string[]` |  | Patterns that auto-deny. |
 
 ### `smelt.files.Grep`
 
@@ -803,7 +789,25 @@ MCP server config accepted by `smelt.mcp.register`.
 | `icon` | `string` | yes |  |
 | `hl_group` | `string` | yes |  |
 | `note` | `string` | yes |  |
-| `permissions` | `table` | yes |  |
+| `access` | [smelt.permissions.Access](types.md#smeltpermissionsaccess) | yes | The most a call may do without asking: "read", "write" (inside the workspace or the sandbox), or "full". |
+| `above` | [smelt.mode.Above](types.md#smeltmodeabove) | yes | What happens to calls that need more than `access`. |
+
+### `smelt.mode.Spec`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+A mode passed to `smelt.mode.register`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | Mode name: lowercase letters, digits, `-` and `_`. |
+| `label` | `string` |  | Status bar label. Default: the name. |
+| `icon` | `string` |  | Status bar icon. |
+| `hl_group` | `string` |  | Status bar highlight group. Default: `SmeltModeDefault`. |
+| `note` | `string` |  | What the model is told when the session enters the mode. |
+| `access` | [smelt.permissions.Access](types.md#smeltpermissionsaccess) |  | The most a call may do without asking. Default: `"read"`. |
+| `above` | [smelt.mode.Above](types.md#smeltmodeabove) |  | What happens to calls that need more. Default: `"ask"`. |
+| `after` | `string` |  | Insert the new mode after this one in the cycle. |
 
 ### `smelt.notify.Scoped`
 
@@ -1072,154 +1076,37 @@ Area for `slice:window`, in cells of the window's text from its top-left.
 | `width` | `integer` |  | Default: to the right edge of the text. |
 | `height` | `integer` |  | Default: to the bottom edge of the text. |
 
-### `smelt.permissions.EffectRules`
+### `smelt.permissions.Call`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Effect-level decisions that apply to tools without a more specific rule.
-
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `read` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that only read data. |
-| `write` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that write or mutate data. |
-| `network` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that access the network. |
-| `process` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that start or control processes. |
-| `config` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that modify configuration. |
-| `user` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that require direct user interaction. |
-| `other` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools whose effect has no more specific category. |
+| `tool` | `string` | yes | Tool name. |
+| `args` | `table` | yes | Tool arguments. |
+| `access` | [smelt.permissions.Access](types.md#smeltpermissionsaccess) | yes | What the call may change. |
+| `mode` | [smelt.mode.Mode](types.md#smeltmodemode) | yes | The active mode. |
+| `paths` | [smelt.permissions.Path[]](types.md#smeltpermissionspath) | yes | The paths the tool declares, each with the access it needs. |
 
-### `smelt.permissions.ListResult`
+### `smelt.permissions.Path`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Current permission state returned by `smelt.permissions.list()`.
-
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) | yes | Session-scoped tool/pattern approvals for this run. |
-| `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) | yes | Session-scoped path grants for this run. |
-| `workspace` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Workspace rules loaded from the on-disk store rooted at the current cwd. |
-| `workspace_revision` | `integer` | yes | Revision required to replace the workspace rules safely. |
-| `repository` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Repository rules shared by all worktrees. Empty outside a Git repository. |
-| `repository_revision` | `integer` | yes | Revision required to replace the repository rules safely. |
+| `path` | `string` | yes | An absolute path the call reads or writes. |
+| `intent` | [smelt.permissions.Intent](types.md#smeltpermissionsintent) | yes | Whether it reads or writes the path. |
+| `access` | [smelt.permissions.Access](types.md#smeltpermissionsaccess) | yes | What the call needs for this path. |
 
-### `smelt.permissions.ModePerms`
+### `smelt.permissions.PathsOpts`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Permission slots that apply within a single agent mode.
+Options for `smelt.permissions.paths`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `tools` | [smelt.permissions.RuleSet](types.md#smeltpermissionsruleset) |  | Exact tool-name `allow`/`ask`/`deny` entries. |
-| `effects` | [smelt.permissions.EffectRules](types.md#smeltpermissionseffectrules) |  | Effect-level decisions keyed by effect name. |
-| `paths` | [smelt.permissions.PathRules](types.md#smeltpermissionspathrules) |  | Trusted directory prefixes for path-aware tool calls in this mode. |
-| `patterns` | `table<string, smelt.permissions.RuleSet>` |  | Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …). |
-
-### `smelt.permissions.PathRules`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Directory prefixes trusted for path-aware tools and shell commands outside the workspace.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `allow` | `string[]` |  | Directory prefixes to trust without a path prompt (supports `~` and symlinks). |
-
-### `smelt.permissions.PolicySpec`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `default` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Baseline rules applied unless a mode-specific slot overrides. |
-| `[string]` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Mode-specific rules keyed by registered mode name. |
-
-### `smelt.permissions.RevokeSpec`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-One exact permission entry to revoke transactionally.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `scope` | `string` | yes | Permission scope: `"session"`, `"workspace"`, or `"repository"`. |
-| `tool` | `string` | yes | Tool name the entry applies to. Use `"directory"` for path-prefix entries. |
-| `pattern` | `string` | yes | Exact pattern to remove. Use `"*"` for a blanket tool approval. |
-
-### `smelt.permissions.RuleSet`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-`allow`/`ask`/`deny` arrays accepted by permission policy sections.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `allow` | `string[]` |  | Patterns that auto-allow without prompting. |
-| `ask` | `string[]` |  | Patterns that always prompt. |
-| `deny` | `string[]` |  | Patterns that auto-deny. |
-
-### `smelt.permissions.ScopeReplacement`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Revision-checked replacement for one persisted permission scope.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `revision` | `integer` | yes | Revision returned by the `smelt.permissions.list()` snapshot being edited. |
-| `rules` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Complete replacement rule set for this scope. |
-
-### `smelt.permissions.SessionEntry`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-A single session permission entry (one approved tool/pattern pair).
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `tool` | `string` | yes | Tool name the rule applies to (e.g. `"bash"`). Special value `"directory"` grants generic path access. |
-| `pattern` | `string` | yes | Pattern matched against the tool's argument bucket. |
-
-### `smelt.permissions.SessionPathGrant`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, the grant applies only in that mode.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `kind` | `string` | yes | Grant kind. Currently only `"path"` is supported. |
-| `mode` | `string` |  | Optional mode, e.g. `"plan"`. Omit for mode-independent path trust. |
-| `tool` | `string` | yes | Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`. |
-| `access` | `string` | yes | Path access granted: `"read"` or `"write"`. |
-| `path_prefix` | `string` | yes | Directory prefix covered by the grant. |
-
-### `smelt.permissions.SyncSpec`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Spec for `smelt.permissions.sync`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) |  | Session entries to replace for this run. Omit to leave them unchanged. |
-| `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) |  | Tool-specific session path grants to replace. Omit to leave them unchanged. |
-| `workspace` | [smelt.permissions.ScopeReplacement](types.md#smeltpermissionsscopereplacement) |  | Revision-checked workspace replacement. Cannot be combined with `repository`. |
-| `repository` | [smelt.permissions.ScopeReplacement](types.md#smeltpermissionsscopereplacement) |  | Revision-checked repository replacement. Cannot be combined with `workspace`. |
-
-### `smelt.permissions.WorkspaceRule`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-A workspace permission rule (one tool with N patterns, persisted to disk).
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `tool` | `string` | yes | Tool name the rule applies to. |
-| `patterns` | `string[]` | yes | Patterns granted for this tool. |
+| `modes` | `string[]` |  | Set the rules for these modes only. Default: every mode. |
 
 ### `smelt.picker.Item`
 
@@ -1510,16 +1397,6 @@ Claude Code visibility and native capability ownership for a registered tool.
 | `enabled` | `boolean` |  | Set false to hide this tool from Claude Code. Custom tools are visible by default. |
 | `replaces` | `string[]` |  | Native tool names replaced by this tool, for example `{ "Bash" }`. Replaced native tools are disabled, not merely discouraged in the prompt. |
 
-### `smelt.tools.PermissionDefaults`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `[string]` | [smelt.tools.Decision](types.md#smelttoolsdecision) |  | Per-mode decisions keyed by registered mode name. |
-
 ### `smelt.tools.ToolDef`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
@@ -1532,17 +1409,13 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `execute` | `function` | yes | Required handler: `execute(args, ctx)` - returns the tool result. `ctx.prepared` contains this invocation's preparation snapshot, when provided. |
 | `description` | `string` |  | Human-readable description shown to the model. |
 | `parameters` | `table` |  | JSON-schema parameters table passed through to the model. |
-| `permission_defaults` | [smelt.tools.PermissionDefaults](types.md#smelttoolspermissiondefaults) |  | Per-mode default decisions. |
-| `effect` | [smelt.tools.Effect](types.md#smelttoolseffect) |  | Coarse side-effect classification used by permission policy. |
-| `default_allow` | `string[]` |  | Subcommand patterns that auto-allow without prompting. |
-| `subpattern_parser` | `string` |  | Built-in subpattern parser kind (e.g. `"bash"`). |
+| `access` | `any` |  | What a call may change: `"read"`, `"write"` (the default), `"full"`, or `access(args, mode) -> smelt.permissions.Access` when it depends on the arguments. A call needs the highest `smelt.permissions.path_access` of its `paths`; a `"write"` call with no `paths` needs `"full"`. |
+| `paths` | `function` |  | `paths(args) -> string[]` - the paths a `"read"` call reads, or that any other call changes. Relative paths resolve against the project cwd. |
 | `modes` | `table` |  | Agent modes the tool is available in; nil means all modes. |
 | `execution_mode` | `string` |  | `"concurrent"` (default) or `"sequential"`. |
 | `summary` | `function` |  | `summary(args) -> string | styled_lines | nil` - styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` - same span shape as `buf:styled` plus optional `selectable = false` for chrome text and `title_suffix = true` for metadata rendered after the live tool timer. |
-| `approval_patterns` | `function` |  | `approval_patterns(args, prepared) -> string[]?` - yielding hook for one-click approval patterns. |
 | `prepare` | `function` |  | `prepare(args) -> table?` - yielding, read-only preparation for this invocation. The returned snapshot is passed to preflight and preview callbacks. Use async APIs for file I/O; rendering callbacks must only format prepared data. |
 | `preflight` | `function` |  | `preflight(args, prepared) -> string?` - yielding validation hook; return an error string to reject execution. Errors and timeouts fail closed. |
-| `paths_for_workspace` | `function` |  | `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. Callback errors and malformed entries reject tool evaluation rather than being treated as no paths. |
 | `preview` | `function` |  | `preview(args, prepared) -> smelt.layout` - pure pre-execute preview render. The confirm dialog renders the invocation's prepared snapshot without I/O. |
 | `preview_output` | `function` |  | `preview_output(args, prepared) -> { content, is_error?, metadata?, display_content? }|nil` - immutable pending transcript output derived from final streamed arguments before execution. Growing display payloads belong in `display_content`, not JSON metadata. |
 | `draft_preview` | `function` |  | `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort renderer for streamed partial arguments in the transcript. |
@@ -2113,6 +1986,14 @@ Open alias - accepts any `string`. Well-known names: `"block_done"` \| `"cmd_pos
 
 Variants: `"change"` \| `"submit"` \| `"cancel"`
 
+### `smelt.mode.Above`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+What happens to a call that needs more access than its mode allows.
+
+Variants: `"ask"` \| `"deny"`
+
 ### `smelt.paint.Event`
 
 **Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
@@ -2121,11 +2002,27 @@ Paint-leaf events accepted by `paint:on(event, fn)`.
 
 Variants: `"press"` \| `"release"` \| `"drag"` \| `"enter"` \| `"leave"` \| `"move"`
 
-### `smelt.permissions.Decision`
+### `smelt.permissions.Access`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Decision accepted by effect-level permission rules.
+What a tool call may change: `"read"` reads files only, `"write"` writes inside the workspace or runs in the write sandbox, `"full"` writes outside the workspace or runs without a sandbox.
+
+Variants: `"read"` \| `"write"` \| `"full"`
+
+### `smelt.permissions.Intent`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Whether a call reads or writes a path.
+
+Variants: `"read"` \| `"write"`
+
+### `smelt.permissions.Rule`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+What a path rule allows: `"allow"` (like the workspace: reads run, writes need `write`), `"ask"` (reads and writes need `full`) or `"deny"` (never).
 
 Variants: `"allow"` \| `"ask"` \| `"deny"`
 
@@ -2144,22 +2041,6 @@ Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"auto_co
 Which side of a cell a color paints, for `smelt.theme.rgb`.
 
 Variants: `"fg"` \| `"bg"`
-
-### `smelt.tools.Decision`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
-
-Variants: `"allow"` \| `"ask"` \| `"deny"`
-
-### `smelt.tools.Effect`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Coarse side-effect classification used by permission policy.
-
-Variants: `"read"` \| `"write"` \| `"network"` \| `"user"` \| `"process"` \| `"config"` \| `"other"`
 
 ### `smelt.transcript.RendererPart`
 

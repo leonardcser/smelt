@@ -1,7 +1,7 @@
 {
   "_about": "Transcript triple-click selection used rematerialized transcript line-break offsets that could be out of sync with the live projected buffer after rendering. A stale hard-break offset made selection_anchor land inside a multibyte glyph.",
   "_fix": "fix(tui): derive transcript mouse breaks from the projected buffer",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "data": {

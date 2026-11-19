@@ -5,67 +5,9 @@ use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
 use crate::lua::value;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
-use lua_doc_derive::{LuaAlias, LuaOpts};
+use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use std::sync::Arc;
-
-/// Decision string accepted by `decide` callbacks and
-/// `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}`
-/// - the engine's `Error(_)` variant is not exposed.
-#[derive(Clone, Copy, Debug, LuaAlias)]
-#[lua(name = "smelt.tools.Decision")]
-pub enum LuaDecision {
-    Allow,
-    Ask,
-    Deny,
-}
-
-impl From<LuaDecision> for protocol::Decision {
-    fn from(d: LuaDecision) -> Self {
-        match d {
-            LuaDecision::Allow => protocol::Decision::Allow,
-            LuaDecision::Ask => protocol::Decision::Ask,
-            LuaDecision::Deny => protocol::Decision::Deny,
-        }
-    }
-}
-
-/// Coarse side-effect classification used by permission policy.
-#[derive(Clone, Copy, Debug, LuaAlias)]
-#[lua(name = "smelt.tools.Effect")]
-pub enum LuaToolEffect {
-    Read,
-    Write,
-    Network,
-    User,
-    Process,
-    Config,
-    Other,
-}
-
-impl From<LuaToolEffect> for smelt_permissions::ToolEffectKind {
-    fn from(effect: LuaToolEffect) -> Self {
-        match effect {
-            LuaToolEffect::Read => smelt_permissions::ToolEffectKind::Read,
-            LuaToolEffect::Write => smelt_permissions::ToolEffectKind::Write,
-            LuaToolEffect::Network => smelt_permissions::ToolEffectKind::Network,
-            LuaToolEffect::User => smelt_permissions::ToolEffectKind::User,
-            LuaToolEffect::Process => smelt_permissions::ToolEffectKind::Process,
-            LuaToolEffect::Config => smelt_permissions::ToolEffectKind::Config,
-            LuaToolEffect::Other => smelt_permissions::ToolEffectKind::Other,
-        }
-    }
-}
-
-/// Per-mode default decisions installed by `smelt.tools.register`.
-/// Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
-#[derive(Default, Debug, LuaOpts)]
-#[lua(name = "smelt.tools.PermissionDefaults")]
-pub struct LuaToolPermissionDefaults {
-    /// Per-mode decisions keyed by registered mode name.
-    #[lua(rest)]
-    pub modes: std::collections::HashMap<String, LuaDecision>,
-}
 
 /// Claude Code visibility and native capability ownership for a registered tool.
 #[derive(Debug, LuaOpts)]
@@ -96,15 +38,14 @@ pub struct LuaToolDef {
     pub description: String,
     /// JSON-schema parameters table passed through to the model.
     pub parameters: Option<mlua::Table>,
-    /// Per-mode default decisions.
-    pub permission_defaults: Option<LuaToolPermissionDefaults>,
-    /// Coarse side-effect classification used by permission policy.
-    pub effect: Option<LuaToolEffect>,
-    /// Subcommand patterns that auto-allow without prompting.
-    #[lua(default)]
-    pub default_allow: Vec<String>,
-    /// Built-in subpattern parser kind (e.g. `"bash"`).
-    pub subpattern_parser: Option<String>,
+    /// What a call may change: `"read"`, `"write"` (the default), `"full"`,
+    /// or `access(args, mode) -> smelt.permissions.Access` when it depends on
+    /// the arguments. A call needs the highest `smelt.permissions.path_access`
+    /// of its `paths`; a `"write"` call with no `paths` needs `"full"`.
+    pub access: Option<mlua::Value>,
+    /// `paths(args) -> string[]` - the paths a `"read"` call reads, or that
+    /// any other call changes. Relative paths resolve against the project cwd.
+    pub paths: Option<mlua::Function>,
     /// Agent modes the tool is available in; nil means all modes.
     pub modes: Option<mlua::Table>,
     /// `"concurrent"` (default) or `"sequential"`.
@@ -116,8 +57,6 @@ pub struct LuaToolDef {
     /// shape as `buf:styled` plus optional `selectable = false` for chrome text and
     /// `title_suffix = true` for metadata rendered after the live tool timer.
     pub summary: Option<mlua::Function>,
-    /// `approval_patterns(args, prepared) -> string[]?` - yielding hook for one-click approval patterns.
-    pub approval_patterns: Option<mlua::Function>,
     /// `prepare(args) -> table?` - yielding, read-only preparation for this invocation.
     /// The returned snapshot is passed to preflight and preview callbacks. Use async
     /// APIs for file I/O; rendering callbacks must only format prepared data.
@@ -125,8 +64,6 @@ pub struct LuaToolDef {
     /// `preflight(args, prepared) -> string?` - yielding validation hook; return an
     /// error string to reject execution. Errors and timeouts fail closed.
     pub preflight: Option<mlua::Function>,
-    /// `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. Callback errors and malformed entries reject tool evaluation rather than being treated as no paths.
-    pub paths_for_workspace: Option<mlua::Function>,
     /// `preview(args, prepared) -> smelt.layout` - pure pre-execute preview render.
     /// The confirm dialog renders the invocation's prepared snapshot without I/O.
     pub preview: Option<mlua::Function>,
@@ -227,38 +164,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let name = def.name;
                 let execute_handle = LuaHandle::from_func(lua, def.execute)?;
 
-                if let Some(perms) = def.permission_defaults {
-                    let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
-                    let entry = defaults.tool_decisions.entry(name.clone()).or_default();
-                    for (mode, decision) in perms.modes {
-                        entry.modes.insert(mode, decision.into());
+                let access = match def.access {
+                    None => mlua::Value::String(lua.create_string("write")?),
+                    Some(mlua::Value::String(access))
+                        if matches!(access.to_str()?.as_ref(), "read" | "write" | "full") =>
+                    {
+                        mlua::Value::String(access)
                     }
-                }
-                if let Some(effect) = def.effect {
-                    let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
-                    defaults.tool_effects.insert(name.clone(), effect.into());
-                }
-                if !def.default_allow.is_empty() {
-                    let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
-                    defaults
-                        .subcommand_allow
-                        .insert(name.clone(), def.default_allow);
-                }
-                if let Some(kind) = def.subpattern_parser {
-                    if let Some(parser) = smelt_permissions::builtin_subpattern_parser(&kind) {
-                        let mut defaults =
-                            s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
-                        defaults.subpattern_parsers.insert(name.clone(), parser);
+                    Some(access @ mlua::Value::Function(_)) => access,
+                    Some(_) => {
+                        return Err(LuaError::RuntimeError(format!(
+                            "tool `{name}`: access must be \"read\", \"write\", \"full\" or a function"
+                        )))
                     }
-                }
+                };
 
                 let stash = |f: mlua::Function| -> LuaResult<LuaHandle> {
                     LuaHandle::from_func(lua, f)
                 };
-                let approval_patterns_handle = def.approval_patterns.map(stash).transpose()?;
                 let preflight_handle = def.preflight.map(stash).transpose()?;
                 let prepare_handle = def.prepare.map(stash).transpose()?;
-                let paths_for_workspace_handle = def.paths_for_workspace.map(stash).transpose()?;
                 let preview_handle = def.preview.map(stash).transpose()?;
                 let preview_output_handle = def.preview_output.map(stash).transpose()?;
                 let has_draft_preview = def.draft_preview.is_some();
@@ -281,12 +206,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 if let Some(mode_str) = def.execution_mode {
                     meta.set("execution_mode", mode_str)?;
                 }
-                meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
-                meta.set("hook_preflight", preflight_handle.is_some() || prepare_handle.is_some())?;
-                meta.set(
-                    "hook_paths_for_workspace",
-                    paths_for_workspace_handle.is_some(),
-                )?;
+                meta.set("access", access)?;
+                if let Some(paths) = def.paths {
+                    meta.set("paths", paths)?;
+                }
                 meta.set("hook_preview", preview_handle.is_some())?;
                 meta.set("hook_preview_output", preview_output_handle.is_some())?;
                 meta.set("hook_draft_preview", has_draft_preview)?;
@@ -325,10 +248,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         ToolHandles {
                             execute: execute_handle,
                             execution_mode,
-                            approval_patterns: approval_patterns_handle,
                             preflight: preflight_handle,
                             prepare: prepare_handle,
-                            paths_for_workspace: paths_for_workspace_handle,
                             preview: preview_handle,
                             preview_output: preview_output_handle,
                         },

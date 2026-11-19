@@ -133,9 +133,8 @@ smelt.tools.register({
   name = "edit_file",
   description = "Perform exact string replacements in files. By default, old_string must be unique; set replace_all to replace every match.",
   override = true,
-  permission_defaults = { apply = "allow" },
   execution_mode = "sequential",
-  effect = "write",
+  access = "write",
   parameters = {
     type = "object",
     properties = {
@@ -165,9 +164,8 @@ smelt.tools.register({
   preflight = function(_, prepared)
     return prepared and prepared.err
   end,
-  paths_for_workspace = function(args)
-    local p = args.file_path or ""
-    return p ~= "" and { { path = p, kind = "file" } } or {}
+  paths = function(args)
+    return { args.file_path or "" }
   end,
   preview = planned_diff,
   preview_output = planned_output,

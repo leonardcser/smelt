@@ -552,6 +552,7 @@ end
 
 local function register_tools()
   smelt.tools.register({
+    access = "read",
     name = "get_goal",
     description = "Return the current session goal, including lifecycle state, progress, auto-continue, id, and timestamps.",
     parameters = { type = "object", properties = {}, required = smelt.json.array() },
@@ -562,6 +563,7 @@ local function register_tools()
   })
 
   smelt.tools.register({
+    access = "read",
     name = "create_goal",
     description = "Create a session goal only when the user explicitly asks to start, set, or create a persistent goal, or system/developer instructions explicitly require one. Do not infer goals from ordinary tasks, investigations, implementations, or requests to continue working. Fails if an unfinished goal already exists; use update_goal to report progress, done or blocked, or clear_goal when the user explicitly asks to remove it.",
     parameters = {
@@ -589,6 +591,7 @@ local function register_tools()
   })
 
   smelt.tools.register({
+    access = "read",
     name = "update_goal",
     description = "Report only on an existing goal. Set progress when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass, including the first after goal creation; not routine substeps, individual tool calls, or live activity. state=done requires current evidence proving the objective complete. state=blocked requires that no meaningful progress is possible without user input or external-state change. Give completion evidence or the exact blocker in reason. This tool cannot pause, resume, clear, or rewrite goals. Use clear_goal only when the user explicitly asks to remove the goal.",
     parameters = {
@@ -626,6 +629,7 @@ local function register_tools()
   })
 
   smelt.tools.register({
+    access = "read",
     name = "clear_goal",
     description = "Clear the current session goal only when the user explicitly asks to clear, cancel, stop, or remove it. Removes the goal and stops future goal-driven auto-continuation without marking it done or interrupting the current turn. Safe to call when no goal is set. Do not infer a request to clear the goal from a blocker or a change of topic.",
     parameters = { type = "object", properties = {}, required = smelt.json.array() },

@@ -13,4 +13,4 @@ expression: frame.text()
 
 ─ stats ──────────────────────────────────────────────────────────────
  No metrics recorded yet.
- ○ normal                                                     1:1 100%
+ ○ read                                                       1:1 100%

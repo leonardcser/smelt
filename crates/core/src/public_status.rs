@@ -413,7 +413,7 @@ mod tests {
                 focus: FocusState::Unfocused,
                 cwd: Some("/repo".to_string()),
                 session_id: Some("session".to_string()),
-                mode: Some("apply".to_string()),
+                mode: Some("write".to_string()),
                 headless: false,
             })
             .unwrap();

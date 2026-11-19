@@ -22,8 +22,6 @@ commands are easy to version-control and share with a team.
 description: commit staged changes
 model: openai/gpt-4o
 reasoning_effort: low
-bash:
-  allow: ["git *"]
 ---
 
 Create a conventional commit for the staged changes.
@@ -53,9 +51,6 @@ All fields are optional.
 | `reasoning_effort` | Reasoning level supported by the selected model |
 | `override`         | When true, replaces a built-in command of the same name |
 | `agent_skill`      | When true, also expose the command as a loadable [skill](../reference/api/skills.md) |
-| `tools`            | `allow` / `ask` / `deny` lists for tool permissions |
-| `bash`             | `allow` / `ask` / `deny` glob patterns for `bash` |
-| `web_fetch`        | `allow` / `ask` / `deny` glob patterns for URLs |
 
 ### Running shell commands in the template
 

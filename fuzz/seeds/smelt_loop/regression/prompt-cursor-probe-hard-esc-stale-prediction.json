@@ -1,6 +1,6 @@
 {
   "_about": "Prompt cursor probe seed: double Esc hard-cancels an active turn, then a stale prompt side-request response arrives before a new completed turn; typing must still advance normally.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_prompt_cursor_after_turn",

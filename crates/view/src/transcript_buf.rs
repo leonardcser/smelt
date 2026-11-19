@@ -5248,9 +5248,9 @@ pub mod tests {
             content: "before".into(),
         });
         transcript.push(Block::Mode {
-            text: "now in apply mode".into(),
+            text: "now in write mode".into(),
             icon: "● ".into(),
-            hl_group: "SmeltModeApply".into(),
+            hl_group: "SmeltModeWrite".into(),
         });
         transcript.push(Block::Text {
             content: "after".into(),
@@ -5260,7 +5260,7 @@ pub mod tests {
         let lines: Vec<&str> = rows.iter().map(|row| row.line.as_str()).collect();
         assert_eq!(
             lines,
-            vec!["before", "", "● now in apply mode", "", "after"]
+            vec!["before", "", "● now in write mode", "", "after"]
         );
     }
 
@@ -7924,9 +7924,9 @@ pub mod tests {
                 transcript.push(randomish_block(i, &mut seed));
             }
             transcript.push(Block::Mode {
-                text: "now in apply mode".into(),
+                text: "now in write mode".into(),
                 icon: "● ".into(),
-                hl_group: "SmeltModeApply".into(),
+                hl_group: "SmeltModeWrite".into(),
             });
 
             let theme = Theme::default();

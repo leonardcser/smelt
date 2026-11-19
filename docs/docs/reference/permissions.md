@@ -1,201 +1,216 @@
 ---
 title: "Permissions"
-description: "How smelt decides what the coding agent may do without asking: modes, rules, approval scopes, workspace restriction, and project trust."
+description: "How smelt decides what the coding agent may do without asking: access levels, modes, path rules, session approvals, the OS sandbox, and project trust."
 ---
 
 # Permissions
 
-The permission system controls what the agent can do without asking. Each
-[mode](../guide/workflows.md#review-before-it-changes-anything) has its own rules, and the prompt that appears
-when a tool is gated offers several scopes for approving the call.
+Every tool call needs an **access level**. Each
+[mode](../guide/workflows.md#review-before-it-changes-anything) runs calls up
+to its own level and asks (or denies) above it. [Path rules](#path-rules) say
+where calls may go.
 
-## How Rules Work
+## Access Levels
 
-Permissions exist so you can trade safety for speed. In a trusted codebase you
-might auto-approve every `git` command; on an unfamiliar repo you may want the
-agent to ask before every edit. The system lets you set these boundaries per
-mode, per tool, and per workspace.
+| Access  | Allows                                                        |
+| ------- | ------------------------------------------------------------- |
+| `read`  | Reads.                                                        |
+| `write` | Writes in the workspace, and commands in the write sandbox.   |
+| `full`  | Writes anywhere, and commands without a sandbox.              |
 
-Permissions are split between **tool-level** rules and **pattern-level**
-rules. The tool name (`bash`, `edit_file`, `web_fetch`, …) decides whether the
-call needs gating at all; pattern buckets (`bash`, `web_fetch`, `mcp`, and any
-tool that registers its own bucket) further refine the decision based on the
-call's arguments.
+The **workspace** is the project root and, in a Git repository, its worktrees
+and Git directory. Symlinks are resolved, so a link cannot point a write
+outside it.
 
-Each rule list has three slots:
+## Modes
 
-- **allow**: execute silently
-- **ask**: prompt for confirmation
-- **deny**: block (deny always wins over allow and ask)
+| Mode    | Runs without asking | Above that | `bash` runs in                      |
+| ------- | ------------------- | ---------- | ----------------------------------- |
+| `plan`  | `read`              | denied     | the read sandbox                    |
+| `read`  | `read`              | asks       | the read sandbox                    |
+| `write` | `read`, `write`     | asks       | the write sandbox                   |
+| `yolo`  | everything          | never asks | no sandbox, unless a `"deny"` rule exists |
 
-Patterns are globs. For pattern rules, the most specific (longest) matching
-pattern wins; on a tie, **ask** beats **allow**. Anything not matched falls back
-to tool, effect, and mode defaults.
-
-## Defaults
-
-Each mode has built-in defaults for every tool and for common shell commands.
-Reading is always allowed; editing asks in Normal, is denied in Plan, and is
-allowed in Apply and Yolo. The full tables are in
-[Permission defaults](permission-defaults.md).
-
-## Configuring Permissions
-
-Extend the generated policy in `init.lua` with `smelt.permissions.extend`:
+Register your own mode:
 
 ```lua
-smelt.permissions.extend({
-  default = {
-    tools = {
-      allow = { "web_search" },
-    },
-    effects = {
-      network = "ask",
-      write = "ask",
-    },
-    patterns = {
-      web_fetch = {
-        allow = { "https://docs.rs/*" },
-      },
-      bash = {
-        allow = { "git log *", "git diff *" },
-      },
-    },
-  },
-  apply = {
-    patterns = {
-      bash = {
-        allow = { "git commit *" },
-      },
-    },
-  },
+smelt.mode.register({
+  name = "review",
+  access = "read",   -- "read" (default), "write" or "full"
+  above = "deny",    -- "ask" (default) or "deny"
+  after = "read",
 })
 ```
 
-`default` applies to all registered modes. Mode-specific rules are keyed by mode
-name (`normal`, `apply`, `yolo`, or plugin-registered names such as `plan`) and
-are merged on top of the generated base policy.
+## Path Rules
 
-Each mode table can contain:
+A path rule applies the same way in every mode:
 
-| Key        | Value                                                      |
-| ---------- | ---------------------------------------------------------- |
-| `tools`    | `{ allow = {...}, ask = {...}, deny = {...} }`, tool names |
-| `effects`  | `{ read|write|network|process|config|user|other = decision }` |
-| `patterns` | Tool-specific `{ allow = {...}, ask = {...}, deny = {...} }` buckets |
+| Rule      | Read         | Write                 |
+| --------- | ------------ | --------------------- |
+| `"allow"` | runs         | needs `write`         |
+| no rule   | runs         | needs `full`          |
+| `"ask"`   | needs `full` | needs `full`          |
+| `"deny"`  | never        | never, even at `full` |
 
-Pattern buckets are routed through the matching tool's parser. Built-in buckets
-include `bash` (shell-aware parsing), `web_fetch` (URL glob), and `mcp` (matched
-against `servername_toolname`); tools that register their own bucket appear here
-too.
+The workspace, the temp directories and saved plans are always `"allow"`.
+smelt's own logins (`auth/` in the [state directory](storage.md)) are always
+`"ask"`. In yolo mode only `"deny"` has an effect.
+
+```lua
+-- every mode
+smelt.permissions.paths({
+  ["~/dev/other"] = "allow",   -- a second project
+  ["~/.aws"]      = "ask",
+  ["**/.env"]     = false,     -- remove a default
+})
+
+-- these modes only
+smelt.permissions.paths({ ["~/.ssh"] = "deny" }, { modes = { "yolo" } })
+
+smelt.permissions.rule("~/.ssh/id_ed25519", "yolo")   --> "deny"
+```
+
+Each call merges into the existing rules. `~` is home, relative paths start at
+the project, and `*`, `?` and `**` make a glob (`**/x` matches anywhere). The
+rule for the closest ancestor wins, so `["~/.ssh/known_hosts"] = "allow"`
+works inside `["~/.ssh"] = "ask"`. At the same depth a mode rule wins, then
+the longer pattern.
+
+Defaults (in the built-in `smelt/permissions.lua`):
+
+- `"allow"`: build caches (XDG cache, Cargo, rustup, Go, npm, bun, pnpm, Yarn,
+  Gradle, Maven), so sandboxed builds work. Also `~/.ssh/known_hosts` and
+  `~/.ssh/config`, so `git` over SSH works with the SSH agent.
+- `"ask"`: credentials. `~/.ssh`, `~/.gnupg`, `~/.password-store`, `~/.aws`,
+  `~/.azure`, gcloud, `gh`, `~/.kube`, `~/.git-credentials`, `~/.netrc`,
+  Cargo and PyPI tokens, `~/Library/Keychains`, the Claude Code and Codex
+  logins, and `.env` files (except `.env.example`, `.env.sample` and
+  `.env.template`).
 
 ## The Permission Prompt
 
-When a call is gated, a confirm dialog appears with the tool summary, a preview
-(when available, for example a diff for `edit_file`), and these options:
+The dialog shows the call, a preview (a diff for edits) and a question:
 
-| Option                                               | Effect                                            |
-| ---------------------------------------------------- | ------------------------------------------------- |
-| **allow once**                                       | Approve this call only                            |
-| **deny**                                             | Deny this call (and `Esc` does the same)          |
-| **allow `<pattern>` for this session**               | Auto-approve matching calls for this session      |
-| **allow `<pattern>` in workspace `<path>`**          | Same, persisted to this exact workspace           |
-| **allow `<pattern>` in this worktree `<path>`**      | Same, persisted to this exact Git worktree        |
-| **allow `<pattern>` in project `<root>` (all worktrees)** | Same, shared by every worktree for the project |
+| Call                     | Question                       |
+| ------------------------ | ------------------------------ |
+| An edit in the project   | Edit this file?                |
+| An edit outside it       | Edit outside the project?      |
+| An `"ask"` path          | Read `<path>`? / Edit `<path>`? |
+| `bash` in the sandbox    | Run this command?              |
+| `bash` at `full`         | Run without the sandbox?       |
+| Any other tool           | Run `<tool>`?                  |
 
-`<pattern>` is the tool-specific approval pattern (e.g. a shell command stem
-like `git status` for `bash`, or a URL host for `web_fetch`). When the call
-touches a path outside the workspace, the same scopes are offered for a directory
-prefix instead. The repository option appears whenever smelt can identify a Git
-repository root.
+| Option                              | Effect                                                    |
+| ----------------------------------- | --------------------------------------------------------- |
+| **allow once**                      | Run this call.                                            |
+| **deny**                            | Block this call (`Esc`).                                  |
+| **allow `<tool>` for this session** | Run this tool up to this call's access.                   |
+| **allow `<path>` for this session** | Run calls beneath this path up to this call's access.     |
 
-Press `Tab` to add a freeform reason that the model will see along with your
-decision.
-
-## Approval Scopes
-
-Approval options can apply at one of three scopes:
-
-| Scope          | Lifetime                              | Storage                                                   |
-| -------------- | ------------------------------------- | --------------------------------------------------------- |
-| **Session**    | Until `/clear`, `/new`, or exit       | Memory                                                    |
-| **Workspace**  | Every current and future session in this exact CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](storage.md) |
-| **Repository** | Every current and future Git worktree | `repository-permissions.json` under the Git common-directory state entry |
-
-Workspace rules do not apply to sibling worktrees; repository rules apply to all
-of them. Approvals stay narrow: approving a command pattern only approves matching
-calls, and approving an outside directory only approves access under it.
-
-Approvals take effect in other running smelt sessions for their next matching call,
-so removing one in `/permissions` revokes it everywhere. If a stored approval file
-is unreadable, that scope is treated as empty (calls ask again) and your other
-approvals are unaffected.
-
-## Managing Saved Approvals
-
-Use `/permissions` to view and remove session, workspace and repository
-approvals. Each entry shows its scope. Deletions are saved immediately and never
-overwrite approvals another session added.
-
-- `j` / `k` to navigate
-- `dd` or `Backspace` to delete the highlighted entry
-- `Esc` to close
-
-From Lua, `smelt.permissions.list()` returns a revision per saved scope and
-`smelt.permissions.sync()` replaces one scope at a time, rejecting a stale
-revision so concurrent grants are not lost:
+The path is what the `"ask"` rule names (`~/.aws`, a `.env` file), or else the
+file's directory. `Tab` adds a reason for the model. Approvals end with the
+session (`/clear`, `/new`, exit):
 
 ```lua
-local permissions = smelt.permissions.list()
-smelt.permissions.sync({
-  workspace = {
-    revision = permissions.workspace_revision,
-    rules = permissions.workspace,
-  },
-})
+smelt.permissions.allow("bash", "write")             -- approve bash up to write
+smelt.permissions.allowed("bash", "read")            -- true: write covers read
+smelt.permissions.allow_path("~/dev/other", "full")  -- approve a directory
+smelt.permissions.clear()                            -- forget every approval
 ```
 
-Omit `session`, `path_grants`, `workspace` or `repository` to leave that part
-unchanged; pass an empty array to clear it.
+## The Sandbox
 
-## Workspace Restriction
+The commands a tool call starts run in an OS sandbox: bubblewrap (`bwrap`) on
+Linux, Seatbelt on macOS. Every child process inherits it. The sandbox has the
+call's access, or the mode's when that is more. So `bash` runs at the mode's
+access unless the model asks for more with its `access` argument. A sandboxed
+command:
 
-When `restrict_to_workspace` is enabled (default), any tool call targeting a
-path outside the current workspace has its decision downgraded from Allow to
-Ask, even if the call would otherwise have been auto-approved by tool, bash
-pattern, or runtime approval. This catches mistakes like the agent editing a
-file in your home directory when it meant to edit one in the project root. The
-prompt then offers per-directory approval options.
+- may write the temp directories, and at `write` also the workspace,
+  `"allow"` paths and approved directories;
+- cannot read or write the paths its access may not read (`"ask"` paths below
+  `full`, `"deny"` paths always). A glob rule hides its matches in the
+  project, except in folders git ignores or when the project is your home
+  directory;
+- does not get smelt's keys: each provider's `api_key_env`, the
+  `brave_search_api_key_env` setting and `SMELT_*_TOKENS`. Other variables
+  stay.
 
-!!! warning
+So read mode can run `git log` or a linter without asking, and a build asks
+for `write` first. A permission error tells the model which access to ask
+for. `grep` and `glob` skip what the call may not read.
 
-    **Best-effort safety measure.** Shell commands, symlinks, and indirect
-    access can bypass workspace restriction.
+Without a sandbox (Windows, Linux without `bwrap` or user namespaces, or
+inside another macOS sandbox), commands run unconfined, so every `bash` call is
+`full`: it asks outside yolo mode, and cannot run while a `"deny"` rule exists.
+`smelt.sandbox.status()` returns `{ available, backend?, reason? }`.
 
-## Project Trust
+!!! warning "A convenience, not a security boundary"
 
-`.smelt/` content (`init.lua`, `plugins/`, `commands/`, `runtime/`) is only
-loaded after the user explicitly trusts the project. Run `/trust` from the
-project root to record a SHA-256 hash of the current `.smelt/` contents; on next
-startup smelt loads the directory if the hash still matches. Editing any trusted
-file invalidates the hash and requires re-running `/trust`.
+    The sandbox stops mistakes, not a determined model. It confines files
+    only. A sandboxed command can still use the network, the SSH agent and
+    other environment variables, or ask an unconfined process (`systemd-run`,
+    tmux, Docker) to run something. Claude Code's native `Bash`, MCP servers
+    and LSP servers run outside it. For untrusted prompts, models, repos or
+    MCP servers, run smelt in a container or VM.
 
-Trust state is stored in `trust.json` in the
-[state directory](storage.md). See
-[`smelt.trust`](api/trust.md) for the Lua API.
+## Customizing the Policy
+
+Every call goes through `smelt.permissions.check(call)`, with
+`call = { tool, args, access, mode, paths }` (`paths`: `{ path, intent,
+access }` for each declared path, with `path` absolute). It returns
+`"allow"`, `"ask"` or `"deny"`.
+Calls that touch a `"deny"` path never reach it. The default allows a call
+when its access is within the mode, or the user approved the tool, or every
+path above the mode is beneath an approved directory; otherwise it returns
+`mode.above`. Wrap it in `init.lua`:
+
+```lua
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  if call.tool == "web_fetch" and call.args.url:find("example.com", 1, true) then
+    return "deny"
+  end
+  return check(call)
+end
+```
+
+## Tool Declarations
+
+Tools registered with `smelt.tools.register` declare:
+
+- `access`: `"read"`, `"write"` (default) or `"full"`, or
+  `access(args, mode)`;
+- `paths(args)`: the paths the call reads (a `read` tool) or changes.
+
+A call needs the most that `smelt.permissions.path_access(path, intent)`
+returns for its paths. A `write` tool without `paths` is `full`. The commands
+a tool starts run in the call's [sandbox](#the-sandbox). See
+[Tools](../extend/tools-and-agent.md).
+
+| Built-in tools                                                                      | Access                                  |
+| ----------------------------------------------------------------------------------- | --------------------------------------- |
+| `read_file`, `glob`, `grep`, `show_image`                                           | `read`, `full` for an `"ask"` path      |
+| `web_fetch`, `web_search`, `read_process_output`, `load_skill`, `ask_user_question` | `read`                                  |
+| `edit_file`, `write_file`, `edit_notebook`, `switch_cwd`                            | `write`, `full` outside the workspace   |
+| `stop_process`, `smelt_reload`                                                      | `write`                                 |
+| `enter_worktree`                                                                    | `full`                                  |
+| `bash`                                                                              | See [The Sandbox](#the-sandbox)         |
+
+MCP tools are `read` with `readOnlyHint`, else `full`. Claude Code native
+tools use the declaration of the smelt tool they map to (`Write` →
+`write_file`). Native `Bash` and unknown native tools are `full`.
 
 ## Headless Mode
 
-In `--headless`, there is no interactive prompt: calls that would be **Ask** are
-denied. To run autonomously, combine headless with `--mode yolo`. See the
+`--headless` cannot ask, so calls that would ask are denied. Use `--mode write`
+for workspace writes in the sandbox, or `--mode yolo` for full autonomy. See
 [Headless Mode](../guide/headless.md#permissions).
 
-## Isolation
+## Project Trust
 
-Permissions and workspace restriction guard against accidental mistakes, not
-against an agent that actively tries to escape. Any approved bash command runs
-with your user's privileges, so a script like `rm -rf ~` works exactly as it
-would if you typed it yourself.
-
-For untrusted prompts, models, or MCP servers, run smelt inside a container or
-VM. Anything else is defense in depth, not a sandbox.
+`.smelt/` (`init.lua`, `plugins/`, `commands/`, `runtime/`) loads only after
+you run `/trust` in the project root. It records a SHA-256 hash of `.smelt/`
+in `trust.json` in the [state directory](storage.md); editing a trusted file
+needs `/trust` again. See [`smelt.trust`](api/trust.md).

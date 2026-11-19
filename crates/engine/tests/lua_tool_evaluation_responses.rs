@@ -9,8 +9,7 @@
 use engine::EngineConfig;
 use protocol::{
     AgentMode, Content, EngineEvent, ModelConfig, ModelTarget, ReasoningEffort,
-    RequestRuntimeConfig, StartTurnPayload, ToolDef, ToolExecutionMode, ToolHookFlags,
-    ToolMetadata, UiCommand,
+    RequestRuntimeConfig, StartTurnPayload, ToolDef, ToolExecutionMode, ToolMetadata, UiCommand,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -224,10 +223,6 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
         modes: None,
         execution_mode: ToolExecutionMode::Concurrent,
         override_core: false,
-        hooks: ToolHookFlags {
-            approval_patterns: false,
-            preflight: true,
-        },
         headless: true,
         claude_code: None,
     };
@@ -235,7 +230,7 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("go")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target,
         request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
@@ -245,7 +240,6 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -329,7 +323,6 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 modes: None,
                 execution_mode: ToolExecutionMode::Concurrent,
                 override_core: false,
-                hooks: ToolHookFlags::default(),
                 headless: true,
                 claude_code: None,
             };
@@ -337,7 +330,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
             handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
                 turn_id: 1,
                 input: protocol::StartTurnInput::user(Content::text("go")),
-                mode: AgentMode::normal(),
+                mode: AgentMode::read(),
                 model_target: target,
                 request_config: RequestRuntimeConfig::default(),
                 reasoning_effort: ReasoningEffort::Off,
@@ -347,14 +340,6 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 session_id: "sess".into(),
                 artifact_dir: PathBuf::from("/tmp"),
                 ephemeral: false,
-                permission_overrides: Some(protocol::PermissionOverrides {
-                    tools: Some(protocol::RuleSetOverride {
-                        allow: vec![TOOL_NAME.into()],
-                        ask: Vec::new(),
-                        deny: Vec::new(),
-                    }),
-                    subcommands: Default::default(),
-                }),
                 native_prompt: None,
                 tool_visibility: protocol::ToolVisibility::Interactive,
                 system_prompt: Some("test system".into()),

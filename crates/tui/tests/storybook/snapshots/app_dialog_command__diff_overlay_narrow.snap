@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 702
 expression: frame.text()
 ---
 
@@ -20,4 +19,4 @@ expression: frame.text()
 ──│                                                      │──
   └──────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────
- NORMAL  ○ normal                                     1:1 0%
+ NORMAL  ○ read                                       1:1 0%

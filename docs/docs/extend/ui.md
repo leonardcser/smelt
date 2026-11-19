@@ -89,7 +89,7 @@ For a modal with a markdown panel, an option list and a text input,
 `smelt.dialog.open` is the higher-level API and returns the user's choice. The
 bundled dialogs in
 [`runtime/lua/smelt/dialogs/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/dialogs)
-(`confirm`, `permissions`, `resume`, `rewind`) are the reference
+(`confirm`, `resume`, `rewind`) are the reference
 implementations.
 
 Dialog height is either `height = "N%"` (fixed) or `max_height = "N%"` (shrink

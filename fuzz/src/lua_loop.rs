@@ -797,8 +797,8 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
 
 /// Emit curated, well-typed Lua API sequences. These complement `ApiProbe`:
 /// probes keep breadth over the generated API registry, recipes keep depth in
-/// success paths where resources are created, callbacks run, and permissions
-/// rules are compiled/evaluated.
+/// success paths where resources are created, callbacks run, and the
+/// permission policy decides calls.
 fn emit_api_recipe(out: &mut String, kind: u8) {
     match kind % 5 {
         0 => out.push_str(
@@ -822,20 +822,15 @@ end))
         ),
         1 => out.push_str(
             r#"assert(pcall(function()
-  smelt.permissions.extend({
-    default = {
-      tools = { allow = { "bash", "web_fetch" }, ask = { "edit" }, deny = { "danger" } },
-      patterns = {
-        bash = { allow = { "git status*", "ls*" }, ask = { "cat *" }, deny = { "rm*", "sudo*" } },
-        web_fetch = { allow = { "https://example.com/*" }, deny = { "http://*" } },
-      },
-    },
-    plan = { tools = { ask = { "bash" } }, patterns = { bash = { allow = { "pwd" } } } },
+  smelt.permissions.allow("bash", "write")
+  smelt.permissions.allowed("bash", "read")
+  smelt.permissions.check({
+    tool = "bash", args = { command = "ls" }, access = "full", paths = {},
+    mode = smelt.mode.get("read"),
   })
-  smelt.permissions.check_tool("normal", "bash")
-  smelt.permissions.check("normal", "bash", "git status --short")
-  smelt.permissions.check("normal", "bash", "rm -rf target")
-  smelt.permissions.list()
+  smelt.sandbox.status()
+  smelt.sandbox.can_write("fuzz/target")
+  smelt.permissions.clear()
 end))
 "#,
         ),
@@ -861,17 +856,15 @@ end))
         ),
         _ => out.push_str(
             r#"assert(pcall(function()
-  smelt.permissions.extend({
-    default = {
-      tools = { allow = { "bash" }, ask = { "web_fetch" }, deny = { "danger" } },
-      patterns = {
-        bash = { allow = { "pwd", "echo *" }, ask = { "cat *" }, deny = { "rm*" } },
-      },
-    },
+  local check = smelt.permissions.check
+  smelt.permissions.check = function(call)
+    if call.tool == "danger" then return "deny" end
+    return check(call)
+  end
+  smelt.permissions.check({
+    tool = "danger", args = {}, access = "read", paths = {}, mode = smelt.mode.get("write"),
   })
-  smelt.permissions.list()
-  smelt.permissions.check_tool("normal", "bash")
-  smelt.permissions.check("normal", "bash", "echo hello")
+  smelt.permissions.check = check
 end))
 "#,
         ),

@@ -1,7 +1,7 @@
 {
   "_about": "vim 'p' / 'P' paste called ctx.buf.insert_str directly, bypassing the clamp_visual_anchor pass that delete_range / replace_range do. After 'V' set visual_anchor at a valid boundary, a later paste inserted bytes that shifted the source layout so the old anchor offset landed mid-codepoint.",
   "_fix": "fix(edit): clamp visual_anchor in vim paste paths",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "data": 1048607,

@@ -13,7 +13,6 @@ name = "tui"
 smelt-transcript = { workspace = true }
 smelt-view = { workspace = true }
 smelt-paths = { workspace = true }
-smelt-permissions = { workspace = true }
 smelt-worktree = { workspace = true }
 smelt-protocol = { workspace = true }
 smelt-engine = { workspace = true }

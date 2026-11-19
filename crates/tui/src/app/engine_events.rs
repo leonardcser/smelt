@@ -675,8 +675,7 @@ impl TuiApp {
                 };
                 let mut pending = std::mem::take(&mut self.native_ui.pending);
                 let result = self.handle_engine_event(event, turn_id, 0, &mut pending, arrived_at);
-                let permissions = self.active_permissions();
-                self.dispatch_scoped_control(result.control, &permissions, &mut pending);
+                self.dispatch_scoped_control(result.control, &mut pending);
                 self.native_ui.pending = pending;
             }
         }
@@ -1083,20 +1082,13 @@ impl TuiApp {
                 tool_name,
                 provider,
                 args,
-                approval_patterns,
                 called_at_ms,
                 summary,
+                access,
             } => {
                 assistant_output_started = true;
                 let summary =
                     self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
-                let lua = self.lua.execution();
-                let (tool_paths, tool_paths_error) = match crate::lua::scope_app(self, || {
-                    lua.tool_paths_for_workspace(&tool_name, &args)
-                }) {
-                    Ok(paths) => (paths.into_paths(), None),
-                    Err(error) => (Vec::new(), Some(error)),
-                };
                 self.begin_tool_block_for_engine_event(
                     pending,
                     ToolStart {
@@ -1115,10 +1107,7 @@ impl TuiApp {
                     tool_name,
                     provider,
                     args,
-                    tool_paths,
-                    tool_paths_error,
-                    approval_candidates: approval_patterns,
-                    grant_options: Vec::new(),
+                    access,
                     summary,
                     request_id,
                 }))
@@ -1332,32 +1321,13 @@ impl TuiApp {
         request: smelt_core::lua::ToolEvaluationRequest,
         metadata: protocol::ToolMetadata,
     ) {
-        let decision = if let Some(error) = metadata.preflight_error.clone() {
-            protocol::Decision::Error(error)
-        } else {
-            let lua = self.lua.execution();
-            match crate::lua::scope_app(self, || {
-                lua.tool_paths_for_workspace(&request.tool_name, &request.args)
-            }) {
-                Ok(paths) => {
-                    self.active_permissions()
-                        .evaluate_tool_with_paths_and_approvals(
-                            request.mode,
-                            smelt_permissions::ToolOrigin::Lua,
-                            &request.tool_name,
-                            &request.args,
-                            paths.as_slice(),
-                        )
-                        .decision
-                }
-                Err(error) => protocol::Decision::Error(error),
-            }
-        };
+        let lua = self.lua.execution();
+        let evaluation = crate::lua::scope_app(self, || lua.decide_tool(&request, metadata));
         self.core
             .engine
             .send(protocol::UiCommand::ToolEvaluationResponse {
                 request_id: request.request_id,
-                evaluation: protocol::ToolEvaluation { decision, metadata },
+                evaluation,
             });
     }
 

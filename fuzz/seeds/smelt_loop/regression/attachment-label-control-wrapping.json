@@ -1,6 +1,6 @@
 {
   "_about": "Attachment display seed: image labels containing terminal control bytes must be sanitized before prompt wrapping/layout sees them.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "insert_attachment",

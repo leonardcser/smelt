@@ -1,7 +1,7 @@
 {
   "_about": "PromptState::prepend_text inserted bytes at offset 0 and manually shifted cpos by inserted.len(), but did not touch vim's visual_anchor. When EscAction::Unqueue prepended a queued message while the user was in Visual mode, the anchor stayed at its old absolute offset and ended up mid-codepoint (mid-attachment-marker) once the prefix straddled a boundary it used to sit on.",
   "_fix": "fix(input): shift vim visual_anchor when prepend_text inserts a prefix",
-  "mode": "apply",
+  "mode": "write",
   "ops": [
     {
       "data": {

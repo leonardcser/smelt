@@ -33,8 +33,7 @@ smelt.tools.register({
   name = "read_process_output",
   description = "Read the captured output snapshot from a background bash process by id without draining or waiting. Running processes return only buffered stdout/stderr, which may be empty; exited processes append the exit status.",
   override = true,
-  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
-  effect = "process",
+  access = "read",
   parameters = {
     type = "object",
     properties = {

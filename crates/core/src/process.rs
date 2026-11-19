@@ -33,6 +33,7 @@ pub(crate) struct Options {
     pub(crate) timeout: Option<Duration>,
     pub(crate) stdin: Option<String>,
     pub(crate) max_output_bytes: Option<usize>,
+    pub(crate) sandbox: Option<smelt_sandbox::Policy>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +75,10 @@ pub(crate) async fn run_async(
 ) -> io::Result<RunOutcome> {
     use tokio::io::AsyncWriteExt;
 
-    let mut command = tokio::process::Command::new(cmd);
+    let mut command = match &opts.sandbox {
+        Some(policy) => tokio::process::Command::from(smelt_sandbox::command(cmd, policy)?),
+        None => tokio::process::Command::new(cmd),
+    };
     command.args(args).current_dir(&opts.cwd);
     apply_default_noninteractive_env(command.as_std_mut());
     for (k, v) in &opts.env {
@@ -290,6 +294,8 @@ pub struct ShellSpec {
     pub program: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    /// The OS sandbox the command runs in; `None` runs it unconfined.
+    pub sandbox: Option<smelt_sandbox::Policy>,
 }
 
 impl Default for ShellSpec {
@@ -298,6 +304,7 @@ impl Default for ShellSpec {
             program: "sh".into(),
             args: vec!["-c".into()],
             env: HashMap::new(),
+            sandbox: None,
         }
     }
 }
@@ -350,32 +357,37 @@ fn spawn_shell_job(
     options: SupervisorOptions,
     systemd_scope: bool,
 ) -> io::Result<SpawnedJob> {
-    let mut cmd = if systemd_scope {
-        let mut cmd = tokio::process::Command::new("systemd-run");
-        cmd.args([
+    let (program, mut args): (&str, Vec<std::ffi::OsString>) = if systemd_scope {
+        let mut args: Vec<std::ffi::OsString> = [
             "--user",
             "--scope",
             "--quiet",
             "--expand-environment=no",
             "--unit",
             unit,
-        ])
-        .arg("--property=OOMPolicy=kill");
+            "--property=OOMPolicy=kill",
+        ]
+        .map(Into::into)
+        .into();
         if let Some(max_bytes) = options.memory_max_bytes {
             // Keep the memory cap independent of the host's available swap.
-            cmd.arg(format!("--property=MemoryMax={max_bytes}"))
-                .arg("--property=MemorySwapMax=0");
+            args.push(format!("--property=MemoryMax={max_bytes}").into());
+            args.push("--property=MemorySwapMax=0".into());
         }
-        cmd.arg("--")
-            .arg(&shell.program)
-            .args(&shell.args)
-            .arg(command);
-        cmd
+        args.push("--".into());
+        args.push(shell.program.clone().into());
+        ("systemd-run", args)
     } else {
-        let mut cmd = tokio::process::Command::new(&shell.program);
-        cmd.args(&shell.args).arg(command);
-        cmd
+        (&shell.program, Vec::new())
     };
+    args.extend(shell.args.iter().map(Into::into));
+    args.push(command.into());
+    // The sandbox wraps the outermost program; children inherit it.
+    let mut cmd = match &shell.sandbox {
+        Some(policy) => tokio::process::Command::from(smelt_sandbox::command(program, policy)?),
+        None => tokio::process::Command::new(program),
+    };
+    cmd.args(args);
     cmd.current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2025,6 +2037,7 @@ mod tests {
             timeout: None,
             stdin: None,
             max_output_bytes: None,
+            sandbox: None,
         }
     }
 

@@ -24,7 +24,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             move |_,
                   (task_id, pattern, path, opts): (u64, String, String, Option<mlua::Table>)|
                   -> LuaResult<()> {
-                let parsed = parse_options(opts.as_ref())?;
+                let mut parsed = parse_options(opts.as_ref())?;
+                parsed.sandbox = sandbox(&s, &path)?;
                 let cancel = crate::lua::current_task_cancel().unwrap_or_default();
                 let cwd = s.evaluation_cwd();
                 let sink = s.resume_sink();
@@ -50,6 +51,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
 
     Ok(())
+}
+
+/// The sandbox `rg` runs in: the one of the tool call that starts it, so it
+/// skips the paths the call may not read beneath the search `root`. Outside
+/// a tool call, or with no sandbox on this machine, `rg` runs unconfined.
+fn sandbox(shared: &LuaShared, root: &str) -> LuaResult<Option<smelt_sandbox::Policy>> {
+    if smelt_sandbox::backend().is_err() {
+        return Ok(None);
+    }
+    let root = super::permissions::resolve(shared, root);
+    super::sandbox::current(shared, Some(&root))
 }
 
 fn parse_options(opts: Option<&mlua::Table>) -> LuaResult<grep::Options> {
@@ -82,5 +94,6 @@ fn parse_options(opts: Option<&mlua::Table>) -> LuaResult<grep::Options> {
         timeout: t
             .get::<Option<u64>>("timeout_secs")?
             .map(Duration::from_secs),
+        sandbox: None,
     })
 }

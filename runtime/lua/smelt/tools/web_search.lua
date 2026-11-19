@@ -151,7 +151,7 @@ smelt.tools.register({
   name = "web_search",
   description = "Search the web using the configured search provider. Returns a list of results with titles, URLs, and descriptions.",
   override = true,
-  effect = "network",
+  access = "read",
   parameters = {
     type = "object",
     properties = {

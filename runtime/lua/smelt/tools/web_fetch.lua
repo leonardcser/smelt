@@ -42,12 +42,6 @@ local function redirect_error(requested_host, final_url)
   }
 end
 
-local function domain_pattern(url)
-  local scheme, host = url:match("^([Hh][Tt][Tt][Pp][Ss]?)://([^/?#]+)")
-  if not scheme or not host then return nil end
-  return scheme:lower() .. "://" .. host:lower() .. "/*"
-end
-
 -- Hard line cap, then char-safe byte cap, then a truncation note.
 local function truncate_output(text, max_lines, max_bytes)
   local lines = {}
@@ -146,10 +140,13 @@ local function render_page(url, timeout)
     timeout_ms = math.max(1, math.floor(timeout * 1000)),
     max_response_bytes = MAX_RESPONSE_SIZE,
   })
+  -- The renderer is the user's own command, and a browser needs to write
+  -- its profile, so it runs outside the call's read sandbox.
   local result, err = smelt.process.run(command, {}, {
     timeout_secs = timeout,
     stdin = request,
     max_output_bytes = MAX_RENDERER_OUTPUT_SIZE,
+    sandbox = false,
   })
   if not result then return nil, command .. ": " .. (err or "could not start") end
   if result.timed_out then return nil, command .. " timed out" end
@@ -365,7 +362,7 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
     .. "The page is fetched, converted to markdown, then an isolated LLM call "
     .. "extracts only what the prompt asks for.",
   override = true,
-  effect = "network",
+  access = "read",
   parameters = {
     type = "object",
     properties = {
@@ -390,11 +387,6 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
     required = { "url", "prompt" },
   },
   summary = function(args) return args.url or "" end,
-  approval_patterns = function(args)
-    local pat = domain_pattern(args.url or "")
-    if pat then return { pat } end
-    return {}
-  end,
   execute = function(args)
     local raw = fetch_raw(args)
     if type(raw) == "table" and raw.is_error then return raw end

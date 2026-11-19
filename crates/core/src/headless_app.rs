@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use protocol::{Content, Decision, EngineEvent, UiCommand};
+use protocol::{Content, EngineEvent, UiCommand};
 
 use super::headless::{HeadlessSink, OutputFormat};
 use super::runtime::Core;
@@ -87,39 +87,6 @@ impl HeadlessApp {
         Some(active.target(api_key))
     }
 
-    fn approves_permission(
-        &mut self,
-        tool_name: &str,
-        args: &HashMap<String, serde_json::Value>,
-    ) -> bool {
-        let tool_paths = if let Some(lua) = self.lua.as_ref() {
-            match crate::host::scope_core(&mut self.core, || {
-                lua.tool_paths_for_workspace(tool_name, args)
-            }) {
-                Ok(paths) => paths,
-                Err(_) => return false,
-            }
-        } else {
-            crate::lua::ToolWorkspacePaths::Undeclared
-        };
-        let mode = self.core.config.mode.clone();
-        let permissions = self.core.permissions.snapshot();
-        permissions
-            .evaluate_tool_with_paths(
-                mode.clone(),
-                smelt_permissions::ToolOrigin::Lua,
-                tool_name,
-                args,
-                tool_paths.as_slice(),
-            )
-            .decision
-            == Decision::Allow
-            || permissions
-                .evaluate_tool(mode, smelt_permissions::ToolOrigin::Mcp, tool_name, args)
-                .decision
-                == Decision::Allow
-    }
-
     fn tool_defs(&self) -> Vec<protocol::ToolDef> {
         if !self.capabilities.tool_calling {
             return Vec::new();
@@ -152,7 +119,9 @@ impl HeadlessApp {
             });
             return;
         };
-        if !lua.tool_available_for(&tool_name, crate::lua::ToolVisibility::Headless) {
+        if lua.has_tool(&tool_name)
+            && !lua.tool_available_for(&tool_name, crate::lua::ToolVisibility::Headless)
+        {
             self.core.engine.send(UiCommand::ToolEvaluationResponse {
                 request_id,
                 evaluation: protocol::ToolEvaluation {
@@ -193,38 +162,11 @@ impl HeadlessApp {
         let Some(lua) = self.lua.as_ref() else {
             return;
         };
-        let crate::lua::ToolEvaluationRequest {
-            request_id,
-            tool_name,
-            args,
-            mode,
-            ..
-        } = request;
-        let decision = if let Some(err) = metadata.preflight_error.clone() {
-            protocol::Decision::Error(err)
-        } else {
-            match crate::host::scope_core(&mut self.core, || {
-                lua.tool_paths_for_workspace(&tool_name, &args)
-            }) {
-                Ok(tool_paths) => {
-                    self.core
-                        .permissions
-                        .snapshot()
-                        .evaluate_tool_with_paths_and_approvals(
-                            mode,
-                            smelt_permissions::ToolOrigin::Lua,
-                            &tool_name,
-                            &args,
-                            tool_paths.as_slice(),
-                        )
-                        .decision
-                }
-                Err(error) => protocol::Decision::Error(error),
-            }
-        };
+        let evaluation =
+            crate::host::scope_core(&mut self.core, || lua.decide_tool(&request, metadata));
         self.core.engine.send(UiCommand::ToolEvaluationResponse {
-            request_id,
-            evaluation: protocol::ToolEvaluation { decision, metadata },
+            request_id: request.request_id,
+            evaluation,
         });
     }
 
@@ -395,14 +337,14 @@ impl HeadlessApp {
             EngineEvent::RequestPermission {
                 request_id,
                 tool_name,
-                args,
                 ..
             } => {
-                let approved = self.approves_permission(tool_name, args);
                 self.core.engine.send(UiCommand::PermissionDecision {
                     request_id: *request_id,
-                    approved,
-                    message: None,
+                    approved: false,
+                    message: Some(format!(
+                        "`{tool_name}` needs approval in this mode, and a headless run cannot ask"
+                    )),
                 });
                 true
             }
@@ -599,12 +541,6 @@ impl HeadlessApp {
             return HeadlessExit::Error;
         };
         let claude_code = smelt_provider::BackendKind::is_claude_code(&model_target.provider_type);
-        if claude_code {
-            crate::claude_code_policy::grant_plan_artifacts(
-                &self.core.permissions,
-                &self.core.sessions.artifact_dir_for(&self.session),
-            );
-        }
         let fast_mode = self
             .session
             .fast_mode
@@ -638,7 +574,6 @@ impl HeadlessApp {
                 artifact_dir: self.core.sessions.artifact_dir_for(&self.session),
                 // One-shot headless history is not persisted.
                 ephemeral: true,
-                permission_overrides: None,
                 system_prompt: Some(self.system_prompt.clone()),
                 native_prompt: self.native_prompt.clone(),
                 tool_visibility: protocol::ToolVisibility::Headless,
@@ -712,27 +647,22 @@ impl HeadlessApp {
                 engine::EngineOutput::Event(ev) => ev,
                 engine::EngineOutput::HostCall(engine::HostCall::NativeToolEvaluation {
                     session_id,
-                    cwd,
                     tool_name,
                     args,
                     mode,
-                    overrides,
                     reply,
                     ..
                 }) => {
-                    let evaluation = if session_id == self.session.id
-                        && self.core.native_session.as_deref() == Some(&session_id)
-                    {
-                        crate::claude_code_policy::evaluate(
-                            &self.core.permissions.snapshot(),
-                            Some(&cwd),
-                            mode,
-                            &tool_name,
-                            &args,
-                            overrides.as_ref(),
-                        )
-                    } else {
-                        protocol::ToolEvaluation::deny()
+                    let evaluation = match self.lua.as_ref() {
+                        Some(lua)
+                            if session_id == self.session.id
+                                && self.core.native_session.as_deref() == Some(&session_id) =>
+                        {
+                            crate::host::scope_core(&mut self.core, || {
+                                crate::claude_code_policy::evaluate(lua, mode, &tool_name, &args)
+                            })
+                        }
+                        _ => protocol::ToolEvaluation::deny(),
                     };
                     let _ = reply.send(evaluation);
                     continue;
@@ -975,7 +905,6 @@ impl HeadlessApp {
 mod tests {
     use super::*;
     use crate::{config, FrontendKind, RuntimeState, StartupOverrides};
-    use smelt_permissions as permissions;
 
     fn runtime_state(tool_calling: bool) -> RuntimeState {
         let config = config::Config {
@@ -1045,7 +974,6 @@ mod tests {
             StartupOverrides::default(),
             engine,
             FrontendKind::Headless,
-            permissions::PermissionsHandle::new(permissions::Permissions::load()),
             clock,
             env,
         );
@@ -1179,7 +1107,6 @@ mod tests {
             StartupOverrides::default(),
             engine,
             FrontendKind::Headless,
-            permissions::PermissionsHandle::new(permissions::Permissions::load()),
             Arc::clone(&clock),
             env,
         );

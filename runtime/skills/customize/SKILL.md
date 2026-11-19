@@ -422,8 +422,8 @@ smelt.mcp.register("filesystem", {
 })
 ```
 
-MCP tool names get prefixed with the server name (`filesystem_read_file`) and
-default to ask-permission.
+MCP tool names get prefixed with the server name (`filesystem_read_file`).
+They count as `full` access unless the server marks them read-only.
 
 ### Register an agent tool
 
@@ -443,26 +443,41 @@ smelt.tools.register({
     return resp.body
   end,
   summary = function(args) return "weather: " .. args.city end,
-  -- optional: approval_patterns, preflight, render, decide, override
+  access = "read", -- "read" | "write" | "full", or function(args, mode)
+  -- optional: paths, preflight, render, decide, override
 })
 ```
 
 Pass `override = true` to replace a built-in tool with the same name.
 
-### Permission rules
+### Permissions
+
+Each call has an access level: `read`, `write` (the workspace and `allow`
+paths) or `full`. A mode allows calls up to its `access` and asks (or denies,
+with `above = "deny"`) above it: `plan` read/deny, `normal` read/ask, `apply`
+write/ask, `yolo` full. Path rules say where calls may go, in every mode or
+only some; the sandbox follows them:
 
 ```lua
-smelt.permissions.extend({
-  default = { patterns = { bash = { allow = { "git log *", "git status *" } } } },
-  apply   = { patterns = { bash = { allow = { "git commit *", "git push *" } } } },
-  yolo    = { patterns = { mcp  = { allow = { "*" } } } },
+smelt.permissions.paths({
+  ["~/dev/other"] = "allow", -- like the workspace
+  ["~/.aws"] = "ask",        -- reads and writes need full
 })
+smelt.permissions.paths({ ["~/.ssh"] = "deny" }, { modes = { "yolo" } }) -- never
 ```
 
-Modes: `default`, `plan`, `apply`, `yolo`. Tool kinds include `bash` and `mcp`.
-For the full match-rule grammar, read
-`$XDG_DATA_HOME/smelt/builtins/lua/smelt/_meta/permissions.lua` or locate
-`smelt.permissions` in the capability map further down.
+Wrap the policy to customize it:
+
+```lua
+local check = smelt.permissions.check
+smelt.permissions.check = function(call) -- { tool, args, access, mode, paths }
+  if call.tool == "bash" and call.args.command:match("^git status") then return "allow" end
+  return check(call)
+end
+```
+
+Read `$XDG_DATA_HOME/smelt/builtins/lua/smelt/permissions.lua` (defaults),
+`_meta/permissions.lua` and `_meta/sandbox.lua` for the full API.
 
 ### Write a project-local skill
 
@@ -512,7 +527,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
 | `smelt.plugins.file_finder` | /files and /search: find workspace or Git-tracked files by name, or search their contents, with a source preview beside the results. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
-| `smelt.plugins.plan_mode` | Plan artifacts and approval UI. |
+| `smelt.plugins.plan_mode` | The `present_plan` tool and its approval UI. |
 | `smelt.plugins.predict` | Input prediction plugin. |
 | `smelt.plugins.process_control` | Ctrl-G: stop waiting for a foreground command or agent while it keeps running. |
 | `smelt.plugins.scroll_pills` | Clickable scroll-pill overlays navigate the transcript. |
@@ -562,7 +577,6 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `file_icon_colors` | `boolean` | `true` | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled. |
 | `show_slug` | `boolean` | `true` | Task-slug label in status bar. |
 | `terminal_title` | `boolean` | `true` | Keep the terminal window/tab title in sync with the current session title. |
-| `restrict_to_workspace` | `boolean` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
 | `auto_reload` | `boolean` | `true` | Watch Lua config inputs (init.lua, plugins/, commands/, completers/, tools/, dialogs/, runtime overrides) and dispatch `/reload` when any of them changes. Prompt inputs such as AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after compaction. A group is a user message, a plain assistant message, or an assistant tool-use step together with its tool outputs. |
@@ -664,10 +678,12 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.parse` - Pure parsers: frontmatter extraction from markdown documents.
 - `smelt.path` - Pure path arithmetic: normalize, join, relative, expand, display, etc.
 - `smelt.perf` - Lightweight scope timers that feed `smelt.metrics.perf_snapshot`.
+- `smelt.permissions` - Decide which agent tool calls run, ask, or are denied.
 - `smelt.process` - Run subprocesses and manage contained shell jobs.
 - `smelt.provider` - List built-in model providers and register custom ones.
 - `smelt.reg` - Helpers for constructing `Reg` handles.
 - `smelt.remember` - Per-key opt-in to last-used recall on launch.
+- `smelt.sandbox` - The OS sandbox (bubblewrap on Linux, Seatbelt on macOS) that confines commands to what their access allows, so a mistake cannot change files outside the project.
 - `smelt.settings` - Metatable-backed proxy table for preferences.
 - `smelt.shell` - Shell command splitting and interactive/background-operator validators.
 - `smelt.signal` - Named reactive values.
@@ -719,10 +735,9 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt` - Root smelt namespace.
 - `smelt.cmd` - Register and list slash commands.
 - `smelt.engine` - LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval.
-- `smelt.mode` - Agent-mode selector.
+- `smelt.mode` - Agent modes.
 - `smelt.model` - Model selector.
 - `smelt.notify` - Status-area toasts.
-- `smelt.permissions` - Inspect, revoke, and extend permission policy state, or synchronize live session and persisted grants.
 - `smelt.prompt` - The main editable input surface: win handle, text get/set, and cursor control.
 - `smelt.reasoning` - Reasoning-effort selector.
 - `smelt.theme` - List bundled colorschemes, or apply, read, and override the active one.

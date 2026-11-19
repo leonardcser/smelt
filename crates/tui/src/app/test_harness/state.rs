@@ -28,7 +28,6 @@ impl TestApp {
             .set_active(Some(crate::app::TurnState {
                 turn_id,
                 pending: Vec::new(),
-                permissions: self.tui.core.permissions.snapshot(),
                 submitted_history_idx: self.tui.session_history_len().saturating_sub(1),
                 rewind_history_idx: None,
                 assistant_output_started: false,
@@ -389,65 +388,30 @@ impl TestApp {
         self.tui.core.config.context_window = context_window;
     }
 
-    /// Restrict tool permissions to the app's injected workspace.
-    pub fn restrict_permissions_to_cwd(&mut self) {
-        let mut permissions = self.tui.core.permissions.snapshot().as_ref().clone();
-        permissions.set_workspace(std::path::PathBuf::from(self.tui.workspace.cwd()));
-        permissions.set_restrict_to_workspace(true);
-        self.tui.core.permissions.replace(permissions);
+    /// Make the permission policy ask before every call to `tool`.
+    pub fn require_tool_confirmation(&mut self, tool: &str) {
+        let tool = serde_json::to_string(tool).expect("tool name serializes");
+        self.run_lua_result(&format!(
+            "local check = smelt.permissions.check
+             smelt.permissions.check = function(call)
+               if call.tool == {tool} then return 'ask' end
+               return check(call)
+             end"
+        ))
+        .expect("wrap smelt.permissions.check");
     }
 
-    /// Allow tool paths outside the injected workspace in focused harness flows.
-    pub fn allow_permissions_outside_cwd(&mut self) {
-        let mut permissions = self.tui.core.permissions.snapshot().as_ref().clone();
-        permissions.set_restrict_to_workspace(false);
-        self.tui.core.permissions.replace(permissions);
-    }
-
-    pub(crate) fn replace_permissions_for_harness(
-        &mut self,
-        permissions: smelt_permissions::Permissions,
-    ) {
-        self.tui.core.permissions.replace(permissions);
-    }
-
-    /// Force one tool through the confirmation path for deterministic harness flows.
-    pub fn require_tool_confirmation(&mut self, tool: &str, patterns: &[String]) {
-        let permissions =
-            self.tui
-                .core
-                .permissions
-                .snapshot()
-                .with_overrides(&protocol::PermissionOverrides {
-                    tools: Some(protocol::RuleSetOverride {
-                        ask: vec![tool.to_owned()],
-                        ..Default::default()
-                    }),
-                    subcommands: [(
-                        tool.to_owned(),
-                        protocol::RuleSetOverride {
-                            ask: patterns.to_vec(),
-                            ..Default::default()
-                        },
-                    )]
-                    .into_iter()
-                    .collect(),
-                });
-        self.tui.core.permissions.replace(permissions);
-        self.tui
-            .conversation
-            .refresh_active_permissions(self.tui.core.permissions.snapshot());
-    }
-
-    /// Add one session-scoped blanket tool approval.
-    pub fn approve_tool_for_session(&self, tool: &str) {
+    /// Approve every call to `tool` for the rest of the session.
+    pub fn approve_tool_for_session(&mut self, tool: &str) {
         self.tui
             .core
             .permissions
-            .approvals()
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .add_session_tool(tool, Vec::new());
+            .allow(tool, protocol::Access::Full);
+    }
+
+    /// Whether a session approval lets `tool` run at `access`.
+    pub fn tool_allowed(&self, tool: &str, access: protocol::Access) -> bool {
+        self.tui.core.permissions.allowed(tool, access)
     }
 
     /// Replace model-picker candidates without selecting a model.
@@ -544,82 +508,42 @@ impl TestApp {
     /// `lua_handlers::handle_dialog_decision` without going through the
     /// Lua layer. Returns `true` when a confirm was consumed.
     pub fn resolve_first_confirm(&mut self, approve: bool, message: Option<String>) -> bool {
-        let Some(handle_id) = self.first_pending_confirm() else {
-            return false;
-        };
-        let Some(entry) = self.tui.core.confirms.take(handle_id) else {
-            return false;
-        };
-        let req = entry.req;
         let choice = if approve {
             smelt_transcript::transcript_model::ConfirmChoice::Yes
         } else {
             smelt_transcript::transcript_model::ConfirmChoice::No
         };
-        {
-            let cancel = self.tui.resolve_confirm(
-                (choice, message),
-                req.invocation_id,
-                req.request_id,
-                &req.tool_name,
-            );
-            if cancel {
-                self.tui.discard_turn(crate::app::TurnEnd::Complete);
-            }
-        }
-        self.drain_cmd();
-        true
+        self.resolve_first_confirm_with(choice, message)
     }
 
-    pub(crate) fn resolve_first_session_grant_where(
-        &mut self,
-        matches_grants: impl Fn(&[smelt_permissions::PermissionGrant]) -> bool,
-    ) -> bool {
-        self.resolve_first_grant_where(
-            |target| matches!(target, smelt_core::ApprovalTarget::Session),
-            matches_grants,
+    /// Resolve the first pending confirm with "allow for this session".
+    pub fn resolve_first_confirm_for_session(&mut self) -> bool {
+        self.resolve_first_confirm_with(
+            smelt_transcript::transcript_model::ConfirmChoice::Session,
+            None,
         )
     }
 
-    pub(crate) fn resolve_first_grant_where(
+    /// Resolve the first pending confirm with "allow `<path>` for this session".
+    pub fn resolve_first_confirm_for_session_path(&mut self) -> bool {
+        self.resolve_first_confirm_with(
+            smelt_transcript::transcript_model::ConfirmChoice::SessionPath,
+            None,
+        )
+    }
+
+    fn resolve_first_confirm_with(
         &mut self,
-        matches_target: impl Fn(&smelt_core::ApprovalTarget) -> bool,
-        matches_grants: impl Fn(&[smelt_permissions::PermissionGrant]) -> bool,
+        choice: smelt_transcript::transcript_model::ConfirmChoice,
+        message: Option<String>,
     ) -> bool {
         let Some(handle_id) = self.first_pending_confirm() else {
-            return false;
-        };
-        let Some(req) = self
-            .tui
-            .core
-            .confirms
-            .get(handle_id)
-            .map(|entry| entry.req.clone())
-        else {
-            return false;
-        };
-        let Some(option) = req
-            .grant_options
-            .iter()
-            .find(|option| matches_target(&option.target) && matches_grants(&option.grants))
-            .cloned()
-        else {
             return false;
         };
         let Some(entry) = self.tui.core.confirms.take(handle_id) else {
             return false;
         };
-        let req = entry.req;
-        let cancel = self.tui.resolve_confirm(
-            (
-                smelt_transcript::transcript_model::ConfirmChoice::Grant(option),
-                None,
-            ),
-            req.invocation_id,
-            req.request_id,
-            &req.tool_name,
-        );
-        if cancel {
+        if self.tui.resolve_confirm((choice, message), &entry) {
             self.tui.discard_turn(crate::app::TurnEnd::Complete);
         }
         self.drain_cmd();
@@ -662,25 +586,6 @@ impl TestApp {
 
     pub fn runtime_cache_root(&self) -> std::path::PathBuf {
         self.tui.core.env.cache_dir().clone()
-    }
-
-    pub fn shell_effect_paths(&self, command: &str) -> Vec<std::path::PathBuf> {
-        let args = std::collections::HashMap::from([(
-            "command".to_string(),
-            serde_json::Value::String(command.to_string()),
-        )]);
-        self.tui
-            .core
-            .permissions
-            .snapshot()
-            .effects_for_tool(smelt_permissions::ToolOrigin::Lua, "bash", &args)
-            .into_iter()
-            .flat_map(|effect| match effect {
-                smelt_permissions::ToolEffect::Shell { paths, .. } => paths,
-                _ => Vec::new(),
-            })
-            .map(|effect| effect.resolution.path().to_path_buf())
-            .collect()
     }
 
     pub fn publish_public_status(&mut self) {
@@ -1051,14 +956,6 @@ impl TestApp {
         self.tui.record_visible_token_usage(usage);
     }
 
-    pub(crate) fn active_permissions(&self) -> std::sync::Arc<smelt_permissions::Permissions> {
-        self.tui.active_permissions()
-    }
-
-    pub(crate) fn session_path_grants(&self) -> Vec<smelt_permissions::SessionPathGrant> {
-        self.tui.session_path_grants()
-    }
-
     pub fn focus_transcript(&mut self) {
         self.tui.app_focus = AppFocus::Content;
         self.tui.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -1254,16 +1151,6 @@ impl TestApp {
 
     pub(crate) fn shutdown_context(&self) -> crate::app::ShutdownContext {
         self.tui.conversation.shutdown_context()
-    }
-
-    pub(crate) fn grant_session_path(
-        &mut self,
-        mode: Option<protocol::AgentMode>,
-        tool: String,
-        access: smelt_permissions::PathAccess,
-        dir: std::path::PathBuf,
-    ) {
-        self.tui.grant_session_path(mode, tool, access, dir);
     }
 
     pub(crate) fn set_session_title(

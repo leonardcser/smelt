@@ -37,8 +37,11 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "glob",
   description = "Fast file pattern matching tool that works with any codebase size. Returns matching file paths sorted by modification time.",
   override = true,
-  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
-  effect = "read",
+  access = "read",
+  paths = function(args)
+    local path = args.path or ""
+    return { path ~= "" and path or "." }
+  end,
   parameters = {
     type = "object",
     properties = {
@@ -60,11 +63,7 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   summary = function(args, ctx)
     return describe(args, ctx)
   end,
-  paths_for_workspace = function(args)
-    local p = args.path or ""
-    return p ~= "" and { { path = p, kind = "directory" } } or {}
-  end,
-  execute = function(args)
+  execute = function(args, ctx)
     local pattern = args.pattern or ""
     if pattern == "" then
       return { content = "missing required parameter: pattern", is_error = true }

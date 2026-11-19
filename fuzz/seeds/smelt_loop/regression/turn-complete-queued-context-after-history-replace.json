@@ -1,7 +1,7 @@
 {
   "_about": "Regression for a smelt_loop oracle crash where TurnComplete did not expect a queued follow-up to append a fresh context note after final model history replaced the session history.",
   "_fix": "Compute the queued follow-up context-note append from the post-model-history state: without a compaction checkpoint, the incoming model history replaces existing context notes.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "data": {

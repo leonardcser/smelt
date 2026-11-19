@@ -2213,7 +2213,7 @@ fn context_breakdown_measures_prompt_sources_and_active_tools() {
         r#"
         smelt.agent.add_system_prompt("Plugin guidance")
         smelt.tools.register({ name = "plan_only_probe", modes = { "plan" },
-          description = "not visible in normal mode", execute = function() end })
+          description = "not visible in read mode", execute = function() end })
     "#
     ));
     let data: serde_json::Value = serde_json::from_str(
@@ -2530,23 +2530,9 @@ fn evaluate_tool_decision(
         call_id: call_id.into(),
         tool_name: tool_name.into(),
         args: args.clone(),
-        mode: protocol::AgentMode::parse("apply").unwrap(),
+        mode: protocol::AgentMode::read(),
     }));
-    app.wait_for_tool_evaluation(request_id);
-    app.actions()
-        .iter()
-        .rev()
-        .find_map(|action| match action {
-            Action::EngineSend(command) => match command.as_ref() {
-                protocol::UiCommand::ToolEvaluationResponse {
-                    request_id: response_id,
-                    evaluation,
-                } if *response_id == request_id => Some(evaluation.decision.clone()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("tool evaluation response")
+    app.wait_for_tool_evaluation(request_id).decision
 }
 
 #[derive(Clone, Copy)]
@@ -9304,4 +9290,220 @@ fn show_image_tool_reports_files_it_cannot_decode() {
     std::fs::write(&path, "not an image").unwrap();
     let (_, content) = run_show_image(&path);
     assert!(content.starts_with("cannot display"), "{content}");
+}
+
+#[test]
+fn read_sandbox_bash_writes_temp_files_and_explains_blocked_writes() {
+    let mut app = TestApp::builder().build();
+    let available: bool = app
+        .eval_lua("return smelt.sandbox.status().available")
+        .unwrap();
+    if !available {
+        return;
+    }
+    app.start_turn(1);
+    let run = |app: &mut TestApp, call_id: &str, command: &str| {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+            invocation_id: protocol::InvocationId::new(1),
+            request_id: 1,
+            call_id: call_id.into(),
+            tool_name: "bash".into(),
+            args: std::collections::HashMap::from([
+                ("command".into(), command.into()),
+                ("access".into(), "read".into()),
+            ]),
+        }));
+        app.wait_for_tool_result(call_id);
+        app.actions()
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    protocol::UiCommand::ToolResult {
+                        call_id: id,
+                        content,
+                        is_error,
+                        ..
+                    } if id == call_id => Some((content.clone(), *is_error)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("bash result")
+    };
+
+    let (content, is_error) = run(
+        &mut app,
+        "temp",
+        "f=$(mktemp) && echo ok > \"$f\" && cat \"$f\" && rm \"$f\"",
+    );
+    assert!(!is_error, "{content}");
+    assert_eq!(content.trim(), "ok");
+
+    // Outside the temp directories, so the read sandbox blocks the write.
+    let outside = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target"))
+        .expect("create directory outside temp");
+    let target = outside.path().join("blocked.txt");
+    let command = format!("printf x > '{}'", target.display());
+    let (content, is_error) = run(&mut app, "blocked", &command);
+    assert!(is_error, "{content}");
+    assert!(content.contains("ran in the read sandbox"), "{content}");
+    assert!(!target.exists());
+}
+
+#[test]
+fn sandboxed_bash_cannot_see_protected_paths_or_credentials_until_full_access() {
+    // nextest runs each test in its own process.
+    std::env::set_var("SMELT_TEST_PROVIDER_KEY", "provider-key");
+    std::env::set_var("SMELT_CODEX_TOKENS", "codex-tokens");
+    let config = tempfile::tempdir().unwrap();
+    let init = config.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"smelt.provider.register("keyed", {
+            type = "openai-compatible", api_base = "https://example.invalid/v1",
+            api_key_env = "SMELT_TEST_PROVIDER_KEY", models = { "m" },
+        })"#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let available: bool = app
+        .eval_lua("return smelt.sandbox.status().available")
+        .unwrap();
+    if !available {
+        return;
+    }
+    // Outside the temp directories, which are always "allow".
+    let home = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target"))
+        .expect("create directory outside temp");
+    let secrets = home.path().join("secrets");
+    std::fs::create_dir(&secrets).unwrap();
+    std::fs::write(secrets.join("token"), "hunter2").unwrap();
+    std::fs::write(home.path().join("notes"), "visible").unwrap();
+    app.run_lua_result(&format!(
+        "smelt.permissions.paths({{ [{:?}] = \"ask\" }})",
+        secrets.display().to_string()
+    ))
+    .expect("set rule");
+    app.start_turn(1);
+    let mut run = |call_id: &str, command: String, access: &str| {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+            invocation_id: protocol::InvocationId::new(1),
+            request_id: 1,
+            call_id: call_id.into(),
+            tool_name: "bash".into(),
+            args: std::collections::HashMap::from([
+                ("command".into(), command.into()),
+                ("access".into(), access.into()),
+            ]),
+        }));
+        app.wait_for_tool_result(call_id);
+        app.actions()
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    protocol::UiCommand::ToolResult {
+                        call_id: id,
+                        content,
+                        is_error,
+                        ..
+                    } if id == call_id => Some((content.clone(), *is_error)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("bash result")
+    };
+
+    let (content, is_error) = run(
+        "notes",
+        format!("cat '{}'", home.path().join("notes").display()),
+        "read",
+    );
+    assert!(!is_error, "{content}");
+    assert_eq!(content.trim(), "visible");
+
+    let read_secret = format!("cat '{}'", secrets.join("token").display());
+    let (content, is_error) = run("hidden", read_secret.clone(), "write");
+    assert!(is_error, "{content}");
+    assert!(!content.contains("hunter2"), "{content}");
+    assert!(content.contains("protected paths"), "{content}");
+
+    let (content, is_error) = run("full", read_secret, "full");
+    assert!(!is_error, "{content}");
+    assert_eq!(content.trim(), "hunter2");
+
+    let print_keys = r#"echo "[$SMELT_TEST_PROVIDER_KEY][$SMELT_CODEX_TOKENS]""#;
+    let (content, _) = run("keys-read", print_keys.into(), "read");
+    assert_eq!(content.trim(), "[][]");
+    let (content, _) = run("keys-full", print_keys.into(), "full");
+    assert_eq!(content.trim(), "[provider-key][codex-tokens]");
+}
+
+#[test]
+fn plugin_tool_commands_run_in_the_sandbox_of_their_call() {
+    let mut app = TestApp::builder().build();
+    let available: bool = app
+        .eval_lua("return smelt.sandbox.status().available")
+        .unwrap();
+    if !available {
+        return;
+    }
+    // Outside the temp directories, which are always "allow".
+    let home = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target"))
+        .expect("create directory outside temp");
+    let secret = home.path().join("token");
+    std::fs::write(&secret, "hunter2").unwrap();
+    let written = home.path().join("written");
+    app.run_lua_result(&format!(
+        r#"
+        smelt.permissions.paths({{ [{secret:?}] = "ask" }})
+        for name, sandbox in pairs({{ confined = true, unconfined = false }}) do
+            smelt.tools.register({{
+                name = name,
+                access = "read",
+                execute = function()
+                    local result = smelt.process.run("sh", {{ "-c", "cat {secret}; echo x > {written}" }}, {{ sandbox = sandbox }})
+                    return result.stdout .. result.stderr
+                end,
+            }})
+        end
+        "#,
+        secret = secret.display().to_string(),
+        written = written.display(),
+    ))
+    .expect("register tools");
+    app.start_turn(1);
+    let mut run = |tool: &str| {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+            invocation_id: protocol::InvocationId::new(1),
+            request_id: 1,
+            call_id: tool.into(),
+            tool_name: tool.into(),
+            args: std::collections::HashMap::new(),
+        }));
+        app.wait_for_tool_result(tool);
+        app.actions()
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    protocol::UiCommand::ToolResult {
+                        call_id, content, ..
+                    } if call_id == tool => Some(content.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("tool result")
+    };
+
+    let content = run("confined");
+    assert!(!content.contains("hunter2"), "{content}");
+    assert!(!written.exists());
+
+    let content = run("unconfined");
+    assert!(content.contains("hunter2"), "{content}");
+    assert!(written.exists());
 }

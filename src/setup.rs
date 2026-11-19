@@ -440,7 +440,7 @@ fn default_config_lua() -> String {
     lua.push_str("smelt.defaults.set({\n");
     lua.push_str("  model = nil,             -- example: \"openai/gpt-5.5\"\n");
     lua.push_str(
-        "  mode = nil,              -- possible: \"normal\", \"plan\", \"apply\", \"yolo\"\n",
+        "  mode = nil,              -- possible: \"read\", \"plan\", \"write\", \"yolo\"\n",
     );
     lua.push_str(
         "  reasoning_effort = nil,  -- possible: \"off\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\", \"ultra\"\n",
@@ -535,20 +535,16 @@ fn default_config_lua() -> String {
     lua.push_str("--   enabled = true,\n");
     lua.push_str("-- })\n\n");
 
-    lua.push_str("-- Permission rules\n");
+    lua.push_str("-- Permissions\n");
+    lua.push_str("-- Each mode allows calls up to its access level and asks above it.\n");
+    lua.push_str("-- Wrap smelt.permissions.check to customize. Uncomment to try.\n");
+    lua.push_str("-- local check = smelt.permissions.check\n");
+    lua.push_str("-- smelt.permissions.check = function(call)\n");
     lua.push_str(
-        "-- Default is to ask for tools that require permission. Uncomment to customize.\n",
+        "--   if call.tool == \"bash\" and call.args.command:match(\"^git status\") then return \"allow\" end\n",
     );
-    lua.push_str("-- smelt.permissions.extend({\n");
-    lua.push_str("--   default = {\n");
-    lua.push_str(
-        "--     patterns = { bash = { allow = { \"git status *\", \"git diff *\" } } },\n",
-    );
-    lua.push_str("--   },\n");
-    lua.push_str("--   apply = {\n");
-    lua.push_str("--     patterns = { bash = { allow = { \"git commit *\" } } },\n");
-    lua.push_str("--   },\n");
-    lua.push_str("-- })\n\n");
+    lua.push_str("--   return check(call)\n");
+    lua.push_str("-- end\n\n");
 
     lua.push_str("-- Theme\n");
     lua.push_str("-- smelt.lifecycle.on_ready(function()\n");

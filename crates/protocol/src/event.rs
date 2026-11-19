@@ -5,7 +5,7 @@ use crate::message::{Message, ToolOutcome};
 use crate::mode::{AgentMode, ReasoningEffort};
 use crate::model::{ModelTarget, RequestRuntimeConfig};
 use crate::style::StyledLines;
-use crate::usage::{PermissionOverrides, TokenUsage, TurnMeta};
+use crate::usage::{TokenUsage, TurnMeta};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -172,13 +172,6 @@ pub struct ToolDef {
     /// is an error reported back to the user.
     #[serde(default)]
     pub override_core: bool,
-    /// Hook signals declared by the tool. These are metadata hooks: they
-    /// add approval suggestions and preflight validation to the mandatory
-    /// permission pipeline. They do not decide whether a tool call is
-    /// permission-checked; every model-initiated tool call must pass
-    /// through the gate before dispatch.
-    #[serde(default)]
-    pub hooks: ToolHookFlags,
     /// If false, the tool should be hidden from the model in headless mode.
     /// Defaults to true so existing tools remain visible.
     #[serde(default = "default_true")]
@@ -189,30 +182,6 @@ pub struct ToolDef {
 
 fn default_true() -> bool {
     true
-}
-
-/// Which metadata hooks a tool has registered. Sent with `ToolDef` so
-/// the engine/host can avoid evaluating optional Lua callbacks that do
-/// not exist.
-///
-/// `summary` is always evaluated regardless of this flag set - it's a
-/// display concern, not a permission hook. These flags are not a security
-/// boundary and must not be used as the permission gate.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ToolHookFlags {
-    #[serde(default)]
-    pub approval_patterns: bool,
-    #[serde(default)]
-    pub preflight: bool,
-}
-
-impl ToolHookFlags {
-    /// True when at least one optional metadata hook is registered.
-    /// This is only an optimization hint; it must not control whether
-    /// permission evaluation runs.
-    pub fn any(&self) -> bool {
-        self.approval_patterns || self.preflight
-    }
 }
 
 /// Permission decision for a single tool call, produced by central policy
@@ -228,15 +197,46 @@ pub enum Decision {
     Error(String),
 }
 
+/// What a tool call may change, from least to most.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    /// Reads files only.
+    Read,
+    /// Writes files inside the workspace, or runs in the write sandbox.
+    Write,
+    /// Writes outside the workspace, or runs without a sandbox. A call whose
+    /// access is unknown counts as full.
+    #[default]
+    Full,
+}
+
+impl Access {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Full => "full",
+        }
+    }
+}
+
 /// Tool metadata evaluated for a specific invocation. These values
 /// describe the call for display and auto-approval matching; they do not
 /// grant permission to execute the tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolMetadata {
-    /// Approval patterns to offer "always allow" for.
-    /// Used when the central permission decision is `Ask`.
-    #[serde(default)]
-    pub approval_patterns: Vec<String>,
     /// Preflight validation error reported by the tool before execution.
     /// The central evaluator converts this into `Decision::Error`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -247,6 +247,9 @@ pub struct ToolMetadata {
     /// engine never extracts arg fields by tool name.
     #[serde(default)]
     pub summary: StyledLines,
+    /// The access the permission policy resolved for this call.
+    #[serde(default)]
+    pub access: Access,
 }
 
 /// Complete tool evaluation result: tool-provided metadata plus the central
@@ -560,11 +563,11 @@ pub enum EngineEvent {
         /// The provider that runs this tool natively, when it is not smelt's.
         provider: Option<String>,
         args: HashMap<String, serde_json::Value>,
-        approval_patterns: Vec<String>,
         called_at_ms: u64,
-        /// Styled summary of the pending call - both the dialog body
-        /// header and any auto-approval pattern matching read this.
+        /// Styled summary of the pending call - the dialog body header.
         summary: StyledLines,
+        /// The access the permission policy resolved for this call.
+        access: Access,
     },
 
     /// Token usage update after an LLM call.
@@ -676,7 +679,7 @@ pub enum EngineEvent {
     },
 
     /// Engine asks the TUI to evaluate a Lua tool's metadata
-    /// callbacks (`summary`, `approval_patterns`, `preflight`) for a
+    /// callbacks (`summary`, `prepare`, `preflight`) for a
     /// specific invocation. The TUI replies with
     /// `UiCommand::ToolEvaluationResponse`, after which the engine
     /// resumes the standard Allow / Deny / Ask flow.
@@ -871,9 +874,6 @@ pub struct StartTurnPayload {
     /// Do not persist agent-backend conversations or session links for this turn.
     #[serde(default)]
     pub ephemeral: bool,
-    /// Per-turn permission overrides (from custom commands or Lua).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub permission_overrides: Option<PermissionOverrides>,
     /// Full system prompt supplied by the frontend.
     /// When present the engine uses this verbatim instead of rendering
     /// its built-in template.
@@ -1102,26 +1102,6 @@ mod tests {
         );
     }
 
-    // ---- ToolHookFlags::any ----
-
-    #[test]
-    fn tool_hook_flags_any_true_when_approval_patterns_set() {
-        let f = ToolHookFlags {
-            approval_patterns: true,
-            ..Default::default()
-        };
-        assert!(f.any());
-    }
-
-    #[test]
-    fn tool_hook_flags_any_true_when_preflight_set() {
-        let f = ToolHookFlags {
-            preflight: true,
-            ..Default::default()
-        };
-        assert!(f.any());
-    }
-
     // ---- Decision ----
 
     #[test]
@@ -1153,7 +1133,6 @@ mod tests {
         assert!(t.modes.is_none());
         assert_eq!(t.execution_mode, ToolExecutionMode::Concurrent);
         assert!(!t.override_core);
-        assert!(!t.hooks.any());
     }
 
     #[test]
@@ -1165,7 +1144,6 @@ mod tests {
             modes: None,
             execution_mode: ToolExecutionMode::Concurrent,
             override_core: false,
-            hooks: ToolHookFlags::default(),
             headless: true,
             claude_code: None,
         };
@@ -1216,7 +1194,7 @@ mod tests {
         let p = StartTurnPayload {
             turn_id: 1,
             input: StartTurnInput::user(Content::text("hi")),
-            mode: AgentMode::normal(),
+            mode: AgentMode::read(),
             model_target: target.clone(),
             request_config,
             reasoning_effort: ReasoningEffort::Off,
@@ -1226,7 +1204,6 @@ mod tests {
             session_id: "s".into(),
             artifact_dir: std::path::PathBuf::from("/tmp"),
             ephemeral: false,
-            permission_overrides: None,
             system_prompt: None,
             native_prompt: None,
             tool_visibility: ToolVisibility::Interactive,
@@ -1234,7 +1211,6 @@ mod tests {
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(v["input"].get("display").is_none());
-        assert!(v.get("permission_overrides").is_none());
         assert!(v.get("system_prompt").is_none());
         assert!(v.get("tools").is_none());
         let decoded: StartTurnPayload = serde_json::from_value(v).unwrap();

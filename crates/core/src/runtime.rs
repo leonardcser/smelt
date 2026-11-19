@@ -51,8 +51,8 @@ pub struct Core {
     pub workspace_files: crate::workspace_files::WorkspaceFiles,
     pub jobs: JobSupervisor,
     pub session_control: crate::session_control::SessionControl,
-    pub permissions: smelt_permissions::PermissionsHandle,
-    pub permission_store: smelt_permissions::store::PermissionStore,
+    /// Workspace roots and session approvals read by the permission policy.
+    pub permissions: crate::permissions::Permissions,
     /// MCP server registry. Shared `Arc` with the engine's
     /// `McpDispatcher`; `None` when the user declared no MCP servers.
     /// Lua introspection reads through this handle without locking out
@@ -80,11 +80,9 @@ impl Core {
         startup_overrides: StartupOverrides,
         engine: EngineHandle,
         frontend: FrontendKind,
-        permissions: smelt_permissions::PermissionsHandle,
         clock: Arc<dyn engine::clock::Clock>,
         env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {
-        permissions.install_home(env.home().clone());
         let cwd = env.cwd().to_str().map(String::from).unwrap_or_default();
         let signals = signals::build_with_builtins(signals::SignalSeeds {
             vim_mode: "Insert".to_string(),
@@ -98,8 +96,6 @@ impl Core {
         let confirms = Confirms::new();
         let confirms_flag = confirms.is_clear_flag();
         let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.state_dir().clone());
-        let permission_store =
-            smelt_permissions::store::PermissionStore::new(env.state_dir().clone());
         let recent = crate::state::RecentStore::from_env(&env);
         let sessions = crate::session::SessionStorage::from_env(&env);
         // Read before the struct literal moves `config` into the field below.
@@ -123,8 +119,7 @@ impl Core {
             workspace_files,
             jobs: JobSupervisor::new(),
             session_control: crate::session_control::SessionControl::default(),
-            permissions,
-            permission_store,
+            permissions: crate::permissions::Permissions::with_credentials(smelt_paths::auth_dir()),
             mcp: None,
             started_at: clock.instant_now(),
             clock,
@@ -143,16 +138,9 @@ impl Core {
             .as_millis() as u64
     }
 
-    /// Read live session approvals and both persisted scopes as one coherent
-    /// permission view for frontends and headless callers.
-    pub fn permission_snapshot(&self) -> Result<smelt_permissions::PermissionSnapshot, String> {
-        let cwd = self.env.cwd();
-        smelt_permissions::read_snapshot(
-            &self.permissions,
-            &self.permission_store,
-            &cwd,
-            Some(std::path::Path::new(&self.config.settings.worktree_root)),
-        )
+    /// The access level of the MCP tool `name`, when one exists.
+    pub fn mcp_tool_access(&self, name: &str) -> Option<crate::permissions::Access> {
+        self.mcp.as_ref()?.tool_access(name)
     }
 
     /// Swap the clipboard sink to match the `system_clipboard` setting. Off

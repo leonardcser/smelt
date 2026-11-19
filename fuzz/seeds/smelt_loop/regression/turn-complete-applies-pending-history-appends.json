@@ -1,6 +1,6 @@
 {
   "_about": "TurnComplete oracle seed: job-status notes queued during an active turn are committed to history after the final model snapshot is merged.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "job_completed",

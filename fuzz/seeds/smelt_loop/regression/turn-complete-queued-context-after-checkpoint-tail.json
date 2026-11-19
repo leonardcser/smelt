@@ -1,7 +1,7 @@
 {
   "_about": "Regression for a smelt_loop oracle crash where TurnComplete with a compaction checkpoint expected a queued follow-up not to append a context note, even though the checkpoint prefix did not preserve the current context note.",
   "_fix": "Decide queued follow-up context-note appends by checking whether the model-history merge preserves the current context note in the checkpoint prefix.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "data": {

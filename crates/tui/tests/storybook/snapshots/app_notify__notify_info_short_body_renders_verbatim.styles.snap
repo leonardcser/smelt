@@ -8,6 +8,6 @@ dim: 40 6
   2   0  40 fg=AnsiValue(237)
   3   1   1 fg=Black bg=White
   4   0  40 fg=AnsiValue(237)
-  5   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
-  5  10  22 bg=AnsiValue(233)
+  5   0   8 fg=AnsiValue(244) bg=AnsiValue(234)
+  5   8  24 bg=AnsiValue(233)
   5  32   8 fg=AnsiValue(244) bg=AnsiValue(233)

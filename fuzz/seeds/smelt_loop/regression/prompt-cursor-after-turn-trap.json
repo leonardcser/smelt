@@ -1,6 +1,6 @@
 {
   "_about": "Regression probe for #15: after turn completion and a hostile prompt text_changed callback, typing must advance cpos. A stuck cursor reverses text by inserting every new char at the same byte offset.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_prompt_cursor_after_turn",

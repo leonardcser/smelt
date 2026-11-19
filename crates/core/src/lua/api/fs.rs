@@ -597,6 +597,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .map(std::time::Duration::from_millis)
                     .unwrap_or_else(|| std::time::Duration::from_secs(30));
                 let path = s.resolve_project_path(path);
+                // Inside a tool call, skip the files the call may not read.
+                let readable = super::sandbox::current_call(&s)?;
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match crate::fs::glob_with_limits(
                         &pattern,
@@ -607,8 +609,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     ) {
                         Ok(mut search) => {
                             search.matches.sort_by_key(|m| std::cmp::Reverse(m.mtime));
-                            let paths: Vec<String> =
-                                search.matches.into_iter().map(|m| m.path).collect();
+                            let paths: Vec<String> = search
+                                .matches
+                                .into_iter()
+                                .map(|m| m.path)
+                                .filter(|found| {
+                                    readable.as_ref().is_none_or(|(rules, access)| {
+                                        rules.may_read(&path.join(found), *access)
+                                    })
+                                })
+                                .collect();
                             serde_json::json!({
                                 "paths": paths,
                                 "scanned": search.scanned,

@@ -162,6 +162,6 @@ dim: 110 28
  24 106   4 fg=AnsiValue(237)
  26   0 110 fg=AnsiValue(237)
  27   0   8 fg=AnsiValue(74) bg=AnsiValue(236)
- 27   8  10 fg=AnsiValue(244) bg=AnsiValue(234)
- 27  18  86 bg=AnsiValue(233)
+ 27   8   8 fg=AnsiValue(244) bg=AnsiValue(234)
+ 27  16  88 bg=AnsiValue(233)
  27 104   6 fg=AnsiValue(244) bg=AnsiValue(233)

@@ -2,15 +2,15 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- /changelog    show release notes of recent smelt…
- /btw          ask a side question
- /brief        summarize planned or completed cha…
- /branch       fork current session
- /barrelroll   spin the screen one full turn
+ /changelog   show release notes of recent smelt …
+ /btw         ask a side question
+ /brief       summarize planned or completed chan…
+ /branch      fork current session
+ /barrelroll  spin the screen one full turn
   › first follow-up
   › second follow-up
   ◌ Stashed (ctrl+s to unstash)
 ─ ● … ────────────────────────────────────────────
  /
 ──────────────────────────────────────────────────
- ○ normal                                 1:2 100%
+ ○ read                                   1:2 100%

@@ -189,7 +189,7 @@ impl StoredRewindRequest {
                         user_turn_count,
                         input,
                         transcript,
-                        mode: AgentMode::parse(&mode).unwrap_or_else(AgentMode::normal),
+                        mode: AgentMode::parse(&mode).unwrap_or_else(AgentMode::read),
                     })
                 })())
             })
@@ -2767,7 +2767,7 @@ impl TuiApp {
             .session()
             .mode
             .as_deref()
-            .unwrap_or("normal");
+            .unwrap_or("read");
         let (store, input, mode, user_turn_count) =
             if let Some(live) = self.conversation.live_session() {
                 let input = if history_idx >= live.live_start {
@@ -2825,7 +2825,7 @@ impl TuiApp {
                 user_turn_count,
                 input,
                 transcript,
-                mode: AgentMode::parse(&mode).unwrap_or_else(AgentMode::normal),
+                mode: AgentMode::parse(&mode).unwrap_or_else(AgentMode::read),
             })),
             (input, transcript, mode, user_turn_count) => {
                 Ok(RewindPreparation::Stored(StoredRewindRequest {
@@ -4713,7 +4713,7 @@ mod checkpoint_tests {
     #[test]
     fn restore_screen_rebuilds_mode_notes_as_mode_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = protocol::mode_change_note("now in apply mode");
+        let note = protocol::mode_change_note("now in write mode");
         app.tui
             .conversation
             .replace_history_for_harness(vec![user(&note)]);
@@ -4737,9 +4737,9 @@ mod checkpoint_tests {
         app.tui.conversation.replace_history_for_harness(vec![
             user("hello"),
             HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-                "normal",
-                "apply",
-                "now in apply mode",
+                "read",
+                "write",
+                "now in write mode",
             )),
         ]);
         app.restore_screen();
@@ -4748,7 +4748,7 @@ mod checkpoint_tests {
         assert!(history
             .order
             .iter()
-            .any(|id| matches!(history.block(*id), Some(Block::Mode { text, .. }) if text == "now in apply mode")));
+            .any(|id| matches!(history.block(*id), Some(Block::Mode { text, .. }) if text == "now in write mode")));
     }
 
     #[test]
@@ -4756,13 +4756,13 @@ mod checkpoint_tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.tui.conversation.replace_history_for_harness(vec![
             HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-                "normal",
+                "read",
                 "plan",
                 "plan mode",
             )),
             user("planned request"),
             HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-                "normal",
+                "read",
                 "yolo",
                 "yolo mode",
             )),
@@ -4777,11 +4777,11 @@ mod checkpoint_tests {
             app.tui
                 .apply_history_append_to_history(&protocol::HistoryAppend::mode_change(
                     HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-                        "normal",
+                        "read",
                         "plan",
                         "plan mode",
                     )),
-                    protocol::AgentMode::normal(),
+                    protocol::AgentMode::read(),
                 ));
 
         assert_eq!(result, protocol::HistoryAppendResult::RemovedLast);

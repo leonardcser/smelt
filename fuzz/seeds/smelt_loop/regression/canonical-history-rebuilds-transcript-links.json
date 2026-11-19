@@ -2,7 +2,7 @@
   "_about": "Regression for a smelt_loop crash where authoritative engine history replaced command entries but transcript descriptors kept their old user-history links, causing the next canonical turn save to fail integrity validation.",
   "_fix": "Validate transcript links against each changed canonical-history suffix and rebuild the transcript from authoritative history when a linked descriptor no longer has the matching semantic projection.",
   "vim": true,
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "engine_turn_complete",

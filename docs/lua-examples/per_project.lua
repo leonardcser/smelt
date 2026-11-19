@@ -3,14 +3,20 @@
 
 smelt.settings.show_tips = false
 
-smelt.permissions.extend({
-  default = {
-    patterns = {
-      bash = {
-        allow = { "git status *", "git diff *", "cargo test *" },
-      },
-    },
-  },
+-- Let the test suite write build output in the sandbox without asking.
+local check = smelt.permissions.check
+smelt.permissions.check = function(call)
+  local command = call.tool == "bash" and call.args.command or ""
+  if call.access == "write" and command:match("^cargo test") then
+    return "allow"
+  end
+  return check(call)
+end
+
+-- Let the agent work in a sibling checkout, and keep it out of the deploy keys.
+smelt.permissions.paths({
+  ["../shared-assets"] = "allow",
+  ["./deploy/keys"] = "deny",
 })
 
 smelt.cmd.register("project-test", function()

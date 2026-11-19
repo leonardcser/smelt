@@ -4,15 +4,15 @@ expression: frame.styles_text()
 ---
 dim: 50 6
   0   1   7 fg=AnsiValue(208)
-  0  15  20 attrs=dim
+  0  14  20 attrs=dim
   1   0   1 bg=AnsiValue(237)
   1   1  11 fg=AnsiValue(208) bg=AnsiValue(237)
-  1  12   3 bg=AnsiValue(237)
-  1  15  29 bg=AnsiValue(237) attrs=dim
-  1  44   6 bg=AnsiValue(237)
+  1  12   2 bg=AnsiValue(237)
+  1  14  29 bg=AnsiValue(237) attrs=dim
+  1  43   7 bg=AnsiValue(237)
   2   0  50 fg=AnsiValue(237)
   3   2   1 fg=Black bg=White
   4   0  50 fg=AnsiValue(237)
-  5   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
-  5  10  32 bg=AnsiValue(233)
+  5   0   8 fg=AnsiValue(244) bg=AnsiValue(234)
+  5   8  34 bg=AnsiValue(233)
   5  42   8 fg=AnsiValue(244) bg=AnsiValue(233)

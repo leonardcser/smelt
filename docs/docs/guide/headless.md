@@ -90,17 +90,14 @@ mode.
 
 ## Permissions
 
-Headless mode never prompts. Decisions that resolve to Ask are denied, explicit
-Allow rules still run, and explicit Deny rules remain blocked. Yolo mode
-(`--mode yolo`) defaults to Allow, while the other modes keep their more cautious
-per-tool and per-effect defaults.
+Headless mode never prompts: calls the [mode](../reference/permissions.md#modes)
+would ask about are denied, and the model is told why. A custom
+`smelt.permissions.check` still applies. Interactive-only tools
+(`ask_user_question`, `enter_worktree`, `switch_cwd`) are left out of the tool
+list.
 
-Interactive-only tools such as `ask_user_question`, `enter_worktree`, and
-`switch_cwd` are omitted from the headless tool list rather than failing after a
-call. Read-only tools (`read_file`, `glob`, `grep`, allowed `bash` patterns) run
-silently in every default mode. See
-[Permissions](../reference/permissions.md) for the defaults and how to widen
-them via `init.lua`.
+`--mode write` is a good default for CI: the agent can edit the checkout and run
+builds and tests in the sandbox, and anything outside the workspace is denied.
 
 For fully autonomous scripting, combine with `--mode yolo`:
 
@@ -152,11 +149,10 @@ Your `init.lua` runs in headless mode too. Settings work as usual:
 
 ```lua
 smelt.settings.autoupgrade = "off"
-smelt.settings.restrict_to_workspace = false
+smelt.permissions.paths({ ["/opt/ci-cache"] = "allow" })
 ```
 
-Only disable workspace restrictions when the process runs inside an isolated
-sandbox. UI-only APIs still require a terminal UI.
+UI-only APIs still require a terminal UI.
 
 For per-run settings, use `--set`; CLI overrides take precedence over Lua config:
 

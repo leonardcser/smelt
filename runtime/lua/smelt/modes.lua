@@ -1,4 +1,6 @@
--- Cycle logic for agent mode and reasoning effort; owns the mode registry.
+-- The built-in agent modes, and cycling through modes and reasoning
+-- efforts. `present_plan` and its approval UI live in
+-- `smelt.plugins.plan_mode`.
 
 local function next_in_cycle(list, current)
   for i, v in ipairs(list) do
@@ -9,129 +11,85 @@ local function next_in_cycle(list, current)
   return list[1]
 end
 
-local registry = {}
-local order = {}
-
 ---@class smelt.mode.Mode
 ---@field name string
 ---@field label string
 ---@field icon string
 ---@field hl_group string
 ---@field note string
----@field permissions table
-
-local function copy_permissions(permissions)
-  local out = {}
-  for key, value in pairs(permissions or {}) do out[key] = value end
-  return out
-end
-
-local function copy_mode(mode)
-  if not mode then return nil end
-  return {
-    name = mode.name,
-    label = mode.label,
-    icon = mode.icon,
-    hl_group = mode.hl_group,
-    note = mode.note,
-    permissions = copy_permissions(mode.permissions),
-  }
-end
-
-local function normalize(spec)
-  if type(spec) ~= "table" or type(spec.name) ~= "string" or spec.name == "" then
-    error("smelt.mode.register requires { name = string }")
-  end
-  local mode = {
-    name = spec.name,
-    label = spec.label or spec.name,
-    icon = spec.icon or "",
-    hl_group = spec.hl_group or "SmeltModeDefault",
-    note = spec.note or ("now in " .. spec.name .. " mode"),
-    permissions = copy_permissions(spec.permissions),
-  }
-  return mode
-end
-
--- Register an agent mode from `{ name, label?, icon?, hl_group?, note?,
--- permissions?, after? }`. Registering a new name appends it, or inserts it
--- after an existing `after` name. Registering an existing name replaces its
--- definition without changing its position. Raises when `name` is missing.
----@type fun(spec: table): nil
-smelt.mode.register = function(spec)
-  local mode = normalize(spec)
-  if not registry[mode.name] then
-    local inserted = false
-    if spec.after then
-      for i, name in ipairs(order) do
-        if name == spec.after then
-          table.insert(order, i + 1, mode.name)
-          inserted = true
-          break
-        end
-      end
-    end
-    if not inserted then order[#order + 1] = mode.name end
-  end
-  registry[mode.name] = mode
-end
-
--- Return a copy of the registered mode definition for `name`, or `nil` when unknown.
----@type fun(name: string): smelt.mode.Mode?
-smelt.mode.get = function(name)
-  return copy_mode(registry[name])
-end
-
--- Return copies of registered mode definitions in registration order.
----@type fun(): smelt.mode.Mode[]
-smelt.mode.list = function()
-  local out = {}
-  for _, name in ipairs(order) do
-    out[#out + 1] = copy_mode(registry[name])
-  end
-  return out
-end
+---@field access smelt.permissions.Access The most a call may do without asking: "read", "write" (inside the workspace or the sandbox), or "full".
+---@field above smelt.mode.Above What happens to calls that need more than `access`.
 
 smelt.mode.register({
-  name = "normal",
+  name = "read",
   icon = "○ ",
   hl_group = "SmeltModeDefault",
-  note = "now in normal mode.",
-  permissions = {
-    default_decision = "ask",
-    allow_subcommands_by_default = false,
-    ask_on_output_redirection = true,
-  },
+  note = "now in read mode. Reads run freely; ask before changing files.",
+  access = "read",
 })
 
 smelt.mode.register({
-  name = "apply",
+  name = "write",
   icon = "→ ",
-  hl_group = "SmeltModeApply",
-  note = "now in apply mode. You may read, edit, and create files. Continue to confirm destructive bash commands before running them.",
-  permissions = {
-    default_decision = "ask",
-    allow_subcommands_by_default = false,
-    ask_on_output_redirection = false,
-  },
+  hl_group = "SmeltModeWrite",
+  note = "now in write mode. You may read, edit, create files and run commands inside the workspace without asking. Anything outside the workspace needs approval.",
+  access = "write",
 })
 
 smelt.mode.register({
   name = "yolo",
   icon = "⚡",
   hl_group = "SmeltModeYolo",
-  note = "now in yolo mode. Full autonomy; act without pausing for confirmation. Continue to avoid genuinely irreversible operations.",
-  permissions = {
-    default_decision = "allow",
-    allow_subcommands_by_default = true,
-    ask_on_output_redirection = false,
-  },
+  note = "now in yolo mode. Full autonomy, with no sandbox; act without pausing for confirmation. Continue to avoid genuinely irreversible operations.",
+  access = "full",
 })
 
-local plan = require("smelt.plan_policy")
-smelt.mode.register(plan.mode)
--- Bare core runtimes load the registry before frontend permission bindings exist.
-if smelt.permissions then smelt.permissions.extend(plan.rules) end
+smelt.mode.register({
+  name = "plan",
+  after = "read",
+  icon = "◇ ",
+  hl_group = "SmeltModePlan",
+  note = [[now in plan mode.
+
+Investigate and reason only. Do not modify workspace files, write workspace files, or run mutating commands. Plan mode may only write plan artifacts under smelt's session state.
+
+Allowed tools:
+- read_file, glob, grep, read_process_output
+- bash, but only for read-only commands
+- ask_user_question when requirements or trade-offs need user input
+- present_plan when the user asks for a written plan, a durable draft would help, or the plan is ready to implement
+- enter_worktree after user confirmation when the user asks to implement in a new worktree
+- edit_file only when revising the full saved plan.md path returned by present_plan
+
+Unavailable or forbidden:
+- write_file, edit_notebook, stop_process, smelt_reload
+- edit_file against workspace files or any path other than a saved plan.md draft
+- destructive shell commands, package installs, formatters, tests that write artifacts, or anything that changes the workspace
+
+Workflow:
+1. Understand the request and inspect relevant files.
+2. Discuss trade-offs and ask questions when requirements are unclear.
+3. Draft the plan in conversation until the user is aligned.
+4. Call present_plan with title, slug, and plan markdown for a new plan, or with the full plan_path for an existing saved draft.
+5. If the user chooses save draft, continue refining in plan mode and use the full saved plan path as the reference.
+6. To revise a saved draft, use read_file and edit_file with the full saved plan path.
+7. When the revised draft is ready, call present_plan with the full plan_path.
+8. If the user chooses approve, proceed in read mode and keep the saved plan path as the implementation reference.
+9. If the user chooses approve and apply, proceed in write mode and keep the saved plan path as the implementation reference.
+
+Use this plan structure unless the user asks otherwise:
+# Goal
+# Context
+# Approach
+# Sequence
+# Risks / Open Questions
+# Verification
+
+The plan should include relevant files/code paths, important constraints, the recommended approach, practical sequencing, and verification steps.
+Your turn should only end with ask_user_question for clarification or present_plan with a written plan.]],
+  access = "read",
+  above = "deny",
+})
 
 -- Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`,
 -- wrapping at the end. No-op when the cycle is empty.

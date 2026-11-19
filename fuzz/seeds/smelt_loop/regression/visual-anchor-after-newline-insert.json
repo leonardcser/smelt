@@ -1,7 +1,7 @@
 {
   "_about": "InsertNewline (Shift-Enter) inserted '\\n' into the buffer source but did not call clamp_anchors_to_source. A lingering vim visual_anchor byte offset survived the source mutation and ended up mid-codepoint (mid-attachment-marker) on the next op, tripping the UTF-8 boundary resource invariant.",
   "_fix": "fix(input): clamp anchors after InsertNewline",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "data": 99,

@@ -18,7 +18,6 @@ pub(super) struct PreparedLuaInputs {
     pub(super) prompt_inputs: crate::prompt_inputs::PromptInputs,
     pub(super) skills: std::sync::Arc<engine::SkillLoader>,
     pub(super) system_prompt_read_error: Option<String>,
-    pub(super) permissions: smelt_permissions::PermissionContext,
 }
 
 pub(super) type LuaPreparation = std::sync::mpsc::Receiver<Result<PreparedLuaInputs, String>>;
@@ -29,45 +28,27 @@ pub(super) enum PreparedWorkspace {
     Cwd(Box<PreparedLuaInputs>),
 }
 
-impl PreparedWorkspace {
-    pub(super) fn permissions(&self) -> &smelt_permissions::PermissionContext {
-        match self {
-            Self::Context(prepared) => &prepared.permissions,
-            Self::Cwd(prepared) => &prepared.permissions,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct PreparedProjectContext {
     target: std::path::PathBuf,
     root: std::path::PathBuf,
     pub(super) cwd: std::path::PathBuf,
     pub(super) project: smelt_worktree::ProjectSnapshot,
-    pub(super) permissions: smelt_permissions::PermissionContext,
 }
 
 impl PreparedProjectContext {
-    fn load(
-        target: std::path::PathBuf,
-        root: std::path::PathBuf,
-        store: smelt_permissions::store::PermissionStore,
-    ) -> Result<Self, String> {
+    fn load(target: std::path::PathBuf, root: std::path::PathBuf) -> Result<Self, String> {
         let cwd = std::fs::canonicalize(&target)
             .map_err(|error| format!("resolve cwd {}: {error}", target.display()))?;
         if !cwd.is_dir() {
             return Err(format!("cwd is not a directory: {}", cwd.display()));
         }
         let project = smelt_worktree::ProjectSnapshot::discover(&cwd, Some(&root));
-        let permissions =
-            smelt_permissions::PermissionContext::load(&cwd, project.context.clone(), &store)
-                .map_err(|error| format!("load persisted permissions: {error}"))?;
         Ok(Self {
             target,
             root,
             cwd,
             project,
-            permissions,
         })
     }
 
@@ -77,7 +58,6 @@ impl PreparedProjectContext {
             && self.root == root
             && std::fs::canonicalize(target).is_ok_and(|cwd| cwd == self.cwd)
             && self.project.is_reusable()
-            && self.permissions.is_reusable()
     }
 
     fn with_lua_inputs(
@@ -97,7 +77,6 @@ impl PreparedProjectContext {
             prompt_inputs,
             skills,
             system_prompt_read_error,
-            permissions: self.permissions,
         }
     }
 }
@@ -239,19 +218,6 @@ impl WorkspaceState {
 
     pub(crate) fn is_managed_worktree(&self) -> bool {
         self.context.managed_worktree
-    }
-
-    pub(crate) fn repository_permission_context(
-        &self,
-    ) -> Option<(&std::path::Path, &std::path::Path)> {
-        self.context.repository_key.as_deref().map(|key| {
-            let display_root = self
-                .context
-                .base_path
-                .as_deref()
-                .unwrap_or(&self.context.active_root);
-            (key, display_root)
-        })
     }
 
     pub(crate) fn install_cwd(&mut self, cwd: std::path::PathBuf) {
@@ -404,9 +370,8 @@ impl TuiApp {
     ) -> Result<LuaPreparation, String> {
         let prompt_inputs = self.prompt_inputs.clone();
         let root = std::path::PathBuf::from(&self.core.config.settings.worktree_root);
-        let permission_store = self.core.permission_store.clone();
         spawn_workspace_preparation(self.lua.wakeup_sender(), move || {
-            let prepared = PreparedProjectContext::load(target, root, permission_store)?;
+            let prepared = PreparedProjectContext::load(target, root)?;
             Ok(prepared.with_lua_inputs(prompt_inputs, refresh_agent_inputs))
         })
     }
@@ -423,9 +388,8 @@ impl TuiApp {
     ) -> Result<ProjectPreparation, String> {
         let prompt_inputs = (cwd != self.core.env.cwd()).then(|| self.prompt_inputs.clone());
         let root = std::path::PathBuf::from(&self.core.config.settings.worktree_root);
-        let store = self.core.permission_store.clone();
         spawn_workspace_preparation(self.lua.wakeup_sender(), move || {
-            let prepared = PreparedProjectContext::load(cwd, root, store)?;
+            let prepared = PreparedProjectContext::load(cwd, root)?;
             Ok(match prompt_inputs {
                 Some(inputs) => {
                     PreparedWorkspace::Cwd(Box::new(prepared.with_lua_inputs(inputs, true)))
@@ -447,21 +411,11 @@ impl TuiApp {
                 }
             }
             PreparedWorkspace::Context(prepared) => {
-                let desired = self.lua.desired();
-                let permissions = prepared.permissions.clone().resolve(
-                    &desired.permissions.rules,
-                    &desired.permissions.tool_defaults,
-                    desired.modes.behaviors.clone(),
-                    self.core.config.settings.restrict_to_workspace,
-                    self.core.env.home(),
-                    self.core.permissions.paths_fn(),
-                );
-                self.core.permissions.apply_resolution(permissions);
+                self.core.permissions.set_project(&prepared.project.context);
                 self.workspace.install_prepared(*prepared);
                 self.publish_workspace_signals();
             }
         }
-        self.refresh_active_turn_permissions();
         let context_changed = previous_context != self.current_context_note_text();
         if context_changed {
             self.ensure_current_context_note();
@@ -503,13 +457,6 @@ impl TuiApp {
                 Err("workspace preparation worker stopped".into())
             }
         };
-        if result
-            .as_ref()
-            .is_ok_and(|prepared| !prepared.permissions.is_current())
-        {
-            self.workspace.pending_change.as_mut().unwrap().preparation = None;
-            return true;
-        }
         self.finish_pending_cwd_change(result)
     }
 
@@ -714,7 +661,10 @@ mod tests {
             request_id: 91,
             call_id: "rename-cwd".into(),
             tool_name: "bash".into(),
-            args: std::collections::HashMap::from([("command".into(), command.into())]),
+            args: std::collections::HashMap::from([
+                ("command".into(), command.into()),
+                ("access".into(), "write".into()),
+            ]),
         }));
         wait_for_bash(&mut app, "rename-cwd").await;
         assert!(app.actions().iter().any(|action| matches!(action,
@@ -766,10 +716,10 @@ mod tests {
             request_id: 92,
             call_id: "relative-write".into(),
             tool_name: "bash".into(),
-            args: std::collections::HashMap::from([(
-                "command".into(),
-                "printf ok > probe.txt".into(),
-            )]),
+            args: std::collections::HashMap::from([
+                ("command".into(), "printf ok > probe.txt".into()),
+                ("access".into(), "write".into()),
+            ]),
         }));
         wait_for_bash(&mut app, "relative-write").await;
         assert_eq!(
@@ -880,7 +830,6 @@ mod tests {
                 .with_init_lua(&init)
                 .build_with_test_environment_guard(&environment);
             let generation = app.lua_probe().id;
-            let permissions = app.active_permissions();
             let session_cwd = app.session_snapshot().cwd;
             std::fs::rename(&original, &renamed).unwrap();
             std::fs::write(&init, "error('rename config rejected')").unwrap();
@@ -913,10 +862,6 @@ mod tests {
             assert_eq!(app.lua_probe().id, generation);
             assert_eq!(app.lua_probe().core_shared().evaluation_cwd(), original);
             assert_eq!(app.session_snapshot().cwd, session_cwd);
-            assert!(std::sync::Arc::ptr_eq(
-                &permissions,
-                &app.active_permissions()
-            ));
             assert!(app.run_lua("assert(rename_marker == 'original')"));
             std::fs::write(&init, "_G.rename_marker = 'renamed'").unwrap();
             app.schedule_lua_reload();
@@ -1041,20 +986,8 @@ mod tests {
                 assert!(!app.actions().iter().any(|action| matches!(action,
                     Action::EngineSend(command) if matches!(command.as_ref(), protocol::UiCommand::ToolResult { .. }))));
             } else {
-                app.tui
-                    .core
-                    .permission_store
-                    .add_tool(
-                        &target.to_string_lossy(),
-                        smelt_permissions::store::PersistenceScope::Workspace,
-                        "bash",
-                        vec![],
-                    )
-                    .unwrap();
                 assert!(tx.send(Ok(prepared)).is_ok());
                 app.feed_one(SourceEvent::LuaWakeup);
-                assert_eq!(app.core_probe().env.cwd(), original_cwd);
-                assert_eq!(app.lua_probe().id, original_generation);
                 app.wait_for_tool_result("prepared-cwd");
                 assert_eq!(app.core_probe().env.cwd(), target);
                 assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));

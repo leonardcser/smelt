@@ -332,7 +332,7 @@ function renderGroups(sessions) {
   if (state.group === "none") return sessions.map(renderSessionItem).join("");
   const groups = new Map();
   for (const session of sessions) {
-    const key = state.group === "mode" ? (session.mode || "normal") : (session.project || projectName(session.cwd) || "unknown project");
+    const key = state.group === "mode" ? (session.mode || "read") : (session.project || projectName(session.cwd) || "unknown project");
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(session);
   }

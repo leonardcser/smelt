@@ -239,7 +239,7 @@ pub(crate) fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck
                 tool_name,
                 provider: None,
                 args: args.into_map(),
-                approval_patterns: Vec::new(),
+                access: protocol::Access::Write,
                 summary: protocol::style::StyledLines::from_plain(summary),
                 called_at_ms: u64::from(req_id),
             });
@@ -259,7 +259,7 @@ pub(crate) fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck
                 tool_name: "bash".to_string(),
                 provider: None,
                 args,
-                approval_patterns: Vec::new(),
+                access: protocol::Access::Write,
                 summary: protocol::style::StyledLines::from_plain("bash".to_string()),
                 called_at_ms: u64::from(req_id),
             });
@@ -295,7 +295,7 @@ pub(crate) fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck
                 call_id: call_id_string(call_id),
                 tool_name,
                 args: args.into_map(),
-                mode: AgentMode::normal(),
+                mode: AgentMode::read(),
             });
             (Some(ev), PostCheck::ToolEvaluationRequested)
         }

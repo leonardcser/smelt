@@ -12,7 +12,6 @@ use crate::lua::{
     value, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent, ToolCallIds,
     ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
-use smelt_permissions::{PathTargetKind, ToolPath};
 use smelt_transcript::content::block_layout::{
     BlockLayout, ContentRenderSpec, ContentSpec, LuaLeaf, TextSpec,
 };
@@ -33,27 +32,7 @@ use smelt_transcript::transcript_model::{
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolWorkspacePaths {
-    Undeclared,
-    Declared(Vec<ToolPath>),
-}
-
-impl ToolWorkspacePaths {
-    pub fn as_slice(&self) -> &[ToolPath] {
-        match self {
-            Self::Undeclared => &[],
-            Self::Declared(paths) => paths,
-        }
-    }
-
-    pub fn into_paths(self) -> Vec<ToolPath> {
-        match self {
-            Self::Undeclared => Vec::new(),
-            Self::Declared(paths) => paths,
-        }
-    }
-}
+pub use super::permission::{PermissionCheck, PermissionTarget};
 
 pub struct ShutdownHookContext<'a> {
     pub session_id: &'a str,
@@ -147,6 +126,7 @@ pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
     BootstrapChunk::ui("transcript_pending.lua"),
     BootstrapChunk::ui("layout.lua"),
     BootstrapChunk::ui("splits.lua"),
+    BootstrapChunk::host("permissions.lua"),
     BootstrapChunk::host("modes.lua"),
 ];
 
@@ -531,61 +511,17 @@ impl LuaRuntime {
         }
     }
 
-    pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
-        let result: LuaResult<Vec<String>> = (|| {
-            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
-            let mode: mlua::Table = smelt.get("mode")?;
-            let list: mlua::Function = mode.get("list")?;
-            let rows: mlua::Table = list.call(())?;
-            let mut names = Vec::new();
-            for row in rows.sequence_values::<mlua::Table>() {
-                names.push(row?.get::<String>("name")?);
-            }
-            Ok(names)
-        })();
-        result
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|name| protocol::AgentMode::parse(&name))
-            .collect()
+    /// The registered modes, in cycle order.
+    pub fn modes(&self) -> crate::modes::Modes {
+        self.shared
+            .modes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
-    pub fn mode_behaviors(
-        &self,
-    ) -> std::collections::HashMap<String, smelt_permissions::ModeBehavior> {
-        let result: LuaResult<std::collections::HashMap<String, smelt_permissions::ModeBehavior>> =
-            (|| {
-                let smelt: mlua::Table = self.lua.globals().get("smelt")?;
-                let mode: mlua::Table = smelt.get("mode")?;
-                let list: mlua::Function = mode.get("list")?;
-                let rows: mlua::Table = list.call(())?;
-                let mut out = std::collections::HashMap::new();
-                for row in rows.sequence_values::<mlua::Table>() {
-                    let row = row?;
-                    let name = row.get::<String>("name")?;
-                    let spec = row.get::<mlua::Table>("permissions")?;
-                    let default_decision =
-                        match spec.get::<Option<String>>("default_decision")?.as_deref() {
-                            Some("allow") => protocol::Decision::Allow,
-                            Some("deny") => protocol::Decision::Deny,
-                            _ => protocol::Decision::Ask,
-                        };
-                    out.insert(
-                        name,
-                        smelt_permissions::ModeBehavior {
-                            default_decision,
-                            allow_subcommands_by_default: spec
-                                .get("allow_subcommands_by_default")
-                                .unwrap_or(false),
-                            ask_on_output_redirection: spec
-                                .get("ask_on_output_redirection")
-                                .unwrap_or(true),
-                        },
-                    );
-                }
-                Ok(out)
-            })();
-        result.unwrap_or_default()
+    pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
+        self.modes().names()
     }
 
     pub fn shared(&self) -> &Arc<LuaShared> {
@@ -1533,14 +1469,6 @@ impl LuaRuntime {
         }
     }
 
-    pub fn permission_rules_snapshot(&self) -> Option<smelt_permissions::rules::RawPerms> {
-        self.shared
-            .permission_rules
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-    }
-
     pub fn lsp_config_snapshot(&self) -> crate::lsp::LspConfig {
         self.shared
             .lsp_config
@@ -1554,14 +1482,6 @@ impl LuaRuntime {
             .default_shell
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clone()
-    }
-
-    pub fn tool_defaults(&self) -> smelt_permissions::rules::ToolDefaults {
-        self.shared
-            .tool_defaults
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
@@ -2228,10 +2148,6 @@ impl LuaRuntime {
                         _ => None,
                     })
                     .unwrap_or_default();
-                let hooks = protocol::ToolHookFlags {
-                    approval_patterns: meta_table.get("hook_approval_patterns").unwrap_or(false),
-                    preflight: meta_table.get("hook_preflight").unwrap_or(false),
-                };
                 let override_core: bool = meta_table.get("override_core").unwrap_or(false);
                 defs.push(protocol::ToolDef {
                     name: name.clone(),
@@ -2239,7 +2155,6 @@ impl LuaRuntime {
                     parameters,
                     modes,
                     execution_mode,
-                    hooks,
                     override_core,
                     headless,
                     claude_code: meta_table
@@ -2252,117 +2167,52 @@ impl LuaRuntime {
         defs
     }
 
-    fn lua_value_to_tool_path(value: mlua::Value) -> Result<ToolPath, String> {
-        let (path, target_kind) = match value {
-            mlua::Value::String(path) => (path.to_string_lossy(), PathTargetKind::Unknown),
-            mlua::Value::Table(table) => {
-                let path = match table
-                    .get::<Option<String>>("path")
-                    .map_err(|error| format!("read `path`: {error}"))?
-                {
-                    Some(path) => Some(path),
-                    None => table
-                        .get::<Option<String>>(1)
-                        .map_err(|error| format!("read positional path: {error}"))?,
+    /// Turn a tool's metadata into its evaluation: a preflight error fails
+    /// the call, otherwise the permission policy decides and records the
+    /// access it resolved. Call inside a host scope.
+    pub fn decide_tool(
+        &self,
+        request: &super::ToolEvaluationRequest,
+        mut metadata: protocol::ToolMetadata,
+    ) -> protocol::ToolEvaluation {
+        let decision = match metadata.preflight_error.clone() {
+            Some(error) => protocol::Decision::Error(error),
+            None => match self.check_permission(
+                &request.tool_name,
+                &request.args,
+                request.mode.clone(),
+                None,
+            ) {
+                Ok(check) => {
+                    metadata.access = check.access;
+                    check.decision
                 }
-                .ok_or_else(|| "missing string `path`".to_string())?;
-                let kind = match table
-                    .get::<Option<String>>("kind")
-                    .map_err(|error| format!("read `kind`: {error}"))?
-                {
-                    Some(kind) => Some(kind),
-                    None => table
-                        .get::<Option<String>>("target_kind")
-                        .map_err(|error| format!("read `target_kind`: {error}"))?,
-                }
-                .unwrap_or_else(|| "unknown".to_string())
-                .trim()
-                .to_ascii_lowercase();
-                let target_kind = match kind.as_str() {
-                    "file" => PathTargetKind::File,
-                    "dir" | "directory" => PathTargetKind::Directory,
-                    "" | "unknown" => PathTargetKind::Unknown,
-                    _ => return Err(format!("unknown path kind `{kind}`")),
-                };
-                (path, target_kind)
-            }
-            value => {
-                return Err(format!(
-                    "expected a path string or table, got {}",
-                    value.type_name()
-                ));
-            }
+                Err(error) => protocol::Decision::Error(error),
+            },
         };
-        if path.is_empty() {
-            return Err("path must not be empty".to_string());
-        }
-        Ok(ToolPath { path, target_kind })
+        protocol::ToolEvaluation { decision, metadata }
     }
 
-    fn parse_tool_workspace_paths(table: mlua::Table) -> Result<Vec<ToolPath>, String> {
-        let sequence_len = table.raw_len();
-        for pair in table.clone().pairs::<mlua::Value, mlua::Value>() {
-            let (key, _) = pair.map_err(|error| format!("read returned paths: {error}"))?;
-            let in_sequence = matches!(
-                key,
-                mlua::Value::Integer(index)
-                    if index >= 1 && usize::try_from(index).ok().is_some_and(|index| index <= sequence_len)
-            );
-            if !in_sequence {
-                return Err("expected an array of path entries".to_string());
-            }
-        }
-
-        let mut paths = Vec::with_capacity(sequence_len);
-        for index in 1..=sequence_len {
-            let value = table
-                .raw_get::<mlua::Value>(index)
-                .map_err(|error| format!("read path entry {index}: {error}"))?;
-            let path = Self::lua_value_to_tool_path(value)
-                .map_err(|error| format!("invalid path entry {index}: {error}"))?;
-            paths.push(path);
-        }
-        Ok(paths)
-    }
-
-    fn tool_workspace_paths_error(&self, tool_name: &str, error: impl std::fmt::Display) -> String {
-        let message = format!("tool paths_for_workspace `{tool_name}` failed: {error}");
-        self.record_error(message.clone());
-        message
-    }
-
-    /// Call a tool's `paths_for_workspace(args)` callback.
-    ///
-    /// Missing callbacks are distinguished from callbacks that successfully
-    /// declare no paths. Callback, conversion, and return-shape failures are
-    /// errors so workspace restrictions cannot silently treat them as pathless.
-    pub fn tool_paths_for_workspace(
+    /// Run `smelt.permissions.check` for one call in `mode`. Pass `access`
+    /// when the caller already knows it: a native tool, or a pending request
+    /// checked again. Call inside a host scope.
+    pub fn check_permission(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-    ) -> Result<ToolWorkspacePaths, String> {
-        let func = {
-            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(handles) = handlers.get(tool_name) else {
-                return Ok(ToolWorkspacePaths::Undeclared);
-            };
-            let Some(handle) = handles.paths_for_workspace.as_ref() else {
-                return Ok(ToolWorkspacePaths::Undeclared);
-            };
-            self.lua
-                .registry_value::<mlua::Function>(&handle.key)
-                .map_err(|error| self.tool_workspace_paths_error(tool_name, error))?
-        };
-        let args_table = self
-            .args_to_lua_table(args)
-            .map_err(|error| self.tool_workspace_paths_error(tool_name, error))?;
-        let _perf = smelt_perf::perf::begin("lua:tool");
-        let table = func
-            .call::<mlua::Table>(args_table)
-            .map_err(|error| self.tool_workspace_paths_error(tool_name, error))?;
-        Self::parse_tool_workspace_paths(table)
-            .map(ToolWorkspacePaths::Declared)
-            .map_err(|error| self.tool_workspace_paths_error(tool_name, error))
+        mode: protocol::AgentMode,
+        access: Option<protocol::Access>,
+    ) -> Result<PermissionCheck, String> {
+        let _perf = smelt_perf::perf::begin("lua:permissions");
+        self.args_to_lua_table(args)
+            .and_then(|args| {
+                super::permission::check(&self.lua, &self.shared, tool_name, args, &mode, access)
+            })
+            .map_err(|error| {
+                let message = format!("permission check for `{tool_name}` failed: {error}");
+                self.record_error(message.clone());
+                message
+            })
     }
 
     /// Invoke a preview callback using explicit Lua state rather than ambient host access.
@@ -2530,10 +2380,14 @@ impl LuaRuntime {
         now: Instant,
     ) -> Result<Option<protocol::ToolMetadata>, String> {
         self.release_tool_preparation(request.invocation_id);
-        let (prepare, approval_patterns, preflight) = {
+        let (prepare, preflight) = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            // An MCP tool: no Lua callbacks, so its arguments summarize it.
             let Some(handler) = handlers.get(&request.tool_name) else {
-                return Ok(Some(protocol::ToolMetadata::default()));
+                return Ok(Some(protocol::ToolMetadata {
+                    summary: crate::mcp::args_summary(&request.args),
+                    ..Default::default()
+                }));
             };
             let function =
                 |handle: &Option<super::LuaHandle>| -> LuaResult<Option<mlua::Function>> {
@@ -2542,34 +2396,33 @@ impl LuaRuntime {
                         .map(|handle| self.lua.registry_value(&handle.key))
                         .transpose()
                 };
-            (
-                function(&handler.prepare),
-                function(&handler.approval_patterns),
-                function(&handler.preflight),
-            )
+            (function(&handler.prepare), function(&handler.preflight))
         };
         let prepare = prepare.map_err(|error| error.to_string())?;
-        let approval_patterns = approval_patterns.map_err(|error| error.to_string())?;
         let preflight = preflight.map_err(|error| error.to_string())?;
-        if prepare.is_none() && approval_patterns.is_none() && preflight.is_none() {
+        if prepare.is_none() && preflight.is_none() {
             return Ok(Some(protocol::ToolMetadata {
                 summary: self.tool_summary(&request.tool_name, &request.args),
                 ..Default::default()
             }));
         }
-        let function = self.lua.load(r#"
-            return function(prepare, approval_patterns, preflight, args)
+        let function = self
+            .lua
+            .load(
+                r#"
+            return function(prepare, preflight, args)
                 local prepared = prepare and prepare(args) or nil
                 return {
                     prepared = prepared,
-                    approval_patterns = approval_patterns and approval_patterns(args, prepared) or nil,
                     preflight_error = preflight and preflight(args, prepared) or nil,
                 }
             end
-        "#).eval::<mlua::Function>().map_err(|error| error.to_string())?;
+        "#,
+            )
+            .eval::<mlua::Function>()
+            .map_err(|error| error.to_string())?;
         let initial = (
             prepare,
-            approval_patterns,
             preflight,
             self.args_to_lua_table(&request.args)
                 .map_err(|error| error.to_string())?,
@@ -2636,23 +2489,11 @@ impl LuaRuntime {
             let error = result
                 .get::<Option<String>>("preflight_error")
                 .map_err(|error| error.to_string())?;
-            let patterns = result
-                .get::<Option<mlua::Table>>("approval_patterns")
-                .map_err(|error| error.to_string())?
-                .map(|patterns| {
-                    patterns
-                        .sequence_values::<String>()
-                        .collect::<LuaResult<Vec<_>>>()
-                })
-                .transpose()
-                .map_err(|error| error.to_string())?
-                .unwrap_or_default();
-            Ok((prepared, error, patterns))
+            Ok((prepared, error))
         });
         match parsed {
-            Ok((prepared, error, patterns)) => {
+            Ok((prepared, error)) => {
                 metadata.preflight_error = error;
-                metadata.approval_patterns = patterns;
                 if let Some(prepared) = prepared {
                     self.shared
                         .tool_preparations
@@ -2666,9 +2507,16 @@ impl LuaRuntime {
         metadata
     }
 
+    /// Forget what the evaluation of a tool call prepared for it, and the
+    /// sandbox its commands run in.
     pub fn release_tool_preparation(&self, invocation_id: protocol::InvocationId) {
         self.shared
             .tool_preparations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&invocation_id);
+        self.shared
+            .call_sandboxes
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&invocation_id);
@@ -3005,6 +2853,25 @@ impl LuaRuntime {
                 };
             }
         };
+
+        match super::permission::sandbox(&self.lua, &self.shared, tool_name, &args_table, &mode) {
+            Ok(sandbox) => {
+                self.shared
+                    .call_sandboxes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(invocation.invocation_id, sandbox);
+            }
+            Err(error) => {
+                return ToolExecResult::Immediate {
+                    content: format!("permission check for `{tool_name}` failed: {error}"),
+                    is_error: true,
+                    metadata: None,
+                    display_content: Vec::new(),
+                    attachment: None,
+                };
+            }
+        }
 
         let ctx_table = match build_tool_ctx(
             &self.lua,
@@ -4968,7 +4835,7 @@ mod tests {
             .exec()
             .unwrap();
 
-        let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+        let defs = rt.tool_defs(protocol::AgentMode::read(), ToolVisibility::Interactive);
         let def = defs
             .iter()
             .find(|def| def.name == "order_probe")
@@ -5707,8 +5574,6 @@ mod tests {
                 },
             },
         );
-        *rt.shared.permission_rules.lock().unwrap() =
-            Some(smelt_permissions::rules::RawPerms::default());
         rt.shared
             .settings_overrides
             .lock()
@@ -5716,10 +5581,6 @@ mod tests {
             .insert("vim".into(), crate::config::SettingValue::Bool(true));
         rt.shared.defaults.lock().unwrap().model = Some("model-a".into());
         rt.shared.remember.lock().unwrap().model = false;
-        rt.shared.tool_defaults.lock().unwrap().tool_effects.insert(
-            "bash".into(),
-            smelt_permissions::rules::ToolEffectKind::Process,
-        );
         *rt.shared.default_shell.lock().unwrap() = Some(crate::lua::DefaultShell {
             program: "zsh".into(),
             args: vec!["-fc".into()],
@@ -5729,17 +5590,9 @@ mod tests {
 
         assert!(rt.shared.providers.lock().unwrap().is_empty());
         assert!(rt.shared.mcp_configs.lock().unwrap().is_empty());
-        assert!(rt.shared.permission_rules.lock().unwrap().is_none());
         assert!(rt.shared.settings_overrides.lock().unwrap().is_empty());
         assert!(rt.shared.defaults.lock().unwrap().model.is_none());
         assert!(rt.shared.remember.lock().unwrap().model);
-        assert!(rt
-            .shared
-            .tool_defaults
-            .lock()
-            .unwrap()
-            .tool_effects
-            .is_empty());
         assert!(rt.shared.default_shell.lock().unwrap().is_none());
     }
 

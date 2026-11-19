@@ -2568,9 +2568,9 @@ fn statusline_built_ins_are_separate_sources() {
         let frame = app.render_to_frame();
         frame.rows[frame.rows.len() - 1].clone()
     };
-    assert!(status(&mut app).contains("normal"));
+    assert!(status(&mut app).contains("read"));
     assert!(app.run_lua(r#"smelt.statusline:remove("agent_mode")"#));
-    assert!(!status(&mut app).contains("normal"));
+    assert!(!status(&mut app).contains("read"));
     assert!(app.run_lua(
         r#"
         smelt.statusline:clear()

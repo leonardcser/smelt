@@ -130,7 +130,8 @@ end
 
 -- Find paths matching `pattern` under `path` off the main thread. `opts`
 -- accepts `max`, `max_scanned`, and `timeout_ms`. Returns a table with
--- `{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
+-- `{ paths, scanned, truncated, timed_out }` or `(nil, err)`. Inside a tool
+-- call, `paths` leaves out the files the call may not read.
 ---@type fun(pattern: string, path: string?, opts: table?): table?, string?
 function smelt.fs.glob_async(pattern, path, opts)
   return external_or_err(function(id) internal.fs.__start_glob(id, pattern, path or "", opts or {}) end)
@@ -186,13 +187,15 @@ end
 
 -- Spawn `command` as a contained background shell job. Yields while smelt
 -- selects and verifies the containment backend, then returns an opaque job ID.
--- `notify_on_completion` defaults to true. Set false for detached services that
--- should neither keep the session waiting nor start a turn when they exit.
--- Must be called from inside `smelt.spawn(fn)` or a `tool.execute`.
----@type fun(command: string, notify_on_completion?: boolean): string
-function smelt.process.spawn_bg(command, notify_on_completion)
+-- `opts.notify_on_completion` defaults to true. Set false for detached services
+-- that should neither keep the session waiting nor start a turn when they exit.
+-- Inside a tool call the job runs in the call's sandbox (see
+-- `smelt.sandbox`); `opts.sandbox = false` runs it unconfined. Must be
+-- called from inside `smelt.spawn(fn)` or a `tool.execute`.
+---@type fun(command: string, opts?: { notify_on_completion?: boolean, sandbox?: boolean }): string
+function smelt.process.spawn_bg(command, opts)
   local result = smelt.task.external(function(id)
-    internal.process.__start_spawn_bg(id, command, notify_on_completion)
+    internal.process.__start_spawn_bg(id, command, opts)
   end)
   if result.err ~= nil then error(result.err, 2) end
   return result.id
@@ -201,8 +204,10 @@ end
 -- Run `cmd` with `args` off the main thread. Yields the calling
 -- coroutine until the child exits; must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
--- `timeout_secs`, `stdin`, and `max_output_bytes` (default 100 KB, maximum
--- 32 MB). Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
+-- `timeout_secs`, `stdin`, `max_output_bytes` (default 100 KB, maximum
+-- 32 MB) and `sandbox`. Inside a tool call the child runs in the call's
+-- sandbox (see `smelt.sandbox`); `sandbox = false` runs it unconfined.
+-- Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
 -- `(nil, err)` on spawn failure. If the calling coroutine is cancelled
 -- (e.g. by `smelt.task.timeout` or by `:remove()` on the parent spawn),
 -- the child process is killed (SIGTERM to its process group) and

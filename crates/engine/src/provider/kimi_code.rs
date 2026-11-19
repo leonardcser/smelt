@@ -13,7 +13,7 @@ use super::{auth_storage::CredStore, LoginCallbacks};
 
 const API_BASE: &str = smelt_provider::kimi_code::API_BASE;
 const OAUTH_HOST: &str = smelt_provider::kimi_code::OAUTH_HOST;
-const TOKENS_ENV: &str = "SMELT_KIMI_CODE_TOKENS";
+pub(crate) const TOKENS_ENV: &str = "SMELT_KIMI_CODE_TOKENS";
 
 pub fn is_api_base(api_base: &str) -> bool {
     smelt_provider::is_kimi_code_api_base(api_base)

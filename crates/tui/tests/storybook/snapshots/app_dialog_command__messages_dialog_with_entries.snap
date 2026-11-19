@@ -15,4 +15,4 @@ expression: frame.text()
 
  [warn] renderer
    second warning
- ○ normal                                                       1:1 0%
+ ○ read                                                         1:1 0%

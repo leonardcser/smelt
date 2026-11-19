@@ -25,9 +25,11 @@ smelt.tools.register({
     .. "Use it to present a screenshot, chart, diagram, or any generated image. The user sees the image; "
     .. "you do not. To look at an image yourself, use read_file. "
     .. "Terminals without graphics support get a low-resolution color-block rendering.",
-  effect = "read",
+  access = "read",
+  paths = function(args)
+    return { args.file_path or "" }
+  end,
   headless = false,
-  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
   parameters = {
     type = "object",
     properties = {
@@ -40,10 +42,6 @@ smelt.tools.register({
   },
   summary = function(args, ctx)
     return smelt.tools.path_summary(args.file_path or "", ctx)
-  end,
-  paths_for_workspace = function(args)
-    local p = args.file_path or ""
-    return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
   execute = function(args)
     local given = args.file_path or ""

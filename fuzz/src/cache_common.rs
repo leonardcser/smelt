@@ -20,7 +20,7 @@ pub const TOOL_NAMES: &[&str] = &[
 ];
 
 /// Mode names the synthetic `[smelt:mode]` note iterates through.
-pub const MODE_NAMES: &[&str] = &["normal", "plan", "apply", "yolo"];
+pub const MODE_NAMES: &[&str] = &["read", "plan", "write", "yolo"];
 
 pub fn mode_at(index: usize) -> AgentMode {
     AgentMode::parse(MODE_NAMES[index % MODE_NAMES.len()]).unwrap()

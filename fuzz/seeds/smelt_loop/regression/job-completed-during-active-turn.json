@@ -1,6 +1,6 @@
 {
   "_about": "JobCompleted fuzz seed: a background job completion during an active compaction/engine turn defers status instead of immediately pushing a transcript block.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_compaction_prepare_request",

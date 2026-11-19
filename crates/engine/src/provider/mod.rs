@@ -7,6 +7,14 @@ pub mod kimi_code;
 use crate::log;
 pub(crate) use auth::LoginCallbacks;
 pub use protocol::TokenUsage;
+
+/// The variables that can hold OAuth provider credentials instead of the
+/// files under `smelt_paths::auth_dir()`.
+pub const CREDENTIAL_ENVS: [&str; 3] = [
+    codex::CODEX_TOKENS_ENV,
+    copilot::COPILOT_TOKENS_ENV,
+    kimi_code::TOKENS_ENV,
+];
 use protocol::{Message, ModelConfig, ReasoningEffort};
 use reqwest::Client;
 #[cfg(test)]

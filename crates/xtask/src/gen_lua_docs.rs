@@ -809,6 +809,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "smelt.permissions",
             "smelt.provider",
             "smelt.reasoning",
+            "smelt.sandbox",
             "smelt.session",
             "smelt.session.messages",
             "smelt.session.slug",

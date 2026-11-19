@@ -194,13 +194,11 @@ smelt.keymap.set("", "<F7>", function() smelt.fs.write({:?}, smelt.prompt.text()
             master.write_all(b"\x1b[18~").unwrap();
             requested_resume = true;
         }
-        if resumed.exists() {
-            if prompt {
-                assert_eq!(
-                    std::fs::read_to_string(&resumed).unwrap(),
-                    "edited prompt\n"
-                );
-            }
+        // The resume keymap may still be writing the file, so wait for its
+        // full content rather than its existence.
+        let resumed_text = std::fs::read_to_string(&resumed).ok();
+        if resumed_text.is_some() && (!prompt || resumed_text.as_deref() == Some("edited prompt\n"))
+        {
             break;
         }
         assert!(
@@ -441,8 +439,7 @@ smelt.settings.autoupgrade = "off"
 smelt.settings.auto_continue = "off"
 smelt.settings.auto_reload = false
 smelt.settings.show_prediction = false
-smelt.permissions.extend({ default = { patterns = { bash = { ask = { "echo fixture-native-tool" } } } } })
-smelt.tools.register({ name = "fixture_dialog_state", permission_defaults = { normal = "allow" }, execute = function() return smelt.dialog.current() and "open" or "closed" end })
+smelt.tools.register({ name = "fixture_dialog_state", access = "read", execute = function() return smelt.dialog.current() and "open" or "closed" end })
 "#,
     )
     .unwrap();
@@ -484,7 +481,7 @@ smelt.tools.register({ name = "fixture_dialog_state", permission_defaults = { no
         let screen = terminal.screen().contents();
         if let Some(approve) = approve {
             if !decision_sent && screen.contains("allow once") && screen.contains("deny") {
-                assert!(screen.contains("Allow?"), "{screen}");
+                assert!(screen.contains("Run without the sandbox?"), "{screen}");
                 assert!(screen.contains("fixture-native-tool"), "{screen}");
                 master
                     .write_all(if approve { b"\r" } else { b"\x1b[B\r" })
@@ -1174,7 +1171,7 @@ async fn interactive_tool_keeps_typing_responsive(probe: ToolProbe) {
         })
         .mount(&provider).await;
     let notebook_setup = if notebook {
-        format!("require('smelt.plugins.notebook')\nsmelt.permissions.extend({{ apply = {{ tools = {{ ask = {{ 'edit_notebook' }} }} }} }})\nsmelt.fs.file_state.record_read({}, {}, 0, 10000)\n",
+        format!("require('smelt.plugins.notebook')\nlocal check = smelt.permissions.check\nsmelt.permissions.check = function(call) if call.tool == 'edit_notebook' then return 'ask' end return check(call) end\nsmelt.fs.file_state.record_read({}, {}, 0, 10000)\n",
             serde_json::to_string(&target.to_string_lossy()).unwrap(),
             serde_json::to_string(&notebook_content).unwrap())
     } else {
@@ -1189,7 +1186,7 @@ async fn interactive_tool_keeps_typing_responsive(probe: ToolProbe) {
             active.display(),
             target.parent().unwrap().display()
         );
-        format!("smelt.settings.restrict_to_workspace = true\nsmelt.lifecycle.on('ready', function() assert(os.execute({})); local file = assert(io.open({}, 'w')); file:write('ready'); file:close() end)\n",
+        format!("smelt.lifecycle.on('ready', function() assert(os.execute({})); local file = assert(io.open({}, 'w')); file:write('ready'); file:close() end)\n",
             serde_json::to_string(&command).unwrap(), serde_json::to_string(&started.to_string_lossy()).unwrap())
     } else {
         String::new()
@@ -1221,7 +1218,7 @@ smelt.provider.register("probe", {{ type = "anthropic", api_base = "{}", api_key
             config.to_str().unwrap(),
             "--ephemeral",
             "--mode",
-            if notebook { "apply" } else { "yolo" },
+            if notebook { "write" } else { "yolo" },
             "-m",
             "probe/test-model",
         ])
@@ -1960,7 +1957,7 @@ smelt.provider.register("local", {{
 smelt.lifecycle.on_ready(function() smelt.model.set("local/test-model") end)
 smelt.cmd.register("quota-command", function()
   smelt.engine.submit_command("quota-command", "original request", {{
-    model = "local/command-model", temperature = 0.3, tools = {{ deny = {{ "bash" }} }},
+    model = "local/command-model", temperature = 0.3,
   }})
 end)
 "#,
@@ -2927,7 +2924,7 @@ smelt.provider.register("test", {{
 smelt.tools.register({{
   name = "stream_probe",
   description = "Record a test side effect",
-  permission_defaults = {{ normal = "allow" }},
+  access = "read",
   parameters = {{ type = "object", properties = {{ value = {{ type = "string" }} }} }},
   execute = function(args)
     local file = assert(io.open("tool-executed", "a"))
@@ -4968,7 +4965,7 @@ for _, name in ipairs({ "buf", "win", "dialog", "overlay", "picker", "paint", "r
 end
 assert(type(smelt.build.display) == "string")
 assert(smelt.api_version == "1")
-assert(type(smelt.permissions.extend) == "function")
+assert(type(smelt.permissions.check) == "function")
 assert(type(smelt.engine.on_prepare_request) == "function")
 assert(type(smelt.model.list) == "function")
 assert(type(smelt.text.width) == "function")
@@ -4988,13 +4985,10 @@ assert(not ok and tostring(err):find("requires an active terminal UI", 1, true),
 fn headless_settings_load_before_shell_dispatch() {
     let output = run_headless_config(
         r#"
-assert(smelt.settings.restrict_to_workspace == true)
 smelt.settings.autoupgrade = "off"
 smelt.settings.fast_mode = true
-smelt.settings.restrict_to_workspace = false
 assert(smelt.settings.autoupgrade == "off")
 assert(smelt.settings.fast_mode == true)
-assert(smelt.settings.restrict_to_workspace == false)
 "#,
     );
     assert!(

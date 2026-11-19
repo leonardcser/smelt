@@ -224,28 +224,8 @@ impl HeadlessCompaction {
         call: HostCall,
     ) -> mlua::Result<()> {
         let (hook, payload, reply) = match call {
-            HostCall::NativeToolEvaluation {
-                cwd,
-                tool_name,
-                args,
-                mode,
-                overrides,
-                reply,
-                ..
-            } => {
-                let evaluation = crate::claude_code_policy::evaluate(
-                    &core.permissions.snapshot(),
-                    Some(&cwd),
-                    mode,
-                    &tool_name,
-                    &args,
-                    overrides.as_ref(),
-                );
-                let _ = reply.send(evaluation);
-                return Ok(());
-            }
-            // The headless app answers it before compaction sees host calls.
-            HostCall::ModelHistory { .. } => return Ok(()),
+            // The headless app answers these before compaction sees host calls.
+            HostCall::NativeToolEvaluation { .. } | HostCall::ModelHistory { .. } => return Ok(()),
             HostCall::PrepareRequest {
                 messages,
                 estimated_tokens,

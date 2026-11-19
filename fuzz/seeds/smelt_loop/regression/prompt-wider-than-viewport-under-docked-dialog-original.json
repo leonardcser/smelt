@@ -1,6 +1,6 @@
 {
   "vim": true,
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "key_unicode",

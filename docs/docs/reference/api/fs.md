@@ -59,7 +59,8 @@ fun(pattern: string, path: string?, opts: table?): table?, string?
 
 Find paths matching `pattern` under `path` off the main thread. `opts`
 accepts `max`, `max_scanned`, and `timeout_ms`. Returns a table with
-`{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
+`{ paths, scanned, truncated, timed_out }` or `(nil, err)`. Inside a tool
+call, `paths` leaves out the files the call may not read.
 
 ## `smelt.fs.is_dir`
 

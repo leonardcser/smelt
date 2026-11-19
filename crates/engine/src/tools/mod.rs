@@ -1,4 +1,3 @@
-use protocol::ToolEvaluation;
 use serde_json::Value;
 use smelt_provider::ToolDefinition;
 use std::collections::HashMap;
@@ -44,20 +43,6 @@ pub trait ToolDispatcher: Send + Sync {
 
     fn end_turn(&self, _turn_id: u64) {}
 
-    fn is_visible(&self, _turn_id: u64, _name: &str, _mode: protocol::AgentMode) -> bool {
-        true
-    }
-
-    /// `None` means the tool is unknown.
-    fn evaluate_tool_call(
-        &self,
-        turn_id: u64,
-        name: &str,
-        args: &HashMap<String, Value>,
-        mode: protocol::AgentMode,
-        permission_overrides: Option<&protocol::PermissionOverrides>,
-    ) -> Option<ToolEvaluation>;
-
     fn dispatch<'a>(
         &'a self,
         name: &str,
@@ -83,17 +68,6 @@ impl ToolDispatcher for EmptyDispatcher {
 
     fn contains(&self, _name: &str) -> bool {
         false
-    }
-
-    fn evaluate_tool_call(
-        &self,
-        _turn_id: u64,
-        _name: &str,
-        _args: &HashMap<String, Value>,
-        _mode: protocol::AgentMode,
-        _permission_overrides: Option<&protocol::PermissionOverrides>,
-    ) -> Option<ToolEvaluation> {
-        None
     }
 
     fn dispatch<'a>(
@@ -137,29 +111,6 @@ mod tests {
         let d = EmptyDispatcher;
         assert!(!d.contains("anything"));
         assert!(!d.contains(""));
-    }
-
-    #[test]
-    fn empty_dispatcher_default_is_visible_returns_true() {
-        // Trait-default is_visible returns true; EmptyDispatcher inherits it.
-        assert!(EmptyDispatcher.is_visible(
-            1,
-            "anything",
-            protocol::AgentMode::parse("plan").unwrap()
-        ));
-    }
-
-    #[test]
-    fn empty_dispatcher_evaluate_tool_call_returns_none() {
-        let d = EmptyDispatcher;
-        let res = d.evaluate_tool_call(
-            1,
-            "name",
-            &HashMap::new(),
-            protocol::AgentMode::parse("plan").unwrap(),
-            None,
-        );
-        assert!(res.is_none());
     }
 
     #[test]

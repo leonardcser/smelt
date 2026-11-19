@@ -91,14 +91,23 @@ impl TestApp {
         }
     }
 
-    pub fn wait_for_tool_evaluation(&mut self, request_id: u64) {
+    /// Wait until the host answers tool evaluation `request_id` and return its answer.
+    pub fn wait_for_tool_evaluation(&mut self, request_id: u64) -> protocol::ToolEvaluation {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !self.actions.iter().any(|action| {
-            matches!(action,
-                Action::EngineSend(command) if matches!(command.as_ref(),
-                    protocol::UiCommand::ToolEvaluationResponse { request_id: completed, .. }
-                        if *completed == request_id))
-        }) {
+        loop {
+            let evaluation = self.actions.iter().find_map(|action| match action {
+                Action::EngineSend(command) => match command.as_ref() {
+                    protocol::UiCommand::ToolEvaluationResponse {
+                        request_id: completed,
+                        evaluation,
+                    } if *completed == request_id => Some(evaluation.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            if let Some(evaluation) = evaluation {
+                return evaluation;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "tool evaluation {request_id} stalled"
@@ -452,14 +461,8 @@ impl TestApp {
         if let Ok(tools) = core.tools.lock() {
             for (name, t) in tools.iter() {
                 check(&format!("tools[{name}].execute"), &t.execute);
-                if let Some(h) = &t.approval_patterns {
-                    check(&format!("tools[{name}].approval_patterns"), h);
-                }
                 if let Some(h) = &t.preflight {
                     check(&format!("tools[{name}].preflight"), h);
-                }
-                if let Some(h) = &t.paths_for_workspace {
-                    check(&format!("tools[{name}].paths_for_workspace"), h);
                 }
                 if let Some(h) = &t.preview {
                     check(&format!("tools[{name}].preview"), h);

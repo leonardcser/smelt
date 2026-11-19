@@ -13,14 +13,29 @@ local function build_options(req)
 
   push("allow once", "yes")
   push("deny", "no")
-
-  for _, option in ipairs(req.grant_options or {}) do
-    if option.label and option.id then
-      push(option.label, option.id)
-    end
-  end
+  -- Approves this tool up to the access this call needs, until the session ends.
+  push("allow " .. req.tool_name .. " for this session", "session")
+  -- Approves calls beneath this path up to the same access.
+  if req.scope then push("allow " .. req.scope .. " for this session", "session_path") end
 
   return labels, decisions
+end
+
+-- The question above the options: what the call will do that the header
+-- does not already show.
+local function question(req)
+  if req.tool_name == "bash" or (req.args and type(req.args.command) == "string") then
+    if req.access == "full" then return "Run without the sandbox?" end
+    return "Run this command?"
+  end
+  if req.intent == "read" then return "Read " .. req.path .. "?" end
+  local edits_file = req.args and (req.args.file_path or req.args.notebook_path)
+  if req.intent == "write" and edits_file then
+    if req.protected then return "Edit " .. req.path .. "?" end
+    if req.access == "full" then return "Edit outside the project?" end
+    return "Edit this file?"
+  end
+  return "Run " .. req.tool_name .. "?"
 end
 
 local NS_HEADER_TOOL = smelt.ns("smelt.confirm.header.tool")
@@ -143,7 +158,7 @@ function smelt.confirm.open(handle_id)
     pad_right   = 0,
   })
   local allow_leaf, allow_buf = smelt.dialog.content({ wrap = false })
-  allow_buf:styled({ { { text = "Allow?", style = { dim = true } } } })
+  allow_buf:styled({ { { text = question(req), style = { dim = true } } } })
 
   -- Reason input is built first so the options menu's on_submit can read
   -- its buffer when the user dismisses with text already typed.

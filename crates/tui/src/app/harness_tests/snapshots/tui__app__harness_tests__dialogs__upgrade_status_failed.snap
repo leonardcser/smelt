@@ -6,4 +6,4 @@ expression: upgrade_status_dialog(&mut app)
  failed
 
  Checksum mismatch
- ○ normal                                             1:1 0%
+ ○ read                                               1:1 0%

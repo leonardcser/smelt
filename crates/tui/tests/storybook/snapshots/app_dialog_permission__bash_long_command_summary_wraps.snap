@@ -1,12 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash ls -ld /Users/leo/.dotfiles; realpath                 14:37:03
        /Users/leo/.dotfiles 2>/dev/null || true; cd /Users/
        leo/dev/rust/smelt/.worktrees/fix-path-parsing &&
        cargo test -p smelt-core permissions::tests
-
 
 
 
@@ -18,9 +17,10 @@ expression: text
        /Users/leo/dev/rust/smelt/.worktrees/fix-path-parsing &&
        cargo test -p smelt-core permissions::tests
 
- Allow?
+ Run this command?
   1. allow once
   2. deny
+  3. allow bash for this session
 
   press tab to add a reason…
- ○ normal                                                       1:1 0%
+ ○ read                                                         1:1 0%

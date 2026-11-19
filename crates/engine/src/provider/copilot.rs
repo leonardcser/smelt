@@ -11,7 +11,7 @@ use smelt_provider::unix_now;
 
 use super::{auth_storage::CredStore, LoginCallbacks};
 
-const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
+pub(crate) const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
 fn cred_store() -> &'static CredStore {
     static STORE: OnceLock<CredStore> = OnceLock::new();

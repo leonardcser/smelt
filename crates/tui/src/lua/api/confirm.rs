@@ -5,7 +5,7 @@
 //! keymaps, route Submit / Dismiss) and composes the title / summary /
 //! preview buffers itself via `buf:styled`,
 //! `smelt.render.syntax`, and friends. The request payload (tool name /
-//! desc / args / options / approval patterns / outside dir / cwd label)
+//! args / access)
 //! flows through the `confirm_requested` signal, so the dialog reads it
 //! once via `smelt.signal.get("confirm_requested")` instead of polling
 //! Rust by handle. Rust exposes:
@@ -23,7 +23,7 @@ use mlua::prelude::*;
 
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use smelt_transcript::transcript_model::{ConfirmChoice, ConfirmRequest};
+use smelt_transcript::transcript_model::ConfirmChoice;
 
 use super::buf::LuaBuf;
 
@@ -149,25 +149,21 @@ pub(super) fn register(
 }
 
 /// Stable string label for the `confirm_resolved` cell payload and `__resolve` input.
-pub(crate) fn decision_label(choice: &ConfirmChoice) -> String {
+pub(crate) fn decision_label(choice: ConfirmChoice) -> &'static str {
     match choice {
-        ConfirmChoice::Yes => "yes".into(),
-        ConfirmChoice::No => "no".into(),
-        ConfirmChoice::Grant(option) => option.id.as_str().into(),
+        ConfirmChoice::Yes => "yes",
+        ConfirmChoice::No => "no",
+        ConfirmChoice::Session => "session",
+        ConfirmChoice::SessionPath => "session_path",
     }
 }
 
 /// Parse a decision label back into `ConfirmChoice`. Unknown labels become `No`.
-pub(crate) fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
+pub(crate) fn parse_decision(decision: &str) -> ConfirmChoice {
     match decision {
         "yes" => ConfirmChoice::Yes,
-        "no" => ConfirmChoice::No,
-        id => req
-            .grant_options
-            .iter()
-            .find(|option| option.id == id)
-            .cloned()
-            .map(ConfirmChoice::Grant)
-            .unwrap_or(ConfirmChoice::No),
+        "session" => ConfirmChoice::Session,
+        "session_path" => ConfirmChoice::SessionPath,
+        _ => ConfirmChoice::No,
     }
 }

@@ -16,8 +16,15 @@ impl AgentMode {
         }
     }
 
-    pub fn normal() -> Self {
-        Self("normal".to_string())
+    /// The default mode: reads run, anything more asks.
+    pub fn read() -> Self {
+        Self("read".to_string())
+    }
+
+    /// The mode that Claude Code's own plan mode maps to: entering one
+    /// enters the other.
+    pub fn plan() -> Self {
+        Self("plan".to_string())
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -34,7 +41,7 @@ impl AgentMode {
     }
 
     pub fn default_cycle() -> Vec<Self> {
-        ["normal", "apply", "yolo"]
+        ["read", "write", "yolo"]
             .into_iter()
             .filter_map(Self::parse)
             .collect()
@@ -50,7 +57,7 @@ impl AgentMode {
 
 impl Default for AgentMode {
     fn default() -> Self {
-        Self::normal()
+        Self::read()
     }
 }
 
@@ -156,7 +163,7 @@ mod tests {
 
     #[test]
     fn agent_mode_parse_accepts_registered_style_labels() {
-        assert_eq!(AgentMode::parse("normal").unwrap().as_str(), "normal");
+        assert_eq!(AgentMode::parse("read").unwrap().as_str(), "read");
         assert_eq!(AgentMode::parse("plan").unwrap().as_str(), "plan");
         assert_eq!(AgentMode::parse("review-2").unwrap().as_str(), "review-2");
     }
@@ -170,11 +177,11 @@ mod tests {
 
     #[test]
     fn agent_mode_parse_list_filters_invalid_entries() {
-        let items = vec!["normal".into(), "bad mode".into(), "yolo".into(), "".into()];
+        let items = vec!["read".into(), "bad mode".into(), "yolo".into(), "".into()];
         assert_eq!(
             AgentMode::parse_list(&items),
             vec![
-                AgentMode::parse("normal").unwrap(),
+                AgentMode::parse("read").unwrap(),
                 AgentMode::parse("yolo").unwrap()
             ]
         );
@@ -186,7 +193,7 @@ mod tests {
             .into_iter()
             .map(|m| m.as_str().to_string())
             .collect();
-        assert_eq!(labels, vec!["normal", "apply", "yolo"]);
+        assert_eq!(labels, vec!["read", "write", "yolo"]);
     }
 
     // ---- ReasoningEffort ----

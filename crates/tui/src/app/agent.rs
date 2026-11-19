@@ -6,7 +6,6 @@ use crate::app::{
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::*;
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// Owns the state machine data that exists only for an agent turn lifecycle.
@@ -32,7 +31,6 @@ pub(crate) struct TurnLifecycle {
     applied_reasoning_effort: protocol::ReasoningEffort,
     cancel_generation: u64,
     dispatching_turn_id: Option<u64>,
-    dispatching_permissions: Option<std::sync::Arc<smelt_permissions::Permissions>>,
 }
 
 /// The command a turn runs for and the request settings it scopes to the turn.
@@ -54,7 +52,6 @@ pub(crate) struct TurnPause {
 pub(crate) struct DispatchingTurn {
     pub(crate) state: TurnState,
     previous_turn_id: Option<u64>,
-    previous_permissions: Option<std::sync::Arc<smelt_permissions::Permissions>>,
 }
 
 pub(super) struct LuaToolCompletion {
@@ -87,7 +84,6 @@ impl TurnLifecycle {
             applied_reasoning_effort,
             cancel_generation: 0,
             dispatching_turn_id: None,
-            dispatching_permissions: None,
         }
     }
 
@@ -320,49 +316,17 @@ impl TurnLifecycle {
             .or(self.dispatching_turn_id)
     }
 
-    pub(crate) fn active_permissions(
-        &self,
-        fallback: std::sync::Arc<smelt_permissions::Permissions>,
-    ) -> std::sync::Arc<smelt_permissions::Permissions> {
-        self.active
-            .as_ref()
-            .map(|turn| turn.permissions.clone())
-            .or_else(|| self.dispatching_permissions.clone())
-            .unwrap_or(fallback)
-    }
-
-    pub(crate) fn refresh_active_permissions(
-        &mut self,
-        permissions: std::sync::Arc<smelt_permissions::Permissions>,
-    ) {
-        if self.dispatching_turn_id.is_some() {
-            self.dispatching_permissions = Some(permissions);
-        } else if let Some(turn) = self.active.as_mut() {
-            turn.permissions = permissions;
-        }
-    }
-
     pub(crate) fn begin_dispatch(&mut self) -> Option<DispatchingTurn> {
         let state = self.active.take()?;
         let previous_turn_id = self.dispatching_turn_id.replace(state.turn_id);
-        let previous_permissions = self
-            .dispatching_permissions
-            .replace(state.permissions.clone());
         Some(DispatchingTurn {
             state,
             previous_turn_id,
-            previous_permissions,
         })
     }
 
-    pub(crate) fn finish_dispatch(&mut self, mut dispatch: DispatchingTurn) {
-        if let Some(permissions) = &self.dispatching_permissions {
-            if !std::sync::Arc::ptr_eq(permissions, &dispatch.state.permissions) {
-                dispatch.state.permissions = permissions.clone();
-            }
-        }
+    pub(crate) fn finish_dispatch(&mut self, dispatch: DispatchingTurn) {
         self.dispatching_turn_id = dispatch.previous_turn_id;
-        self.dispatching_permissions = dispatch.previous_permissions;
         self.active = Some(dispatch.state);
     }
 
@@ -440,8 +404,6 @@ struct PreparedTurn {
     model_target: protocol::ModelTarget,
     request_config: protocol::RequestRuntimeConfig,
     reasoning_effort: protocol::ReasoningEffort,
-    permission_overrides: Option<protocol::PermissionOverrides>,
-    permissions: std::sync::Arc<smelt_permissions::Permissions>,
     command: CommandScope,
     rewind_history_idx: Option<usize>,
     rollback: Option<StagedTurnRollback>,
@@ -566,11 +528,6 @@ impl TuiApp {
         });
     }
 
-    pub(crate) fn active_permissions(&self) -> std::sync::Arc<smelt_permissions::Permissions> {
-        self.conversation
-            .active_permissions(self.core.permissions.snapshot())
-    }
-
     pub(crate) fn with_dispatched_turn<R>(
         &mut self,
         body: impl FnOnce(&mut Self, &mut TurnState) -> R,
@@ -584,11 +541,6 @@ impl TuiApp {
             Ok(value) => Some(value),
             Err(payload) => std::panic::resume_unwind(payload),
         }
-    }
-
-    pub(super) fn refresh_active_turn_permissions(&mut self) {
-        self.conversation
-            .refresh_active_permissions(self.core.permissions.snapshot());
     }
 
     fn agent_project_context(&self) -> protocol::AgentProjectContext {
@@ -680,8 +632,6 @@ impl TuiApp {
             model_target,
             request_config: self.core.config.request_runtime_config(),
             reasoning_effort: self.core.config.reasoning_effort.clone(),
-            permission_overrides: None,
-            permissions: self.core.permissions.snapshot(),
             command: CommandScope::default(),
             rewind_history_idx: None,
             rollback: None,
@@ -945,8 +895,6 @@ impl TuiApp {
                     model_target,
                     request_config: self.core.config.request_runtime_config(),
                     reasoning_effort: self.core.config.reasoning_effort.clone(),
-                    permission_overrides: None,
-                    permissions: self.core.permissions.snapshot(),
                     command: CommandScope::default(),
                     rewind_history_idx: None,
                     rollback: None,
@@ -1099,16 +1047,6 @@ impl TuiApp {
             .session_control
             .begin_turn(&self.conversation.session().id, turn_id);
 
-        if smelt_provider::BackendKind::is_claude_code(&turn.model_target.provider_type) {
-            smelt_core::claude_code_policy::grant_plan_artifacts(
-                &self.core.permissions,
-                &self
-                    .core
-                    .sessions
-                    .artifact_dir_for(self.conversation.session()),
-            );
-        }
-        let permissions = turn.permissions.clone();
         let native_prompt =
             (smelt_provider::BackendKind::is_claude_code(&turn.model_target.provider_type))
                 .then(|| self.native_system_prompt());
@@ -1123,12 +1061,8 @@ impl TuiApp {
             control_env: self.core.session_control.agent_env(),
             history,
             session_id: self.conversation.session().id.clone(),
-            artifact_dir: self
-                .core
-                .sessions
-                .artifact_dir_for(self.conversation.session()),
+            artifact_dir: self.current_artifact_dir(),
             ephemeral: self.ephemeral(),
-            permission_overrides: turn.permission_overrides,
             system_prompt: Some(system_prompt),
             native_prompt,
             tool_visibility: protocol::ToolVisibility::Interactive,
@@ -1158,7 +1092,6 @@ impl TuiApp {
         Some(TurnState {
             turn_id,
             pending: Vec::new(),
-            permissions,
             submitted_history_idx: turn.submitted_history_idx,
             rewind_history_idx: turn.rewind_history_idx,
             assistant_output_started: false,
@@ -1281,8 +1214,6 @@ impl TuiApp {
                 model_target,
                 request_config,
                 reasoning_effort: self.core.config.reasoning_effort.clone(),
-                permission_overrides: None,
-                permissions: self.core.permissions.snapshot(),
                 command: CommandScope::default(),
                 rewind_history_idx: None,
                 rollback: (adds_history || adds_block).then_some(rollback),
@@ -1487,34 +1418,6 @@ impl TuiApp {
             model_target.config = model_target.config.with_overrides(request_overrides);
         }
 
-        let permission_overrides = {
-            let o = &overrides;
-            if o.tools.is_some() || !o.subcommands.is_empty() {
-                let to_override =
-                    |r: &smelt_core::custom_commands::RuleOverride| protocol::RuleSetOverride {
-                        allow: r.allow.clone(),
-                        ask: r.ask.clone(),
-                        deny: r.deny.clone(),
-                    };
-                Some(protocol::PermissionOverrides {
-                    tools: o.tools.as_ref().map(to_override),
-                    subcommands: o
-                        .subcommands
-                        .iter()
-                        .map(|(k, v)| (k.clone(), to_override(v)))
-                        .collect(),
-                })
-            } else {
-                None
-            }
-        };
-
-        let current_permissions = self.core.permissions.snapshot();
-        let permissions = permission_overrides
-            .as_ref()
-            .map(|overrides| std::sync::Arc::new(current_permissions.with_overrides(overrides)))
-            .unwrap_or(current_permissions);
-
         if matches!(start, CommandTurnStart::ContinueFromLast) {
             self.working.continue_from_last(TurnPhase::Working);
         }
@@ -1530,8 +1433,6 @@ impl TuiApp {
                 model_target,
                 request_config,
                 reasoning_effort: reasoning,
-                permission_overrides,
-                permissions,
                 command: CommandScope { name, overrides },
                 rewind_history_idx,
                 rollback: Some(rollback),
@@ -1897,7 +1798,6 @@ impl TuiApp {
         } = completion;
         match cwd_change {
             Ok(true) => {
-                self.refresh_active_turn_permissions();
                 annotate_cwd_metadata(&mut metadata, true, None);
             }
             Ok(false) => {}
@@ -1996,237 +1896,37 @@ impl TuiApp {
         }
     }
 
-    #[cfg(any(test, feature = "harness"))]
-    pub(crate) fn session_path_grants(&self) -> Vec<smelt_permissions::SessionPathGrant> {
-        self.core
-            .permissions
-            .approvals()
-            .read()
-            .unwrap()
-            .session_path_grants()
-    }
-
-    pub(crate) fn grant_session_path(
-        &mut self,
-        mode: Option<protocol::AgentMode>,
-        tool: String,
-        access: smelt_permissions::PathAccess,
-        dir: PathBuf,
-    ) {
-        let approval_store = self.core.permissions.approvals();
-        let mut approvals = approval_store.write().unwrap();
-        if let Some(mode) = mode {
-            approvals.add_session_path_grant(mode, tool, access, dir);
-        } else {
-            approvals.add_session_path_trust(tool, access, dir);
-        }
-    }
-
-    pub(crate) fn sync_permissions(
-        &mut self,
-        session_entries: Option<Vec<PermissionEntry>>,
-        session_path_grants: Option<Vec<smelt_permissions::SessionPathGrant>>,
-        workspace: Option<smelt_permissions::store::Replacement>,
-        repository: Option<smelt_permissions::store::Replacement>,
-    ) -> Result<(), String> {
-        if workspace.is_some() && repository.is_some() {
-            return Err(
-                "sync one persisted permission scope at a time so each replacement is atomic"
-                    .into(),
-            );
-        }
-
-        let session_entries = session_entries
-            .map(|entries| {
-                let mut tools = Vec::new();
-                let mut dirs = Vec::new();
-                for entry in entries {
-                    if entry.tool.is_empty() {
-                        return Err("session permission tool name cannot be empty".to_string());
-                    }
-                    if entry.tool == "directory" {
-                        if entry.pattern.is_empty() {
-                            return Err("session permission directory cannot be empty".to_string());
-                        }
-                        dirs.push(PathBuf::from(entry.pattern));
-                    } else {
-                        let pattern = (entry.pattern != "*").then_some(entry.pattern);
-                        if let Some(pattern) = pattern.as_deref() {
-                            glob::Pattern::new(pattern).map_err(|error| {
-                                format!("invalid session pattern for {}: {error}", entry.tool)
-                            })?;
-                        }
-                        tools.push(smelt_permissions::SessionToolApproval {
-                            tool: entry.tool,
-                            pattern,
-                        });
-                    }
-                }
-                Ok((tools, dirs))
-            })
-            .transpose()?;
-
-        if let Some(replacement) = workspace {
-            self.core
-                .permission_store
-                .replace(
-                    self.workspace.cwd(),
-                    smelt_permissions::store::PersistenceScope::Workspace,
-                    replacement,
-                )
-                .map_err(|error| format!("replace workspace permissions: {error}"))?;
-        }
-        if let Some(replacement) = repository {
-            let repository_key = self
-                .workspace
-                .repository_permission_context()
-                .map(|(key, _)| key.to_path_buf())
-                .ok_or_else(|| "repository permissions require a Git repository".to_string())?;
-            self.core
-                .permission_store
-                .replace(
-                    &repository_key.to_string_lossy(),
-                    smelt_permissions::store::PersistenceScope::Repository,
-                    replacement,
-                )
-                .map_err(|error| format!("replace repository permissions: {error}"))?;
-        }
-
-        if session_entries.is_some() || session_path_grants.is_some() {
-            let approval_store = self.core.permissions.approvals();
-            let mut approvals = approval_store
-                .write()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some((tools, dirs)) = session_entries {
-                approvals.set_session_entries(tools, dirs);
-            }
-            if let Some(path_grants) = session_path_grants {
-                approvals.set_session_path_grants(path_grants);
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn revoke_permission(
-        &mut self,
-        scope: &str,
-        tool: &str,
-        pattern: &str,
-    ) -> Result<bool, String> {
-        if scope == "session" {
-            return Ok(self
-                .core
-                .permissions
-                .approvals()
-                .write()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove_session_entry(tool, pattern));
-        }
-
-        let (root, persistence_scope) = match scope {
-            "workspace" => (
-                std::path::PathBuf::from(self.workspace.cwd()),
-                smelt_permissions::store::PersistenceScope::Workspace,
-            ),
-            "repository" => (
-                self.workspace
-                    .repository_permission_context()
-                    .map(|(key, _)| key.to_path_buf())
-                    .ok_or_else(|| "repository permissions require a Git repository".to_string())?,
-                smelt_permissions::store::PersistenceScope::Repository,
-            ),
-            _ => return Err(format!("unsupported permission scope `{scope}`")),
-        };
-        self.core
-            .permission_store
-            .remove(&root.to_string_lossy(), persistence_scope, tool, pattern)
-            .map_err(|error| format!("remove {scope} permission: {error}"))
-    }
-
     pub(crate) fn clear_session_scoped_permissions_for_session_boundary(&mut self) {
-        self.core
-            .permissions
-            .approvals()
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear_session();
-    }
-
-    fn reject_failed_persistent_permission(
-        &mut self,
-        invocation_id: protocol::InvocationId,
-        request_id: u64,
-        error: String,
-    ) -> bool {
-        let message = format!("permission was not saved: {error}");
-        self.notify_workspace_error_sticky(message.clone());
-        self.send_permission_decision(request_id, false, Some(message));
-        self.finish_tool(invocation_id, ToolStatus::Denied, None, None);
-        self.conversation.remove_pending_tool(invocation_id);
-        false
+        self.core.permissions.clear_approvals();
     }
 
     /// Resolves a confirm dialog choice; returns `true` if the agent should be cancelled.
     pub(crate) fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
-        invocation_id: protocol::InvocationId,
-        request_id: u64,
-        tool_name: &str,
+        entry: &smelt_core::confirms::ConfirmEntry,
     ) -> bool {
-        let label = match &choice {
+        let req = &entry.req;
+        let (invocation_id, request_id, tool_name) =
+            (req.invocation_id, req.request_id, req.tool_name.as_str());
+        let label = match choice {
             ConfirmChoice::Yes => "approved",
-            ConfirmChoice::Grant(option) => option.label.as_str(),
+            ConfirmChoice::Session | ConfirmChoice::SessionPath => "approved for this session",
             ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
             self.set_active_user_message(invocation_id, format!("{label}: {msg}"));
         }
         match choice {
-            ConfirmChoice::Yes => {
-                self.set_active_status(invocation_id, ToolStatus::Pending);
-                self.send_permission_decision(request_id, true, message);
-                false
-            }
-            ConfirmChoice::Grant(option) => {
-                match option.target {
-                    ApprovalTarget::Session => {
-                        let approval_store = self.core.permissions.approvals();
-                        let mut approvals = approval_store.write().unwrap();
-                        for grant in option.grants {
-                            approvals.add_session_grant(grant);
-                        }
+            ConfirmChoice::Yes | ConfirmChoice::Session | ConfirmChoice::SessionPath => {
+                match (choice, &entry.scope) {
+                    (ConfirmChoice::Session, _) => {
+                        self.core.permissions.allow(tool_name, req.access);
                     }
-                    ApprovalTarget::Workspace { root } => {
-                        let result = add_persisted_grants(
-                            &self.core.permission_store,
-                            &root,
-                            smelt_permissions::store::PersistenceScope::Workspace,
-                            &option.grants,
-                        );
-                        if let Err(error) = result {
-                            return self.reject_failed_persistent_permission(
-                                invocation_id,
-                                request_id,
-                                error,
-                            );
-                        }
+                    (ConfirmChoice::SessionPath, Some(scope)) => {
+                        self.core.permissions.allow_path(scope, req.access);
                     }
-                    ApprovalTarget::Repository { key } => {
-                        let result = add_persisted_grants(
-                            &self.core.permission_store,
-                            &key,
-                            smelt_permissions::store::PersistenceScope::Repository,
-                            &option.grants,
-                        );
-                        if let Err(error) = result {
-                            return self.reject_failed_persistent_permission(
-                                invocation_id,
-                                request_id,
-                                error,
-                            );
-                        }
-                    }
+                    _ => {}
                 }
                 self.set_active_status(invocation_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
@@ -2256,19 +1956,42 @@ impl TuiApp {
         }
     }
 
-    fn permission_decision_for_confirm(&self, req: &ConfirmRequest) -> Decision {
-        if let Some(error) = req.tool_paths_error.as_ref() {
-            return Decision::Error(error.clone());
+    /// `path` as the permission prompt shows it: relative to the cwd or
+    /// home, with a trailing `/` for a directory.
+    fn prompt_path(&self, path: &std::path::Path) -> String {
+        let cwd = self.core.env.cwd();
+        let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+        let shown = smelt_core::path_display::display_path_from(
+            &path.to_string_lossy(),
+            &cwd,
+            self.core.env.home(),
+        );
+        match (shown.as_str(), path.is_dir()) {
+            (".", _) => "./".into(),
+            (_, true) if !shown.ends_with('/') => format!("{shown}/"),
+            _ => shown,
         }
-        self.active_permissions()
-            .evaluate_tool_with_paths_and_approvals(
-                self.conversation.applied_mode().clone(),
-                smelt_permissions::ToolOrigin::Lua,
-                &req.tool_name,
-                &req.args,
-                &req.tool_paths,
-            )
-            .decision
+    }
+
+    /// Run the permission policy again on a pending request: the mode or the
+    /// session approvals may have changed since the engine asked.
+    fn permission_decision_for_confirm(&mut self, req: &ConfirmRequest) -> Decision {
+        self.permission_check_for_confirm(req).0
+    }
+
+    /// The decision for a pending request, and the path the prompt names.
+    fn permission_check_for_confirm(
+        &mut self,
+        req: &ConfirmRequest,
+    ) -> (Decision, Option<smelt_core::lua::PermissionTarget>) {
+        let lua = self.lua.execution();
+        let mode = self.conversation.applied_mode().clone();
+        match crate::lua::scope_app(self, || {
+            lua.check_permission(&req.tool_name, &req.args, mode, Some(req.access))
+        }) {
+            Ok(check) => (check.decision, check.target),
+            Err(error) => (Decision::Error(error), None),
+        }
     }
 
     fn resolve_confirm_by_policy(
@@ -2339,13 +2062,12 @@ impl TuiApp {
         ctrl: SessionControl,
         turn: &mut TurnState,
     ) -> SessionControl {
-        self.dispatch_scoped_control(ctrl, &turn.permissions, &mut turn.pending)
+        self.dispatch_scoped_control(ctrl, &mut turn.pending)
     }
 
     pub(crate) fn dispatch_scoped_control(
         &mut self,
         ctrl: SessionControl,
-        permissions: &smelt_permissions::Permissions,
         pending: &mut Vec<PendingTool>,
     ) -> SessionControl {
         let should_queue = self
@@ -2364,21 +2086,9 @@ impl TuiApp {
                 if req.tool_name.is_empty() {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
-                if let Some(error) = req.tool_paths_error.clone() {
-                    self.send_permission_decision(req.request_id, false, Some(error));
-                    self.finish_tool(req.invocation_id, ToolStatus::Denied, None, None);
-                    pending.retain(|pending| pending.invocation_id != req.invocation_id);
-                    return SessionControl::Continue;
-                }
 
-                let outcome = permissions.evaluate_tool_with_paths_and_approvals(
-                    self.conversation.applied_mode().clone(),
-                    smelt_permissions::ToolOrigin::Lua,
-                    &req.tool_name,
-                    &req.args,
-                    &req.tool_paths,
-                );
-                match outcome.decision {
+                let (decision, target) = self.permission_check_for_confirm(&req);
+                match decision {
                     Decision::Allow => {
                         self.resolve_confirm_by_policy(&req, true, None, "auto_allow", None);
                         return SessionControl::Continue;
@@ -2405,18 +2115,6 @@ impl TuiApp {
                     return SessionControl::Continue;
                 }
 
-                let options = permissions.approval_options(
-                    &req.tool_name,
-                    &req.approval_candidates,
-                    &outcome,
-                );
-                req.grant_options = confirm_grant_options(
-                    options.grant_sets,
-                    self.workspace.cwd(),
-                    self.workspace.repository_permission_context(),
-                    self.core.env.home(),
-                );
-
                 self.close_focused_non_blocking_overlay();
                 self.set_active_status(req.invocation_id, ToolStatus::Confirm);
 
@@ -2428,9 +2126,20 @@ impl TuiApp {
                     ),
                     summary: req.summary.clone(),
                     args: req.args.clone(),
-                    grant_options: req.grant_options.clone(),
+                    access: req.access,
+                    path: target.as_ref().map(|target| self.prompt_path(&target.path)),
+                    intent: target.as_ref().map(|target| match target.intent {
+                        smelt_core::permissions::Intent::Read => "read",
+                        smelt_core::permissions::Intent::Write => "write",
+                    }),
+                    protected: target.as_ref().is_some_and(|target| target.protected),
+                    scope: target
+                        .as_ref()
+                        .and_then(|target| target.scope.as_deref())
+                        .map(|scope| self.prompt_path(scope)),
                 };
-                let handle_id = self.core.confirms.register(*req);
+                let scope = target.and_then(|target| target.scope);
+                let handle_id = self.core.confirms.register(*req, scope);
                 self.core.signals.set_dyn(
                     "confirm_requested",
                     std::rc::Rc::new(smelt_core::signals::ConfirmRequested {
@@ -2444,75 +2153,6 @@ impl TuiApp {
             }
         }
     }
-}
-
-fn confirm_grant_options(
-    grant_sets: Vec<Vec<smelt_permissions::PermissionGrant>>,
-    cwd: &str,
-    repository: Option<(&std::path::Path, &std::path::Path)>,
-    home: &std::path::Path,
-) -> Vec<smelt_transcript::transcript_model::ConfirmApprovalOption> {
-    let mut out = Vec::new();
-    for (idx, grants) in grant_sets.into_iter().enumerate() {
-        let subject = smelt_permissions::PermissionGrant::display_subjects(&grants, home);
-        out.push(smelt_transcript::transcript_model::ConfirmApprovalOption {
-            id: format!("grant_{idx}_session"),
-            label: format!("allow {subject} for this session"),
-            target: ApprovalTarget::Session,
-            grants: grants.clone(),
-        });
-        out.push(smelt_transcript::transcript_model::ConfirmApprovalOption {
-            id: format!("grant_{idx}_workspace"),
-            label: format!(
-                "allow {subject} in {} {}",
-                if repository.is_some() {
-                    "this worktree"
-                } else {
-                    "workspace"
-                },
-                pretty_cwd(cwd, home)
-            ),
-            target: ApprovalTarget::Workspace {
-                root: std::path::PathBuf::from(cwd),
-            },
-            grants: grants.clone(),
-        });
-        if let Some((repository_key, display_root)) = repository {
-            out.push(smelt_transcript::transcript_model::ConfirmApprovalOption {
-                id: format!("grant_{idx}_repository"),
-                label: format!(
-                    "allow {subject} in project {} (all worktrees)",
-                    pretty_path(display_root, home)
-                ),
-                target: ApprovalTarget::Repository {
-                    key: repository_key.to_path_buf(),
-                },
-                grants,
-            });
-        }
-    }
-    out
-}
-
-fn pretty_cwd(cwd: &str, home: &std::path::Path) -> String {
-    pretty_path(std::path::Path::new(cwd), home)
-}
-
-fn pretty_path(path: &std::path::Path, home: &std::path::Path) -> String {
-    smelt_paths::collapse_tilde_from(path, home)
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn add_persisted_grants(
-    store: &smelt_permissions::store::PermissionStore,
-    root: &std::path::Path,
-    scope: smelt_permissions::store::PersistenceScope,
-    grants: &[smelt_permissions::PermissionGrant],
-) -> Result<(), String> {
-    store
-        .add_grants(&root.to_string_lossy(), scope, grants)
-        .map_err(|error| format!("save persisted permission: {error}"))
 }
 
 fn display_safe_process_id(id: &str) -> String {
@@ -2619,7 +2259,7 @@ mod tests {
     #[test]
     fn turn_lifecycle_owns_continuation_and_callback_generations() {
         let mut lifecycle = TurnLifecycle::new(
-            protocol::AgentMode::parse("normal").unwrap(),
+            protocol::AgentMode::parse("read").unwrap(),
             protocol::ReasoningEffort::Off,
         );
 
@@ -2637,7 +2277,7 @@ mod tests {
 
     #[test]
     fn turn_lifecycle_replaces_mode_changes_and_removes_base_mode() {
-        let base = protocol::AgentMode::parse("normal").unwrap();
+        let base = protocol::AgentMode::parse("read").unwrap();
         let mut lifecycle = TurnLifecycle::new(base.clone(), protocol::ReasoningEffort::Off);
 
         lifecycle.queue_history_append(
@@ -2653,7 +2293,7 @@ mod tests {
         assert_eq!(lifecycle.pending_history_appends()[0].mode(), Some("auto"));
 
         lifecycle.queue_history_append(
-            PendingHistoryAppend::mode_change("normal".to_string(), "normal mode".to_string()),
+            PendingHistoryAppend::mode_change("read".to_string(), "read mode".to_string()),
             Some(&base),
         );
         assert_eq!(lifecycle.pending_history_append_count(), 0);
@@ -2662,7 +2302,7 @@ mod tests {
     #[test]
     fn turn_lifecycle_replaces_and_removes_named_context() {
         let mut lifecycle = TurnLifecycle::new(
-            protocol::AgentMode::parse("normal").unwrap(),
+            protocol::AgentMode::parse("read").unwrap(),
             protocol::ReasoningEffort::Off,
         );
 
@@ -2712,7 +2352,7 @@ mod tests {
     #[test]
     fn turn_lifecycle_extracts_matching_history_append() {
         let mut lifecycle = TurnLifecycle::new(
-            protocol::AgentMode::parse("normal").unwrap(),
+            protocol::AgentMode::parse("read").unwrap(),
             protocol::ReasoningEffort::Off,
         );
         let append = PendingHistoryAppend::context("project".to_string(), "text".to_string());
@@ -2728,7 +2368,7 @@ mod tests {
 
     #[test]
     fn turn_lifecycle_retains_only_session_scoped_history() {
-        let base = protocol::AgentMode::parse("normal").unwrap();
+        let base = protocol::AgentMode::parse("read").unwrap();
         let mut lifecycle = TurnLifecycle::new(base.clone(), protocol::ReasoningEffort::Off);
         lifecycle.queue_history_append(
             PendingHistoryAppend::mode_change("plan".to_string(), "plan mode".to_string()),

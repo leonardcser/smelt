@@ -18,7 +18,6 @@ Eighteen targets covering distinct surfaces:
 | `transcript_scroll_ops`   | sparse transcript scrolling, cursor motion, selection drag, and autoscroll   | resumed heterogeneous transcript + semantic scroll trace oracles                                |
 | `provider_body`           | provider request construction and configuration                              | all body builders + routing, API-base, auth, catalog, extraction, and schema invariants          |
 | `provider_stream`         | provider SSE/response parsers                                                | raw-byte partitioning + Chat Completions/OpenAI/Anthropic lifecycle and response oracles         |
-| `permissions_rules`       | permission rule compilation/evaluation                                       | random rule sets, shell-aware subpatterns, mode behavior, workspace downgrade oracle            |
 | `store_state`             | canonical session persistence and maintenance                                | file-backed writer/reader state machine + independent history, transcript-record, and revision model   |
 | `engine_events`           | engine lifecycle and canonical-history application                           | focused event state machine + independent active-turn and canonical-suffix model                |
 | `engine_turns`            | real engine turn loop (steering, tools, permissions, cancellation, retries)  | scripted provider transport + virtual time + frontend answering tool events; wire, lifecycle, and history oracles |

@@ -21,4 +21,4 @@ expression: frame.text()
   3. wire up the CLI flag and document the expected
      behavior for new users
   4. (current)
- ○ normal                                            5:1 66%
+ ○ read                                              5:1 66%

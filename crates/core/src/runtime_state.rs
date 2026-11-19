@@ -406,11 +406,11 @@ fn resolve_mode(inputs: &RuntimeInputs<'_>, cycle: &mut Vec<AgentMode>) -> Agent
         })
         .filter(registered)
         .unwrap_or_else(|| {
-            let normal = AgentMode::normal();
-            if registered(&normal) {
-                normal
+            let read = AgentMode::read();
+            if registered(&read) {
+                read
             } else {
-                inputs.registered_modes.first().cloned().unwrap_or(normal)
+                inputs.registered_modes.first().cloned().unwrap_or(read)
             }
         });
     if inputs.startup.mode_cycle.is_none() && !cycle.contains(&selected) {
@@ -983,7 +983,7 @@ mod tests {
         let models = config.resolve_models();
         let startup = StartupOverrides::default();
         let selections = RuntimeSelections::default();
-        let modes = vec![AgentMode::normal()];
+        let modes = vec![AgentMode::read()];
         let initial = resolve_runtime(RuntimeInputs {
             config: &config,
             startup: &startup,
@@ -1636,10 +1636,10 @@ mod tests {
     fn runtime_cycles_are_deduplicated_without_reordering() {
         let config = provider_config();
         let models = config.resolve_models();
-        let normal = AgentMode::normal();
+        let read = AgentMode::read();
         let plan = AgentMode::parse("plan").unwrap();
         let startup = StartupOverrides {
-            mode_cycle: Some(vec![normal.clone(), plan.clone(), normal.clone()]),
+            mode_cycle: Some(vec![read.clone(), plan.clone(), read.clone()]),
             reasoning_cycle: Some(vec![
                 ReasoningEffort::Off,
                 ReasoningEffort::High,
@@ -1651,14 +1651,14 @@ mod tests {
             config: &config,
             startup: &startup,
             available_models: &models,
-            registered_modes: &[normal.clone(), plan.clone()],
+            registered_modes: &[read.clone(), plan.clone()],
             selections: &RuntimeSelections::default(),
             previous: None,
             headless: false,
         })
         .unwrap();
 
-        assert_eq!(state.mode_cycle, vec![normal, plan]);
+        assert_eq!(state.mode_cycle, vec![read, plan]);
         assert_eq!(
             state.reasoning_cycle,
             vec![ReasoningEffort::Off, ReasoningEffort::High]
@@ -1690,26 +1690,26 @@ mod tests {
     fn cli_cycles_remain_immutable_when_current_selections_are_outside_them() {
         let config = provider_config();
         let models = config.resolve_models();
-        let normal = AgentMode::normal();
+        let read = AgentMode::read();
         let plan = AgentMode::parse("plan").unwrap();
         let state = resolve_runtime(RuntimeInputs {
             config: &config,
             startup: &StartupOverrides {
-                mode: Some(normal.clone()),
+                mode: Some(read.clone()),
                 mode_cycle: Some(vec![plan.clone()]),
                 reasoning_effort: Some(ReasoningEffort::High),
                 reasoning_cycle: Some(vec![ReasoningEffort::Off]),
                 ..Default::default()
             },
             available_models: &models,
-            registered_modes: &[normal.clone(), plan.clone()],
+            registered_modes: &[read.clone(), plan.clone()],
             selections: &RuntimeSelections::default(),
             previous: None,
             headless: false,
         })
         .unwrap();
 
-        assert_eq!(state.mode, normal);
+        assert_eq!(state.mode, read);
         assert_eq!(state.mode_cycle, vec![plan]);
         assert_eq!(state.reasoning_effort, ReasoningEffort::High);
         assert_eq!(state.reasoning_cycle, vec![ReasoningEffort::Off]);

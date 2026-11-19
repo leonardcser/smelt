@@ -192,51 +192,6 @@ fn wrapped_menu_uses_its_layout_width_before_first_paint() {
 }
 
 #[test]
-fn permissions_wrapped_rules_delete_the_highlighted_item() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(32, 18);
-    app.run_lua_result(
-        r#"
-        smelt.permissions.sync({session = {
-            {tool = "bash", pattern = "cat /very/long/path/to/a/project/configuration/file.json"},
-            {tool = "web_fetch", pattern = "https://example.com/very/long/documentation/path/*"},
-            {tool = "write_file", pattern = "src/**/*.rs"},
-        }})
-        original_rules = smelt.permissions.list().session
-        smelt.cmd.run("permissions")
-    "#,
-    )
-    .unwrap();
-    drive_lua_tasks(&mut app);
-    app.render_silent();
-    app.type_char('2');
-    let frame = app.render_to_frame();
-    let row = frame
-        .rows
-        .iter()
-        .position(|row| row.contains(" 2. "))
-        .unwrap_or_else(|| panic!("{}", frame.text()));
-    assert_eq!(
-        frame.styles[row][0].bg,
-        app.ui_probe().theme().get("CursorLine").bg,
-        "{}",
-        frame.text()
-    );
-    app.press(KeyCode::Backspace);
-    drive_lua_tasks(&mut app);
-    app.run_lua_result(
-        r#"
-        local remaining = smelt.permissions.list().session
-        assert(#remaining == 2)
-        for _, rule in ipairs(remaining) do
-            assert(rule.tool ~= original_rules[2].tool or rule.pattern ~= original_rules[2].pattern)
-        end
-    "#,
-    )
-    .unwrap();
-}
-
-#[test]
 fn menu_row_mapping_handles_newlines_clipping_and_narrow_widths() {
     for wrap in ["nil", "true", "false"] {
         let mut app = TestApp::builder().build();
@@ -1592,38 +1547,6 @@ fn tool_result<'a>(app: &'a TestApp, call_id: &str) -> Option<(&'a str, bool)> {
     })
 }
 
-fn confirm_test_permissions() -> smelt_permissions::Permissions {
-    use smelt_permissions::rules::{RawModePerms, RawPerms, RawRuleSet, ToolDefaults};
-    let mut modes = std::collections::HashMap::new();
-    modes.insert(
-        "apply".to_string(),
-        RawModePerms {
-            tools: RawRuleSet {
-                allow: vec!["test_tool".into()],
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    );
-    modes.insert(
-        "deny".to_string(),
-        RawModePerms {
-            tools: RawRuleSet {
-                deny: vec!["test_tool".into()],
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    );
-    smelt_permissions::Permissions::from_raw(
-        &RawPerms {
-            default: RawModePerms::default(),
-            modes,
-        },
-        &ToolDefaults::default(),
-    )
-}
-
 fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
     smelt_core::ConfirmRequest {
         invocation_id: protocol::InvocationId::new(request_id),
@@ -1631,17 +1554,28 @@ fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
         tool_name: "test_tool".into(),
         provider: None,
         args: std::collections::HashMap::new(),
-        tool_paths: Vec::new(),
-        tool_paths_error: None,
-        approval_candidates: Vec::new(),
-        grant_options: Vec::new(),
         summary: protocol::StyledLines::from_plain("test tool"),
         request_id,
+        access: protocol::Access::Write,
     }
 }
 
+/// Register `test_tool`, a `write` tool, and a `deny` mode that denies
+/// everything above `read`. `write` allows the tool and `read` asks.
 fn install_confirm_test_permissions(app: &mut TestApp) {
-    app.replace_permissions_for_harness(confirm_test_permissions());
+    app.run_lua_result(
+        r#"
+        smelt.tools.register({
+            name = "test_tool",
+            description = "permission probe",
+            parameters = { type = "object", properties = {} },
+            paths = function() return {} end,
+            execute = function() return "ok" end,
+        })
+        smelt.mode.register({ name = "deny", access = "read", above = "deny" })
+        "#,
+    )
+    .expect("install confirm test policy");
 }
 
 fn permission_decisions(cmds: Vec<protocol::UiCommand>) -> Vec<(u64, bool)> {
@@ -1690,7 +1624,7 @@ fn request_bash_permission(
     app: &mut TestApp,
     request_id: u64,
     command: &str,
-    approval_patterns: Vec<&str>,
+    access: protocol::Access,
 ) {
     app.feed_one(SourceEvent::engine(
         protocol::EngineEvent::RequestPermission {
@@ -1700,9 +1634,9 @@ fn request_bash_permission(
             tool_name: "bash".into(),
             provider: None,
             args: bash_permission_args(command),
-            approval_patterns: approval_patterns.into_iter().map(str::to_string).collect(),
             called_at_ms: 0,
             summary: protocol::StyledLines::from_plain(command.to_string()),
+            access,
         },
     ));
 }
@@ -1719,9 +1653,9 @@ fn native_tool_permission_shows_its_provider_and_matches_rules_by_raw_name() {
             tool_name: "ToolSearch".into(),
             provider: Some("claude-code".into()),
             args: std::collections::HashMap::from([("query".into(), serde_json::json!("x"))]),
-            approval_patterns: Vec::new(),
             called_at_ms: 0,
             summary: protocol::StyledLines::from_plain("x"),
+            access: protocol::Access::Write,
         },
     ));
     let frame = app.render_to_frame().text();
@@ -1734,565 +1668,12 @@ fn native_tool_permission_shows_its_provider_and_matches_rules_by_raw_name() {
     assert_eq!(confirm.req.tool_name, "ToolSearch");
 }
 
-struct GitWorktreeFixture {
-    repo: tempfile::TempDir,
-    worktrees: tempfile::TempDir,
-    feature: std::path::PathBuf,
-}
-
-impl GitWorktreeFixture {
-    fn new() -> Self {
-        let repo = tempfile::tempdir().unwrap();
-        let worktrees = tempfile::tempdir().unwrap();
-        Self::run_git(repo.path(), &["init", "-b", "main"]);
-        std::fs::write(repo.path().join("README.md"), "test\n").unwrap();
-        Self::run_git(repo.path(), &["add", "README.md"]);
-        Self::run_git(repo.path(), &["commit", "-m", "initial"]);
-        let feature = worktrees.path().join("feature");
-        Self::add_worktree(repo.path(), &feature, "feature");
-        Self {
-            repo,
-            worktrees,
-            feature,
-        }
-    }
-
-    fn repository_root(&self) -> std::path::PathBuf {
-        std::fs::canonicalize(self.repo.path()).unwrap()
-    }
-
-    fn repository_key(&self) -> std::path::PathBuf {
-        std::fs::canonicalize(self.repo.path().join(".git")).unwrap()
-    }
-
-    fn add_sibling(&self) -> std::path::PathBuf {
-        let sibling = self.worktrees.path().join("sibling");
-        Self::add_worktree(self.repo.path(), &sibling, "sibling");
-        sibling
-    }
-
-    fn add_worktree(repo: &std::path::Path, path: &std::path::Path, branch: &str) {
-        Self::run_git(
-            repo,
-            &["worktree", "add", "-b", branch, path.to_str().unwrap()],
-        );
-    }
-
-    fn run_git(cwd: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .current_dir(cwd)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "smelt test")
-            .env("GIT_AUTHOR_EMAIL", "smelt-test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "smelt test")
-            .env("GIT_COMMITTER_EMAIL", "smelt-test@example.invalid")
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-fn open_repository_permission_dialog(fixture: &GitWorktreeFixture) -> TestApp {
-    let mut app = TestApp::builder().with_cwd(&fixture.feature).build();
-    app.start_submitted_turn("run tests");
-    request_bash_permission(&mut app, 9, "cargo test", vec!["cargo test *"]);
-    app
-}
-
-fn is_cargo_test_grant(grants: &[smelt_permissions::PermissionGrant]) -> bool {
-    matches!(
-        grants,
-        [smelt_permissions::PermissionGrant::Command { tool, pattern }]
-            if tool == "bash" && pattern == "cargo test *"
-    )
-}
-
-#[test]
-fn worktree_permission_dialog_offers_repository_scope_with_main_checkout_label() {
-    let fixture = GitWorktreeFixture::new();
-    let mut app = open_repository_permission_dialog(&fixture);
-    let handle_id = app.first_pending_confirm().expect("permission dialog");
-    let options = &app
-        .core_probe()
-        .confirms
-        .get(handle_id)
-        .expect("confirm request")
-        .req
-        .grant_options;
-    let repository = options
-        .iter()
-        .find(|option| matches!(option.target, smelt_core::ApprovalTarget::Repository { .. }))
-        .expect("repository approval option");
-
-    assert_eq!(
-        repository.target,
-        smelt_core::ApprovalTarget::Repository {
-            key: fixture.repository_key(),
-        }
-    );
-    assert_eq!(
-        repository.label,
-        format!(
-            "allow cargo test * in project {} (all worktrees)",
-            fixture.repository_root().display()
-        )
-    );
-    let workspace = options
-        .iter()
-        .find(|option| matches!(option.target, smelt_core::ApprovalTarget::Workspace { .. }))
-        .expect("worktree approval option");
-    assert_eq!(
-        workspace.label,
-        format!(
-            "allow cargo test * in this worktree {}",
-            fixture.feature.display()
-        )
-    );
-    // The label holds the fixture's path, whose length follows `TMPDIR`.
-    let width = (repository.label.chars().count() + 16).max(80) as u16;
-    app.set_terminal_size(width, 24);
-    let frame = app.render_to_frame().text();
-    assert!(frame.contains("in project"));
-    assert!(frame.contains("all worktrees"));
-}
-
-#[test]
-fn repository_approval_persists_under_git_common_directory_key() {
-    let fixture = GitWorktreeFixture::new();
-    let mut app = open_repository_permission_dialog(&fixture);
-
-    assert!(app.resolve_first_grant_where(
-        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
-        is_cargo_test_grant,
-    ));
-    let store = &app.core_probe().permission_store;
-    assert!(store
-        .load(
-            &fixture.feature.to_string_lossy(),
-            smelt_permissions::store::PersistenceScope::Workspace,
-        )
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        store
-            .load(
-                &fixture.repository_key().to_string_lossy(),
-                smelt_permissions::store::PersistenceScope::Repository,
-            )
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn running_peer_in_same_workspace_lazily_loads_new_workspace_approval() {
-    let runtime_home = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    let mut granter = TestApp::builder()
-        .with_runtime_home(runtime_home.path())
-        .with_cwd(workspace.path())
-        .build();
-    let mut peer = TestApp::builder()
-        .with_runtime_home(runtime_home.path())
-        .with_cwd(workspace.path())
-        .build();
-
-    granter.start_submitted_turn("run tests");
-    request_bash_permission(&mut granter, 40, "cargo test", vec!["cargo test *"]);
-    assert!(granter.resolve_first_grant_where(
-        |target| matches!(target, smelt_core::ApprovalTarget::Workspace { .. }),
-        is_cargo_test_grant,
-    ));
-
-    peer.start_submitted_turn("run tests");
-    request_bash_permission(&mut peer, 41, "cargo test", vec!["cargo test *"]);
-
-    assert_eq!(peer.pending_confirm_count(), 0);
-    assert_eq!(
-        actions_permission_decisions(peer.actions()),
-        vec![(41, true)]
-    );
-
-    granter
-        .core_probe()
-        .permission_store
-        .remove(
-            granter.cwd_str(),
-            smelt_permissions::store::PersistenceScope::Workspace,
-            "bash",
-            "cargo test *",
-        )
-        .unwrap();
-    request_bash_permission(&mut peer, 42, "cargo test", vec!["cargo test *"]);
-    assert_eq!(peer.pending_confirm_count(), 1);
-}
-
-#[test]
-fn persistent_permission_failure_is_reported_and_does_not_run_tool() {
-    let mut app = TestApp::builder().build();
-    app.core_probe()
-        .permission_store
-        .add_tool(
-            app.cwd_str(),
-            smelt_permissions::store::PersistenceScope::Workspace,
-            "bash",
-            vec!["existing command".into()],
-        )
-        .unwrap();
-    let permission_dir = std::fs::read_dir(
-        app.runtime_home()
-            .join("state")
-            .join("smelt")
-            .join("workspaces"),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
-    let lock_path = permission_dir.join("permissions.lock");
-    std::fs::remove_file(&lock_path).unwrap();
-    std::fs::create_dir(&lock_path).unwrap();
-
-    app.start_submitted_turn("run tests");
-    request_bash_permission(&mut app, 45, "cargo test", vec!["cargo test *"]);
-    assert!(app.resolve_first_grant_where(
-        |target| matches!(target, smelt_core::ApprovalTarget::Workspace { .. }),
-        is_cargo_test_grant,
-    ));
-
-    assert_eq!(
-        actions_permission_decisions(app.actions()),
-        vec![(45, false)]
-    );
-    assert!(app.lua_messages_contain("permission was not saved:"));
-    assert_eq!(
-        app.core_probe()
-            .permission_store
-            .load(
-                app.cwd_str(),
-                smelt_permissions::store::PersistenceScope::Workspace,
-            )
-            .unwrap(),
-        vec![smelt_permissions::store::Rule {
-            tool: "bash".into(),
-            patterns: vec!["existing command".into()],
-        }]
-    );
-}
-
-#[test]
-fn successful_persistent_grant_is_approved_when_other_scope_is_malformed() {
-    let fixture = GitWorktreeFixture::new();
-    let runtime_home = tempfile::tempdir().unwrap();
-    let mut app = TestApp::builder()
-        .with_runtime_home(runtime_home.path())
-        .with_cwd(&fixture.feature)
-        .build();
-    app.core_probe()
-        .permission_store
-        .add_tool(
-            &fixture.repository_key().to_string_lossy(),
-            smelt_permissions::store::PersistenceScope::Repository,
-            "bash",
-            vec!["git status".into()],
-        )
-        .unwrap();
-    let stores_dir = runtime_home.path().join("state/smelt/workspaces");
-    let repository_permissions = std::fs::read_dir(stores_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path().join("repository-permissions.json"))
-        .find(|path| path.is_file())
-        .unwrap();
-    app.start_submitted_turn("run tests");
-    request_bash_permission(&mut app, 46, "cargo test", vec!["cargo test *"]);
-    std::fs::write(repository_permissions, "{not json").unwrap();
-    assert!(app.resolve_first_grant_where(
-        |target| matches!(target, smelt_core::ApprovalTarget::Workspace { .. }),
-        is_cargo_test_grant,
-    ));
-
-    assert_eq!(
-        actions_permission_decisions(app.actions()),
-        vec![(46, true)]
-    );
-    assert_eq!(
-        app.core_probe()
-            .permission_store
-            .load(
-                app.cwd_str(),
-                smelt_permissions::store::PersistenceScope::Workspace,
-            )
-            .unwrap(),
-        vec![smelt_permissions::store::Rule {
-            tool: "bash".into(),
-            patterns: vec!["cargo test *".into()],
-        }]
-    );
-}
-
-#[test]
-fn running_sibling_worktree_lazily_loads_new_repository_approval() {
-    let fixture = GitWorktreeFixture::new();
-    let sibling = fixture.add_sibling();
-    let runtime_home = tempfile::tempdir().unwrap();
-    let mut granter = TestApp::builder()
-        .with_runtime_home(runtime_home.path())
-        .with_cwd(&fixture.feature)
-        .build();
-    let mut peer = TestApp::builder()
-        .with_runtime_home(runtime_home.path())
-        .with_cwd(sibling)
-        .build();
-
-    granter.start_submitted_turn("run tests");
-    request_bash_permission(&mut granter, 50, "cargo test", vec!["cargo test *"]);
-    assert!(granter.resolve_first_grant_where(
-        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
-        is_cargo_test_grant,
-    ));
-
-    peer.start_submitted_turn("run tests");
-    request_bash_permission(&mut peer, 51, "cargo test", vec!["cargo test *"]);
-
-    assert_eq!(peer.pending_confirm_count(), 0);
-    assert_eq!(
-        actions_permission_decisions(peer.actions()),
-        vec![(51, true)]
-    );
-}
-
-#[test]
-fn permissions_lua_transactional_revoke_preserves_concurrent_rules() {
-    let fixture = GitWorktreeFixture::new();
-    let mut app = open_repository_permission_dialog(&fixture);
-    assert!(app.resolve_first_grant_where(
-        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
-        is_cargo_test_grant,
-    ));
-
-    assert!(app.run_lua(
-        r#"
-        _G.stale_permissions = smelt.permissions.list()
-        assert(#_G.stale_permissions.repository == 1)
-        "#
-    ));
-    app.core_probe()
-        .permission_store
-        .add_tool(
-            &fixture.repository_key().to_string_lossy(),
-            smelt_permissions::store::PersistenceScope::Repository,
-            "web_fetch",
-            vec!["https://example.com/*".into()],
-        )
-        .unwrap();
-
-    assert!(app.run_lua(
-        r#"
-        local stale = _G.stale_permissions.repository[1]
-        assert(smelt.permissions.revoke({
-          scope = "repository",
-          tool = stale.tool,
-          pattern = stale.patterns[1],
-        }))
-        "#
-    ));
-    assert_eq!(
-        app.core_probe()
-            .permission_store
-            .load(
-                &fixture.repository_key().to_string_lossy(),
-                smelt_permissions::store::PersistenceScope::Repository,
-            )
-            .unwrap(),
-        vec![smelt_permissions::store::Rule {
-            tool: "web_fetch".into(),
-            patterns: vec!["https://example.com/*".into()],
-        }]
-    );
-}
-
-#[test]
-fn permissions_lua_sync_rejects_stale_repository_snapshot() {
-    let fixture = GitWorktreeFixture::new();
-    let mut app = open_repository_permission_dialog(&fixture);
-    assert!(app.resolve_first_grant_where(
-        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
-        is_cargo_test_grant,
-    ));
-    assert!(app.run_lua(
-        r#"
-        _G.stale_permissions = smelt.permissions.list()
-        assert(#_G.stale_permissions.repository == 1)
-        "#
-    ));
-    app.core_probe()
-        .permission_store
-        .add_tool(
-            &fixture.repository_key().to_string_lossy(),
-            smelt_permissions::store::PersistenceScope::Repository,
-            "web_fetch",
-            vec!["https://example.com/*".into()],
-        )
-        .unwrap();
-
-    assert!(app.run_lua(
-        r#"
-        local ok, err = pcall(function()
-          smelt.permissions.sync({
-            repository = {
-              revision = _G.stale_permissions.repository_revision,
-              rules = {},
-            },
-          })
-        end)
-        assert(not ok)
-        assert(tostring(err):find("changed since it was read", 1, true))
-        "#
-    ));
-    assert_eq!(
-        app.core_probe()
-            .permission_store
-            .load(
-                &fixture.repository_key().to_string_lossy(),
-                smelt_permissions::store::PersistenceScope::Repository,
-            )
-            .unwrap(),
-        vec![
-            smelt_permissions::store::Rule {
-                tool: "bash".into(),
-                patterns: vec!["cargo test *".into()],
-            },
-            smelt_permissions::store::Rule {
-                tool: "web_fetch".into(),
-                patterns: vec!["https://example.com/*".into()],
-            },
-        ]
-    );
-}
-
-#[test]
-fn permissions_lua_sync_rejects_two_persisted_scopes_without_writing_either() {
-    let fixture = GitWorktreeFixture::new();
-    let mut app = TestApp::builder().with_cwd(&fixture.feature).build();
-    app.core_probe()
-        .permission_store
-        .add_tool(
-            app.cwd_str(),
-            smelt_permissions::store::PersistenceScope::Workspace,
-            "bash",
-            vec!["workspace command".into()],
-        )
-        .unwrap();
-    app.core_probe()
-        .permission_store
-        .add_tool(
-            &fixture.repository_key().to_string_lossy(),
-            smelt_permissions::store::PersistenceScope::Repository,
-            "bash",
-            vec!["repository command".into()],
-        )
-        .unwrap();
-
-    assert!(app.run_lua(
-        r#"
-        local permissions = smelt.permissions.list()
-        local ok, err = pcall(function()
-          smelt.permissions.sync({
-            workspace = {
-              revision = permissions.workspace_revision,
-              rules = {},
-            },
-            repository = {
-              revision = permissions.repository_revision,
-              rules = {},
-            },
-          })
-        end)
-        assert(not ok)
-        assert(tostring(err):find("one persisted permission scope", 1, true))
-        "#
-    ));
-    assert_eq!(
-        app.core_probe()
-            .permission_store
-            .load(
-                app.cwd_str(),
-                smelt_permissions::store::PersistenceScope::Workspace,
-            )
-            .unwrap()[0]
-            .patterns,
-        vec!["workspace command"]
-    );
-    assert_eq!(
-        app.core_probe()
-            .permission_store
-            .load(
-                &fixture.repository_key().to_string_lossy(),
-                smelt_permissions::store::PersistenceScope::Repository,
-            )
-            .unwrap()[0]
-            .patterns,
-        vec!["repository command"]
-    );
-}
-
-#[test]
-fn external_sibling_worktree_inherits_repository_but_not_workspace_rules() {
-    let fixture = GitWorktreeFixture::new();
-    let app = TestApp::builder().with_cwd(&fixture.feature).build();
-    let store = &app.core_probe().permission_store;
-    store
-        .add_grant(
-            &fixture.repository_key().to_string_lossy(),
-            smelt_permissions::store::PersistenceScope::Repository,
-            smelt_permissions::PermissionGrant::Command {
-                tool: "bash".into(),
-                pattern: "cargo test *".into(),
-            },
-        )
-        .unwrap();
-    store
-        .add_tool(
-            &fixture.feature.to_string_lossy(),
-            smelt_permissions::store::PersistenceScope::Workspace,
-            "bash",
-            vec!["worktree-only *".into()],
-        )
-        .unwrap();
-    let sibling = fixture.add_sibling();
-
-    let resolution = smelt_permissions::resolve_permissions(
-        &smelt_permissions::rules::RawPerms::default(),
-        &smelt_permissions::rules::ToolDefaults::default(),
-        std::collections::HashMap::new(),
-        smelt_permissions::WorkspacePolicy::default(),
-        smelt_permissions::PermissionRuntimePaths {
-            cwd: &sibling,
-            home: app.runtime_home(),
-        },
-        store,
-        None,
-    );
-    let permissions = smelt_permissions::PermissionsHandle::from_resolution(resolution.unwrap());
-    let approvals = permissions.approvals();
-    let approvals = approvals.read().unwrap();
-    assert!(approvals.has_pattern("bash", "cargo test *"));
-    assert!(!approvals.has_pattern("bash", "worktree-only *"));
-}
-
 #[test]
 fn request_permission_auto_allows_when_applied_turn_mode_allows() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
-    app.set_applied_mode(protocol::AgentMode::parse("apply").unwrap());
+    app.set_applied_mode(protocol::AgentMode::parse("write").unwrap());
 
     let mut pending = Vec::new();
     let ctrl = dispatch_confirm_request(&mut app, confirm_req(10), &mut pending);
@@ -2343,9 +1724,9 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
             tool_name: "test_tool".into(),
             provider: None,
             args: std::collections::HashMap::new(),
-            approval_patterns: Vec::new(),
             called_at_ms: 0,
             summary: protocol::StyledLines::from_plain("test tool"),
+            access: protocol::Access::Write,
         },
     ));
     assert_eq!(
@@ -2384,48 +1765,16 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
 }
 
 #[test]
-fn bash_session_grants_for_cd_prefixed_outside_path_survive_cancel_and_rewind() {
-    let outside = tempfile::TempDir::new().expect("create outside-workspace directory");
-    let outside_dir = outside.path().join("shared-data");
-    std::fs::create_dir_all(&outside_dir).expect("create outside data directory");
-    let outside_dir = std::fs::canonicalize(outside_dir).expect("canonicalize outside dir");
-    let outside_file = outside_dir.join("sample.input");
-    std::fs::write(&outside_file, "fixture\n").expect("write outside-workspace file");
-
+fn session_approval_survives_cancel_and_rewind() {
     let mut app = TestApp::builder().build();
-    let approval_pattern = "python3 *";
-    let command = format!(
-        "cd {} && python3 -m demo_tool --input {} --dry-run",
-        app.cwd_str(),
-        outside_file.display()
-    );
-    app.restrict_permissions_to_cwd();
-    app.start_submitted_turn("process outside data");
+    let command = "cargo test";
+    app.start_submitted_turn("run tests");
     let history_idx = app.session_message_count().saturating_sub(1);
 
-    request_bash_permission(&mut app, 21, &command, vec![approval_pattern]);
+    request_bash_permission(&mut app, 21, command, protocol::Access::Write);
     assert_eq!(app.pending_confirm_count(), 1);
     let before = app.actions().len();
-    assert!(
-        app.resolve_first_session_grant_where(|grants| {
-            let has_command_grant = grants.iter().any(|grant| {
-                matches!(
-                    grant,
-                    smelt_permissions::PermissionGrant::Command { tool, pattern }
-                        if tool == "bash" && pattern == approval_pattern
-                )
-            });
-            let has_path_grant = grants.iter().any(|grant| {
-                matches!(
-                    grant,
-                    smelt_permissions::PermissionGrant::PathPrefix { dir }
-                        if dir == &outside_dir
-                )
-            });
-            has_command_grant && has_path_grant
-        }),
-        "matching session command and path grant option"
-    );
+    assert!(app.resolve_first_confirm_for_session());
     assert_eq!(
         actions_permission_decisions(app.actions_since(before)),
         vec![(21, true)]
@@ -2435,55 +1784,19 @@ fn bash_session_grants_for_cd_prefixed_outside_path_survive_cancel_and_rewind() 
     app.rewind_to_history_index(Some(history_idx), false);
 
     let before = app.actions().len();
-    app.start_submitted_turn("process outside data");
-    request_bash_permission(&mut app, 22, &command, vec![approval_pattern]);
-
+    app.start_submitted_turn("run tests");
+    request_bash_permission(&mut app, 22, command, protocol::Access::Write);
     assert_eq!(app.pending_confirm_count(), 0);
     assert_eq!(
         actions_permission_decisions(app.actions_since(before)),
         vec![(22, true)]
     );
-}
 
-#[test]
-fn command_session_grant_survives_cancel_and_rewind() {
-    let approval_pattern = "python3 *";
-    let mut app = TestApp::builder().build();
-    let command = format!("cd {} && python3 --version", app.cwd_str());
-    app.start_submitted_turn("check python");
-    let history_idx = app.session_message_count().saturating_sub(1);
-
-    request_bash_permission(&mut app, 31, &command, vec![approval_pattern]);
-    assert_eq!(app.pending_confirm_count(), 1);
-    let before = app.actions().len();
-    assert!(
-        app.resolve_first_session_grant_where(|grants| {
-            grants.iter().any(|grant| {
-                matches!(
-                    grant,
-                    smelt_permissions::PermissionGrant::Command { tool, pattern }
-                        if tool == "bash" && pattern == approval_pattern
-                )
-            })
-        }),
-        "matching session command grant option"
-    );
+    request_bash_permission(&mut app, 23, command, protocol::Access::Full);
     assert_eq!(
-        actions_permission_decisions(app.actions_since(before)),
-        vec![(31, true)]
-    );
-
-    app.cancel();
-    app.rewind_to_history_index(Some(history_idx), false);
-
-    let before = app.actions().len();
-    app.start_submitted_turn("check python");
-    request_bash_permission(&mut app, 32, &command, vec![approval_pattern]);
-
-    assert_eq!(app.pending_confirm_count(), 0);
-    assert_eq!(
-        actions_permission_decisions(app.actions_since(before)),
-        vec![(32, true)]
+        app.pending_confirm_count(),
+        1,
+        "a write approval does not cover full access"
     );
 }
 
@@ -2494,7 +1807,7 @@ fn evaluate_tool(
     tool_name: &str,
     args: std::collections::HashMap<String, serde_json::Value>,
     mode: protocol::AgentMode,
-) -> protocol::Decision {
+) -> protocol::ToolEvaluation {
     app.feed_one(SourceEvent::engine(
         protocol::EngineEvent::ToolEvaluationRequest {
             invocation_id: protocol::InvocationId::new(request_id),
@@ -2505,22 +1818,7 @@ fn evaluate_tool(
             mode,
         },
     ));
-    app.wait_for_tool_evaluation(request_id);
-
-    app.actions()
-        .iter()
-        .rev()
-        .find_map(|action| match action {
-            Action::EngineSend(command) => match command.as_ref() {
-                protocol::UiCommand::ToolEvaluationResponse {
-                    request_id: response_id,
-                    evaluation,
-                } if *response_id == request_id => Some(evaluation.decision.clone()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("tool evaluation response")
+    app.wait_for_tool_evaluation(request_id)
 }
 
 #[test]
@@ -2537,291 +1835,79 @@ fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
         "call-91",
         "test_tool",
         std::collections::HashMap::new(),
-        protocol::AgentMode::parse("apply").unwrap(),
+        protocol::AgentMode::parse("write").unwrap(),
     );
-    assert_eq!(decision, protocol::Decision::Allow);
+    assert_eq!(decision.decision, protocol::Decision::Allow);
 }
 
 #[test]
-fn switch_cwd_outside_workspace_requires_destination_permission() {
-    let environment_guard = test_environment_guard();
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    let target = app.runtime_home().join("outside-project");
-    std::fs::create_dir_all(&target).expect("create outside-workspace directory");
-    let target = std::fs::canonicalize(target).expect("canonicalize target directory");
-    let raw_target = "~/outside-project";
-    let args = std::collections::HashMap::from([(
-        "path".to_string(),
-        serde_json::Value::String(raw_target.to_string()),
-    )]);
-
-    let original_cwd = app.cwd_str().to_owned();
-    app.restrict_permissions_to_cwd();
-    app.approve_tool_for_session("switch_cwd");
-    app.start_turn(1);
-    let _ = app.drain_engine_sends();
-
-    let decision = evaluate_tool(
-        &mut app,
-        90,
-        "switch-cwd",
-        "switch_cwd",
-        args.clone(),
-        protocol::AgentMode::parse("yolo").unwrap(),
-    );
-    assert_eq!(decision, protocol::Decision::Ask);
-
-    app.feed_one(SourceEvent::engine(
-        protocol::EngineEvent::RequestPermission {
-            invocation_id: protocol::InvocationId::new(90),
-            request_id: 91,
-            call_id: "switch-cwd".into(),
-            tool_name: "switch_cwd".into(),
-            provider: None,
-            args: args.clone(),
-            approval_patterns: Vec::new(),
-            called_at_ms: 0,
-            summary: protocol::StyledLines::from_plain(target.to_string_lossy()),
-        },
-    ));
-
-    let handle_id = app
-        .first_pending_confirm()
-        .expect("outside destination opens a permission dialog");
-    let request = &app
-        .core_probe()
-        .confirms
-        .get(handle_id)
-        .expect("pending switch_cwd confirm")
-        .req;
-    assert_eq!(
-        request.tool_paths,
-        vec![smelt_permissions::ToolPath::directory(
-            target.to_string_lossy()
-        )]
-    );
-    assert!(request.grant_options.iter().any(|option| {
-        matches!(option.target, smelt_core::ApprovalTarget::Session)
-            && option.grants
-                == vec![smelt_permissions::PermissionGrant::PathPrefix {
-                    dir: target.clone(),
-                }]
-    }));
-    assert!(request.grant_options.iter().any(|option| {
-        matches!(option.target, smelt_core::ApprovalTarget::Workspace { .. })
-            && option.grants
-                == vec![smelt_permissions::PermissionGrant::PathPrefix {
-                    dir: target.clone(),
-                }]
-    }));
-    assert_eq!(app.cwd_str(), original_cwd);
-
-    app.press(KeyCode::Enter);
-    assert!(app.first_pending_confirm().is_none());
-    assert!(app.state().active_modal.is_none());
-    assert_eq!(app.cwd_str(), original_cwd);
-
-    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
-        invocation_id: protocol::InvocationId::new(90),
-        request_id: 92,
-        call_id: "switch-cwd".into(),
-        tool_name: "switch_cwd".into(),
-        args,
-    }));
-    app.wait_for_tool_result("switch-cwd");
-
-    assert_eq!(app.core_probe().env.cwd(), target);
-    assert_eq!(std::env::current_dir().unwrap(), target);
-}
-
-#[test]
-fn switch_cwd_outside_repository_offers_repository_scoped_destination_grant() {
-    let fixture = GitWorktreeFixture::new();
-    let outside = tempfile::tempdir().expect("create outside repository target");
-    let target = std::fs::canonicalize(outside.path()).expect("canonical outside target");
-    let active = std::fs::canonicalize(&fixture.feature).expect("canonical active worktree");
-    let mut app = TestApp::builder().with_cwd(active).build();
-    let mut permissions = app.core_probe().permissions.snapshot().as_ref().clone();
-    permissions.set_restrict_to_workspace(true);
-    app.replace_permissions_for_harness(permissions);
-    app.approve_tool_for_session("switch_cwd");
-    app.start_turn(1);
-    let args = std::collections::HashMap::from([(
-        "path".to_string(),
-        serde_json::Value::String(target.to_string_lossy().into_owned()),
-    )]);
-    let _ = app.drain_engine_sends();
-
-    assert_eq!(
-        evaluate_tool(
-            &mut app,
-            98,
-            "switch-outside-repository",
-            "switch_cwd",
-            args.clone(),
-            protocol::AgentMode::parse("yolo").unwrap(),
-        ),
-        protocol::Decision::Ask
-    );
-    app.feed_one(SourceEvent::engine(
-        protocol::EngineEvent::RequestPermission {
-            invocation_id: protocol::InvocationId::new(98),
-            request_id: 99,
-            call_id: "switch-outside-repository".into(),
-            tool_name: "switch_cwd".into(),
-            provider: None,
-            args,
-            approval_patterns: Vec::new(),
-            called_at_ms: 0,
-            summary: protocol::StyledLines::from_plain(target.to_string_lossy()),
-        },
-    ));
-
-    let handle_id = app
-        .first_pending_confirm()
-        .expect("outside destination opens a permission dialog");
-    let options = &app
-        .core_probe()
-        .confirms
-        .get(handle_id)
-        .expect("switch_cwd confirm")
-        .req
-        .grant_options;
-    let repository = options
-        .iter()
-        .find(|option| matches!(option.target, smelt_core::ApprovalTarget::Repository { .. }))
-        .expect("repository-scoped switch_cwd grant");
-    assert_eq!(
-        repository.target,
-        smelt_core::ApprovalTarget::Repository {
-            key: fixture.repository_key(),
-        }
-    );
-    assert_eq!(
-        repository.grants,
-        vec![smelt_permissions::PermissionGrant::PathPrefix { dir: target }]
-    );
-}
-
-#[test]
-fn switch_cwd_between_repository_worktrees_remains_allowed() {
-    let fixture = GitWorktreeFixture::new();
-    let environment_guard = test_environment_guard();
-    let active = std::fs::canonicalize(&fixture.feature).expect("canonical active worktree");
-    let target = std::fs::canonicalize(fixture.repo.path()).expect("canonical main checkout");
-    let mut app = TestApp::builder()
-        .with_cwd(&active)
-        .build_with_test_environment_guard(&environment_guard);
-    let mut permissions = app.core_probe().permissions.snapshot().as_ref().clone();
-    permissions.set_restrict_to_workspace(true);
-    app.replace_permissions_for_harness(permissions);
-    app.approve_tool_for_session("switch_cwd");
-    app.start_turn(1);
-    let _ = app.drain_engine_sends();
-
-    let decision = evaluate_tool(
-        &mut app,
-        93,
-        "switch-worktree",
-        "switch_cwd",
-        std::collections::HashMap::from([(
-            "path".to_string(),
-            serde_json::Value::String(target.to_string_lossy().into_owned()),
-        )]),
-        protocol::AgentMode::parse("yolo").unwrap(),
-    );
-    assert_eq!(decision, protocol::Decision::Allow);
-}
-
-#[test]
-fn switch_cwd_relative_path_is_evaluated_from_runtime_cwd() {
-    let workspace = tempfile::tempdir().expect("create workspace");
-    let active_root = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
-    let nested = active_root.join("nested");
-    std::fs::create_dir(&nested).expect("create nested cwd");
-    let environment_guard = test_environment_guard();
-    let mut app = TestApp::builder()
-        .with_cwd(&nested)
-        .build_with_test_environment_guard(&environment_guard);
-    let mut permissions = app.core_probe().permissions.snapshot().as_ref().clone();
-    permissions.set_allowed_roots(active_root, Vec::new());
-    permissions.set_restrict_to_workspace(true);
-    app.replace_permissions_for_harness(permissions);
-    app.approve_tool_for_session("switch_cwd");
-    app.start_turn(1);
-    let _ = app.drain_engine_sends();
-
-    let decision = evaluate_tool(
-        &mut app,
-        94,
-        "switch-parent",
-        "switch_cwd",
-        std::collections::HashMap::from([(
-            "path".to_string(),
-            serde_json::Value::String("..".to_string()),
-        )]),
-        protocol::AgentMode::parse("yolo").unwrap(),
-    );
-    assert_eq!(decision, protocol::Decision::Allow);
-}
-
-#[test]
-fn lua_tool_paths_are_scoped_and_preserved_for_permission_rechecks() {
-    let outside = tempfile::TempDir::new().expect("create outside-workspace directory");
-    let outside_file = outside.path().join("secret.txt");
-    std::fs::write(&outside_file, "secret").expect("write outside-workspace file");
-    let outside_path = outside_file.to_string_lossy();
-    let lua_path = serde_json::to_string(outside_path.as_ref()).expect("quote Lua path");
-
+fn switch_cwd_outside_the_sandbox_needs_full_access() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);
-    app.run_lua_result(&format!(
+    let _ = app.drain_engine_sends();
+    let write = protocol::AgentMode::parse("write").unwrap();
+    let path_args = |path: &str| {
+        std::collections::HashMap::from([(
+            "path".to_string(),
+            serde_json::Value::String(path.to_string()),
+        )])
+    };
+
+    let inside = evaluate_tool(
+        &mut app,
+        90,
+        "switch-inside",
+        "switch_cwd",
+        path_args("."),
+        write.clone(),
+    );
+    assert_eq!(inside.decision, protocol::Decision::Allow);
+    assert_eq!(inside.metadata.access, protocol::Access::Write);
+
+    let outside = evaluate_tool(
+        &mut app,
+        91,
+        "switch-outside",
+        "switch_cwd",
+        path_args("/"),
+        write,
+    );
+    assert_eq!(outside.decision, protocol::Decision::Ask);
+    assert_eq!(outside.metadata.access, protocol::Access::Full);
+}
+
+#[test]
+fn lua_tool_paths_set_the_access_the_dialog_rechecks() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.run_lua_result(
         r#"
-        path_callback_count = 0
         path_callback_session_id = nil
-        smelt.tools.register({{
+        smelt.tools.register({
             name = "scoped_path_probe",
             description = "permission path probe",
-            parameters = {{ type = "object", properties = {{}} }},
-            effect = "read",
-            permission_defaults = {{ normal = "allow" }},
-            paths_for_workspace = function()
-                local session_id = smelt.session.id()
-                assert(type(session_id) == "string" and session_id ~= "")
-                path_callback_count = path_callback_count + 1
-                path_callback_session_id = session_id
-                return {{ {{ path = {lua_path}, kind = "file" }} }}
+            parameters = { type = "object", properties = {} },
+            paths = function()
+                path_callback_session_id = smelt.session.id()
+                return { "/" }
             end,
             execute = function() return "ok" end,
-        }})
-        "#
-    ))
+        })
+        "#,
+    )
     .expect("register path-aware tool");
-
     let _ = app.drain_engine_sends();
-    app.feed_one(SourceEvent::engine(
-        protocol::EngineEvent::ToolEvaluationRequest {
-            invocation_id: protocol::InvocationId::new(91),
-            request_id: 91,
-            call_id: "call-91".into(),
-            tool_name: "scoped_path_probe".into(),
-            args: std::collections::HashMap::new(),
-            mode: protocol::AgentMode::normal(),
-        },
-    ));
 
-    let decision = app.actions().iter().rev().find_map(|action| match action {
-        Action::EngineSend(command) => match command.as_ref() {
-            protocol::UiCommand::ToolEvaluationResponse {
-                request_id: 91,
-                evaluation,
-            } => Some(evaluation.decision.clone()),
-            _ => None,
-        },
-        _ => None,
-    });
-    assert_eq!(decision, Some(protocol::Decision::Ask));
-    assert_eq!(app.lua_int_global("path_callback_count"), Some(1));
+    let evaluation = evaluate_tool(
+        &mut app,
+        91,
+        "call-91",
+        "scoped_path_probe",
+        std::collections::HashMap::new(),
+        protocol::AgentMode::parse("write").unwrap(),
+    );
+    assert_eq!(evaluation.decision, protocol::Decision::Ask);
+    assert_eq!(evaluation.metadata.access, protocol::Access::Full);
     assert_eq!(
         app.eval_lua::<String>("return path_callback_session_id")
             .expect("read callback session id"),
@@ -2836,45 +1922,105 @@ fn lua_tool_paths_are_scoped_and_preserved_for_permission_rechecks() {
             tool_name: "scoped_path_probe".into(),
             provider: None,
             args: std::collections::HashMap::new(),
-            approval_patterns: Vec::new(),
             called_at_ms: 0,
             summary: protocol::StyledLines::from_plain("path probe"),
+            access: evaluation.metadata.access,
         },
     ));
-
     let handle_id = app
         .first_pending_confirm()
         .expect("permission dialog opens");
-    let request = &app
-        .core_probe()
-        .confirms
-        .get(handle_id)
-        .expect("pending confirm")
-        .req;
-    assert_eq!(request.tool_paths.len(), 1);
-    assert_eq!(request.tool_paths[0].path, outside_path);
-    assert_eq!(app.lua_int_global("path_callback_count"), Some(2));
-
     assert!(!app.resolve_open_confirm_for_current_mode(handle_id));
-    assert_eq!(app.lua_int_global("path_callback_count"), Some(2));
 }
 
 #[test]
-fn tool_path_callback_failure_fails_closed_without_opening_a_dialog() {
+fn approving_a_path_for_the_session_covers_later_calls_beneath_it() {
     let mut app = TestApp::builder().build();
-    app.restrict_permissions_to_cwd();
+    app.start_turn(1);
+    app.run_lua_result(
+        r#"
+        smelt.tools.register({
+            name = "path_writer",
+            description = "writes a path",
+            access = "write",
+            parameters = { type = "object", properties = { path = { type = "string" } } },
+            paths = function(args) return { args.path } end,
+            execute = function() return "ok" end,
+        })
+        "#,
+    )
+    .expect("register path tool");
+    let _ = app.drain_engine_sends();
+    // Outside the temp directories, which are always "allow".
+    let outside = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target"))
+        .expect("create directory outside temp");
+    let args = |name: &str| {
+        std::collections::HashMap::from([(
+            "path".to_string(),
+            serde_json::json!(outside.path().join(name).to_string_lossy()),
+        )])
+    };
+    let write = protocol::AgentMode::parse("write").unwrap();
+
+    let evaluation = evaluate_tool(
+        &mut app,
+        41,
+        "call-41",
+        "path_writer",
+        args("a.txt"),
+        write.clone(),
+    );
+    assert_eq!(evaluation.decision, protocol::Decision::Ask);
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(41),
+            request_id: 42,
+            call_id: "call-41".into(),
+            tool_name: "path_writer".into(),
+            provider: None,
+            args: args("a.txt"),
+            called_at_ms: 0,
+            summary: protocol::StyledLines::from_plain("a.txt"),
+            access: evaluation.metadata.access,
+        },
+    ));
+    let options: String = app
+        .eval_lua(
+            r#"local req = smelt.signal.get("confirm_requested")
+            return req.scope .. "|" .. tostring(req.intent)"#,
+        )
+        .expect("read confirm request");
+    assert!(options.ends_with("/|write"), "{options}");
+    assert!(app.resolve_first_confirm_for_session_path());
+
+    let evaluation = evaluate_tool(
+        &mut app,
+        43,
+        "call-43",
+        "path_writer",
+        args("b.txt"),
+        write.clone(),
+    );
+    assert_eq!(evaluation.decision, protocol::Decision::Allow);
+    let elsewhere = std::collections::HashMap::from([(
+        "path".to_string(),
+        serde_json::json!("/outside-every-approval/c.txt"),
+    )]);
+    let evaluation = evaluate_tool(&mut app, 44, "call-44", "path_writer", elsewhere, write);
+    assert_eq!(evaluation.decision, protocol::Decision::Ask);
+}
+
+#[test]
+fn tool_path_callback_failure_fails_closed() {
+    let mut app = TestApp::builder().build();
     app.start_turn(1);
     app.run_lua_result(
         r#"
         smelt.tools.register({
             name = "broken_path_callback",
-            description = "broken workspace path callback",
+            description = "broken path callback",
             parameters = { type = "object", properties = {} },
-            effect = "write",
-            permission_defaults = { yolo = "allow" },
-            paths_for_workspace = function()
-                error("path callback exploded")
-            end,
+            paths = function() error("path callback exploded") end,
             execute = function() return "should not run" end,
         })
         "#,
@@ -2883,7 +2029,7 @@ fn tool_path_callback_failure_fails_closed_without_opening_a_dialog() {
     app.approve_tool_for_session("broken_path_callback");
     let _ = app.drain_engine_sends();
 
-    let decision = evaluate_tool(
+    let evaluation = evaluate_tool(
         &mut app,
         95,
         "broken-path-callback",
@@ -2893,92 +2039,11 @@ fn tool_path_callback_failure_fails_closed_without_opening_a_dialog() {
     );
     assert!(
         matches!(
-            decision,
-            protocol::Decision::Error(ref error)
-                if error.contains("paths_for_workspace")
-                    && error.contains("path callback exploded")
+            evaluation.decision,
+            protocol::Decision::Error(ref error) if error.contains("path callback exploded")
         ),
-        "unexpected evaluation decision: {decision:?}"
-    );
-
-    let before = app.actions().len();
-    app.feed_one(SourceEvent::engine(
-        protocol::EngineEvent::RequestPermission {
-            invocation_id: protocol::InvocationId::new(95),
-            request_id: 96,
-            call_id: "broken-path-callback".into(),
-            tool_name: "broken_path_callback".into(),
-            provider: None,
-            args: std::collections::HashMap::new(),
-            approval_patterns: Vec::new(),
-            called_at_ms: 0,
-            summary: protocol::StyledLines::from_plain("broken path callback"),
-        },
-    ));
-
-    assert_eq!(app.pending_confirm_count(), 0);
-    let denial = app
-        .actions_since(before)
-        .iter()
-        .find_map(|action| match action {
-            Action::EngineSend(command) => match command.as_ref() {
-                protocol::UiCommand::PermissionDecision {
-                    request_id: 96,
-                    approved,
-                    message,
-                } => Some((*approved, message.clone())),
-                _ => None,
-            },
-            _ => None,
-        });
-    assert!(matches!(
-        denial,
-        Some((false, Some(ref message)))
-            if message.contains("paths_for_workspace")
-                && message.contains("path callback exploded")
-    ));
-}
-
-#[test]
-fn malformed_tool_path_callback_entry_fails_closed_in_yolo() {
-    let mut app = TestApp::builder().build();
-    app.restrict_permissions_to_cwd();
-    app.start_turn(1);
-    app.run_lua_result(
-        r#"
-        smelt.tools.register({
-            name = "malformed_path_callback",
-            description = "malformed workspace path callback",
-            parameters = { type = "object", properties = {} },
-            effect = "write",
-            permission_defaults = { yolo = "allow" },
-            paths_for_workspace = function()
-                return { 42 }
-            end,
-            execute = function() return "should not run" end,
-        })
-        "#,
-    )
-    .expect("register tool with malformed path callback");
-    app.approve_tool_for_session("malformed_path_callback");
-    let _ = app.drain_engine_sends();
-
-    let decision = evaluate_tool(
-        &mut app,
-        97,
-        "malformed-path-callback",
-        "malformed_path_callback",
-        std::collections::HashMap::new(),
-        protocol::AgentMode::parse("yolo").unwrap(),
-    );
-    assert!(
-        matches!(
-            decision,
-            protocol::Decision::Error(ref error)
-                if error.contains("invalid path entry 1")
-                    && error.contains("got integer")
-        ),
-        "unexpected evaluation decision: {decision:?}"
+        "unexpected evaluation decision: {:?}",
+        evaluation.decision
     );
 }
 
@@ -3227,8 +2292,8 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
 fn shift_tab_on_open_confirm_waits_for_turn_mode_boundary_before_allowing() {
     let mut app = TestApp::builder()
         .with_mode_cycle(vec![
-            protocol::AgentMode::normal(),
-            protocol::AgentMode::parse("apply").unwrap(),
+            protocol::AgentMode::read(),
+            protocol::AgentMode::parse("write").unwrap(),
         ])
         .build();
     install_confirm_test_permissions(&mut app);
@@ -3245,7 +2310,7 @@ fn shift_tab_on_open_confirm_waits_for_turn_mode_boundary_before_allowing() {
     app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
 
     assert_eq!(app.pending_confirm_count(), 1);
-    assert_eq!(app.core_probe().config.mode.as_str(), "apply");
+    assert_eq!(app.core_probe().config.mode.as_str(), "write");
     assert!(app.mode_pending());
     assert!(actions_permission_decisions(app.actions()).is_empty());
 
@@ -3320,30 +2385,18 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
         "# Goal\nShip the parser change.\n"
     );
 
-    let artifact_dir = std::path::Path::new(plan_path).parent().unwrap();
-    let artifact_dir = std::fs::canonicalize(artifact_dir).unwrap();
-    let grants = app.session_path_grants();
-    assert!(grants.iter().any(|grant| {
-        grant.mode.is_none()
-            && grant.tool == "read_file"
-            && grant.access == smelt_permissions::PathAccess::Read
-            && grant.dir == artifact_dir
-    }));
-    assert!(grants.iter().any(|grant| {
-        grant.mode.is_none()
-            && grant.tool == "edit_file"
-            && grant.access == smelt_permissions::PathAccess::Write
-            && grant.dir == artifact_dir
-    }));
-    assert!(grants.iter().any(|grant| {
-        grant
-            .mode
-            .as_ref()
-            .is_some_and(|mode| mode.as_str() == "plan")
-            && grant.tool == "edit_file"
-            && grant.access == smelt_permissions::PathAccess::Write
-            && grant.dir == artifact_dir
-    }));
+    let artifact_dir = std::path::Path::new(plan_path)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let plan_path = plan_path.to_owned();
+    let plan_edit: String = app
+        .eval_lua(&format!(
+            r#"return smelt.permissions.path_access({}, "write")"#,
+            serde_json::to_string(&plan_path).unwrap()
+        ))
+        .expect("plan path access");
+    assert_eq!(plan_edit, "read", "plan mode may edit its own plan");
 
     let manifest_path = artifact_dir.join("manifest.json");
     let manifest: serde_json::Value =
@@ -4329,9 +3382,9 @@ fn unprepared_edit_file_permission_previews_the_replacement() {
                 ("old_string".into(), serde_json::json!("NATIVE_BEFORE")),
                 ("new_string".into(), serde_json::json!("NATIVE_AFTER")),
             ]),
-            approval_patterns: Vec::new(),
             called_at_ms: 0,
             summary: protocol::StyledLines::from_plain("native.rs"),
+            access: protocol::Access::Write,
         },
     ));
     let frame = app.render_to_frame().text();

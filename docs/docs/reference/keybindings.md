@@ -19,7 +19,7 @@ description: "Every smelt key binding: input, modes, vim mode, transcript, comma
 | `Ctrl+C`                        | Clear input (undoable) / cancel agent / quit              |
 | `Ctrl+G`                        | Move a foreground bash tool call to the background        |
 | `Ctrl+T`                        | Cycle reasoning effort                                    |
-| `Shift+Tab`                     | Cycle mode (normal → plan → apply → yolo)                 |
+| `Shift+Tab`                     | Cycle mode (read → plan → write → yolo)                 |
 | `Esc`                           | Dismiss dialog / unqueue messages                         |
 | `Esc Esc`                       | Cancel agent / compaction / rewind                        |
 | `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Previous / next line (history at edges)                   |
@@ -132,8 +132,8 @@ block when the click lands inside a table.
 
 ## Modes
 
-smelt has four agent modes: `normal`, `plan`, `apply`, and `yolo`. Each has its
-own permission defaults. The active mode is shown in the status bar. Cycle with
+smelt has four agent modes: `read`, `plan`, `write`, and `yolo`. Each allows
+tool calls up to its own [access level](permissions.md#modes). The active mode is shown in the status bar. Cycle with
 `Shift+Tab`. Bindings can be scoped to a specific mode through the Lua API
 (`smelt.keymap.set`); see the
 [Themes and keymaps](../customize/appearance.md#keymaps).
@@ -315,7 +315,6 @@ The completer pops up when typing `/` (commands) or `@` (file references).
 | Help        | `q` / `?` / `Esc` | Close                    |
 | Confirm     | `e`               | Focus reason input       |
 | Confirm     | `Shift+Tab`       | Back to previous request |
-| Permissions | `dd` / `⌫`        | Delete permission        |
 | Ps          | `⌫`               | Kill process             |
 | Resume      | `Alt+D`           | Delete session           |
 | Resume      | `Ctrl+W`          | Toggle workspace filter  |

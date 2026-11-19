@@ -34,6 +34,6 @@ dim: 32 12
   8  15  17 bg=AnsiValue(237)
   9   1   4 attrs=dim
  10   1   4 attrs=dim
- 11   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
- 11  10  16 bg=AnsiValue(233)
+ 11   0   8 fg=AnsiValue(244) bg=AnsiValue(234)
+ 11   8  18 bg=AnsiValue(233)
  11  26   6 fg=AnsiValue(244) bg=AnsiValue(233)

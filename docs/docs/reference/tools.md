@@ -1,12 +1,12 @@
 ---
 title: "Built-in tools"
-description: "The tools the smelt coding agent can call: file I/O, search, execution, web, interaction and more, each gated by the permissions system."
+description: "The tools the smelt coding agent can call: file I/O, search, execution, web, interaction and more, each gated by the permission policy."
 ---
 
 # Tools
 
-Built-in tools the agent can call. Each call is gated by the
-[permissions](permissions.md) system before it runs. Tools are implemented in
+Built-in tools the agent can call. Each call has an access level that the
+[permission policy](permissions.md) checks before it runs. Tools are implemented in
 Lua and are pluggable; see the [plugins guide](../extend/tools-and-agent.md) for how to
 add or override tools.
 
@@ -147,9 +147,13 @@ the next call.
 | `timeout_ms`            | Timeout in milliseconds (default: 120000, max: 600000)                      |
 | `background`            | Start the command in the background and return immediately (default: false) |
 | `background_on_timeout` | Move a foreground command to the background if it times out (default: true) |
+| `access`                | Sandbox level: `read`, `write` or `full` (default: the current mode's level) |
 
 **Behavior:**
 
+- Commands run in the OS [sandbox](permissions.md#the-sandbox) at `access`, and
+  child processes inherit it. Asking for more than the mode allows goes through
+  the permission policy
 - Interactive commands (editors, pagers, interactive rebases) are blocked
 - Shell backgrounding (`&`) in the command string is rejected
 - Stdout and stderr are multiplexed as bounded line output
@@ -202,8 +206,8 @@ available because it schedules config work at a safe turn boundary.
 ### `switch_cwd`
 
 Switches smelt's real process working directory. Future relative tool calls,
-project instructions, skills, session metadata, and workspace permission checks
-use the new checkout. This differs from `cd` inside `bash`, which affects only
+project instructions, skills, session metadata, and the workspace the sandbox may
+write use the new checkout. This differs from `cd` inside `bash`, which affects only
 that one shell process.
 
 | Parameter | Description |
@@ -361,8 +365,8 @@ Tools that only appear in certain modes.
 
 Plan mode only. Built in and autoloaded by default. Called by the agent to
 present a written plan after discussion. The review dialog renders the proposed
-plan as markdown and lets you choose `save draft`, `approve` (switch to Normal),
-or `approve and apply` (switch to Apply). The transcript only shows the plan
+plan as markdown and lets you choose `save draft`, `approve` (switch to Read),
+or `approve and apply` (switch to Write). The transcript only shows the plan
 body after one of those options is accepted, using the same line-numbered file
 view as `write_file`. Existing drafts should be revised with file tools against
 the full saved `plan.md` path, then presented again with `plan_path`.

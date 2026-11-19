@@ -1,6 +1,6 @@
 {
   "_about": "Regression probe for #15: after a completed turn installs the real prediction placeholder, typing ordinary text must still advance cpos and prompt cursor projection without clearing prediction state first.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_prompt_cursor_after_turn",

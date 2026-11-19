@@ -9,31 +9,6 @@ local MAX_TIMEOUT_MS = 600000
 local DEFAULT_BACKGROUND_ON_TIMEOUT = true
 local BACKGROUND_HINT_AFTER_MS = 10000
 
--- Read-only command prefixes that auto-approve. Also used locally to avoid
--- suggesting patterns that are already permanently allowed.
-local DEFAULT_ALLOW = {
-  -- Directory listing & file search
-  "ls *", "find *", "tree *",
-  -- Text viewing
-  "cat *", "head *", "tail *", "less *",
-  -- Text search & processing (read-only)
-  "grep *", "sort *", "uniq *", "wc *", "diff *", "tr *", "cut *", "jq *",
-  -- Path & file info
-  "echo *", "pwd *", "which *", "dirname *", "basename *", "realpath *",
-  "stat *", "file *", "test *",
-  -- Disk & system info
-  "du *", "df *", "date *", "whoami *",
-  -- Binary inspection
-  "sha256sum *", "md5sum *", "xxd *", "hexdump *", "strings *",
-}
-
-local DEFAULT_ALLOW_SET = {}
-for _, p in ipairs(DEFAULT_ALLOW) do DEFAULT_ALLOW_SET[p] = true end
-
-local function basename(s)
-  return s:match("([^/]+)$") or s
-end
-
 -- Models sometimes send numbers and booleans as strings ("30000", "true").
 local function num_arg(v, default)
   local n = tonumber(v)
@@ -78,23 +53,38 @@ local function background_hint()
   })
 end
 
-function M.approval_patterns(args)
-  local cmd = args.command or ""
-  local subs = smelt.shell.split(cmd)
-  local patterns = {}
-  local seen = {}
-  for _, sub in ipairs(subs) do
-    local bin = sub:match("^%s*(%S+)") or ""
-    local base = basename(bin)
-    if base ~= "" and base ~= "cd" then -- cd is a path permission, not a command
-      local pat = base .. " *"
-      if not DEFAULT_ALLOW_SET[pat] and not seen[pat] then
-        seen[pat] = true
-        table.insert(patterns, pat)
+local LEVEL = { read = 1, write = 2, full = 3 }
+
+-- The sandbox a command runs in: the mode's own level, so the command runs
+-- without asking, or more when the model asks for it. With no sandbox on
+-- this machine, every command runs unconfined and counts as "full".
+function M.access(args, mode)
+  local access = mode.access
+  if LEVEL[args.access] and LEVEL[args.access] > LEVEL[access] then access = args.access end
+  if access ~= "full" and not smelt.sandbox.status().available then return "full" end
+  return access
+end
+
+-- Errors a command gets when the sandbox blocks a path.
+local SANDBOX_ERRORS = { "Permission denied", "Read-only file system", "Operation not permitted" }
+
+-- A failed sandboxed command that reports a blocked path gets a note, so
+-- the model asks for more access instead of working around the error.
+local function sandbox_hint(access, content)
+  if access == "full" then return nil end
+  for _, err in ipairs(SANDBOX_ERRORS) do
+    if content:find(err, 1, true) then
+      if access == "read" then
+        return "This command ran in the read sandbox, which may write only temp directories "
+          .. "and cannot see protected paths such as credentials. If the sandbox caused the "
+          .. "error, run it again with access = \"write\" (workspace, temp directories and "
+          .. "tool caches) or \"full\" (protected paths and anywhere else)."
       end
+      return "This command ran in the write sandbox, which may write only the workspace, "
+        .. "temp directories and tool caches, and cannot see protected paths such as "
+        .. "credentials. If the sandbox caused the error, run it again with access = \"full\"."
     end
   end
-  return patterns
 end
 
 function M.execute(args, ctx)
@@ -117,9 +107,10 @@ function M.execute(args, ctx)
   end
 
   local timeout_ms = timeout_arg(args.timeout_ms)
+  local access = M.access(args, smelt.mode.get(ctx.mode))
 
   if background then
-    local job_id = smelt.process.spawn_bg(command, notify)
+    local job_id = smelt.process.spawn_bg(command, { notify_on_completion = notify })
     return {
       content = "started background process " .. job_id
         .. (notify and ", you'll be notified when it completes" or ", completion notification disabled"),
@@ -129,7 +120,10 @@ function M.execute(args, ctx)
   end
 
   local id = smelt.task.alloc()
-  smelt.process.run_streaming(id, ctx.call_id or "", command, timeout_ms, background_on_timeout)
+  smelt.process.run_streaming(id, ctx.call_id or "", command, {
+    timeout_ms = timeout_ms,
+    background_on_timeout = background_on_timeout,
+  })
   local result = smelt.task.wait(id)
   local metadata
   if result.background_id or result.termination then
@@ -138,8 +132,11 @@ function M.execute(args, ctx)
       termination = result.termination,
     }
   end
+  local content = result.content or ""
+  local hint = result.is_error and sandbox_hint(access, content)
+  if hint then content = content .. "\n\n" .. hint end
   return {
-    content = result.content or "",
+    content = content,
     is_error = result.is_error and true or false,
     metadata = metadata,
   }
@@ -171,10 +168,11 @@ smelt.transcript.register_tool("bash", {
 smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "bash",
   override = true,
-  default_allow = DEFAULT_ALLOW,
-  subpattern_parser = "shell",
+  access = M.access,
+  -- The sandbox confines every write, so the command names no paths.
+  paths = function() return {} end,
   description =
-  "Run non-interactive bash and return output. Background jobs automatically notify on completion by default, even after your turn. Do not sleep or poll just to wait; do other work, or end your turn if nothing is ready. Use read_process_output to inspect output and stop_process to stop jobs. Avoid broad filename-based cleanup with pkill -f or killall: it can kill smelt or unrelated processes. For processes not managed by this tool, identify and verify the exact PID before stopping it. Do not use shell backgrounding (`&`). Pipe long output (e.g. test or build logs) through head, tail, or grep to retain relevant parts and save context. The working directory is not preserved between calls; cd affects only that invocation. Prefer absolute paths. Do not run interactive commands (editors, pagers, interactive rebases): they hang. Ask the user to run them if no non-interactive alternative exists.",
+  "Run non-interactive bash and return output. Commands run in an OS sandbox: with access=read they can write only temp directories; with access=write they can also write the workspace and tool caches; neither can see protected paths such as credentials; access=full runs without a sandbox and may need user approval. Leave access unset to use the most the current mode allows without asking. Background jobs automatically notify on completion by default, even after your turn. Do not sleep or poll just to wait; do other work, or end your turn if nothing is ready. Use read_process_output to inspect output and stop_process to stop jobs. Avoid broad filename-based cleanup with pkill -f or killall: it can kill smelt or unrelated processes. For processes not managed by this tool, identify and verify the exact PID before stopping it. Do not use shell backgrounding (`&`). Pipe long output (e.g. test or build logs) through head, tail, or grep to retain relevant parts and save context. The working directory is not preserved between calls; cd affects only that invocation. Prefer absolute paths. Do not run interactive commands (editors, pagers, interactive rebases): they hang. Ask the user to run them if no non-interactive alternative exists.",
   parameters = {
     type = "object",
     properties = {
@@ -184,10 +182,10 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
       background = { type = "boolean", description = "Start in background; return immediately. Default: false." },
       notify_on_completion = { type = "boolean", description = "For background=true, notify the agent and keep the session waiting until completion (default: true). Set false for detached servers or watchers." },
       background_on_timeout = { type = "boolean", description = "On timeout, keep running in background instead of killing. Default: true." },
+      access = { type = "string", enum = { "read", "write", "full" }, description = "Sandbox level to ask for when the command needs more than the current mode allows without asking." },
     },
     required = { "command" },
   },
-  approval_patterns = M.approval_patterns,
   -- `summary` doubles as both the transcript header and the confirm dialog body.
   -- Returning styled-lines (same shape as `buf:styled(lines)`) lets us
   -- syntax-highlight the command without the renderer hard-coding bash.

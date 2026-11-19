@@ -753,7 +753,7 @@ fn quota_resume_preserves_command_scope_across_reload_and_cancellation() {
             r#"
             smelt.engine.submit_command("scoped", "scoped request", {
                 model = smelt.model.current(), temperature = 0.3,
-                reasoning_effort = "high", tools = { deny = { "bash" } },
+                reasoning_effort = "high",
             })
         "#
         ));
@@ -794,17 +794,6 @@ fn quota_resume_preserves_command_scope_across_reload_and_cancellation() {
             .expect("resumed request");
         assert_eq!(resumed.model_target.config.temperature, Some(0.3));
         assert_eq!(resumed.reasoning_effort, protocol::ReasoningEffort::High);
-        assert_eq!(
-            resumed
-                .permission_overrides
-                .as_ref()
-                .unwrap()
-                .tools
-                .as_ref()
-                .unwrap()
-                .deny,
-            ["bash"]
-        );
         assert_eq!(app.state().queued_inputs, vec!["next turn"]);
         let frame = app.render_to_frame().text();
         assert!(!frame.lines().any(|line| line.trim() == "/"), "{frame}");
@@ -819,7 +808,6 @@ fn quota_resume_preserves_command_scope_across_reload_and_cancellation() {
         assert!(app.drain_engine_sends().iter().any(
             |cmd| matches!(cmd, protocol::UiCommand::StartTurn(payload)
                 if payload.input.provider_content().text_content() == "next turn"
-                    && payload.permission_overrides.is_none()
                     && payload.model_target.config.temperature != Some(0.3))
         ));
     }

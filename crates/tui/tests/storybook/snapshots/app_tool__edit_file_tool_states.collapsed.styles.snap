@@ -28,6 +28,6 @@ dim: 84 30
  26   6  78 fg=AnsiValue(237)
  27   1   1 fg=Black bg=White
  28   0  84 fg=AnsiValue(237)
- 29   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
- 29  10  66 bg=AnsiValue(233)
+ 29   0   8 fg=AnsiValue(244) bg=AnsiValue(234)
+ 29   8  68 bg=AnsiValue(233)
  29  76   8 fg=AnsiValue(244) bg=AnsiValue(233)

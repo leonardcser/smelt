@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/text", "crates/paths", "crates/permissions", "crates/worktree", "crates/transcript", "crates/view", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support", "crates/mermaid"]
+members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/text", "crates/paths", "crates/worktree", "crates/transcript", "crates/view", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support", "crates/mermaid", "crates/sandbox"]
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -18,7 +18,6 @@ smelt-ansi = { path = "crates/ansi", version = "0.5.0" }
 smelt-perf = { path = "crates/perf", version = "0.3.0" }
 smelt-text = { path = "crates/text" }
 smelt-paths = { path = "crates/paths" }
-smelt-permissions = { path = "crates/permissions" }
 smelt-worktree = { path = "crates/worktree" }
 smelt-transcript = { path = "crates/transcript" }
 smelt-view = { path = "crates/view" }
@@ -31,6 +30,7 @@ smelt-tui = { path = "crates/tui", default-features = false }
 smelt-lua-doc-derive = { path = "crates/lua-doc-derive" }
 smelt-test-support = { path = "crates/test-support" }
 smelt-mermaid = { path = "crates/mermaid" }
+smelt-sandbox = { path = "crates/sandbox" }
 
 # Async / runtime
 tokio = { version = "1", default-features = false }
@@ -89,7 +89,6 @@ path = "src/main.rs"
 [dependencies]
 smelt-protocol = { workspace = true }
 smelt-paths = { workspace = true }
-smelt-permissions = { workspace = true }
 smelt-worktree = { workspace = true }
 smelt-provider = { workspace = true }
 smelt-engine = { workspace = true }

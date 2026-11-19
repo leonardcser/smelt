@@ -5,18 +5,18 @@ use crate::*;
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FuzzMode {
-    Normal,
+    Read,
     Plan,
-    Apply,
+    Write,
     Yolo,
 }
 
 impl From<FuzzMode> for AgentMode {
     fn from(m: FuzzMode) -> Self {
         match m {
-            FuzzMode::Normal => AgentMode::normal(),
+            FuzzMode::Read => AgentMode::read(),
             FuzzMode::Plan => AgentMode::parse("plan").unwrap(),
-            FuzzMode::Apply => AgentMode::parse("apply").unwrap(),
+            FuzzMode::Write => AgentMode::parse("write").unwrap(),
             FuzzMode::Yolo => AgentMode::parse("yolo").unwrap(),
         }
     }

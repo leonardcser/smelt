@@ -1,4 +1,5 @@
--- Plan artifacts and approval UI. Shared mode policy lives in smelt.plan_policy.
+-- The `present_plan` tool and its approval UI. The plan mode itself is in
+-- `smelt.modes`, so headless sessions have it too.
 
 local function read_text(path)
   local text = smelt.fs.read(path)
@@ -136,24 +137,6 @@ local function manifest_table(title, slug, status, created_at, updated_at)
   }
 end
 
-local function grant_session_path(tool, access, dir, mode)
-  local grant = {
-    kind        = "path",
-    tool        = tool,
-    access      = access,
-    path_prefix = dir,
-  }
-  if mode then grant.mode = mode end
-  smelt.permissions.grant_session(grant)
-end
-
-local function grant_plan_dir(dir)
-  if not smelt.permissions or not smelt.permissions.grant_session then return end
-  grant_session_path("read_file", "read", dir)
-  grant_session_path("edit_file", "write", dir)
-  grant_session_path("edit_file", "write", dir, "plan")
-end
-
 local function read_manifest(path)
   local text, read_err = smelt.fs.read(path)
   if not text then return nil, read_err end
@@ -161,19 +144,6 @@ local function read_manifest(path)
   if not manifest then return nil, json_err end
   if type(manifest) ~= "table" or manifest.kind ~= PLAN_KIND then return nil, "invalid plan manifest" end
   return manifest
-end
-
-local function rehydrate_plan_grants()
-  local plans_dir = session_plans_dir()
-  if not plans_dir or not smelt.fs.is_dir(plans_dir) then return end
-  local matches = smelt.fs.glob("*/manifest.json", plans_dir, { max = 1000 })
-  if type(matches) ~= "table" then return end
-  for _, manifest_path in ipairs(matches) do
-    local dir = parent_dir(manifest_path)
-    if dir and is_child_plan_dir(dir, plans_dir) and read_manifest(manifest_path) then
-      grant_plan_dir(dir)
-    end
-  end
 end
 
 local function validate_plan_path(path, plans_dir)
@@ -199,7 +169,6 @@ local function save_manifest(artifact_dir, title, slug, status, created_at)
   ) .. "\n"
   local ok, err = write_text(artifact_dir .. "/manifest.json", content)
   if not ok then return nil, nil, err end
-  grant_plan_dir(artifact_dir)
   return artifact_dir, artifact_dir .. "/plan.md"
 end
 
@@ -246,10 +215,9 @@ end
 local function register_present_plan()
   smelt.tools.register({
     name = "present_plan",
-    description = "Present a written plan for the user to save as a draft, approve with normal permissions, or approve in apply mode. Call this after discussing the plan with the user.",
+    description = "Present a written plan for the user to save as a draft, approve in read mode, or approve in write mode. Call this after discussing the plan with the user.",
     modes = { "plan" },
-    permission_defaults = { plan = "allow" },
-    effect = "user",
+    access = "read",
     execution_mode = "sequential",
     parameters = {
       type = "object",
@@ -336,11 +304,11 @@ local function register_present_plan()
       end
 
       if action == "approve" then
-        smelt.mode.set("normal")
+        smelt.mode.set("read")
         return plan_result(
           "wrote plan to " .. path
             .. "\nplan artifact directory: " .. artifact_dir
-            .. "\nplan approved\n\nproceed with the implementation using normal-mode permissions and this saved plan as the reference",
+            .. "\nplan approved\n\nproceed with the implementation in read mode and this saved plan as the reference",
           path,
           artifact_dir,
           action,
@@ -349,11 +317,11 @@ local function register_present_plan()
       end
 
       if action == "apply" then
-        smelt.mode.set("apply")
+        smelt.mode.set("write")
         return plan_result(
           "wrote plan to " .. path
             .. "\nplan artifact directory: " .. artifact_dir
-            .. "\nplan approved\n\nproceed with the implementation in apply mode, using this saved plan as the reference",
+            .. "\nplan approved\n\nproceed with the implementation in write mode, using this saved plan as the reference",
           path,
           artifact_dir,
           action,
@@ -375,9 +343,3 @@ local function register_present_plan()
 end
 
 register_present_plan()
-
-smelt.events.on("session_started", function()
-  rehydrate_plan_grants()
-end)
-
-rehydrate_plan_grants()

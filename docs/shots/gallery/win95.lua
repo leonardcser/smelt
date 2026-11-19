@@ -31,7 +31,7 @@ smelt.statusline:add("taskbar", function()
   return {
     { text = " ⊞ Start ", style = { fg = BLACK, bg = { 223, 223, 223 }, bold = true } },
     { text = " ▣ smelt ", style = { fg = BLACK, bg = { 210, 210, 210 } } },
-    { text = " " .. (smelt.signal.get("agent_mode") or "normal") .. " ", style = { fg = BLACK, bg = { 223, 223, 223 } }, align_right = true },
+    { text = " " .. (smelt.signal.get("agent_mode") or "read") .. " ", style = { fg = BLACK, bg = { 223, 223, 223 } }, align_right = true },
     { text = " " .. os.date("%H:%M") .. " ", style = { fg = BLACK, bg = { 223, 223, 223 } }, align_right = true },
   }
 end)

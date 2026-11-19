@@ -1,6 +1,6 @@
 {
   "_about": "Prompt layout regression: pasted control characters inside attachment-heavy prompt text must render as safe display glyphs so wrapped prompt rows do not exceed the pinned content viewport.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "insert_attachment",

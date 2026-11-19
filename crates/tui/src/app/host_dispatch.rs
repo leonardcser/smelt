@@ -387,27 +387,21 @@ impl TuiApp {
     pub(crate) fn dispatch_host_call(&mut self, call: HostCall) {
         match call {
             HostCall::NativeToolEvaluation {
-                turn_id: _,
                 session_id,
-                cwd,
                 tool_name,
                 args,
                 mode,
-                overrides,
                 reply,
+                ..
             } => {
                 let evaluation = if self.core.native_session.as_deref() == Some(&session_id)
                     && session_id == self.conversation.session().id
                     && !self.session_is_read_only()
                 {
-                    smelt_core::claude_code_policy::evaluate(
-                        &self.active_permissions(),
-                        Some(&cwd),
-                        mode,
-                        &tool_name,
-                        &args,
-                        overrides.as_ref(),
-                    )
+                    let lua = self.lua.execution();
+                    crate::lua::scope_app(self, || {
+                        smelt_core::claude_code_policy::evaluate(&lua, mode, &tool_name, &args)
+                    })
                 } else {
                     protocol::ToolEvaluation::deny()
                 };
@@ -552,9 +546,6 @@ impl TuiApp {
         if project.lua_generation != self.lua.id
             || project.runtime_revision != self.core.config.revision
             || project.target_cwd != self.current_project_cwd()
-            || prepared
-                .as_ref()
-                .is_ok_and(|prepared| !prepared.permissions().is_current())
         {
             self.prepare_project_request(project.request);
             return true;

@@ -1,6 +1,6 @@
 {
   "_about": "TurnComplete fuzz seed: after compaction installs a context checkpoint, set_history preserves the checkpoint prefix and merges incoming model history after it.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_compaction_prepare_request",

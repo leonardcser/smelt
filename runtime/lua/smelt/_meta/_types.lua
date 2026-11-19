@@ -383,7 +383,7 @@
 ---@field on_draft_rejected? fun() Discard the current streamed draft before a retry or terminal failure. Does not fire on cancellation, which preserves partial output.
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
---- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
+--- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.CommandOverrides
 ---@field description? string Override the command description shown in `/help`.
@@ -395,8 +395,6 @@
 ---@field min_p? number Minimum-probability cutoff override.
 ---@field repeat_penalty? number Repeat-penalty override.
 ---@field reasoning_effort? string Reasoning-effort override. Known and provider-defined string labels are accepted.
----@field tools? smelt.engine.RuleOverride Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn.
----@field [string] smelt.engine.RuleOverride Per-subcommand pattern buckets keyed by tool name.
 
 --- Current continuation identity and automatic-dispatch pause. Scoped to the current session.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -438,13 +436,6 @@
 ---@field estimated_tokens integer Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions.
 ---@field estimated_context_tokens integer Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the matching token snapshot. After a compaction checkpoint and before the next provider usage report, this starts from the checkpoint's post-compaction estimate. Before either baseline exists, it equals `estimated_tokens`.
 ---@field context_estimate smelt.engine.PrepareContextEstimate Structured breakdown explaining how `estimated_context_tokens` was computed.
-
---- Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-matter `{ allow?, ask?, deny? }` shape.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.engine.RuleOverride
----@field allow? string[] Patterns that auto-allow.
----@field ask? string[] Patterns that always prompt.
----@field deny? string[] Patterns that auto-deny.
 
 --- A running content search from `smelt.files.grep`. Rows are zero-based. The search stops on `cancel` or when collected.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -546,7 +537,20 @@
 ---@field icon string
 ---@field hl_group string
 ---@field note string
----@field permissions table
+---@field access smelt.permissions.Access The most a call may do without asking: "read", "write" (inside the workspace or the sandbox), or "full".
+---@field above smelt.mode.Above What happens to calls that need more than `access`.
+
+--- A mode passed to `smelt.mode.register`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.mode.Spec
+---@field name string Mode name: lowercase letters, digits, `-` and `_`.
+---@field label? string Status bar label. Default: the name.
+---@field icon? string Status bar icon.
+---@field hl_group? string Status bar highlight group. Default: `SmeltModeDefault`.
+---@field note? string What the model is told when the session enters the mode.
+---@field access? smelt.permissions.Access The most a call may do without asking. Default: `"read"`.
+---@field above? smelt.mode.Above What happens to calls that need more. Default: `"ask"`.
+---@field after? string Insert the new mode after this one in the cycle.
 
 --- Source-bound notify handle returned by `smelt.notify.scoped`.
 --- Use `handle.info(msg)`, `handle.error(msg)`, or `handle.warn(msg)` to
@@ -725,94 +729,24 @@
 ---@field width? integer Default: to the right edge of the text.
 ---@field height? integer Default: to the bottom edge of the text.
 
---- Effect-level decisions that apply to tools without a more specific rule.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.EffectRules
----@field read? smelt.permissions.Decision Decision for tools that only read data.
----@field write? smelt.permissions.Decision Decision for tools that write or mutate data.
----@field network? smelt.permissions.Decision Decision for tools that access the network.
----@field process? smelt.permissions.Decision Decision for tools that start or control processes.
----@field config? smelt.permissions.Decision Decision for tools that modify configuration.
----@field user? smelt.permissions.Decision Decision for tools that require direct user interaction.
----@field other? smelt.permissions.Decision Decision for tools whose effect has no more specific category.
+---@class smelt.permissions.Call
+---@field tool string Tool name.
+---@field args table Tool arguments.
+---@field access smelt.permissions.Access What the call may change.
+---@field mode smelt.mode.Mode The active mode.
+---@field paths smelt.permissions.Path[] The paths the tool declares, each with the access it needs.
 
---- Current permission state returned by `smelt.permissions.list()`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.ListResult
----@field session smelt.permissions.SessionEntry[] Session-scoped tool/pattern approvals for this run.
----@field path_grants smelt.permissions.SessionPathGrant[] Session-scoped path grants for this run.
----@field workspace smelt.permissions.WorkspaceRule[] Workspace rules loaded from the on-disk store rooted at the current cwd.
----@field workspace_revision integer Revision required to replace the workspace rules safely.
----@field repository smelt.permissions.WorkspaceRule[] Repository rules shared by all worktrees. Empty outside a Git repository.
----@field repository_revision integer Revision required to replace the repository rules safely.
+---@class smelt.permissions.Path
+---@field path string An absolute path the call reads or writes.
+---@field intent smelt.permissions.Intent Whether it reads or writes the path.
+---@field access smelt.permissions.Access What the call needs for this path.
 
---- Permission slots that apply within a single agent mode.
+--- Options for `smelt.permissions.paths`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.ModePerms
----@field tools? smelt.permissions.RuleSet Exact tool-name `allow`/`ask`/`deny` entries.
----@field effects? smelt.permissions.EffectRules Effect-level decisions keyed by effect name.
----@field paths? smelt.permissions.PathRules Trusted directory prefixes for path-aware tool calls in this mode.
----@field patterns? table<string, smelt.permissions.RuleSet> Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …).
-
---- Directory prefixes trusted for path-aware tools and shell commands outside the workspace.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.PathRules
----@field allow? string[] Directory prefixes to trust without a path prompt (supports `~` and symlinks).
-
---- Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.PolicySpec
----@field default? smelt.permissions.ModePerms Baseline rules applied unless a mode-specific slot overrides.
----@field [string] smelt.permissions.ModePerms Mode-specific rules keyed by registered mode name.
-
---- One exact permission entry to revoke transactionally.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.RevokeSpec
----@field scope string Permission scope: `"session"`, `"workspace"`, or `"repository"`.
----@field tool string Tool name the entry applies to. Use `"directory"` for path-prefix entries.
----@field pattern string Exact pattern to remove. Use `"*"` for a blanket tool approval.
-
---- `allow`/`ask`/`deny` arrays accepted by permission policy sections.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.RuleSet
----@field allow? string[] Patterns that auto-allow without prompting.
----@field ask? string[] Patterns that always prompt.
----@field deny? string[] Patterns that auto-deny.
-
---- Revision-checked replacement for one persisted permission scope.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.ScopeReplacement
----@field revision integer Revision returned by the `smelt.permissions.list()` snapshot being edited.
----@field rules smelt.permissions.WorkspaceRule[] Complete replacement rule set for this scope.
-
---- A single session permission entry (one approved tool/pattern pair).
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.SessionEntry
----@field tool string Tool name the rule applies to (e.g. `"bash"`). Special value `"directory"` grants generic path access.
----@field pattern string Pattern matched against the tool's argument bucket.
-
---- A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, the grant applies only in that mode.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.SessionPathGrant
----@field kind string Grant kind. Currently only `"path"` is supported.
----@field mode? string Optional mode, e.g. `"plan"`. Omit for mode-independent path trust.
----@field tool string Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`.
----@field access string Path access granted: `"read"` or `"write"`.
----@field path_prefix string Directory prefix covered by the grant.
-
---- Spec for `smelt.permissions.sync`.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.SyncSpec
----@field session? smelt.permissions.SessionEntry[] Session entries to replace for this run. Omit to leave them unchanged.
----@field path_grants? smelt.permissions.SessionPathGrant[] Tool-specific session path grants to replace. Omit to leave them unchanged.
----@field workspace? smelt.permissions.ScopeReplacement Revision-checked workspace replacement. Cannot be combined with `repository`.
----@field repository? smelt.permissions.ScopeReplacement Revision-checked repository replacement. Cannot be combined with `workspace`.
-
---- A workspace permission rule (one tool with N patterns, persisted to disk).
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.permissions.WorkspaceRule
----@field tool string Tool name the rule applies to.
----@field patterns string[] Patterns granted for this tool.
+---@class smelt.permissions.PathsOpts
+---@field modes? string[] Set the rules for these modes only. Default: every mode.
 
 --- Row accepted by picker constructors. A bare string is also accepted and is treated as `{ label = string }`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1008,11 +942,6 @@
 ---@field enabled? boolean Set false to hide this tool from Claude Code. Custom tools are visible by default.
 ---@field replaces? string[] Native tool names replaced by this tool, for example `{ "Bash" }`. Replaced native tools are disabled, not merely discouraged in the prompt.
 
---- Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.tools.PermissionDefaults
----@field [string] smelt.tools.Decision Per-mode decisions keyed by registered mode name.
-
 --- Plugin tool definition passed to `smelt.tools.register`. `execute` is required; the remaining hooks are optional and are invoked at well-defined points during a tool turn - see the field docs for each callback's contract.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.tools.ToolDef
@@ -1020,17 +949,13 @@
 ---@field execute function Required handler: `execute(args, ctx)` - returns the tool result. `ctx.prepared` contains this invocation's preparation snapshot, when provided.
 ---@field description? string Human-readable description shown to the model.
 ---@field parameters? table JSON-schema parameters table passed through to the model.
----@field permission_defaults? smelt.tools.PermissionDefaults Per-mode default decisions.
----@field effect? smelt.tools.Effect Coarse side-effect classification used by permission policy.
----@field default_allow? string[] Subcommand patterns that auto-allow without prompting.
----@field subpattern_parser? string Built-in subpattern parser kind (e.g. `"bash"`).
+---@field access? any What a call may change: `"read"`, `"write"` (the default), `"full"`, or `access(args, mode) -> smelt.permissions.Access` when it depends on the arguments. A call needs the highest `smelt.permissions.path_access` of its `paths`; a `"write"` call with no `paths` needs `"full"`.
+---@field paths? function `paths(args) -> string[]` - the paths a `"read"` call reads, or that any other call changes. Relative paths resolve against the project cwd.
 ---@field modes? table Agent modes the tool is available in; nil means all modes.
 ---@field execution_mode? string `"concurrent"` (default) or `"sequential"`.
 ---@field summary? function `summary(args) -> string | styled_lines | nil` - styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` - same span shape as `buf:styled` plus optional `selectable = false` for chrome text and `title_suffix = true` for metadata rendered after the live tool timer.
----@field approval_patterns? function `approval_patterns(args, prepared) -> string[]?` - yielding hook for one-click approval patterns.
 ---@field prepare? function `prepare(args) -> table?` - yielding, read-only preparation for this invocation. The returned snapshot is passed to preflight and preview callbacks. Use async APIs for file I/O; rendering callbacks must only format prepared data.
 ---@field preflight? function `preflight(args, prepared) -> string?` - yielding validation hook; return an error string to reject execution. Errors and timeouts fail closed.
----@field paths_for_workspace? function `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. Callback errors and malformed entries reject tool evaluation rather than being treated as no paths.
 ---@field preview? function `preview(args, prepared) -> smelt.layout` - pure pre-execute preview render. The confirm dialog renders the invocation's prepared snapshot without I/O.
 ---@field preview_output? function `preview_output(args, prepared) -> { content, is_error?, metadata?, display_content? }|nil` - immutable pending transcript output derived from final streamed arguments before execution. Growing display payloads belong in `display_content`, not JSON metadata.
 ---@field draft_preview? function `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort renderer for streamed partial arguments in the transcript.
@@ -1429,13 +1354,25 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.input.Event "change"|"submit"|"cancel"
 
+--- What happens to a call that needs more access than its mode allows.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@alias smelt.mode.Above "ask"|"deny"
+
 --- Paint-leaf events accepted by `paint:on(event, fn)`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@alias smelt.paint.Event "press"|"release"|"drag"|"enter"|"leave"|"move"
 
---- Decision accepted by effect-level permission rules.
+--- What a tool call may change: `"read"` reads files only, `"write"` writes inside the workspace or runs in the write sandbox, `"full"` writes outside the workspace or runs without a sandbox.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.permissions.Decision "allow"|"ask"|"deny"
+---@alias smelt.permissions.Access "read"|"write"|"full"
+
+--- Whether a call reads or writes a path.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@alias smelt.permissions.Intent "read"|"write"
+
+--- What a path rule allows: `"allow"` (like the workspace: reads run, writes need `write`), `"ask"` (reads and writes need `full`) or `"deny"` (never).
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@alias smelt.permissions.Rule "allow"|"ask"|"deny"
 
 --- Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1444,14 +1381,6 @@
 --- Which side of a cell a color paints, for `smelt.theme.rgb`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.theme.Layer "fg"|"bg"
-
---- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.tools.Decision "allow"|"ask"|"deny"
-
---- Coarse side-effect classification used by permission policy.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.tools.Effect "read"|"write"|"network"|"user"|"process"|"config"|"other"
 
 --- Semantic stages in the bundled transcript composition pipeline.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

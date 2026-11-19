@@ -1,6 +1,6 @@
 {
   "vim": false,
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "job_completed",

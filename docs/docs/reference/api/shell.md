@@ -27,35 +27,11 @@ fun(command: string): string?
 
 Return a user-facing error message if `command` would invoke an interactive program (editor, REPL, pager, `git -i`, etc.), or `nil` if it is safe to run non-interactively.
 
-## `smelt.shell.extract_paths`
-
-```lua
-fun(command: string): string[]
-```
-
-Extract filesystem paths referenced by `command` for workspace permission checks.
-
-## `smelt.shell.has_output_redirection`
-
-```lua
-fun(command: string): boolean
-```
-
-Return true when `command` contains shell output redirection such as `>` or `>>`.
-
 ## `smelt.shell.split`
 
 ```lua
 fun(command: string): string[]
 ```
 
-Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`). Operators themselves are dropped.
-
-## `smelt.shell.split_with_ops`
-
-```lua
-fun(command: string): table
-```
-
-Split `command` into subcommands and pair each with the operator that followed it. Returns rows of `{ command = string, op = string? }`.
+Split `command` into the sequence of subcommands separated by shell operators (`;`, `&`, `&&`, `||`, `|`) outside quotes. Operators themselves are dropped.
 

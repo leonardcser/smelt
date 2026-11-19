@@ -14,7 +14,6 @@ smelt-buffer = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-ansi = { workspace = true }
 smelt-store = { workspace = true }
-smelt-permissions = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 url = { workspace = true }

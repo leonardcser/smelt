@@ -1,47 +1,32 @@
 //! Apply smelt policy to Claude Code's native tools without dispatching them.
 
-use protocol::{AgentMode, PermissionOverrides, ToolEvaluation, ToolMetadata};
+use crate::lua::LuaRuntime;
+use crate::permissions::Access;
+use protocol::{AgentMode, Decision, ToolEvaluation, ToolMetadata};
 use serde_json::Value;
-use smelt_permissions::{Permissions, PermissionsHandle, ToolPath};
 use std::collections::HashMap;
 
-/// Native plan files are artifacts, not workspace edits.
-pub fn grant_plan_artifacts(permissions: &PermissionsHandle, artifact_dir: &std::path::Path) {
-    permissions.grant_plan_directory(&engine::claude_code_plan_directory(artifact_dir));
-}
-
+/// Decide a native tool call with `smelt.permissions.check`. A native tool
+/// that shares a smelt tool's capability uses that tool's access and paths.
+/// Native `Bash` runs outside the sandbox, so it and every other native tool
+/// count as `full`. Path arguments arrive absolute. Call inside a host scope.
 pub fn evaluate(
-    permissions: &Permissions,
-    cwd: Option<&std::path::Path>,
+    lua: &LuaRuntime,
     mode: AgentMode,
     name: &str,
     args: &HashMap<String, Value>,
-    overrides: Option<&PermissionOverrides>,
 ) -> ToolEvaluation {
     let (tool, args) = engine::claude_code_smelt_tool(name, args).unwrap_or((name, args.clone()));
-    let paths: Vec<ToolPath> = match tool {
-        "read_file" | "write_file" | "edit_file" => args
-            .get("file_path")
-            .and_then(Value::as_str)
-            .map(ToolPath::file)
-            .into_iter()
-            .collect(),
-        "edit_notebook" => args
-            .get("notebook_path")
-            .and_then(Value::as_str)
-            .map(ToolPath::file)
-            .into_iter()
-            .collect(),
-        "glob" | "grep" => vec![ToolPath::directory(
-            args.get("path").and_then(Value::as_str).unwrap_or("."),
-        )],
-        _ => Vec::new(),
+    let access = (tool == "bash").then_some(Access::Full);
+    let (decision, access) = match lua.check_permission(tool, &args, mode, access) {
+        Ok(check) => (check.decision, check.access),
+        Err(error) => (Decision::Error(error), Access::Full),
     };
-    let decision = permissions.evaluate_in_directory(cwd, overrides, mode, tool, &args, &paths);
     ToolEvaluation {
         decision,
         metadata: ToolMetadata {
             summary: crate::mcp::args_summary(&args),
+            access,
             ..Default::default()
         },
     }

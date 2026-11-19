@@ -49,7 +49,7 @@ return {
   { name = "SmeltVimInsert", role = "style", owner = "statusline", description = "Vim insert mode pill." },
   { name = "SmeltVimVisual", role = "style", owner = "statusline", description = "Vim visual mode pill." },
   { name = "SmeltModePlan", role = "style", owner = "statusline", description = "Plan agent mode pill." },
-  { name = "SmeltModeApply", role = "style", owner = "statusline", description = "Apply agent mode pill." },
+  { name = "SmeltModeWrite", role = "style", owner = "statusline", description = "Apply agent mode pill." },
   { name = "SmeltModeYolo", role = "style", owner = "statusline", description = "Yolo agent mode pill." },
   { name = "SmeltModeDefault", role = "style", owner = "statusline", description = "Default and custom agent mode pill." },
   { name = "SmeltExecPrefix", role = "style", owner = "prompt", description = "Shell execution prefix." },

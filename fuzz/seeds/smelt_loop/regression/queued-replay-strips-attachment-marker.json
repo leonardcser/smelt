@@ -1,7 +1,7 @@
 {
   "_about": "Queued plain-text prompt replay could contain a raw attachment marker from external or fuzzed text. Replaying it with prepend_text inserted the marker without a matching attachment id, tripping AttachedTextMut's marker/id invariant.",
   "_fix": "fix(tui): strip attachment markers from queued prompt replay text",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "data": ")ü(￼",

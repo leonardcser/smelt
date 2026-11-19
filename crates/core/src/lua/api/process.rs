@@ -12,7 +12,26 @@ use crate::lua::shared::DefaultShell;
 use crate::lua::LuaShared;
 use crate::process;
 
-fn current_shell_spec(shared: &Arc<LuaShared>) -> process::ShellSpec {
+/// The sandbox for a command: the one of the tool call that starts it (see
+/// `smelt.sandbox`), unless `opts.sandbox` is false.
+fn sandbox_for(
+    shared: &LuaShared,
+    opts: Option<&mlua::Table>,
+) -> LuaResult<Option<smelt_sandbox::Policy>> {
+    let confined = match opts {
+        Some(opts) => opts.get::<Option<bool>>("sandbox")?.unwrap_or(true),
+        None => true,
+    };
+    if !confined {
+        return Ok(None);
+    }
+    super::sandbox::current(shared, None)
+}
+
+fn current_shell_spec(
+    shared: &Arc<LuaShared>,
+    opts: Option<&mlua::Table>,
+) -> LuaResult<process::ShellSpec> {
     let mut shell = shared
         .default_shell
         .lock()
@@ -26,7 +45,8 @@ fn current_shell_spec(shared: &Arc<LuaShared>) -> process::ShellSpec {
         .unwrap_or_default();
     shell.env =
         crate::host::try_with_core(|core| core.session_control.shell_env()).unwrap_or_default();
-    shell
+    shell.sandbox = sandbox_for(shared, opts)?;
+    Ok(shell)
 }
 
 fn output_table(
@@ -141,14 +161,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared_spawn = Arc::clone(shared);
         m.private_live_only_fn(
             "__start_spawn_bg",
-            &["task_id", "command", "notify_on_completion"],
-            move |_, (task_id, command, notify): (u64, String, Option<bool>)| -> LuaResult<()> {
+            &["task_id", "command", "opts"],
+            move |_,
+                  (task_id, command, opts): (u64, String, Option<mlua::Table>)|
+                  -> LuaResult<()> {
+                let notify = match &opts {
+                    Some(opts) => opts.get::<Option<bool>>("notify_on_completion")?,
+                    None => None,
+                };
                 let (supervisor, now) = crate::host::try_with_core(|core| {
                     (core.jobs.clone(), core.clock.instant_now())
                 })
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
                 let cwd = shared_spawn.evaluation_cwd();
-                let shell = current_shell_spec(&shared_spawn);
+                let shell = current_shell_spec(&shared_spawn, opts.as_ref())?;
                 let sink = shared_spawn.resume_sink();
                 tokio::spawn(async move {
                     let payload = match supervisor
@@ -184,7 +210,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             )|
                   -> LuaResult<()> {
                 let runtime_cwd = s.evaluation_cwd();
-                let parsed = parse_run_options(opts.as_ref(), &runtime_cwd)?;
+                let mut parsed = parse_run_options(opts.as_ref(), &runtime_cwd)?;
+                parsed.sandbox = sandbox_for(&s, opts.as_ref())?;
                 let args = args.unwrap_or_default();
                 let cancel = crate::lua::current_task_cancel().unwrap_or_default();
                 let sink = s.resume_sink();
@@ -211,9 +238,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared_run_streaming = Arc::clone(shared);
         m.live_only_fn(
             "run_streaming",
-            "Run `command` as a contained job with a `timeout_ms` deadline, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, the same supervised job keeps running in the background.",
-            &["task_id", "call_id", "command", "timeout_ms", "background_on_timeout"],
-            move |_, (task_id, call_id, command, timeout_ms, background_on_timeout): (u64, String, String, u64, bool)| -> LuaResult<()> {
+            "Run `command` as a contained job, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled). `opts.timeout_ms` sets the deadline. When `opts.background_on_timeout` is true, the same supervised job keeps running in the background. Inside a tool call it runs in the call's sandbox; `opts.sandbox = false` runs it unconfined.",
+            &["task_id", "call_id", "command", "opts"],
+            move |_, (task_id, call_id, command, opts): (u64, String, String, mlua::Table)| -> LuaResult<()> {
+                let timeout_ms: u64 = opts.get("timeout_ms")?;
+                let background_on_timeout =
+                    opts.get::<Option<bool>>("background_on_timeout")?.unwrap_or(false);
+                let shell = current_shell_spec(&shared_run_streaming, Some(&opts))?;
                 let (injector, supervisor, now) = crate::host::try_with_core(|core| {
                     (
                         core.engine.injector(),
@@ -235,7 +266,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let sink = shared_run_streaming.resume_sink();
                 let cancel = crate::lua::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
-                let shell = current_shell_spec(&shared_run_streaming);
                 tokio::spawn(async move {
                     let on_line = |line: String| {
                         injector.inject_tool_output(invocation_id, call_id.clone(), line);
@@ -333,6 +363,7 @@ fn parse_run_options(
             timeout: None,
             stdin: None,
             max_output_bytes: None,
+            sandbox: None,
         });
     };
 
@@ -372,5 +403,6 @@ fn parse_run_options(
             .map(Duration::from_secs),
         stdin: t.get::<Option<String>>("stdin")?,
         max_output_bytes,
+        sandbox: None,
     })
 }

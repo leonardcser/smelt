@@ -93,36 +93,9 @@ pub struct LuaAskResponseTable {
     pub tool_calls: Option<Vec<LuaAskToolCall>>,
 }
 
-/// Subcommand rule override accepted inside `CommandOverrides`. Mirrors
-/// the front-matter `{ allow?, ask?, deny? }` shape.
-#[derive(Default, Debug, LuaOpts)]
-#[lua(name = "smelt.engine.RuleOverride")]
-pub struct LuaRuleOverride {
-    /// Patterns that auto-allow.
-    #[lua(default)]
-    pub allow: Vec<String>,
-    /// Patterns that always prompt.
-    #[lua(default)]
-    pub ask: Vec<String>,
-    /// Patterns that auto-deny.
-    #[lua(default)]
-    pub deny: Vec<String>,
-}
-
-impl From<LuaRuleOverride> for smelt_core::custom_commands::RuleOverride {
-    fn from(r: LuaRuleOverride) -> Self {
-        Self {
-            allow: r.allow,
-            ask: r.ask,
-            deny: r.deny,
-        }
-    }
-}
-
 /// Front-matter override block accepted by
 /// `smelt.engine.submit_command`. Mirrors what plugin commands set in
-/// their markdown header. Tool-name keys (e.g. `bash`, `edit`) become
-/// per-subcommand pattern buckets.
+/// their markdown header.
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.engine.CommandOverrides")]
 pub struct LuaCommandOverrides {
@@ -144,11 +117,6 @@ pub struct LuaCommandOverrides {
     pub repeat_penalty: Option<f64>,
     /// Reasoning-effort override. Known and provider-defined string labels are accepted.
     pub reasoning_effort: Option<String>,
-    /// Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn.
-    pub tools: Option<LuaRuleOverride>,
-    /// Per-subcommand pattern buckets keyed by tool name.
-    #[lua(rest)]
-    pub subcommands: std::collections::HashMap<String, LuaRuleOverride>,
 }
 
 impl From<LuaCommandOverrides> for smelt_core::custom_commands::CommandOverrides {
@@ -162,12 +130,6 @@ impl From<LuaCommandOverrides> for smelt_core::custom_commands::CommandOverrides
             min_p: o.min_p,
             repeat_penalty: o.repeat_penalty,
             reasoning_effort: o.reasoning_effort,
-            tools: o.tools.map(Into::into),
-            subcommands: o
-                .subcommands
-                .into_iter()
-                .map(|(k, v)| (k, v.into()))
-                .collect(),
         }
     }
 }

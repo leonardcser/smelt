@@ -515,7 +515,6 @@ impl TestApp {
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
         args: std::collections::HashMap<String, serde_json::Value>,
-        approval_patterns: Vec<String>,
         summary: protocol::StyledLines,
     ) {
         let invocation_id = next_synthetic_invocation_id();
@@ -529,7 +528,10 @@ impl TestApp {
             args: args.clone(),
             mode: self.tui.core.config.mode.clone(),
         });
-        self.wait_for_tool_evaluation(invocation_id.get());
+        let access = self
+            .wait_for_tool_evaluation(invocation_id.get())
+            .metadata
+            .access;
         let called_at_ms = self.tool_called_at_ms();
         self.engine_event(EngineEvent::RequestPermission {
             request_id,
@@ -538,9 +540,9 @@ impl TestApp {
             tool_name,
             provider: None,
             args,
-            approval_patterns,
             called_at_ms,
             summary,
+            access,
         });
     }
 

@@ -7,6 +7,7 @@ pub mod hooks;
 pub mod lua_type;
 pub mod module;
 pub mod options;
+mod permission;
 pub mod reg;
 pub mod runtime;
 mod shared;
@@ -19,8 +20,8 @@ pub use reg::LuaReg;
 pub use hooks::{HookEntry, HookRegistry};
 pub use runtime::{
     autoload_modules, autoload_modules_filtered, ensure_builtins_extracted, init_lua_path,
-    load_bootstrap_chunks, LuaLoadFailureLocation, LuaRuntime, ShutdownHookContext, ToolVisibility,
-    ToolWorkspacePaths, OPTIONAL_PLUGINS,
+    load_bootstrap_chunks, LuaLoadFailureLocation, LuaRuntime, PermissionCheck, PermissionTarget,
+    ShutdownHookContext, ToolVisibility, OPTIONAL_PLUGINS,
 };
 pub use shared::{
     AskCallbacks, CliFlagKind, CliFlagSpec, CliFlagValue, CommandBusyBehavior, DefaultShell, Hooks,

@@ -2,8 +2,7 @@
 -- and registers a `/<name>` command per file; re-reads on each invocation.
 --
 -- Each file may carry YAML frontmatter with `description`, model/sampling overrides,
--- permission rule-set overrides (`tools`, `bash`, `web_fetch`), and
--- `agent_skill: true` to expose the static command body through `load_skill`.
+-- and `agent_skill: true` to expose the static command body through `load_skill`.
 -- Agent-loaded command skills refresh on `/reload`; they do not receive
 -- slash-command arguments and do not evaluate shell output markers.
 --
@@ -190,13 +189,10 @@ local function file_overrides_existing(path)
   return v == 1
 end
 
--- Reserved frontmatter keys map to CommandOverrides; any other sub-table becomes
--- a per-tool subpattern bucket.
-local RESERVED = {
-  description = true, provider = true, model = true, temperature = true,
-  top_p = true, top_k = true, min_p = true, repeat_penalty = true,
-  reasoning_effort = true, tools = true, override = true,
-  agent_skill = true, ["agent-skill"] = true,
+-- Frontmatter keys that map to CommandOverrides.
+local OVERRIDES = {
+  provider = true, model = true, temperature = true, top_p = true, top_k = true,
+  min_p = true, repeat_penalty = true, reasoning_effort = true,
 }
 
 local function build_overrides(fm)
@@ -206,9 +202,7 @@ local function build_overrides(fm)
     if k == "description" then
       local desc = frontmatter_string(v)
       if desc then out[k] = desc end
-    elseif RESERVED[k] then
-      out[k] = v
-    elseif type(v) == "table" then
+    elseif OVERRIDES[k] then
       out[k] = v
     end
   end

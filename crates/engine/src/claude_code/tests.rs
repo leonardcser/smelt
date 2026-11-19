@@ -100,7 +100,7 @@ fn payload(root: &Path, turn: u64, history: Vec<HistoryItem>) -> UiCommand {
     UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: turn,
         input: StartTurnInput::user(Content::text(format!("turn {turn}"))),
-        mode: protocol::AgentMode::normal(),
+        mode: protocol::AgentMode::read(),
         model_target: ModelTarget {
             model: "sonnet".into(),
             provider_type: "claude-code".into(),
@@ -117,7 +117,6 @@ fn payload(root: &Path, turn: u64, history: Vec<HistoryItem>) -> UiCommand {
         session_id: "test-session".into(),
         artifact_dir: root.join("artifacts/test-session"),
         ephemeral: false,
-        permission_overrides: None,
         system_prompt: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
@@ -1328,7 +1327,7 @@ async fn permission_mode_change_rejects_pending_evaluation_and_approval() {
                             mode: protocol::AgentMode::parse("plan").unwrap(),
                         });
                         handle.send(UiCommand::SetMode {
-                            mode: protocol::AgentMode::normal(),
+                            mode: protocol::AgentMode::read(),
                         });
                     }
                     reply
@@ -1346,7 +1345,7 @@ async fn permission_mode_change_rejects_pending_evaluation_and_approval() {
                         mode: protocol::AgentMode::parse("plan").unwrap(),
                     });
                     handle.send(UiCommand::SetMode {
-                        mode: protocol::AgentMode::normal(),
+                        mode: protocol::AgentMode::read(),
                     });
                     handle.send(UiCommand::PermissionDecision {
                         request_id,
@@ -1912,7 +1911,7 @@ async fn native_plan_approval_survives_mode_echo_and_keeps_native_identity() {
             }) => {
                 assert_eq!(call_id, "interaction-tool");
                 handle.send(UiCommand::SetMode {
-                    mode: protocol::AgentMode::normal(),
+                    mode: protocol::AgentMode::read(),
                 });
                 handle.send(UiCommand::ToolResult {
                     request_id,
@@ -1985,7 +1984,7 @@ async fn native_question_policy_change_rejects_stale_evaluation() {
                     mode: protocol::AgentMode::parse("plan").unwrap(),
                 });
                 handle.send(UiCommand::SetMode {
-                    mode: protocol::AgentMode::normal(),
+                    mode: protocol::AgentMode::read(),
                 });
                 handle.send(UiCommand::ToolEvaluationResponse {
                     request_id,

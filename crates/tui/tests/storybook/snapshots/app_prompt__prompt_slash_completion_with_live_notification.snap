@@ -2,11 +2,11 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- /btw          ask a side question
- /brief        summarize planned or completed cha…
- /branch       fork current session
- /barrelroll   spin the screen one full turn
+ /btw         ask a side question
+ /brief       summarize planned or completed chan…
+ /branch      fork current session
+ /barrelroll  spin the screen one full turn
 ──────────────────────────────────────────────────
  /
 ──────────────────────────────────────────────────
- ○ normal                                 1:2 100%
+ ○ read                                   1:2 100%

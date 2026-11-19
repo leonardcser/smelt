@@ -1,6 +1,6 @@
 {
   "_about": "Installing an empty prompt placeholder must clear dispatch opts along with the extmark; otherwise placeholder_opts can outlive the visible placeholder.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "install_placeholder",

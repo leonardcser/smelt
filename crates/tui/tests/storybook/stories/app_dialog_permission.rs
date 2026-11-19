@@ -21,8 +21,8 @@ fn open_bash_permission_dialog(ctx: &mut AppStoryCtx) {
         args([
             ("command", json!("ls -la /tmp/foo")),
             ("description", json!("List files in /tmp/foo")),
+            ("access", json!("write")),
         ]),
-        vec!["ls *".into()],
     );
 }
 
@@ -38,176 +38,6 @@ app_story!(permission_request_deferred_while_typing, |ctx| {
     ctx.type_prompt("Continue drafting this response");
     open_bash_permission_dialog(ctx);
     ctx.assert_snapshot();
-});
-
-app_story!(bash_lua_doc_validation_permission_targets_tmp, |ctx| {
-    ctx.set_viewport(120, 30);
-    ctx.restrict_permissions_to_cwd();
-    ctx.approve_tool_for_session("bash");
-    let command = concat!(
-        "set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120; ",
-        "status=${PIPESTATUS[0]}; if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi; ",
-        "git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta ",
-        "docs/zensical.toml runtime/skills/customize/SKILL.md >/tmp/smelt-doc-diff || ",
-        "{ cat /tmp/smelt-doc-diff; exit 1; }",
-    );
-    ctx.request_permission(
-        "bash",
-        args([
-            ("command", json!(command)),
-            ("description", json!("Generate and validate Lua API docs")),
-        ]),
-        vec![],
-    );
-
-    let frame = ctx.frame_text();
-    assert!(
-        frame.contains("allow /tmp for this session"),
-        "expected a /tmp session grant: {frame}"
-    );
-    assert!(
-        !frame.contains("allow / for this session"),
-        "must not offer a root session grant: {frame}"
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(
-    bash_nested_validation_script_never_offers_root_grant,
-    |ctx| {
-        ctx.set_viewport(120, 30);
-        ctx.restrict_permissions_to_cwd();
-        ctx.approve_tool_for_session("bash");
-        let command = concat!(
-        "cd /home/dev/dev/smelt/.worktrees/lua-api-audit && ",
-        "export RUSTUP_TOOLCHAIN=1.95.0 CARGO_BUILD_JOBS=1 ",
-        "TMPDIR=/home/dev/.cache/smelt-phase4-validation-tmp && ",
-        "flock target/.phase1-validation.lock bash -c '",
-        "set -euo pipefail; cargo fmt 2>&1 | tail -15; ",
-        "cargo test -p smelt-tui --features harness public_message_log_returns_independent_ordered_typed_rows 2>&1 | tail -38; ",
-        "cargo test -p smelt-tui --features harness public_message_log_bounds_aggregate_retained_bodies 2>&1 | tail -38; ",
-        "cargo test -p smelt-tui --features harness messages_dialog_ 2>&1 | tail -38; ",
-        "cargo xtask gen-lua-docs 2>&1 | tail -13; ",
-        "before=$(sha256sum runtime/lua/smelt/_meta/*.lua ",
-        "docs/docs/reference/api/*.md | sha256sum); ",
-        "cargo xtask gen-lua-docs 2>&1 | tail -13; ",
-        "after=$(sha256sum runtime/lua/smelt/_meta/*.lua ",
-        "docs/docs/reference/api/*.md | sha256sum); ",
-        "test \"$before\" = \"$after\" && printf \"generated contracts unchanged\\n\"'",
-    );
-        ctx.request_permission(
-            "bash",
-            args([
-                ("command", json!(command)),
-                ("description", json!("Validate Lua API contracts")),
-            ]),
-            vec![],
-        );
-
-        let frame = ctx.frame_text();
-        assert!(
-            frame.contains("allow /home/dev/dev/smelt/.worktrees/lua-api-audit for this session"),
-            "expected a grant for the actual outside worktree: {frame}"
-        );
-        assert!(
-            !frame.contains("allow / for this session"),
-            "must not offer a root session grant: {frame}"
-        );
-    }
-);
-
-app_story!(bash_brace_expansion_permission_targets_directory, |ctx| {
-    ctx.set_viewport(120, 30);
-    ctx.restrict_permissions_to_cwd();
-    ctx.approve_tool_for_session("bash");
-    ctx.request_permission(
-        "bash",
-        args([
-            (
-                "command",
-                json!(concat!(
-                    "rm -rf /tmp/smelt-startup-duplicate-repro && ",
-                    "mkdir -p /tmp/smelt-startup-duplicate-repro/{config,state,cache,data,home}"
-                )),
-            ),
-            (
-                "description",
-                json!("Reset startup reproduction directories"),
-            ),
-        ]),
-        vec![],
-    );
-
-    let frame = ctx.frame_text();
-    assert!(
-        frame.contains("allow /tmp/smelt-startup-duplicate-repro for this session"),
-        "expected a reproduction-directory session grant: {frame}"
-    );
-    assert!(
-        !frame.contains("allow /tmp for this session"),
-        "must not offer a broader /tmp session grant: {frame}"
-    );
-    assert!(
-        !frame.contains("allow / for this session"),
-        "must not offer a root session grant: {frame}"
-    );
-});
-
-app_story!(bash_awk_program_is_not_offered_as_path_approval, |ctx| {
-    ctx.set_viewport(120, 30);
-    ctx.restrict_permissions_to_cwd();
-    ctx.approve_tool_for_session("bash");
-    let command = concat!(
-        "echo '--- all fuzz managers ---'\n",
-        "ps -eo pid=,ppid=,pgid=,stat=,etime=,cmd= | ",
-        "awk '/cargo (xtask fuzz|fuzz)|libfuzzer|fuzz\\/target\\/.*\\/permissions_rules/ ",
-        "&& !/awk/ {print}'",
-    );
-    ctx.request_permission(
-        "bash",
-        args([
-            ("command", json!(command)),
-            ("description", json!("Inspect fuzz process groups")),
-        ]),
-        vec![],
-    );
-
-    let frame = ctx.frame_text();
-    assert!(
-        frame.contains("allow awk * for this session"),
-        "opaque awk execution needs command-scoped approval: {frame}"
-    );
-    assert!(
-        !frame.contains("allow /cargo") && !frame.contains("allow /awk"),
-        "awk regex was treated as an outside-workspace path: {frame}"
-    );
-});
-
-app_story!(bash_opaque_awk_program_requires_command_approval, |ctx| {
-    ctx.set_viewport(100, 24);
-    ctx.restrict_permissions_to_cwd();
-    ctx.approve_tool_for_session("bash");
-    ctx.request_permission(
-        "bash",
-        args([
-            (
-                "command",
-                json!("awk 'BEGIN { system(\"cat /etc/passwd\") }'"),
-            ),
-            ("description", json!("Run an opaque awk program")),
-        ]),
-        vec!["awk *".into()],
-    );
-
-    let frame = ctx.frame_text();
-    assert!(
-        frame.contains("allow awk * for this session"),
-        "opaque awk execution needs command-scoped approval: {frame}"
-    );
-    assert!(
-        !frame.contains("allow /etc"),
-        "awk source must not become a path grant: {frame}"
-    );
 });
 
 app_story!(bash_permission_preserves_reasoning_context, |ctx| {
@@ -247,7 +77,6 @@ app_story!(bash_permission_dialog_tall_terminal, |ctx| {
             ("command", json!("ls -la /tmp/foo")),
             ("description", json!("List files in /tmp/foo")),
         ]),
-        vec!["ls *".into()],
     );
     ctx.assert_snapshot();
 });
@@ -260,7 +89,6 @@ app_story!(bash_multiline_command_summary, |ctx| {
             "command",
             json!("for f in *.rs; do\n  rustfmt \"$f\"\ndone"),
         )]),
-        vec!["for *".into()],
     );
     ctx.assert_snapshot();
 });
@@ -273,52 +101,13 @@ app_story!(bash_long_command_summary_wraps, |ctx| {
             "command",
             json!("ls -ld /Users/leo/.dotfiles; realpath /Users/leo/.dotfiles 2>/dev/null || true; cd /Users/leo/dev/rust/smelt/.worktrees/fix-path-parsing && cargo test -p smelt-core permissions::tests"),
         )]),
-        vec!["ls *".into()],
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(bash_outside_workspace_extra_options, |ctx| {
-    ctx.set_viewport(80, 22);
-    ctx.request_permission(
-        "bash",
-        args([("command", json!("cat /etc/hosts"))]),
-        vec!["cat *".into(), "cat /etc/*".into()],
     );
     ctx.assert_snapshot();
 });
 
 app_story!(switch_cwd_outside_workspace_permission_dialog, |ctx| {
     ctx.set_viewport(80, 22);
-    ctx.restrict_permissions_to_cwd();
-    ctx.approve_tool_for_session("switch_cwd");
-    ctx.request_permission(
-        "switch_cwd",
-        args([("path", json!("/tmp/electronics"))]),
-        vec![],
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(bash_permission_dialog_long_extra_options_wrap, |ctx| {
-    ctx.set_viewport(70, 22);
-    ctx.request_permission(
-        "bash",
-        args([(
-            "command",
-            json!(
-                "cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/very-long-permission-target.log"
-            ),
-        )]),
-        vec![
-            "cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/very-long-permission-target.log"
-                .into(),
-            "cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/*".into(),
-        ],
-    );
-    ctx.press_char('j');
-    ctx.press_char('j');
-    ctx.press_char('j');
+    ctx.request_permission("switch_cwd", args([("path", json!("/tmp/electronics"))]));
     ctx.assert_snapshot();
 });
 
@@ -333,7 +122,6 @@ app_story!(write_file_permission_dialog_with_file_view, |ctx| {
                 json!("fn main() {\n    println!(\"hello, world\");\n}\n"),
             ),
         ]),
-        vec![],
     );
     ctx.assert_snapshot();
 });
@@ -350,7 +138,6 @@ app_story!(edit_file_permission_dialog_with_diff, |ctx| {
             ("old_string", json!("println!(\"hello, world\");")),
             ("new_string", json!("println!(\"hello, smelt\");")),
         ]),
-        vec![],
     );
     ctx.assert_snapshot();
 });
@@ -386,7 +173,6 @@ fn open_edit_file_permission_after_draft(ctx: &mut AppStoryCtx) {
             ("old_string", json!(old_string)),
             ("new_string", json!(new_string)),
         ]),
-        vec![],
     );
 }
 
@@ -430,7 +216,6 @@ app_story!(
                 ("file_path", json!("src/main.rs")),
                 ("content", json!(content)),
             ]),
-            vec![],
         );
         ctx.assert_snapshot();
     }
@@ -451,7 +236,6 @@ app_story!(edit_file_long_path_permission_dialog_wraps, |ctx| {
             ("old_string", json!("# Plan\n")),
             ("new_string", json!("# Updated plan\n")),
         ]),
-        vec![],
     );
     ctx.assert_snapshot();
 });
@@ -476,7 +260,6 @@ app_story!(edit_file_permission_dialog_multiline_diff, |ctx| {
                 ),
             ),
         ]),
-        vec![],
     );
     ctx.assert_snapshot();
 });
@@ -510,7 +293,6 @@ app_story!(notebook_edit_permission_dialog_with_diff, |ctx| {
                 json!("import pandas as pd\ndf = pd.read_csv('data.csv')\nprint(df.head())\n"),
             ),
         ]),
-        vec![],
     );
     ctx.assert_snapshot();
 });
@@ -542,7 +324,6 @@ app_story!(notebook_edit_permission_dialog_insert_cell, |ctx| {
                 json!("import numpy as np\nx = np.arange(10)\n"),
             ),
         ]),
-        vec![],
     );
     ctx.assert_snapshot();
 });
@@ -557,122 +338,18 @@ app_story!(web_fetch_permission_dialog_no_preview, |ctx| {
             ("url", json!("https://example.com/page")),
             ("prompt", json!("Extract the main heading.")),
         ]),
-        vec!["https://example.com/*".into()],
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(web_search_permission_dialog, |ctx| {
-    ctx.set_viewport(70, 18);
-    ctx.request_permission(
-        "web_search",
-        args([("query", json!("rust terminal tui snapshots"))]),
-        vec!["rust terminal *".into()],
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(grep_permission_dialog, |ctx| {
-    ctx.set_viewport(70, 18);
-    ctx.request_permission(
-        "grep",
-        args([
-            ("pattern", json!("confirm_dialog")),
-            ("path", json!("crates/tui/src")),
-            ("output_mode", json!("content")),
-        ]),
-        vec!["confirm_*".into()],
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(glob_permission_dialog, |ctx| {
-    ctx.set_viewport(70, 18);
-    ctx.request_permission(
-        "glob",
-        args([
-            ("pattern", json!("**/*.rs")),
-            ("path", json!("crates/tui/tests")),
-        ]),
-        vec!["**/*.rs".into()],
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(read_file_permission_dialog, |ctx| {
-    ctx.set_viewport(70, 18);
-    ctx.request_permission(
-        "read_file",
-        args([
-            ("file_path", json!("crates/tui/src/app.rs")),
-            ("offset", json!(120)),
-            ("limit", json!(40)),
-        ]),
-        vec![],
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(read_file_long_path_permission_dialog_wraps, |ctx| {
-    ctx.set_viewport(70, 18);
-    ctx.request_permission(
-        "read_file",
-        args([
-            (
-                "file_path",
-                json!("/tmp/smelt-storybook-nonexistent-session-93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
-            ),
-            ("offset", json!(1)),
-            ("limit", json!(80)),
-        ]),
-        vec![],
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(read_process_output_permission_dialog, |ctx| {
-    ctx.set_viewport(70, 18);
-    ctx.request_permission("read_process_output", args([("id", json!("4242"))]), vec![]);
     ctx.assert_snapshot();
 });
 
 app_story!(stop_process_permission_dialog, |ctx| {
     ctx.set_viewport(70, 18);
-    ctx.request_permission("stop_process", args([("id", json!("4242"))]), vec![]);
-    ctx.assert_snapshot();
-});
-
-app_story!(load_skill_permission_dialog, |ctx| {
-    ctx.set_viewport(70, 18);
-    ctx.request_permission("load_skill", args([("name", json!("customize"))]), vec![]);
+    ctx.request_permission("stop_process", args([("id", json!("4242"))]));
     ctx.assert_snapshot();
 });
 
 app_story!(smelt_reload_permission_dialog, |ctx| {
     ctx.set_viewport(70, 18);
-    ctx.request_permission("smelt_reload", HashMap::new(), vec![]);
-    ctx.assert_snapshot();
-});
-
-app_story!(ask_user_question_permission_dialog, |ctx| {
-    ctx.set_viewport(70, 24);
-    ctx.request_permission(
-        "ask_user_question",
-        args([(
-            "questions",
-            json!([
-                {
-                    "header": "Approach",
-                    "question": "Which implementation should I use?",
-                    "multiSelect": false,
-                    "options": [
-                        { "label": "Minimal", "description": "Small targeted change." },
-                        { "label": "Rewrite", "description": "Replace the component." }
-                    ]
-                }
-            ]),
-        )]),
-        vec![],
-    );
+    ctx.request_permission("smelt_reload", HashMap::new());
     ctx.assert_snapshot();
 });

@@ -24,7 +24,6 @@ smelt-tui = { path = "../crates/tui", features = ["harness"] }
 smelt-edit = { path = "../crates/edit" }
 smelt-core = { path = "../crates/core" }
 smelt-transcript = { path = "../crates/transcript" }
-smelt-permissions = { path = "../crates/permissions" }
 smelt-text = { path = "../crates/text" }
 smelt-buffer = { path = "../crates/buffer" }
 smelt-style = { path = "../crates/style" }
@@ -142,12 +141,6 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "permissions_rules"
-path = "fuzz_targets/permissions_rules.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "store_state"

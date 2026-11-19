@@ -82,7 +82,8 @@ smelt.mcp.register("filesystem", {
 | `enabled`     | Set `false` to skip connecting on startup (default `true`) |
 
 MCP tools appear to the agent as `servername_toolname` (for example
-`filesystem_read_file`) and ask for permission by default. Control them with the
-`mcp` bucket in [Permissions](../reference/permissions.md#configuring-permissions).
+`filesystem_read_file`). A tool the server marks `readOnlyHint` counts as a read;
+any other has full access and asks outside yolo mode. To change that, wrap
+`smelt.permissions.check` (see [Permissions](../reference/permissions.md#customizing-the-policy)).
 Run `/mcp` to see server state and tool names, or use `smelt.mcp.list()` and
 `smelt.mcp.status(name)` from Lua.

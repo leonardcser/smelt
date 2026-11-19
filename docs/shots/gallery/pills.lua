@@ -11,7 +11,7 @@ end
 smelt.statusline:clear()
 smelt.statusline:add("pills", function()
   return {
-    pill(smelt.signal.get("agent_mode") or "normal", COLORS[1]),
+    pill(smelt.signal.get("agent_mode") or "read", COLORS[1]),
     pill(smelt.path.basename(smelt.os.cwd()), COLORS[2]),
     pill(((smelt.signal.get("model") or ""):gsub("^.*/", "")), COLORS[3]),
     pill(os.date("%H:%M"), COLORS[4], true),

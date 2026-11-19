@@ -2,9 +2,8 @@
 
 use engine::EngineConfig;
 use protocol::{
-    AgentMode, Content, Decision, EngineEvent, HistoryItem, ModelConfig, ModelTarget,
-    ReasoningEffort, RequestRuntimeConfig, StartTurnPayload, ToolEvaluation, ToolMetadata,
-    UiCommand,
+    AgentMode, Content, EngineEvent, HistoryItem, ModelConfig, ModelTarget, ReasoningEffort,
+    RequestRuntimeConfig, StartTurnPayload, UiCommand,
 };
 use smelt_provider::{FunctionSchema, ToolDefinition};
 use std::collections::HashMap;
@@ -122,6 +121,14 @@ async fn run_server<F>(
     }
 }
 
+/// Answer the host's permission evaluation for a dispatcher tool.
+fn allow_evaluation(handle: &engine::EngineHandle, request_id: u64) {
+    handle.send(UiCommand::ToolEvaluationResponse {
+        request_id,
+        evaluation: protocol::ToolEvaluation::default(),
+    });
+}
+
 struct CountingDispatcher {
     executions: Arc<AtomicUsize>,
 }
@@ -137,20 +144,6 @@ impl engine::tools::ToolDispatcher for CountingDispatcher {
 
     fn contains(&self, name: &str) -> bool {
         name == TOOL_NAME
-    }
-
-    fn evaluate_tool_call(
-        &self,
-        _turn_id: u64,
-        name: &str,
-        _args: &HashMap<String, serde_json::Value>,
-        _mode: AgentMode,
-        _permission_overrides: Option<&protocol::PermissionOverrides>,
-    ) -> Option<ToolEvaluation> {
-        self.contains(name).then(|| ToolEvaluation {
-            decision: Decision::Allow,
-            metadata: ToolMetadata::default(),
-        })
     }
 
     fn dispatch<'a>(
@@ -246,6 +239,9 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
     loop {
         match handle.recv().await {
             Some(EngineEvent::Ready) => break,
+            Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                allow_evaluation(&handle, request_id)
+            }
             Some(_) => {}
             None => panic!("engine closed before Ready"),
         }
@@ -254,7 +250,7 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("go")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target,
         request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
@@ -264,7 +260,6 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -284,6 +279,9 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
                 }
                 Some(EngineEvent::TurnError { message, .. }) => turn_error = Some(message),
                 Some(EngineEvent::TurnComplete { .. }) => break,
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before turn completion"),
             }
@@ -351,6 +349,9 @@ async fn fresh_tool_call_rounds_continue_past_previous_checkpoint() {
     loop {
         match handle.recv().await {
             Some(EngineEvent::Ready) => break,
+            Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                allow_evaluation(&handle, request_id)
+            }
             Some(_) => {}
             None => panic!("engine closed before Ready"),
         }
@@ -359,7 +360,7 @@ async fn fresh_tool_call_rounds_continue_past_previous_checkpoint() {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("go")),
-        mode: AgentMode::normal(),
+        mode: AgentMode::read(),
         model_target: target,
         request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
@@ -369,7 +370,6 @@ async fn fresh_tool_call_rounds_continue_past_previous_checkpoint() {
         session_id: "sess".into(),
         artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
-        permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
@@ -386,6 +386,9 @@ async fn fresh_tool_call_rounds_continue_past_previous_checkpoint() {
                 }
                 Some(EngineEvent::TurnError { message, .. }) => turn_error = Some(message),
                 Some(EngineEvent::TurnComplete { .. }) => break,
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    allow_evaluation(&handle, request_id)
+                }
                 Some(_) => {}
                 None => panic!("engine stopped before turn completion"),
             }

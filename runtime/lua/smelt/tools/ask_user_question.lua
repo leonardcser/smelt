@@ -8,8 +8,7 @@ smelt.tools.register({
   description = "Ask the user for preferences, instruction clarification, or implementation decisions.",
   execution_mode = "sequential",
   headless = false,
-  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
-  effect = "user",
+  access = "read",
   parameters = {
     type = "object",
     properties = {

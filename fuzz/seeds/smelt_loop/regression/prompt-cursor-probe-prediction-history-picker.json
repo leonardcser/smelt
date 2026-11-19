@@ -1,7 +1,7 @@
 {
   "_about": "Prompt cursor prediction probe regression: Ctrl-R can schedule the prompt history picker, which may open after the probe's initial cleanup. The prediction branch must quiesce prompt-docked picker transients without clearing the placeholder before checking typing and cursor motion.",
   "_fix": "test(fuzz): quiesce prompt pickers in prediction probe",
-  "mode": "apply",
+  "mode": "write",
   "ops": [
     {
       "data": {

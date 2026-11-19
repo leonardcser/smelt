@@ -1,8 +1,9 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash ls -la /tmp/foo                                                 14:37:03
+
 
 
 
@@ -16,11 +17,10 @@ expression: text
  bash: ls -la /tmp/foo
  List files in /tmp/foo
 
- Allow?
+ Run this command?
   1. allow once
   2. deny
-  3. allow ls * for this session
-  4. allow ls * in workspace ~/cwd
+  3. allow bash for this session
 
   press tab to add a reason…
- ○ normal                                                                 1:1 0%
+ ○ read                                                                   1:1 0%

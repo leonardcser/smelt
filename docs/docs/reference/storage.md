@@ -18,7 +18,6 @@ On Linux and macOS they follow the XDG base directories:
 | `$XDG_STATE_HOME/smelt/artifacts/`    | Files owned by a saved session, such as plans |
 | `$XDG_STATE_HOME/smelt/auth/`         | OAuth credentials for Codex, Copilot and Kimi Code |
 | `$XDG_STATE_HOME/smelt/recent.json`   | Last-used model, mode and reasoning effort |
-| `$XDG_STATE_HOME/smelt/workspaces/`   | Saved permissions per workspace |
 | `$XDG_STATE_HOME/smelt/plugins/`      | State saved by Lua plugins |
 | `$XDG_STATE_HOME/smelt/trust.json`    | Hashes of trusted project `.smelt/` directories |
 | `$XDG_STATE_HOME/smelt/logs/`         | Rotated log files |

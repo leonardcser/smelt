@@ -14,8 +14,8 @@ use engine::{EngineConfig, EngineHandle, HostCallbacks};
 use protocol::{
     AgentMode, Content, Decision, EngineEvent, HistoryItem, InvocationId, ModelConfig,
     ModelHistorySource, ModelTarget, ReasoningEffort, RequestRuntimeConfig, StartTurnInput,
-    StartTurnPayload, SteerId, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags,
-    ToolMetadata, ToolVisibility, TurnHistory, UiCommand,
+    StartTurnPayload, SteerId, ToolDef, ToolEvaluation, ToolExecutionMode, ToolMetadata,
+    ToolVisibility, TurnHistory, UiCommand,
 };
 use serde_json::{json, Value};
 use smelt_provider::ChatTransport;
@@ -509,7 +509,7 @@ impl Sim {
             answers: HashMap::new(),
             turn_steers: Vec::new(),
             turn_markers: Vec::new(),
-            mode: AgentMode::normal(),
+            mode: AgentMode::read(),
             record_trace: std::env::var_os("SMELT_SIM_TRACE").is_some(),
             trace: Vec::new(),
         }
@@ -569,7 +569,7 @@ impl Sim {
             }
             Op::Advance { millis } => self.advance(Duration::from_millis(u64::from(millis))).await,
             Op::SetMode { mode } => {
-                let modes = ["normal", "plan", "apply", "yolo"];
+                let modes = ["read", "plan", "write", "yolo"];
                 self.mode =
                     AgentMode::parse(modes[usize::from(mode) % modes.len()]).expect("known mode");
                 self.handle.send(UiCommand::SetMode {
@@ -619,7 +619,6 @@ impl Sim {
                 session_id: "sim-session".into(),
                 artifact_dir: std::env::temp_dir(),
                 ephemeral: false,
-                permission_overrides: None,
                 native_prompt: None,
                 tool_visibility: ToolVisibility::Interactive,
                 system_prompt: Some("simulated system prompt".into()),
@@ -936,36 +935,20 @@ impl Sim {
 }
 
 fn sim_tools() -> Vec<ToolDef> {
-    let tool = |name: &str, execution_mode, hooks| ToolDef {
+    let tool = |name: &str, execution_mode| ToolDef {
         name: name.into(),
         description: "simulated tool".into(),
         parameters: json!({"type": "object", "properties": {}}),
         modes: None,
         execution_mode,
         override_core: false,
-        hooks,
         headless: true,
         claude_code: None,
     };
     vec![
-        tool(
-            TOOL_NAMES[0],
-            ToolExecutionMode::Concurrent,
-            ToolHookFlags::default(),
-        ),
-        tool(
-            TOOL_NAMES[1],
-            ToolExecutionMode::Sequential,
-            ToolHookFlags::default(),
-        ),
-        tool(
-            TOOL_NAMES[2],
-            ToolExecutionMode::Concurrent,
-            ToolHookFlags {
-                approval_patterns: true,
-                preflight: true,
-            },
-        ),
+        tool(TOOL_NAMES[0], ToolExecutionMode::Concurrent),
+        tool(TOOL_NAMES[1], ToolExecutionMode::Sequential),
+        tool(TOOL_NAMES[2], ToolExecutionMode::Concurrent),
     ]
 }
 

@@ -1,6 +1,6 @@
 {
   "vim": false,
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "probe_prompt_cursor_after_turn",

@@ -121,7 +121,7 @@ local function build(p)
     SmeltVimInsert      = { fg = color(p.success), bg = surface },
     SmeltVimVisual      = { fg = color(p.accent), bg = surface },
     SmeltModePlan       = { fg = color(p.success), bg = surface },
-    SmeltModeApply      = { fg = color(p.accent), bg = surface },
+    SmeltModeWrite      = { fg = color(p.accent), bg = surface },
     SmeltModeYolo       = { fg = color(p.warn), bg = surface },
     SmeltModeDefault    = { fg = color(p.muted), bg = surface },
     SmeltExecPrefix     = fg(color(p.error), { bold = true }),

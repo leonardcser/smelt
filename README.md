@@ -111,7 +111,7 @@ smelt --model gpt-5.5 --api-base https://api.openai.com/v1 --api-key-env OPENAI_
 ```
 
 Or just run `smelt` with no arguments and follow the wizard. The default mode
-cycle is Normal → Plan → Apply → Yolo. Plan mode is bundled and autoloaded.
+cycle is Read → Plan → Write → Yolo. Plan mode is bundled and autoloaded.
 Optional bundled plugins include `which_key`, the local request inspector, and
 LSP-backed semantic code tools; enable them from `~/.config/smelt/init.lua`.
 

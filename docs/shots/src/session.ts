@@ -322,7 +322,7 @@ export async function run(
   const mock = opts.live ? null : startMock(opts.wordDelay);
   const home = await prepare(mock?.port ?? null, opts);
   // Live runs get a throwaway state dir holding a copy of the real codex login, so sessions and
-  // permissions stay out of the real state. The copy is written back if smelt refreshed the token.
+  // other state stay out of the real state dir. The copy is written back if smelt refreshed the token.
   const state = `${home}/state`;
   const realAuth = path.join(process.env.XDG_STATE_HOME ?? path.join(process.env.HOME!, ".local/state"), "smelt/codex_auth.json");
   const tempAuth = path.join(state, "smelt/codex_auth.json");

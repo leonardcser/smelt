@@ -535,20 +535,12 @@ pub struct LuaLoadManifest {
 #[derive(Clone)]
 pub struct ModeDeclarations {
     pub cycle: Vec<protocol::AgentMode>,
-    pub behaviors: std::collections::HashMap<String, smelt_permissions::ModeBehavior>,
-}
-
-#[derive(Clone)]
-pub struct PermissionDeclarations {
-    pub rules: smelt_permissions::rules::RawPerms,
-    pub tool_defaults: smelt_permissions::rules::ToolDefaults,
 }
 
 #[derive(Clone)]
 pub struct LuaDesiredState {
     pub config: smelt_core::config::Config,
     pub modes: ModeDeclarations,
-    pub permissions: PermissionDeclarations,
     pub default_shell: Option<smelt_core::lua::DefaultShell>,
 }
 
@@ -851,12 +843,6 @@ impl LuaRuntime {
     pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
         self.core.mode_names()
     }
-
-    pub fn mode_behaviors(
-        &self,
-    ) -> std::collections::HashMap<String, smelt_permissions::ModeBehavior> {
-        self.core.mode_behaviors()
-    }
 }
 
 fn collect_desired_state(core: &smelt_core::lua::LuaRuntime) -> LuaDesiredState {
@@ -864,11 +850,6 @@ fn collect_desired_state(core: &smelt_core::lua::LuaRuntime) -> LuaDesiredState 
         config: core.to_config(),
         modes: ModeDeclarations {
             cycle: core.mode_names(),
-            behaviors: core.mode_behaviors(),
-        },
-        permissions: PermissionDeclarations {
-            rules: core.permission_rules_snapshot().unwrap_or_default(),
-            tool_defaults: core.tool_defaults(),
         },
         default_shell: core.default_shell_snapshot(),
     }
@@ -1087,73 +1068,36 @@ fn invoke_confirm_open(core: &smelt_core::lua::LuaRuntime, handle_id: u64) {
 }
 
 fn mode_note(core: &smelt_core::lua::LuaRuntime, name: &str) -> String {
-    let fallback = || format!("now in {name} mode");
-    let result: mlua::Result<String> = (|| {
-        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
-        let mode: mlua::Table = smelt.get("mode")?;
-        let get: mlua::Function = mode.get("get")?;
-        let Some(info) = get.call::<Option<mlua::Table>>(name.to_string())? else {
-            return Ok(fallback());
-        };
-        Ok(info.get::<Option<String>>("note")?.unwrap_or_else(fallback))
-    })();
-    result.unwrap_or_else(|_| fallback())
+    core.modes()
+        .get(name)
+        .map(|mode| mode.note.clone())
+        .unwrap_or_else(|| format!("now in {name} mode"))
 }
 
+/// The transcript block for a mode change: the mode named `name`, or the
+/// mode whose note is `note` when there is no name.
 pub(crate) fn mode_block(
     core: &smelt_core::lua::LuaRuntime,
     name: Option<&str>,
     note: &str,
 ) -> smelt_transcript::transcript_model::Block {
-    let result: mlua::Result<(String, String, String)> = (|| {
-        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
-        let mode: mlua::Table = smelt.get("mode")?;
-        if let Some(name) = name {
-            let get: mlua::Function = mode.get("get")?;
-            let info: Option<mlua::Table> = get.call(name.to_string())?;
-            if let Some(info) = info {
-                let icon = info.get::<Option<String>>("icon")?.unwrap_or_default();
-                let hl_group = info
-                    .get::<Option<String>>("hl_group")?
-                    .unwrap_or_else(|| "SmeltModeDefault".to_string());
-                return Ok((icon, hl_group, format!("now in {name} mode")));
-            }
-            return Ok((
-                String::new(),
-                "SmeltModeDefault".to_string(),
-                format!("now in {name} mode"),
-            ));
-        }
-        let list: mlua::Function = mode.get("list")?;
-        let rows: mlua::Table = list.call(())?;
-        for row in rows.sequence_values::<mlua::Table>() {
-            let row = row?;
-            if row.get::<Option<String>>("note")?.as_deref() == Some(note) {
-                let name = row.get::<String>("name")?;
-                let icon = row.get::<Option<String>>("icon")?.unwrap_or_default();
-                let hl_group = row
-                    .get::<Option<String>>("hl_group")?
-                    .unwrap_or_else(|| "SmeltModeDefault".to_string());
-                return Ok((icon, hl_group, format!("now in {name} mode")));
-            }
-        }
-        Ok((
-            String::new(),
-            "SmeltModeDefault".to_string(),
-            note.to_string(),
-        ))
-    })();
-    let (icon, hl_group, text) = result.unwrap_or_else(|_| {
-        (
-            String::new(),
-            "SmeltModeDefault".to_string(),
-            note.to_string(),
-        )
-    });
+    let modes = core.modes();
+    let mode = match name {
+        Some(name) => modes.get(name),
+        None => modes.iter().find(|mode| mode.note == note),
+    };
+    let text = match (name, mode) {
+        (Some(name), _) => format!("now in {name} mode"),
+        (None, Some(mode)) => format!("now in {} mode", mode.name.as_str()),
+        (None, None) => note.to_string(),
+    };
     smelt_transcript::transcript_model::Block::Mode {
         text,
-        icon,
-        hl_group,
+        icon: mode.map(|mode| mode.icon.clone()).unwrap_or_default(),
+        hl_group: mode.map_or_else(
+            || "SmeltModeDefault".to_string(),
+            |mode| mode.hl_group.clone(),
+        ),
     }
 }
 
@@ -1215,7 +1159,7 @@ mod tests {
         static EMPTY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let p = EMPTY_PATH.get_or_init(std::path::PathBuf::new);
         ToolEnv {
-            mode: protocol::AgentMode::parse("apply").unwrap(),
+            mode: protocol::AgentMode::parse("write").unwrap(),
             session_id: "",
             artifact_dir: p,
         }
@@ -1460,22 +1404,20 @@ mod tests {
     #[test]
     fn mode_registry_records_are_isolated_and_preserve_registered_notes() {
         let runtime = LuaRuntime::new();
-        let (note, decision, label): (String, String, String) = runtime
+        let (note, access, label): (String, String, String) = runtime
             .lua
             .load(
                 r#"
-                local permissions = { default_decision = "deny" }
                 smelt.mode.register({
                     name = "review",
                     label = "Review",
                     note = "review carefully",
-                    permissions = permissions,
+                    access = "read",
                 })
-                permissions.default_decision = "allow"
 
                 local record = smelt.mode.get("review")
                 record.note = "mutated"
-                record.permissions.default_decision = "ask"
+                record.access = "full"
 
                 local listed = smelt.mode.list()
                 for _, mode in ipairs(listed) do
@@ -1483,14 +1425,14 @@ mod tests {
                 end
 
                 local current = smelt.mode.get("review")
-                return current.note, current.permissions.default_decision, current.label
+                return current.note, current.access, current.label
                 "#,
             )
             .eval()
             .expect("mode records remain isolated from callers");
 
         assert_eq!(note, "review carefully");
-        assert_eq!(decision, "deny");
+        assert_eq!(access, "read");
         assert_eq!(label, "Review");
         assert_eq!(runtime.execution().mode_note("review"), "review carefully");
     }
@@ -1502,11 +1444,9 @@ mod tests {
             .lua
             .load(
                 r#"
-                assert(smelt.settings.restrict_to_workspace == true)
                 assert(smelt.settings.fast_mode == false)
                 smelt.settings.autoupgrade = "off"
                 smelt.settings.fast_mode = true
-                smelt.settings.restrict_to_workspace = false
                 assert(smelt.settings.fast_mode == true)
                 local count = 0
                 for key, value in pairs(smelt.settings) do
@@ -1523,7 +1463,6 @@ mod tests {
         let config = runtime.to_config();
         assert_eq!(config.settings.autoupgrade, "off");
         assert!(config.settings.fast_mode);
-        assert!(!config.settings.restrict_to_workspace);
     }
 
     #[test]
@@ -1535,10 +1474,10 @@ mod tests {
             .load("return smelt.mode.current()")
             .eval()
             .expect("Host API remains available without a terminal UI entry");
-        assert_eq!(mode, "normal");
+        assert_eq!(mode, "read");
         let registered_mode: bool = runtime
             .lua
-            .load("return smelt.mode.get('normal') ~= nil")
+            .load("return smelt.mode.get('read') ~= nil")
             .eval()
             .expect("bundled Host API remains available without a terminal UI entry");
         assert!(registered_mode);
@@ -1613,7 +1552,7 @@ mod tests {
 
         for (call, api) in [
             ("return smelt.model.current()", "smelt.model.current"),
-            ("return smelt.mode.set('normal')", "smelt.mode.set"),
+            ("return smelt.mode.set('read')", "smelt.mode.set"),
             (
                 "return smelt.transcript.watch_view(function() end)",
                 "smelt.transcript.watch_view",
@@ -1642,105 +1581,6 @@ mod tests {
                 "unexpected {api} error: {error}"
             );
         }
-    }
-
-    #[test]
-    fn headless_lua_policy_paths_cover_registered_file_and_shell_tools() {
-        use smelt_permissions::{
-            resolve_permissions, store::PermissionStore, PermissionRuntimePaths, PermissionsHandle,
-            ToolOrigin,
-        };
-
-        let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("workspace");
-        let trusted = root.path().join("trusted");
-        let config_dir = root.path().join("config");
-        for path in [&cwd, &trusted, &config_dir] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        std::fs::write(
-            config_dir.join("init.lua"),
-            format!(
-                r#"smelt.permissions.extend({{
-                    default = {{
-                        tools = {{ allow = {{ "read_file" }} }},
-                        patterns = {{ bash = {{ allow = {{ "cat *" }} }} }},
-                        paths = {{ allow = {{ "{}" }} }},
-                    }},
-                }})"#,
-                trusted.display()
-            ),
-        )
-        .unwrap();
-        let env = engine::env::RuntimeEnv::scripted(
-            4242,
-            root.path().join("home"),
-            config_dir.clone(),
-            root.path().join("state"),
-            root.path().join("cache"),
-            root.path().join("data"),
-            root.path().join("runtime"),
-            cwd.clone(),
-            std::num::NonZeroUsize::new(1).unwrap(),
-        );
-        let mut lua = LuaRuntime::new_for_runtime(&env, Some(config_dir), None, Some(cwd.clone()));
-        lua.load_host_bootstrap();
-        lua.load_host_autoload();
-        lua.load_user_config();
-        assert!(
-            lua.load_error.is_none(),
-            "headless startup: {:?}",
-            lua.load_error
-        );
-        let permissions = PermissionsHandle::from_resolution(
-            resolve_permissions(
-                &lua.permission_rules_snapshot().unwrap(),
-                &lua.tool_defaults(),
-                lua.mode_behaviors(),
-                smelt_permissions::WorkspacePolicy::default(),
-                PermissionRuntimePaths {
-                    cwd: &cwd,
-                    home: env.home(),
-                },
-                &PermissionStore::new(env.state_dir().clone()),
-                None,
-            )
-            .unwrap(),
-        );
-        let path = trusted.join("file.txt");
-        let args = std::collections::HashMap::from([("file_path".into(), serde_json::json!(path))]);
-        let paths = lua.tool_paths_for_workspace("read_file", &args).unwrap();
-        assert!(matches!(
-            paths,
-            smelt_core::lua::ToolWorkspacePaths::Declared(_)
-        ));
-        assert_eq!(
-            permissions
-                .evaluate_tool_with_paths_and_approvals(
-                    protocol::AgentMode::normal(),
-                    ToolOrigin::Lua,
-                    "read_file",
-                    &args,
-                    paths.as_slice(),
-                )
-                .decision,
-            protocol::Decision::Allow,
-        );
-        let args = std::collections::HashMap::from([(
-            "command".into(),
-            serde_json::json!(format!("cat {}", path.display())),
-        )]);
-        assert_eq!(
-            permissions
-                .evaluate_tool_with_approvals(
-                    protocol::AgentMode::normal(),
-                    ToolOrigin::Lua,
-                    "bash",
-                    &args,
-                )
-                .decision,
-            protocol::Decision::Allow,
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1830,29 +1670,20 @@ mod tests {
             smelt_core::StartupOverrides::default(),
             engine,
             smelt_core::FrontendKind::Headless,
-            smelt_permissions::PermissionsHandle::new(smelt_permissions::Permissions::load()),
             clock,
             env,
         );
 
         core.permissions
-            .approvals()
-            .write()
-            .unwrap()
-            .add_session_tool("headless_probe", Vec::new());
+            .allow("headless_probe", protocol::Access::Read);
         let (model_count, permission_listed): (usize, bool) =
             smelt_core::host::scope_core(&mut core, || {
                 runtime
                     .lua
                     .load(
                         r#"
-                        local listed = false
-                        for _, entry in ipairs(smelt.permissions.list().session) do
-                            if entry.tool == "headless_probe" and entry.pattern == "*" then
-                                listed = true
-                            end
-                        end
-                        return #smelt.model.list(), listed
+                        return #smelt.model.list(),
+                            smelt.permissions.allowed("headless_probe", "read")
                         "#,
                     )
                     .eval()
@@ -1889,7 +1720,7 @@ mod tests {
                     call_id: "notebook-call",
                 },
                 smelt_core::lua::ToolEnv {
-                    mode: protocol::AgentMode::parse("apply").unwrap(),
+                    mode: protocol::AgentMode::parse("write").unwrap(),
                     session_id: "headless-test",
                     artifact_dir: root.path(),
                 },
@@ -3323,7 +3154,7 @@ mod tests {
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let defs = rt.tool_defs(
-            protocol::AgentMode::normal(),
+            protocol::AgentMode::read(),
             smelt_core::lua::ToolVisibility::Interactive,
         );
         for name in ["ask_user_question", "enter_worktree", "switch_cwd"] {
@@ -3342,11 +3173,11 @@ mod tests {
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
 
         let interactive = rt.tool_defs(
-            protocol::AgentMode::normal(),
+            protocol::AgentMode::read(),
             smelt_core::lua::ToolVisibility::Interactive,
         );
         let headless = rt.tool_defs(
-            protocol::AgentMode::normal(),
+            protocol::AgentMode::read(),
             smelt_core::lua::ToolVisibility::Headless,
         );
         let interactive_names: Vec<_> = interactive.iter().map(|d| d.name.as_str()).collect();
@@ -3378,7 +3209,7 @@ mod tests {
             .unwrap();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let defs = rt.tool_defs(
-            protocol::AgentMode::normal(),
+            protocol::AgentMode::read(),
             smelt_core::lua::ToolVisibility::Interactive,
         );
         for name in ["edit_file", "edit_notebook"] {
@@ -3596,7 +3427,7 @@ mod tests {
                 call_id: "call-read-file-utf8-boundary",
             },
             ToolEnv {
-                mode: protocol::AgentMode::normal(),
+                mode: protocol::AgentMode::read(),
                 session_id: "sess",
                 artifact_dir: tmp.path(),
             },

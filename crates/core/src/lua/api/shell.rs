@@ -11,9 +11,79 @@ const INTERACTIVE_BINS: &[&str] = &[
 
 const GIT_INTERACTIVE_SUBCMDS: &[&str] = &["rebase", "add", "checkout", "clean", "stash"];
 
+/// One command of a shell line and the operator that ends it.
+#[derive(Debug, PartialEq, Eq)]
+struct Segment {
+    command: String,
+    op: Option<&'static str>,
+}
+
+/// Split a shell line at `;`, `&`, `&&`, `||`, `|`, `|&` and newlines,
+/// outside quotes. Redirections such as `2>&1` and `&>` stay in the command.
+/// This is a guard against commands that would hang, not a parser.
+fn split(line: &str) -> Vec<Segment> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    let mut push = |current: &mut String, op: Option<&'static str>| {
+        let command = current.trim();
+        if !command.is_empty() || op.is_some() {
+            segments.push(Segment {
+                command: command.to_string(),
+                op,
+            });
+        }
+        current.clear();
+    };
+    while let Some(ch) = chars.next() {
+        if let Some(open) = quote {
+            current.push(ch);
+            if ch == open {
+                quote = None;
+            } else if ch == '\\' && open == '"' {
+                current.extend(chars.next());
+            }
+            continue;
+        }
+        let op = match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                None
+            }
+            '\\' => {
+                current.push(ch);
+                current.extend(chars.next());
+                continue;
+            }
+            ';' | '\n' => Some(";"),
+            '|' if chars.next_if_eq(&'|').is_some() => Some("||"),
+            '|' if chars.next_if_eq(&'&').is_some() => Some("|&"),
+            '|' => Some("|"),
+            '&' if chars.next_if_eq(&'&').is_some() => Some("&&"),
+            '&' if current.ends_with(['>', '<']) || chars.peek() == Some(&'>') => None,
+            '&' => Some("&"),
+            _ => None,
+        };
+        match op {
+            Some(op) => push(&mut current, Some(op)),
+            None => current.push(ch),
+        }
+    }
+    push(&mut current, None);
+    segments
+}
+
+fn commands(line: &str) -> Vec<String> {
+    split(line)
+        .into_iter()
+        .map(|segment| segment.command)
+        .filter(|command| !command.is_empty())
+        .collect()
+}
+
 fn check_interactive(command: &str) -> Option<&'static str> {
-    let cmds = smelt_permissions::split_shell_commands(command);
-    for subcmd in &cmds {
+    for subcmd in commands(command) {
         let parts: Vec<&str> = subcmd.split_whitespace().collect();
         let bin = match parts.first() {
             Some(b) => *b,
@@ -38,9 +108,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
 }
 
 fn check_shell_background_operator(command: &str) -> Option<String> {
-    let has = smelt_permissions::split_shell_commands_with_ops(command)
-        .iter()
-        .any(|(_, op)| op.as_deref() == Some("&"));
+    let has = split(command).iter().any(|segment| segment.op == Some("&"));
     if has {
         Some(
             "shell backgrounding (`&`) is not supported in `bash` commands here; remove `&`, set `background=true` on the tool call, then use `read_process_output` and `stop_process` with the returned job ID"
@@ -61,27 +129,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "split",
-        "Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`). Operators themselves are dropped.",
+        "Split `command` into the sequence of subcommands separated by shell operators (`;`, `&`, `&&`, `||`, `|`) outside quotes. Operators themselves are dropped.",
         &["command"],
-        |_, command: String| Ok(smelt_permissions::split_shell_commands(&command)),
-    )?;
-    m.fn_(
-        "split_with_ops",
-        "Split `command` into subcommands and pair each with the operator that followed it. Returns rows of `{ command = string, op = string? }`.",
-        &["command"],
-        |lua, command: String| -> LuaResult<mlua::Table> {
-            let parts = smelt_permissions::split_shell_commands_with_ops(&command);
-            let out = lua.create_table()?;
-            for (i, (cmd, op)) in parts.into_iter().enumerate() {
-                let row = lua.create_table()?;
-                row.set("command", cmd)?;
-                if let Some(op) = op {
-                    row.set("op", op)?;
-                }
-                out.set(i + 1, row)?;
-            }
-            Ok(out)
-        },
+        |_, command: String| Ok(commands(&command)),
     )?;
     m.fn_(
         "check_interactive",
@@ -95,21 +145,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["command"],
         |_, command: String| Ok(check_shell_background_operator(&command)),
     )?;
-    m.fn_(
-        "extract_paths",
-        "Extract filesystem paths referenced by `command` for workspace permission checks.",
-        &["command"],
-        |_, command: String| -> LuaResult<Vec<String>> {
-            Ok(smelt_permissions::workspace::extract_paths_from_command(
-                &command,
-            ))
-        },
-    )?;
-    m.fn_(
-        "has_output_redirection",
-        "Return true when `command` contains shell output redirection such as `>` or `>>`.",
-        &["command"],
-        |_, command: String| Ok(smelt_permissions::shell_has_output_redirection(&command)),
-    )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_at_operators_outside_quotes() {
+        assert_eq!(
+            commands("cd a && echo 'x; y' | grep \"a|b\" || ls; pwd"),
+            ["cd a", "echo 'x; y'", "grep \"a|b\"", "ls", "pwd"]
+        );
+    }
+
+    #[test]
+    fn background_operator_is_found_but_redirections_are_not() {
+        assert!(check_shell_background_operator("sleep 1 & echo").is_some());
+        assert!(check_shell_background_operator("make 2>&1 | tail").is_none());
+        assert!(check_shell_background_operator("make &> log && echo ok").is_none());
+        assert!(check_shell_background_operator("echo '&'").is_none());
+    }
+
+    #[test]
+    fn interactive_programs_are_found_in_any_command() {
+        assert!(check_interactive("git status && vim a.txt").is_some());
+        assert!(check_interactive("git rebase -i HEAD~2").is_some());
+        assert!(check_interactive("echo vim").is_none());
+    }
 }

@@ -201,7 +201,7 @@ in Lua default to `openai-compatible` unless they set `type`):
 | Flag                         | Description                                                                                      |
 | ---------------------------- | ------------------------------------------------------------------------------------------------ |
 | `--prompt-file <PATH>`       | Read the initial message from a UTF-8 file; conflicts with the positional message                |
-| `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`                                                 |
+| `--mode <MODE>`              | Starting mode: `read`, `plan`, `write`, `yolo`                                                 |
 | `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)                                                  |
 | `--reasoning-effort <LEVEL>` | Starting reasoning. Known labels: `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; provider-defined labels are accepted |
 | `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated known or provider-defined labels)                    |

@@ -1,7 +1,6 @@
 //! Token usage, turn metadata, and per-turn overrides.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Parsed token usage from an API response.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -124,27 +123,6 @@ pub struct ModelConfigOverrides {
     pub thinking_budgets: Option<ThinkingBudgets>,
 }
 
-/// Permission rule-set override (allow / ask / deny glob patterns).
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RuleSetOverride {
-    pub allow: Vec<String>,
-    pub ask: Vec<String>,
-    pub deny: Vec<String>,
-}
-
-/// Per-turn permission overrides. `tools` matches tool *names*; every
-/// other entry in `subcommands` is a per-tool subpattern bucket
-/// (`bash`, `web_fetch`, `mcp`, or any tool that registers one).
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PermissionOverrides {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<RuleSetOverride>,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub subcommands: HashMap<String, RuleSetOverride>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,15 +205,5 @@ mod tests {
         };
         let v = serde_json::to_value(o).unwrap();
         assert_eq!(v, json!({"temperature": 0.5}));
-    }
-
-    // ---- PermissionOverrides ----
-
-    #[test]
-    fn permission_overrides_omits_empty_subcommands_map() {
-        let p = PermissionOverrides::default();
-        let v = serde_json::to_value(p).unwrap();
-        assert!(v.get("subcommands").is_none());
-        assert!(v.get("tools").is_none());
     }
 }

@@ -1,16 +1,12 @@
-use crate::mcp::{args_summary, McpManager, McpToolDef};
+use crate::mcp::{McpManager, McpToolDef};
 use engine::tools::{ToolContext, ToolDispatcher, ToolFuture, ToolResult};
-use protocol::{AgentMode, ToolEvaluation, ToolMetadata};
 use serde_json::Value;
-use smelt_permissions::ToolOrigin;
 use smelt_provider::{FunctionSchema, ToolDefinition};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct McpDispatcher {
     manager: Arc<McpManager>,
-    permissions: smelt_permissions::PermissionsHandle,
-    turn_permissions: Mutex<HashMap<u64, Arc<smelt_permissions::Permissions>>>,
 }
 
 impl McpDispatcher {
@@ -21,15 +17,8 @@ impl McpDispatcher {
     /// holds no cached tool list - it queries `manager.tool_defs()` on
     /// every access so `/reload`-driven server changes are picked up
     /// immediately.
-    pub fn new(
-        manager: Arc<McpManager>,
-        permissions: smelt_permissions::PermissionsHandle,
-    ) -> Self {
-        Self {
-            manager,
-            permissions,
-            turn_permissions: Mutex::new(HashMap::new()),
-        }
+    pub fn new(manager: Arc<McpManager>) -> Self {
+        Self { manager }
     }
 
     fn def_for(&self, name: &str) -> Option<McpToolDef> {
@@ -37,15 +26,6 @@ impl McpDispatcher {
             .tool_defs()
             .into_iter()
             .find(|d| d.qualified_name() == name)
-    }
-
-    fn permissions_for_turn(&self, turn_id: u64) -> Arc<smelt_permissions::Permissions> {
-        self.turn_permissions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&turn_id)
-            .cloned()
-            .unwrap_or_else(|| self.permissions.snapshot())
     }
 }
 
@@ -66,59 +46,6 @@ impl ToolDispatcher for McpDispatcher {
 
     fn contains(&self, name: &str) -> bool {
         self.def_for(name).is_some()
-    }
-
-    fn begin_turn(&self, turn_id: u64) {
-        self.turn_permissions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(turn_id, self.permissions.snapshot());
-    }
-
-    fn end_turn(&self, turn_id: u64) {
-        self.turn_permissions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&turn_id);
-    }
-
-    fn is_visible(&self, turn_id: u64, name: &str, mode: AgentMode) -> bool {
-        self.def_for(name).is_some()
-            && self
-                .permissions_for_turn(turn_id)
-                .check_subcommand(mode, "mcp", name)
-                != protocol::Decision::Deny
-    }
-
-    fn evaluate_tool_call(
-        &self,
-        turn_id: u64,
-        name: &str,
-        args: &HashMap<String, Value>,
-        mode: AgentMode,
-        permission_overrides: Option<&protocol::PermissionOverrides>,
-    ) -> Option<ToolEvaluation> {
-        self.def_for(name)?;
-        let summary = args_summary(args);
-        let current = self.permissions_for_turn(turn_id);
-        let permissions;
-        let active_permissions = if let Some(overrides) = permission_overrides {
-            permissions = current.with_overrides(overrides);
-            &permissions
-        } else {
-            current.as_ref()
-        };
-        let outcome =
-            active_permissions.evaluate_tool_with_approvals(mode, ToolOrigin::Mcp, name, args);
-        let decision = outcome.decision;
-        Some(ToolEvaluation {
-            decision,
-            metadata: ToolMetadata {
-                approval_patterns: Vec::new(),
-                preflight_error: None,
-                summary,
-            },
-        })
     }
 
     fn dispatch<'a>(
@@ -142,99 +69,5 @@ impl ToolDispatcher for McpDispatcher {
                 Err(e) => ToolResult::err(e),
             }
         }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mcp::{McpServer, McpServerConfig, McpTransportConfig};
-    use protocol::Decision;
-    use smelt_permissions::rules::{RawPerms, RawRuleSet, ToolDefaults};
-    use std::sync::{Mutex, RwLock};
-    use std::time::Duration;
-
-    fn manager_with_tool() -> Arc<McpManager> {
-        let config = McpServerConfig {
-            description: String::new(),
-            enabled: true,
-            transport: McpTransportConfig::Local {
-                command: vec!["unused".into()],
-                env: HashMap::new(),
-                timeout: 30_000,
-            },
-        };
-        let server = Arc::new(McpServer::new(
-            "demo".into(),
-            config,
-            std::env::current_dir().unwrap(),
-        ));
-        server.set_tools(vec![McpToolDef {
-            server_name: "demo".into(),
-            tool_name: "read".into(),
-            description: String::new(),
-            input_schema: serde_json::json!({"type": "object"}),
-            timeout: Duration::from_secs(30),
-        }]);
-        Arc::new(McpManager {
-            servers: RwLock::new(HashMap::from([("demo".into(), server)])),
-            controller: Mutex::new(Default::default()),
-            observed: tokio::sync::watch::channel(0).0,
-        })
-    }
-
-    fn permissions_for_mcp(decision: Decision) -> smelt_permissions::Permissions {
-        let mut raw = RawPerms::default();
-        let rules = RawRuleSet {
-            allow: (decision == Decision::Allow)
-                .then(|| "*".into())
-                .into_iter()
-                .collect(),
-            ask: (decision == Decision::Ask)
-                .then(|| "*".into())
-                .into_iter()
-                .collect(),
-            deny: (decision == Decision::Deny)
-                .then(|| "*".into())
-                .into_iter()
-                .collect(),
-        };
-        raw.default.patterns.insert("mcp".into(), rules);
-        smelt_permissions::Permissions::from_raw(&raw, &ToolDefaults::default())
-    }
-
-    #[test]
-    fn dispatcher_observes_replaced_runtime_permissions() {
-        let permissions =
-            smelt_permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Deny));
-        let dispatcher = McpDispatcher::new(manager_with_tool(), permissions.clone());
-        let mode = AgentMode::normal();
-        assert!(!dispatcher.is_visible(0, "demo_read", mode.clone()));
-
-        let live_permissions = permissions.replace(permissions_for_mcp(Decision::Allow));
-        assert_eq!(
-            live_permissions.check_subcommand(mode.clone(), "mcp", "demo_read"),
-            Decision::Allow
-        );
-        assert!(
-            dispatcher.is_visible(0, "demo_read", mode),
-            "MCP permission evaluation must observe the replacement used by the live runtime"
-        );
-    }
-
-    #[test]
-    fn dispatcher_pins_static_permissions_for_each_turn() {
-        let permissions =
-            smelt_permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Allow));
-        let dispatcher = McpDispatcher::new(manager_with_tool(), permissions.clone());
-        let mode = AgentMode::normal();
-        dispatcher.begin_turn(7);
-
-        permissions.replace(permissions_for_mcp(Decision::Deny));
-
-        assert!(dispatcher.is_visible(7, "demo_read", mode.clone()));
-        assert!(!dispatcher.is_visible(8, "demo_read", mode.clone()));
-        dispatcher.end_turn(7);
-        assert!(!dispatcher.is_visible(7, "demo_read", mode));
     }
 }

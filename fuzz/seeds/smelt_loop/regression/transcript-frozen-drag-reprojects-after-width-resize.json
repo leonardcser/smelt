@@ -1,7 +1,7 @@
 {
   "_about": "Transcript resize regression: a mouse press can freeze the transcript layer for drag selection; after a width-changing resize, the next render must reproject at the new width instead of preserving old-width preformatted rows with horizontal scroll pinned.",
   "_fix": "fix(tui): cancel frozen transcript drag on width resize",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "start_custom_command",

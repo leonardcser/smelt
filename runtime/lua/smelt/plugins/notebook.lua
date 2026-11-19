@@ -103,7 +103,7 @@ smelt.tools.register({
   description = "Edit a Jupyter notebook (.ipynb) cell: replace, insert, or delete.",
   override = true,
   execution_mode = "sequential",
-  effect = "write",
+  access = "write",
   parameters = {
     type = "object",
     properties = {
@@ -147,9 +147,8 @@ smelt.tools.register({
   preflight = function(_, prepared)
     return prepared and prepared.err
   end,
-  paths_for_workspace = function(args)
-    local p = args.notebook_path or ""
-    return p ~= "" and { { path = p, kind = "file" } } or {}
+  paths = function(args)
+    return { args.notebook_path or "" }
   end,
   preview = function(_, prepared)
     local meta = prepared and prepared.preview

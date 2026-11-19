@@ -31,6 +31,6 @@ dim: 80 26
  23  31   2 fg=Rgb { r: 99, g: 169, b: 240 }
  23  33  28 fg=AnsiValue(244)
  24   1  30 fg=AnsiValue(244)
- 25   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
- 25  10  64 bg=AnsiValue(233)
+ 25   0   8 fg=AnsiValue(244) bg=AnsiValue(234)
+ 25   8  66 bg=AnsiValue(233)
  25  74   6 fg=AnsiValue(244) bg=AnsiValue(233)

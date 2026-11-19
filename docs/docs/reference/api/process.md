@@ -68,8 +68,10 @@ fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: strin
 Run `cmd` with `args` off the main thread. Yields the calling
 coroutine until the child exits; must be called from inside
 `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
-`timeout_secs`, `stdin`, and `max_output_bytes` (default 100 KB, maximum
-32 MB). Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
+`timeout_secs`, `stdin`, `max_output_bytes` (default 100 KB, maximum
+32 MB) and `sandbox`. Inside a tool call the child runs in the call's
+sandbox (see `smelt.sandbox`); `sandbox = false` runs it unconfined.
+Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
 `(nil, err)` on spawn failure. If the calling coroutine is cancelled
 (e.g. by `smelt.task.timeout` or by `:remove()` on the parent spawn),
 the child process is killed (SIGTERM to its process group) and
@@ -79,10 +81,10 @@ yielding API.
 ## `smelt.process.run_streaming`
 
 ```lua
-fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil
+fun(task_id: integer, call_id: string, command: string, opts: table): nil
 ```
 
-Run `command` as a contained job with a `timeout_ms` deadline, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, the same supervised job keeps running in the background.
+Run `command` as a contained job, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled). `opts.timeout_ms` sets the deadline. When `opts.background_on_timeout` is true, the same supervised job keeps running in the background. Inside a tool call it runs in the call's sandbox; `opts.sandbox = false` runs it unconfined.
 
 ## `smelt.process.set_default_shell`
 
@@ -95,14 +97,16 @@ Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-fo
 ## `smelt.process.spawn_bg`
 
 ```lua
-fun(command: string, notify_on_completion?: boolean): string
+fun(command: string, opts?: { notify_on_completion?: boolean, sandbox?: boolean }): string
 ```
 
 Spawn `command` as a contained background shell job. Yields while smelt
 selects and verifies the containment backend, then returns an opaque job ID.
-`notify_on_completion` defaults to true. Set false for detached services that
-should neither keep the session waiting nor start a turn when they exit.
-Must be called from inside `smelt.spawn(fn)` or a `tool.execute`.
+`opts.notify_on_completion` defaults to true. Set false for detached services
+that should neither keep the session waiting nor start a turn when they exit.
+Inside a tool call the job runs in the call's sandbox (see
+`smelt.sandbox`); `opts.sandbox = false` runs it unconfined. Must be
+called from inside `smelt.spawn(fn)` or a `tool.execute`.
 
 ## `smelt.process.stop`
 

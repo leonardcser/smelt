@@ -60,6 +60,21 @@ async fn until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+/// Path arguments of Claude Code's native file tools.
+const PATH_ARGS: &[&str] = &["file_path", "notebook_path", "path"];
+
+/// Join every relative path argument onto `cwd`, the directory Claude Code
+/// resolved it in, so the host and the transcript see the real file.
+fn absolute_paths(args: &mut HashMap<String, Value>, cwd: &std::path::Path) {
+    for key in PATH_ARGS {
+        if let Some(Value::String(path)) = args.get_mut(*key) {
+            if !path.starts_with('~') && std::path::Path::new(path.as_str()).is_relative() {
+                *path = cwd.join(path.as_str()).to_string_lossy().into_owned();
+            }
+        }
+    }
+}
+
 /// Prefix Claude Code gives the tools it calls through smelt's MCP server.
 const SMELT_MCP_PREFIX: &str = "mcp__smelt__";
 
@@ -71,7 +86,6 @@ struct Gate {
     /// The name Claude Code calls the tool by.
     tool_name: String,
     args: HashMap<String, Value>,
-    in_workspace_root: bool,
 }
 
 struct InteractionRequest {
@@ -1415,7 +1429,6 @@ impl Runtime<'_> {
                                 call_id: call.call_id.clone(),
                                 tool_name: format!("{SMELT_MCP_PREFIX}{}", call.tool_name),
                                 args: call.args.clone(),
-                                in_workspace_root: true,
                             };
                             self.request_approval(request_id, gate, evaluation.metadata);
                             self.native.executions.insert(request_id, call);
@@ -1597,8 +1610,8 @@ impl Runtime<'_> {
     }
 
     fn enter_plan_mode(&mut self) {
-        if self.mode != protocol::AgentMode::parse("plan").expect("valid built-in mode") {
-            self.mode = protocol::AgentMode::parse("plan").expect("valid built-in mode");
+        if self.mode != protocol::AgentMode::plan() {
+            self.mode = protocol::AgentMode::plan();
             self.policy_revision = self.policy_revision.saturating_add(1);
             let _ = self.live_tx().send(EngineEvent::NativeModeChanged {
                 turn_id: self.payload.turn_id,
@@ -1772,19 +1785,21 @@ impl Runtime<'_> {
         call_id: Option<&str>,
         cwd: Option<&str>,
     ) {
+        let cwd = cwd.map_or_else(|| self.config.cwd.clone(), std::path::PathBuf::from);
+        let mut args: HashMap<String, Value> = input
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        absolute_paths(&mut args, &cwd);
         let gate = Gate {
             policy_revision: self.policy_revision,
             control_id: id.into(),
             hook,
             call_id: call_id.unwrap_or(id).into(),
             tool_name: name.into(),
-            args: input
-                .as_object()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .collect(),
-            in_workspace_root: cwd.is_none_or(|cwd| std::path::Path::new(cwd) == self.config.cwd),
+            args,
         };
         if self.catalog.owns(name) {
             self.native
@@ -1796,13 +1811,9 @@ impl Runtime<'_> {
         let call = crate::HostCall::NativeToolEvaluation {
             turn_id: self.payload.turn_id,
             session_id: self.payload.session_id.clone(),
-            cwd: cwd
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| self.config.cwd.clone()),
             tool_name: name.into(),
             args: gate.args.clone(),
             mode: self.mode.clone(),
-            overrides: self.payload.permission_overrides.clone(),
             reply,
         };
         let _ = self.host.send(call);
@@ -1852,18 +1863,7 @@ impl Runtime<'_> {
         self.native
             .active_controls
             .insert(gate.control_id.clone(), Some(invocation_id));
-        // Hosts recheck a request against their own workspace root, so it is
-        // presented as a smelt tool only when Claude Code resolved it there.
-        let call = if gate.in_workspace_root {
-            transcript::presented(&gate.tool_name, gate.args.clone())
-        } else {
-            transcript::Presented {
-                name: gate.tool_name.clone(),
-                args: gate.args.clone(),
-                native: true,
-                namespaced: true,
-            }
-        };
+        let call = transcript::presented(&gate.tool_name, gate.args.clone());
         let _ = self.session_tx().send(EngineEvent::RequestPermission {
             request_id: id,
             invocation_id,
@@ -1873,9 +1873,9 @@ impl Runtime<'_> {
                 .namespaced
                 .then(|| self.payload.model_target.provider.clone()),
             args: call.args,
-            approval_patterns: metadata.approval_patterns,
             called_at_ms: crate::clock::unix_time_ms(self.config.clock.as_ref()),
             summary: metadata.summary,
+            access: metadata.access,
         });
         self.native.approvals.insert(id, gate);
     }
@@ -1967,23 +1967,9 @@ impl Runtime<'_> {
                 if self.payload.tools.iter().any(|tool| tool.name == name && !self.catalog.exposes(tool, &self.mode)) {
                     return self.reject_tool(call, "Tool is native-owned or hidden in this mode").await;
                 }
-                let request_id = agent::next_request_id();
-                if self.payload.tools.iter().any(|tool| tool.name == name && self.catalog.exposes(tool, &self.mode)) {
+                let exposed = self.payload.tools.iter().any(|tool| tool.name == name && self.catalog.exposes(tool, &self.mode));
+                if exposed || self.dispatcher.contains(name) {
                     self.request_evaluation(call);
-                } else if let Some(evaluation) = self.dispatcher.evaluate_tool_call(
-                    self.payload.turn_id,
-                    name,
-                    &call.args,
-                    self.mode.clone(),
-                    self.payload.permission_overrides.as_ref(),
-                ) {
-                    self.native.evaluations.insert(request_id, call);
-                    self.command(UiCommand::ToolEvaluationResponse {
-                            request_id,
-                            evaluation,
-                        },
-                    )
-                    .await?;
                 } else {
                     self.reject_tool(call,
                         "Tool is unavailable in this mode",
@@ -2007,7 +1993,7 @@ impl Runtime<'_> {
     /// smelt tools the native agent sees through the "smelt" MCP server.
     fn tool_list(&self) -> Vec<Value> {
         let mut tools: Vec<Value> = self.payload.tools.iter().filter(|tool| self.catalog.exposes(tool, &self.mode)).map(|tool| json!({"name":tool.name,"description":tool.description,"inputSchema":tool.parameters})).collect();
-        tools.extend(self.dispatcher.definitions().into_iter().filter(|tool| !self.payload.tools.iter().any(|lua| lua.name == tool.function.name) && self.dispatcher.is_visible(self.payload.turn_id, &tool.function.name, self.mode.clone())).map(|tool| json!({"name":tool.function.name,"description":tool.function.description,"inputSchema":tool.function.parameters})));
+        tools.extend(self.dispatcher.definitions().into_iter().filter(|tool| !self.payload.tools.iter().any(|lua| lua.name == tool.function.name)).map(|tool| json!({"name":tool.function.name,"description":tool.function.description,"inputSchema":tool.function.parameters})));
         tools
     }
 
@@ -2505,7 +2491,7 @@ async fn auxiliary(
     let mut process = Process::spawn(transport::LaunchOptions {
         cwd,
         target: &task.target,
-        mode: &protocol::AgentMode::normal(),
+        mode: &protocol::AgentMode::read(),
         effort: &task.reasoning_effort,
         resume: None,
         resume_at: None,

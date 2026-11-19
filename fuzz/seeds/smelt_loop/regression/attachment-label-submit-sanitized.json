@@ -1,6 +1,6 @@
 {
   "_about": "Attachment display regression: submitted prompt text must use sanitized attachment labels so control bytes in labels cannot create over-wide transcript rows.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "insert_attachment",

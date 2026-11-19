@@ -473,15 +473,11 @@ local function register_tool(name, description, properties, required)
   add_reg(smelt.tools.register(__smelt_internal.tools.with_watchdog({
     name = name,
     description = description,
-    permission_defaults = { normal = "allow", plan = "allow", apply = name == "rename_symbol" and "ask" or "allow" },
-    effect = name == "rename_symbol" and "write" or "read",
+    -- A rename edits every reference, wherever the server finds one.
+    access = name == "rename_symbol" and "full" or "read",
     parameters = parameters,
     summary = function(args, ctx)
       return tool_summary(name, args, ctx)
-    end,
-    paths_for_workspace = function(args)
-      local p = (args and args.file_path) or ""
-      return p ~= "" and { { path = p, kind = "file" } } or {}
     end,
     execute = function(args)
       return call_backend(name, args)

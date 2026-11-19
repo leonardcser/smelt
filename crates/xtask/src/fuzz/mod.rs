@@ -320,10 +320,6 @@ pub(super) const TARGETS: &[FuzzTarget] = &[
         kind: TargetKind::Bytes,
     },
     FuzzTarget {
-        name: "permissions_rules",
-        kind: TargetKind::Bytes,
-    },
-    FuzzTarget {
         name: "store_state",
         kind: TargetKind::Bytes,
     },

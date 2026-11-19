@@ -16,7 +16,10 @@ smelt.tools.register({
   name = "stop_process",
   description = "Stop a running background bash process by id and return its buffered output.",
   override = true,
-  effect = "process",
+  -- Stopping a job changes no files, but it is an action: it runs freely
+  -- from apply mode up.
+  access = "write",
+  paths = function() return {} end,
   parameters = {
     type = "object",
     properties = {

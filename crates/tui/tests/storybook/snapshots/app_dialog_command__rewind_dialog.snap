@@ -17,4 +17,4 @@ expression: frame.text()
   2. add the renderer
   3. wire up the CLI flag
   4. (current)
- ○ normal                                           4:1 100%
+ ○ read                                             4:1 100%

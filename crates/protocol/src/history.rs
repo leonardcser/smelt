@@ -1387,30 +1387,30 @@ mod tests {
     fn effective_mode_at_uses_transition_base_after_rewind_boundary() {
         let history = vec![
             HistoryItem::user(Content::text("before")),
-            transition_item("normal", "apply"),
+            transition_item("read", "write"),
             HistoryItem::user(Content::text("after")),
         ];
 
-        assert_eq!(effective_mode_at(&history, 1, "apply"), "normal");
-        assert_eq!(effective_mode_at(&history, 2, "normal"), "apply");
+        assert_eq!(effective_mode_at(&history, 1, "write"), "read");
+        assert_eq!(effective_mode_at(&history, 2, "read"), "write");
     }
 
     #[test]
     fn mode_append_back_to_base_removes_pending_mode_note() {
-        let base = crate::mode::AgentMode::parse("normal").unwrap();
+        let base = crate::mode::AgentMode::parse("read").unwrap();
         let mut history = vec![HistoryItem::user(Content::text("hello"))];
 
         assert_eq!(
             apply_history_append(
                 &mut history,
-                &HistoryAppend::mode_change(mode_item("apply"), base.clone()),
+                &HistoryAppend::mode_change(mode_item("write"), base.clone()),
             ),
             HistoryAppendResult::Pushed
         );
         assert_eq!(
             apply_history_append(
                 &mut history,
-                &HistoryAppend::mode_change(mode_item("normal"), base.clone()),
+                &HistoryAppend::mode_change(mode_item("read"), base.clone()),
             ),
             HistoryAppendResult::RemovedLast
         );
@@ -1420,10 +1420,10 @@ mod tests {
 
     #[test]
     fn mode_append_replaces_with_distinct_mode() {
-        let base = crate::mode::AgentMode::parse("normal").unwrap();
+        let base = crate::mode::AgentMode::parse("read").unwrap();
         let mut history = vec![
             HistoryItem::user(Content::text("hello")),
-            mode_item("apply"),
+            mode_item("write"),
         ];
 
         assert_eq!(
@@ -1445,13 +1445,13 @@ mod tests {
 
     #[test]
     fn mode_append_matching_effective_mode_is_noop() {
-        let base = crate::mode::AgentMode::parse("normal").unwrap();
+        let base = crate::mode::AgentMode::parse("read").unwrap();
         let mut history = vec![HistoryItem::user(Content::text("hello"))];
 
         assert_eq!(
             apply_history_append(
                 &mut history,
-                &HistoryAppend::mode_change(mode_item("normal"), base.clone()),
+                &HistoryAppend::mode_change(mode_item("read"), base.clone()),
             ),
             HistoryAppendResult::Unchanged
         );
@@ -1553,7 +1553,7 @@ mod tests {
 
     #[test]
     fn notes_round_trip_through_provider_user_messages() {
-        let item = HistoryItem::note(HistoryNote::mode_change("now in apply mode"));
+        let item = HistoryItem::note(HistoryNote::mode_change("now in write mode"));
         let messages = history_to_messages(std::slice::from_ref(&item));
         assert!(matches!(messages[0].role, Role::User));
         assert!(messages[0].content.as_ref().is_some_and(|content| content
@@ -1575,11 +1575,11 @@ mod tests {
         );
 
         let mode = history_item_from_user_content(Content::text(crate::note::mode_change_note(
-            "now in apply mode.",
+            "now in write mode.",
         )));
         assert_eq!(
             mode,
-            HistoryItem::note(HistoryNote::mode_change("now in apply mode."))
+            HistoryItem::note(HistoryNote::mode_change("now in write mode."))
         );
     }
 
@@ -1605,11 +1605,11 @@ mod tests {
     fn transcript_block_kinds_follow_semantic_history_projection() {
         let user = HistoryItem::user(Content::text("follow up"));
         let encoded_mode =
-            HistoryItem::user(Content::text(crate::note::mode_change_note("apply mode")));
+            HistoryItem::user(Content::text(crate::note::mode_change_note("write mode")));
         let encoded_process = HistoryItem::user(Content::text(crate::note::process_status_note(
             "process finished",
         )));
-        let mode = HistoryItem::note(HistoryNote::mode_change("apply mode"));
+        let mode = HistoryItem::note(HistoryNote::mode_change("write mode"));
         let process = HistoryItem::note(HistoryNote::process_status("process finished"));
         let context = HistoryItem::note(HistoryNote::context("cwd changed"));
 
@@ -1768,14 +1768,14 @@ mod tests {
     #[test]
     fn notes_serialize_without_kind_field_collision() {
         let item = HistoryItem::note(HistoryNote::mode_change_for_mode(
-            "apply",
-            "now in apply mode",
+            "write",
+            "now in write mode",
         ));
         let json = serde_json::to_value(&item).expect("serialize note item");
         assert_eq!(json["kind"], "note");
         assert_eq!(json["note_kind"], "mode_change");
-        assert_eq!(json["mode"], "apply");
-        assert_eq!(json["text"], "now in apply mode");
+        assert_eq!(json["mode"], "write");
+        assert_eq!(json["text"], "now in write mode");
         let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
         assert_eq!(back, item);
     }

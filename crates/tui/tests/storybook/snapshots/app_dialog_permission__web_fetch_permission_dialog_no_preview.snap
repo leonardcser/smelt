@@ -1,8 +1,9 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * web_fetch https://example.com/page                         14:37:03
+
 
 
 
@@ -12,11 +13,10 @@ expression: text
 ──────────────────────────────────────────────────────────────────────
  web_fetch: https://example.com/page
 
- Allow?
+ Run web_fetch?
   1. allow once
   2. deny
-  3. allow example.com for this session
-  4. allow example.com in workspace ~/cwd
+  3. allow web_fetch for this session
 
   press tab to add a reason…
- ○ normal                                                       1:1 0%
+ ○ read                                                         1:1 0%

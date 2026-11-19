@@ -1,6 +1,6 @@
 {
   "_about": "Prompt cursor probe isolation seed: pre-existing queued steering text is replayed on cancel and must not make the cursor probe fail before typing starts.",
-  "mode": "normal",
+  "mode": "read",
   "ops": [
     {
       "kind": "steer",

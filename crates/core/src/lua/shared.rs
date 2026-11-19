@@ -106,10 +106,8 @@ pub struct RegisteredWinRenderer {
 pub struct ToolHandles {
     pub execute: LuaHandle,
     pub execution_mode: protocol::ToolExecutionMode,
-    pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
     pub prepare: Option<LuaHandle>,
-    pub paths_for_workspace: Option<LuaHandle>,
     pub preview: Option<LuaHandle>,
     pub preview_output: Option<LuaHandle>,
 }
@@ -270,7 +268,13 @@ pub struct LuaShared {
     /// Wakes the main loop when a coroutine resume payload is queued.
     pub wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
     pub providers: Mutex<Vec<crate::config::ProviderConfig>>,
-    pub permission_rules: Mutex<Option<smelt_permissions::rules::RawPerms>>,
+    /// Agent modes registered with `smelt.mode.register`.
+    pub modes: Mutex<crate::modes::Modes>,
+    /// Path rules set with `smelt.permissions.paths`.
+    pub path_rules: Mutex<crate::permissions::RuleSet>,
+    /// The sandbox of each running tool call: the commands it starts run in
+    /// it. Released with the call's preparation.
+    pub(crate) call_sandboxes: Mutex<HashMap<protocol::InvocationId, CallSandbox>>,
     pub mcp_configs: Mutex<HashMap<String, crate::mcp::McpServerConfig>>,
     /// Stable session service used by committed LSP calls.
     pub lsp: Arc<crate::lsp::LspManager>,
@@ -280,7 +284,6 @@ pub struct LuaShared {
     pub settings_overrides: Mutex<HashMap<String, crate::config::SettingValue>>,
     pub defaults: Mutex<crate::config::DefaultsConfig>,
     pub remember: Mutex<crate::config::RememberConfig>,
-    pub tool_defaults: Mutex<smelt_permissions::rules::ToolDefaults>,
     pub messages: Arc<Mutex<crate::messages::Messages>>,
     /// Session-long clock used by transcript rendering without re-entering the
     /// scoped frontend host. Shared by replacement Lua generations.
@@ -324,6 +327,14 @@ pub struct LuaShared {
     /// the agent loop is live.
     phase: AtomicU8,
     generation_id: AtomicU64,
+}
+
+/// The sandbox the commands of one tool call run in: the most the call may
+/// do without asking, in the mode it runs in.
+#[derive(Debug, Clone)]
+pub(crate) struct CallSandbox {
+    pub access: crate::permissions::Access,
+    pub mode: protocol::AgentMode,
 }
 
 /// Registry entry for one `smelt.engine.ask` request. Response and
@@ -460,7 +471,9 @@ impl Default for LuaShared {
             http_client: Arc::new(crate::http::Client::default()),
             wakeup_tx: std::sync::OnceLock::new(),
             providers: Mutex::new(Vec::new()),
-            permission_rules: Mutex::new(None),
+            modes: Mutex::new(crate::modes::Modes::default()),
+            path_rules: Mutex::new(crate::permissions::RuleSet::default()),
+            call_sandboxes: Mutex::new(HashMap::new()),
             mcp_configs: Mutex::new(HashMap::new()),
             lsp: Arc::new(crate::lsp::LspManager::default()),
             lsp_config: Mutex::new(crate::lsp::LspConfig {
@@ -469,7 +482,6 @@ impl Default for LuaShared {
             settings_overrides: Mutex::new(HashMap::new()),
             defaults: Mutex::new(crate::config::DefaultsConfig::default()),
             remember: Mutex::new(crate::config::RememberConfig::default()),
-            tool_defaults: Mutex::new(smelt_permissions::rules::ToolDefaults::default()),
             messages: Arc::new(Mutex::new(crate::messages::Messages::new())),
             clock: Arc::new(Mutex::new(Arc::new(engine::clock::RealClock))),
             disabled_modules: Mutex::new(HashSet::new()),
@@ -795,6 +807,9 @@ impl LuaShared {
         if let Ok(mut m) = self.tool_preparations.lock() {
             m.clear();
         }
+        if let Ok(mut m) = self.call_sandboxes.lock() {
+            m.clear();
+        }
         if let Ok(mut renderer) = self.transcript_renderer.lock() {
             *renderer = None;
         }
@@ -840,8 +855,11 @@ impl LuaShared {
         if let Ok(mut p) = self.providers.lock() {
             p.clear();
         }
-        if let Ok(mut rules) = self.permission_rules.lock() {
-            *rules = None;
+        if let Ok(mut modes) = self.modes.lock() {
+            *modes = crate::modes::Modes::default();
+        }
+        if let Ok(mut rules) = self.path_rules.lock() {
+            *rules = crate::permissions::RuleSet::default();
         }
         if let Ok(mut settings) = self.settings_overrides.lock() {
             settings.clear();
@@ -851,9 +869,6 @@ impl LuaShared {
         }
         if let Ok(mut remember) = self.remember.lock() {
             *remember = crate::config::RememberConfig::default();
-        }
-        if let Ok(mut defaults) = self.tool_defaults.lock() {
-            *defaults = smelt_permissions::rules::ToolDefaults::default();
         }
         if let Ok(mut shell) = self.default_shell.lock() {
             *shell = None;

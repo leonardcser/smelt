@@ -1,0 +1,12 @@
+[package]
+name = "smelt-sandbox"
+version = "0.0.0-dev"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+description = "Run commands that can write only chosen directories and cannot see hidden paths."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -68,9 +68,9 @@ export function relativeTime(value) {
 }
 
 export function modeBadge(mode) {
-  const name = String(mode || "normal").toLowerCase();
-  const cls = ["normal", "plan", "apply", "yolo"].includes(name) ? name : "normal";
-  const iconName = cls === "apply" ? "arrow-right" : cls === "yolo" ? "zap" : "circle-outline";
+  const name = String(mode || "read").toLowerCase();
+  const cls = ["read", "plan", "write", "yolo"].includes(name) ? name : "read";
+  const iconName = cls === "write" ? "arrow-right" : cls === "yolo" ? "zap" : "circle-outline";
   return `<span class="badge mode-${cls}">${icon(iconName)}${escapeHtml(name)}</span>`;
 }
 

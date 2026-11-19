@@ -9,7 +9,7 @@ description: "Reference for every namespace of the smelt Lua API: commands, keym
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 92 namespace(s), 485 function(s), 132 class(es), 15 alias(es).
+**Coverage:** 93 namespace(s), 485 function(s), 122 class(es), 16 alias(es).
 
 Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).
 
@@ -47,11 +47,12 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.lsp`](lsp.md): Generic stdio Language Server Protocol client. Advanced.
 - [`smelt.mcp`](mcp.md): Config-time MCP server registration.
 - [`smelt.messages`](messages.md): Persistent message log with full bodies and tracebacks.
-- [`smelt.mode`](mode.md) (some UI only): Agent-mode selector.
+- [`smelt.mode`](mode.md) (some UI only): Agent modes.
 - [`smelt.model`](model.md) (some UI only): Model selector.
-- [`smelt.permissions`](permissions.md) (some UI only): Inspect, revoke, and extend permission policy state, or synchronize live session and persisted grants.
+- [`smelt.permissions`](permissions.md): Decide which agent tool calls run, ask, or are denied.
 - [`smelt.provider`](provider.md): List built-in model providers and register custom ones.
 - [`smelt.reasoning`](reasoning.md) (some UI only): Reasoning-effort selector.
+- [`smelt.sandbox`](sandbox.md): The OS sandbox (bubblewrap on Linux, Seatbelt on macOS) that confines commands to what their access allows, so a mistake cannot change files outside the project.
 - [`smelt.session`](session.md) (UI only): Current session metadata, turn list, message snapshots, rewind, and persisted session management. 8 advanced function(s).
 - [`smelt.session.messages`](session_messages.md) (UI only): Session messages.
 - [`smelt.session.slug`](session_slug.md) (UI only): Session slug.

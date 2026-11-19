@@ -56,7 +56,7 @@ pub(super) fn reply(id: &str, response: Value) -> Value {
 }
 
 pub(super) fn permission_mode(mode: &AgentMode) -> &'static str {
-    if mode.as_str() == "plan" {
+    if *mode == AgentMode::plan() {
         "plan"
     } else {
         "default"
@@ -290,7 +290,7 @@ impl Process {
                 provider: "claude-code".into(),
                 config: Default::default(),
             },
-            mode: &AgentMode::normal(),
+            mode: &AgentMode::read(),
             effort: &ReasoningEffort::Off,
             resume: None,
             resume_at: None,

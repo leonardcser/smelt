@@ -165,7 +165,6 @@ const init = (port: number | null) => `smelt.provider.register("ollama", {
   models = { { name = "qwen3.8:27b", context_window = 32768 } },
 })
 smelt.settings.show_cost = false
-smelt.settings.restrict_to_workspace = false
 `;
 
 /** A message sent at once, held a moment so it can be read: the clip gets to the plugin sooner. */

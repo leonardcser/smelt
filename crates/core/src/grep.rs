@@ -30,6 +30,8 @@ pub(crate) struct Options {
     pub(crate) file_type: Option<String>,
     pub(crate) include_ignored: bool,
     pub(crate) timeout: Option<Duration>,
+    /// Run `rg` in this sandbox, so it skips the paths it hides.
+    pub(crate) sandbox: Option<smelt_sandbox::Policy>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,8 +50,11 @@ pub(crate) enum RunOutcome {
     Cancelled,
 }
 
+/// Version-control folders that searches skip, and smelt's worktrees.
+pub(crate) const VCS_DIRS: [&str; 6] = [".git", ".jj", ".hg", ".svn", ".sl", ".worktrees"];
+
 fn append_hard_excludes(args: &mut Vec<String>, path: &Path) {
-    for dir in [".git", ".jj", ".hg", ".svn", ".sl", ".worktrees"] {
+    for dir in VCS_DIRS {
         if !path_contains_component(path, dir) {
             args.push(format!("--glob=!**/{dir}/**"));
         }
@@ -130,12 +135,15 @@ pub(crate) async fn run_async(
     }
 
     append_hard_excludes(&mut args, &path);
-
     args.push("--".into());
     args.push(pattern.to_string());
     args.push(path.to_string_lossy().into_owned());
 
-    let mut child = tokio::process::Command::new("rg")
+    let mut command = match &opts.sandbox {
+        Some(policy) => tokio::process::Command::from(smelt_sandbox::command("rg", policy)?),
+        None => tokio::process::Command::new("rg"),
+    };
+    let mut child = command
         .args(&args)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -189,13 +197,36 @@ pub(crate) async fn run_async(
         status = child.wait() => {
             let stdout_buf = stdout_task.await.unwrap_or_default();
             let stderr_buf = stderr_task.await.unwrap_or_default();
-            Ok(RunOutcome::Done(Output {
+            let mut output = Output {
                 stdout: stdout_buf,
                 stderr: stderr_buf,
                 exit_code: status?.code().unwrap_or(-1),
                 timed_out: false,
-            }))
+            };
+            if opts.sandbox.is_some() {
+                skip_hidden_errors(&mut output);
+            }
+            Ok(RunOutcome::Done(output))
         }
+    }
+}
+
+/// Drop the errors `rg` reports for paths the sandbox hides, so a search
+/// skips them quietly. When nothing else failed, the exit code becomes the
+/// usual match (0) or no-match (1).
+fn skip_hidden_errors(output: &mut Output) {
+    let hidden = |line: &str| {
+        line.ends_with("Permission denied (os error 13)")
+            || line.ends_with("Operation not permitted (os error 1)")
+    };
+    if !output.stderr.lines().any(hidden) {
+        return;
+    }
+    let rest: Vec<&str> = output.stderr.lines().filter(|line| !hidden(line)).collect();
+    let failed = !rest.is_empty();
+    output.stderr = rest.join("\n");
+    if output.exit_code == 2 && !failed {
+        output.exit_code = if output.stdout.is_empty() { 1 } else { 0 };
     }
 }
 
@@ -222,6 +253,53 @@ mod tests {
             RunOutcome::Done(out) => out,
             RunOutcome::Cancelled => panic!("unexpected cancellation"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_search_sandbox_skips_paths_the_rules_hide() {
+        use crate::permissions::{Access, Layer, PathRule, Permissions, Rule};
+        if !rg_available() || smelt_sandbox::backend().is_err() {
+            return;
+        }
+        // Outside the temp directories, which are always "allow".
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let workspace = tempfile::tempdir_in(target).unwrap();
+        let ws = workspace.path().canonicalize().unwrap();
+        std::fs::create_dir_all(ws.join("secrets")).unwrap();
+        std::fs::create_dir_all(ws.join("app")).unwrap();
+        std::fs::write(ws.join(".gitignore"), "*.key\n").unwrap();
+        for file in [
+            "secrets/notes",
+            "id.key",
+            "app/id.key",
+            "public.key",
+            "notes.txt",
+        ] {
+            std::fs::write(ws.join(file), "needle\n").unwrap();
+        }
+
+        let rule = |pattern, rule| PathRule::parse(pattern, rule, Layer::Global, &ws, &ws).unwrap();
+        let rules = Permissions::default().rules(vec![
+            rule("secrets", Rule::Ask),
+            rule("**/*.key", Rule::Ask),
+            rule("**/public.key", Rule::Allow),
+        ]);
+        let opts = Options {
+            mode: Mode::FilesWithMatches,
+            include_ignored: true,
+            sandbox: rules.scanning(&ws).sandbox(Access::Read),
+            ..Default::default()
+        };
+        let out = run("needle", &ws, &opts).await;
+        let mut found: Vec<&str> = out
+            .stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix(ws.to_str().unwrap()))
+            .collect();
+        found.sort_unstable();
+        assert_eq!(found, ["/notes.txt", "/public.key"], "{out:?}");
+        assert_eq!(out.exit_code, 0, "{out:?}");
     }
 
     #[tokio::test]
