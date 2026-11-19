@@ -30,14 +30,6 @@ Windows uses `%APPDATA%\smelt` for config and `%LOCALAPPDATA%\smelt\state`,
 `\cache` and `\data` for the rest. Explicit XDG variables override these defaults
 on every platform.
 
-## Upgrading from smelt 0.7
-
-On its first start, smelt 0.8 moves the 0.7 session files, prompt history and
-usage log into `$XDG_STATE_HOME/smelt/v0.7/` and imports them into `smelt.db`. It
-prints progress while it works, then lists any session it could not import. Run
-`smelt session migrate` to retry those. Delete `v0.7/` once you no longer need
-the originals.
-
 ## Credentials
 
 OAuth providers keep credentials in a private file in the state directory,

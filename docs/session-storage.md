@@ -159,8 +159,9 @@ materialization is a cold operation.
 
 A smelt database has `PRAGMA application_id` "smlt" and `PRAGMA user_version`
 `SCHEMA_VERSION` from `crates/store/src/db.rs`, both checked on open. An empty
-file is created with the current schema; any other file is refused without
-writing to it.
+file is created with the current schema and a smelt database with an earlier
+schema is upgraded in one short write transaction; any other file is refused
+without writing to it.
 
 A later schema change must not rewrite the whole database while every process
 waits: add columns and tables, and convert existing rows lazily, per session.
@@ -190,12 +191,10 @@ forking it takes 0.56 s.
 ```sh
 smelt session doctor [<SESSION>] [--json]
 smelt session backup <OUTPUT>
-smelt session migrate
 ```
 
 `doctor` runs `PRAGMA quick_check` and, for one session, reports its row counts and
 stored bytes. `backup` writes a consistent copy of the whole database with
 `VACUUM INTO` and never overwrites an existing file. Both are safe while smelt
-runs. `migrate` imports smelt 0.7 sessions from `<state>/v0.7/`; smelt also runs
-it on its first start. Session bodies, credentials and real-data errors must not appear in
+runs. Session bodies, credentials and real-data errors must not appear in
 evidence logs.

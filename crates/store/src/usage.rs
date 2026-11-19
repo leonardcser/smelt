@@ -29,12 +29,6 @@ impl Store {
         self.insert_usage(std::slice::from_ref(entry))
     }
 
-    /// Appends entries saved by smelt 0.7, in one transaction.
-    // COMPAT(state-v0.7)
-    pub fn import_usage(&self, entries: &[UsageEntry]) -> Result<()> {
-        self.insert_usage(entries)
-    }
-
     fn insert_usage(&self, entries: &[UsageEntry]) -> Result<()> {
         let Some(latest) = entries.iter().map(|entry| entry.timestamp_ms).max() else {
             return Ok(());

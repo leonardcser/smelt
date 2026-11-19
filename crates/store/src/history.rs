@@ -108,8 +108,8 @@ pub(crate) fn chain_before(conn: &Connection, sid: i64, end: i64) -> Result<Hist
     if from >= end {
         return Ok(chain);
     }
-    // COMPAT(history-chain-column): rows from before the column, or from
-    // earlier 0.8 releases, have no chain.
+    // COMPAT(history-chain-column): rows that 0.8 releases wrote may have no
+    // chain.
     let _perf = smelt_perf::perf::begin("store:history:legacy_chain");
     let mut statement = conn.prepare_cached(
         "SELECT body FROM history WHERE sid = ?1 AND idx >= ?2 AND idx < ?3 ORDER BY idx",

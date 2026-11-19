@@ -1,6 +1,5 @@
-use protocol::{HistoryIdentity, HistoryItem};
+use protocol::HistoryIdentity;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Most recent fork points kept per session.
@@ -140,59 +139,6 @@ pub(super) fn invalidate(artifact_dir: &Path) {
     }
 }
 
-/// COMPAT(claude-code-link-v1): the link of earlier 0.8 releases, which names
-/// a history by a digest of its JSON.
-#[derive(Deserialize)]
-struct LegacyLink {
-    native_id: String,
-    history_digest: Option<String>,
-    cwd: PathBuf,
-    config_dir: Option<String>,
-    #[serde(default)]
-    plan_path: Option<PathBuf>,
-}
-
-/// COMPAT(claude-code-link-v1)
-fn legacy_link_path(artifact_dir: &Path) -> PathBuf {
-    artifact_dir.join("claude-code.json")
-}
-
-/// COMPAT(claude-code-link-v1)
-pub(super) fn has_legacy(artifact_dir: &Path) -> bool {
-    legacy_link_path(artifact_dir).exists()
-}
-
-/// COMPAT(claude-code-link-v1): resumes the native session of a legacy link
-/// whose history is `items`, and removes the link, which is read only once.
-/// Its checkpoints name histories by digest, so they are dropped.
-pub(super) fn take_legacy(
-    artifact_dir: &Path,
-    cwd: &Path,
-    items: &[HistoryItem],
-) -> Option<Resume> {
-    let path = legacy_link_path(artifact_dir);
-    let bytes = std::fs::read(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    let legacy: LegacyLink = serde_json::from_slice(&bytes?).ok()?;
-    let link = SessionLink {
-        native_id: legacy.native_id,
-        history: legacy.history_digest,
-        cwd: legacy.cwd,
-        config_dir: legacy.config_dir,
-        plan_path: legacy.plan_path,
-        checkpoints: Vec::new(),
-    };
-    let conversation: Vec<_> = items
-        .iter()
-        .filter(|item| !matches!(item, HistoryItem::Note(_) | HistoryItem::System { .. }))
-        .collect();
-    let digest: String = Sha256::digest(serde_json::to_vec(&conversation).ok()?)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    resume(link, cwd, &digest)
-}
-
 fn valid_native_id(id: &str) -> bool {
     id.len() == 36
         && id.bytes().enumerate().all(|(i, b)| {
@@ -207,6 +153,7 @@ fn valid_native_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::HistoryItem;
 
     const NATIVE: &str = "12345678-1234-1234-1234-123456789abc";
 
@@ -263,39 +210,5 @@ mod tests {
         assert_eq!(resume.at.as_deref(), Some("first-answer"));
         assert_eq!(resume.checkpoints, checkpoints[..1]);
         assert!(load(root.path(), root.path(), &identity(&[])).is_none());
-    }
-
-    #[test]
-    fn legacy_links_resume_a_matching_history_once() {
-        let root = tempfile::tempdir().unwrap();
-        let items = vec![
-            HistoryItem::user(protocol::Content::text("one")),
-            HistoryItem::note(protocol::HistoryNote::context("cwd")),
-        ];
-        let write_legacy = |digest_of: &[HistoryItem]| {
-            let conversation = &digest_of[..1];
-            let digest: String = Sha256::digest(serde_json::to_vec(conversation).unwrap())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            let link = serde_json::json!({
-                "native_id": NATIVE,
-                "history_digest": digest,
-                "cwd": root.path(),
-                "config_dir": std::env::var("CLAUDE_CONFIG_DIR").ok(),
-                "checkpoints": [{"history_digest": "old", "message": "answer"}],
-            });
-            std::fs::write(legacy_link_path(root.path()), link.to_string()).unwrap();
-        };
-        write_legacy(&items);
-        assert!(has_legacy(root.path()));
-        let resume = take_legacy(root.path(), root.path(), &items).unwrap();
-        assert_eq!((resume.native_id.as_str(), resume.at), (NATIVE, None));
-        assert!(resume.checkpoints.is_empty());
-        assert!(!has_legacy(root.path()));
-
-        write_legacy(&[HistoryItem::user(protocol::Content::text("other"))]);
-        assert!(take_legacy(root.path(), root.path(), &items).is_none());
-        assert!(!has_legacy(root.path()));
     }
 }

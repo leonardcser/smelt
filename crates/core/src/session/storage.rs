@@ -727,7 +727,7 @@ pub fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     create_private_dir_all_in(root, path)
 }
 
-pub fn create_private_dir_all_in(state_root: &Path, path: &Path) -> std::io::Result<()> {
+fn create_private_dir_all_in(state_root: &Path, path: &Path) -> std::io::Result<()> {
     let relative = path.strip_prefix(state_root).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

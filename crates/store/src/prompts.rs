@@ -27,21 +27,6 @@ impl Store {
         }
         Ok(())
     }
-
-    /// Appends prompts saved by smelt 0.7, in one transaction.
-    // COMPAT(state-v0.7)
-    pub fn import_prompts(&self, texts: &[String]) -> Result<()> {
-        let mut conn = self.connect_ledger()?;
-        let tx = conn.transaction()?;
-        {
-            let mut insert = tx.prepare("INSERT INTO prompts (text) VALUES (?1)")?;
-            for text in texts {
-                insert.execute([text])?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

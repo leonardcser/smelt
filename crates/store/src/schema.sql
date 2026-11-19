@@ -57,7 +57,7 @@ CREATE TABLE history (
     text_bytes INTEGER NOT NULL,
     body BLOB NOT NULL,
     -- `protocol::HistoryChain` over the conversation in [0, idx]. NULL in rows
-    -- that earlier 0.8 releases wrote; see `history::chain_before`.
+    -- that 0.8 releases wrote; see `history::chain_before`.
     chain BLOB,
     PRIMARY KEY (sid, idx)
 );

@@ -466,24 +466,13 @@ impl Runtime<'_> {
             self.dispatcher.end_turn(previous);
         }
         if !reuse {
-            let dir = &self.payload.artifact_dir;
-            let mut link = (!self.payload.ephemeral)
-                .then(|| session::load(dir, &self.config.cwd, &history))
+            let link = (!self.payload.ephemeral)
+                .then(|| session::load(&self.payload.artifact_dir, &self.config.cwd, &history))
                 .flatten();
-            let mut items = None;
-            // COMPAT(claude-code-link-v1): a legacy link matches the items.
-            if link.is_none() && !self.payload.ephemeral && session::has_legacy(dir) {
-                let fetched =
-                    items.insert(history_items(self.host, self.payload.turn_id, &history).await?);
-                link = session::take_legacy(dir, &self.config.cwd, fetched);
-            }
             // A provider switch or edited history cannot reuse a native
             // transcript. Import its readable context into a fresh native session.
             if link.is_none() && !history.is_empty() {
-                let items = match items {
-                    Some(items) => items,
-                    None => history_items(self.host, self.payload.turn_id, &history).await?,
-                };
+                let items = history_items(self.host, self.payload.turn_id, &history).await?;
                 content.insert(0, json!({"type":"text", "text":imported_history(&items)}));
             }
             let target = &self.payload.model_target;

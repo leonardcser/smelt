@@ -599,7 +599,11 @@ smelt.tools.register({ name = "fixture_dialog_state", access = "read", execute =
             assert!(std::fs::read_dir(&artifacts)
                 .into_iter()
                 .flatten()
-                .all(|dir| !dir.unwrap().path().join("claude-code.json").exists()));
+                .all(|dir| !dir
+                    .unwrap()
+                    .path()
+                    .join("claude-code-session.json")
+                    .exists()));
             master.write_all(b"\x03").unwrap();
             break;
         }

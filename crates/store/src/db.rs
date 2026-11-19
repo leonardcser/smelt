@@ -7,7 +7,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use crate::error::{Result, StoreError};
 use crate::Store;
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 /// `PRAGMA application_id` of a smelt database: "smlt".
 const APPLICATION_ID: i32 = 0x736d_6c74;
 const SCHEMA: &str = include_str!("schema.sql");
@@ -17,8 +17,9 @@ const WAL_SIZE_LIMIT: i64 = 1024 * 1024;
 /// Checkpoint before the WAL outgrows its size limit, in 4 KiB pages.
 const WAL_CHECKPOINT_PAGES: i64 = WAL_SIZE_LIMIT / 4096;
 
-/// Opens the shared database, creating it and its schema on first use. A file
-/// with another schema is refused without writing to it.
+/// Opens the shared database, creating it and its schema on first use and
+/// upgrading an earlier schema. A file with another schema is refused without
+/// writing to it.
 pub(crate) fn open(store: &Store) -> Result<Connection> {
     let path = &store.database_path();
     if let Some(parent) = path.parent() {
@@ -33,7 +34,8 @@ pub(crate) fn open(store: &Store) -> Result<Connection> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.set_prepared_statement_cache_capacity(64);
     match schema_of(&conn)? {
-        (APPLICATION_ID, SCHEMA_VERSION) => add_history_chain(&conn)?,
+        (APPLICATION_ID, SCHEMA_VERSION) => {}
+        (APPLICATION_ID, 1) => upgrade(&conn)?,
         (0, 0) => create(&conn)?,
         (application_id, version) => {
             return Err(StoreError::UnsupportedSchema {
@@ -64,25 +66,31 @@ fn schema_of(conn: &Connection) -> Result<(i32, i32)> {
     ))
 }
 
-/// COMPAT(history-chain-column): adds `history.chain` to databases from
-/// before it, without a new schema version, so earlier 0.8 releases still open
-/// them. Their rows keep NULL; see `history::chain_before`.
-fn add_history_chain(conn: &Connection) -> Result<()> {
-    let present = |conn: &Connection| -> Result<bool> {
-        Ok(conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('history') WHERE name = 'chain'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )? > 0)
-    };
-    if present(conn)? {
-        return Ok(());
-    }
+/// Upgrades a schema 1 database, unless another process did while this one
+/// waited for the write lock. Schema 2 adds `history.chain`, which some 0.8
+/// releases already created; rows without it keep NULL.
+fn upgrade(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
-        if !present(conn)? {
+        match schema_of(conn)? {
+            (APPLICATION_ID, 1) => {}
+            (APPLICATION_ID, SCHEMA_VERSION) => return Ok(()),
+            (_, found) => {
+                return Err(StoreError::UnsupportedSchema {
+                    found,
+                    expected: SCHEMA_VERSION,
+                })
+            }
+        }
+        let has_chain: i64 = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('history') WHERE name = 'chain'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_chain == 0 {
             conn.execute_batch("ALTER TABLE history ADD COLUMN chain BLOB")?;
         }
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     })();
     match result {
@@ -296,46 +304,53 @@ mod tests {
     }
 
     #[test]
-    fn databases_without_the_history_chain_gain_it_and_keep_their_schema() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
+    fn schema_1_databases_upgrade_with_and_without_the_history_chain() {
         let items = [
             protocol::HistoryItem::user(protocol::Content::text("one")),
             protocol::HistoryItem::note(protocol::HistoryNote::context("cwd")),
             protocol::HistoryItem::user(protocol::Content::text("two")),
         ];
-        for id in ["a", "b"] {
-            let identity = crate::SessionIdentity {
-                id: id.into(),
-                created_at: 0,
-                parent_id: None,
-            };
-            let commit = crate::SessionCommit {
-                history: Some(crate::HistorySuffix {
-                    start: 0,
-                    items: items.to_vec(),
-                }),
-                ..Default::default()
-            };
-            store
-                .writer(id)
-                .unwrap()
-                .commit(&identity, &commit)
-                .unwrap();
-        }
-        open(&store)
-            .unwrap()
-            .execute_batch("ALTER TABLE history DROP COLUMN chain")
-            .unwrap();
-        let conn = open(&store).unwrap();
-        assert_eq!(schema_of(&conn).unwrap(), (APPLICATION_ID, SCHEMA_VERSION));
-        for id in ["a", "b"] {
-            let reader = store.reader(id).unwrap();
-            for end in 0..=items.len() {
-                assert_eq!(
-                    reader.history_chain_before(end as u64).unwrap(),
-                    protocol::HistoryChain::of(&items[..end])
-                );
+        for downgrade in [
+            "PRAGMA user_version = 1",
+            "PRAGMA user_version = 1; ALTER TABLE history DROP COLUMN chain",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(dir.path());
+            for id in ["a", "b"] {
+                let identity = crate::SessionIdentity {
+                    id: id.into(),
+                    created_at: 0,
+                    parent_id: None,
+                };
+                let commit = crate::SessionCommit {
+                    history: Some(crate::HistorySuffix {
+                        start: 0,
+                        items: items.to_vec(),
+                    }),
+                    ..Default::default()
+                };
+                store
+                    .writer(id)
+                    .unwrap()
+                    .commit(&identity, &commit)
+                    .unwrap();
+            }
+            open(&store).unwrap().execute_batch(downgrade).unwrap();
+            let conn = open(&store).unwrap();
+            assert_eq!(
+                schema_of(&conn).unwrap(),
+                (APPLICATION_ID, SCHEMA_VERSION),
+                "{downgrade}"
+            );
+            for id in ["a", "b"] {
+                let reader = store.reader(id).unwrap();
+                for end in 0..=items.len() {
+                    assert_eq!(
+                        reader.history_chain_before(end as u64).unwrap(),
+                        protocol::HistoryChain::of(&items[..end]),
+                        "{downgrade}"
+                    );
+                }
             }
         }
     }
