@@ -1610,6 +1610,48 @@ fn native_edit_results_carry_the_whole_file_for_a_diff() {
 }
 
 #[test]
+fn native_edit_results_without_the_original_file_revert_the_patch_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.txt");
+    let path_text = path.to_str().unwrap();
+    let edit = |disk: &str| {
+        std::fs::write(&path, disk).unwrap();
+        let (tx, _, _rx) = crate::output_channel(HostCallbacks::Disabled);
+        let mut transcript = Transcript::new(tx, "claude-code".into(), 1, 0);
+        transcript.frame(
+            &json!({"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":path_text,"old_string":"two","new_string":"TWO"}}]}}),
+            1_000,
+        );
+        // Claude Code sends no `originalFile` for files over about 10 KB.
+        transcript.frame(
+            &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"updated"}]},
+                "tool_use_result":{"filePath":path_text,"oldString":"two","newString":"TWO","originalFile":null,"structuredPatch":[{"oldStart":1,"oldLines":3,"newStart":1,"newLines":3,"lines":[" one","-two","+TWO"," three"]}]}}),
+            2_000,
+        );
+        let [HistoryItem::Assistant(step)] = transcript.committed.as_slice() else {
+            panic!("one committed step: {:?}", transcript.committed);
+        };
+        step.invocations[0]
+            .result
+            .display_content
+            .iter()
+            .map(|field| (field.name.clone(), field.content.as_str().to_owned()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        edit("one\nTWO\nthree\nfour\n"),
+        [
+            ("old_content".into(), "one\ntwo\nthree\nfour\n".into()),
+            ("new_content".into(), "one\nTWO\nthree\nfour\n".into()),
+        ]
+    );
+    assert!(
+        edit("one\nchanged since\nthree\n").is_empty(),
+        "a file that no longer holds the edit shows no diff"
+    );
+}
+
+#[test]
 fn edit_patches_apply_what_claude_code_changed_or_nothing() {
     use super::transcript::apply_patch;
     let hunk = |start: u64, lines: &[&str]| {

@@ -716,16 +716,17 @@ fn build_diff_ir_ext_inner(
     }
 
     if !dv.is_full_file {
-        let after_start = new_lineno;
-        let after_end = dv.view_end.min(file_lines.len());
+        // The file holds the original text: read it at the old position and
+        // number its lines as they will be after the edit.
+        let after_count = dv.view_end.saturating_sub(new_lineno);
         for (idx, line) in file_lines
             .iter()
-            .take(after_end)
-            .skip(after_start)
+            .skip(old_lineno)
+            .take(after_count)
             .enumerate()
         {
             let text = expanded_line(line);
-            lines.push(context_line(after_start + idx + 1, text));
+            lines.push(context_line(new_lineno + idx + 1, text));
         }
     }
 
@@ -2865,6 +2866,28 @@ mod tests {
             _ => None,
         });
         assert_eq!(first_lineno, Some(3));
+    }
+
+    #[test]
+    fn snippet_diff_context_after_a_removed_line_follows_the_original_file() {
+        let file = "a\nold one\nold two\nkeep\n}\nz\n";
+        let cache = build_diff_ir_ext_with_source(
+            "old one\nold two\nkeep",
+            "new one\nkeep",
+            "a.lua",
+            "",
+            None,
+            file,
+        );
+        let context: Vec<_> = cache
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                DiffLine::Context { lineno, text } => Some((*lineno, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(context, [(1, "a"), (3, "keep"), (4, "}"), (5, "z")]);
     }
 
     #[test]

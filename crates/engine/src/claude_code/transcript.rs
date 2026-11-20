@@ -572,24 +572,62 @@ impl Transcript {
 }
 
 /// Claude Code's structured Edit result in the shape of smelt's `edit_file`:
-/// the file before and after the edit, rendered as a full-file diff.
+/// the file before and after the edit, rendered as a full-file diff. Claude
+/// Code leaves `originalFile` null for files over about 10 KB. The file on
+/// disk then holds the edit, and reverting the patch on it gives the original.
 fn edit_result(content: &str, result: &Value) -> Option<ToolOutcome> {
-    let original = result["originalFile"].as_str()?;
     let hunks = result["structuredPatch"]
         .as_array()
         .filter(|hunks| !hunks.is_empty())?;
-    let edited = apply_patch(original, hunks)?;
+    let (original, edited) = match result["originalFile"].as_str() {
+        Some(original) => (original.to_owned(), apply_patch(original, hunks)?),
+        None => {
+            let edited = std::fs::read_to_string(result["filePath"].as_str()?).ok()?;
+            (revert_patch(&edited, hunks)?, edited)
+        }
+    };
     ToolOutcome::try_from_parts(
         content.into(),
         false,
         Some(serde_json::json!({"path": result["filePath"]})),
         vec![
-            protocol::ToolDisplayContent::new("old_content", original.into()),
+            protocol::ToolDisplayContent::new("old_content", original),
             protocol::ToolDisplayContent::new("new_content", edited),
         ],
         None,
     )
     .ok()
+}
+
+/// Undoes the hunks Claude Code reports for an edit on the edited file, with
+/// the same checks as [`apply_patch`].
+pub(super) fn revert_patch(edited: &str, hunks: &[Value]) -> Option<String> {
+    let reversed: Vec<Value> = hunks
+        .iter()
+        .map(|hunk| {
+            let lines: Vec<Value> = hunk["lines"]
+                .as_array()?
+                .iter()
+                .map(|line| {
+                    let line = line.as_str()?;
+                    let swapped = if let Some(text) = line.strip_prefix('+') {
+                        format!("-{text}")
+                    } else if let Some(text) = line.strip_prefix('-') {
+                        format!("+{text}")
+                    } else {
+                        line.to_owned()
+                    };
+                    Some(Value::from(swapped))
+                })
+                .collect::<Option<_>>()?;
+            Some(serde_json::json!({
+                "oldStart": hunk["newStart"],
+                "oldLines": hunk["newLines"],
+                "lines": lines,
+            }))
+        })
+        .collect::<Option<_>>()?;
+    apply_patch(edited, &reversed)
 }
 
 /// Applies the hunks Claude Code reports for an edit to the original file.
