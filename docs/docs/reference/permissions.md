@@ -90,7 +90,8 @@ Defaults (in the built-in `smelt/permissions.lua`):
 
 ## The Permission Prompt
 
-The dialog shows the call, a preview (a diff for edits) and a question:
+The dialog shows the call, a preview (a diff for edits) and a question. A write
+to a file that does not exist yet says **Create** instead of **Edit**.
 
 | Call                     | Question                       |
 | ------------------------ | ------------------------------ |

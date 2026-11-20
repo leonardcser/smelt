@@ -24,7 +24,7 @@ expression: frame.text()
     2       println!("hello, world");
     3   }
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
- Edit this file?
+ Create this file?
   1. allow once
   2. deny
   3. allow write_file for this session

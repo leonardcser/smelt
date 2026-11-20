@@ -31,9 +31,10 @@ local function question(req)
   if req.intent == "read" then return "Read " .. req.path .. "?" end
   local edits_file = req.args and (req.args.file_path or req.args.notebook_path)
   if req.intent == "write" and edits_file then
-    if req.protected then return "Edit " .. req.path .. "?" end
-    if req.access == "full" then return "Edit outside the project?" end
-    return "Edit this file?"
+    local verb = smelt.fs.exists(edits_file) and "Edit" or "Create"
+    if req.protected then return verb .. " " .. req.path .. "?" end
+    if req.access == "full" then return verb .. " outside the project?" end
+    return verb .. " this file?"
   end
   return "Run " .. req.tool_name .. "?"
 end
