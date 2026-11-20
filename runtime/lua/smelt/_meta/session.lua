@@ -197,6 +197,11 @@ session.turns = nil
 ---@type fun(before?: integer): table
 session.turns_page = nil
 
+--- Directory that holds the managed worktrees smelt creates from the current cwd, following `smelt.settings.worktree_root`. Returns `nil` outside a git repository or for an invalid root.
+---@see smelt.settings.worktree_root
+---@type fun(): string?
+session.worktree_dir = nil
+
 --- List managed worktrees off the UI thread. Must run in `smelt.spawn`, a
 --- command, or a tool. Returns sorted `{ name, branch, path, base, current }` rows.
 ---@type fun(): table

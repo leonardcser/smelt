@@ -139,7 +139,7 @@ pub fn generated_name() -> String {
 }
 
 pub fn enter_or_create(cwd: &Path, spec: WorktreeSpec<'_>) -> Result<WorktreeInfo, String> {
-    let root = smelt_paths::git_root(cwd).ok_or_else(|| "not in a git repository".to_string())?;
+    let root = managed_repo(cwd).ok_or_else(|| "not in a git repository".to_string())?;
     let requested = match spec.name {
         Some(name) => {
             Some(sanitize_name(name).ok_or_else(|| format!("invalid worktree name: {name:?}"))?)
@@ -339,6 +339,21 @@ impl ProjectSnapshot {
 /// project context.
 pub fn repository_root(cwd: &Path) -> Option<PathBuf> {
     cached_git_facts(cwd).toplevel
+}
+
+/// The directory that holds the managed worktrees `enter_or_create` makes
+/// from `cwd` with `root`, or `None` outside a Git work tree or for an
+/// invalid `root`.
+pub fn managed_dir(cwd: &Path, root: Option<&Path>) -> Option<PathBuf> {
+    let repo = managed_repo(cwd)?;
+    let resolved = resolve_worktree_root(root).ok()?;
+    Some(worktree_parent_dir(&repo, &resolved))
+}
+
+/// The repository that holds the managed worktrees made from `cwd`, or
+/// `None` when it is too broad to be a workspace.
+fn managed_repo(cwd: &Path) -> Option<PathBuf> {
+    repository_root(cwd).and_then(smelt_paths::workspace_boundary)
 }
 
 /// Holds the lock while Git runs, so a discovery that starts during a
@@ -812,6 +827,29 @@ mod tests {
         assert!(fs::read_to_string(repo.path().join(".git/info/exclude"))
             .unwrap()
             .contains(".worktrees/"));
+    }
+
+    #[test]
+    fn managed_dir_is_where_enter_or_create_puts_worktrees() {
+        let repo = repo();
+        let external = tempfile::tempdir().unwrap();
+        for (name, root) in [("local", None), ("external", Some(external.path()))] {
+            let info = enter_or_create(
+                repo.path(),
+                WorktreeSpec {
+                    name: Some(name),
+                    base: None,
+                    root,
+                },
+            )
+            .unwrap();
+            let dir = managed_dir(repo.path(), root).unwrap();
+            assert_eq!(
+                fs::canonicalize(info.path.parent().unwrap()).unwrap(),
+                fs::canonicalize(dir).unwrap()
+            );
+        }
+        assert_eq!(managed_dir(repo.path(), Some(Path::new(".."))), None);
     }
 
     #[test]

@@ -2032,6 +2032,45 @@ async fn enter_worktree_tool_changes_the_process_cwd() {
 }
 
 #[test]
+fn enter_worktree_needs_full_access_only_for_an_external_root() {
+    let repo = worktree_repo();
+    let environment_guard = test_environment_guard();
+    let mut app = TestApp::builder()
+        .with_cwd(repo.path())
+        .build_with_test_environment_guard(&environment_guard);
+    app.start_turn(42);
+    let _ = app.drain_engine_sends();
+
+    let evaluate = |app: &mut TestApp, request_id: u64, root: &str| {
+        let mut settings = app.core_probe().config.settings.clone();
+        settings.worktree_root = root.into();
+        app.set_settings_for_harness(settings);
+        app.feed_one(SourceEvent::engine(
+            protocol::EngineEvent::ToolEvaluationRequest {
+                invocation_id: protocol::InvocationId::new(request_id),
+                request_id,
+                call_id: format!("enter-{request_id}"),
+                tool_name: "enter_worktree".into(),
+                args: std::collections::HashMap::from([("name".into(), "feature".into())]),
+                mode: protocol::AgentMode::parse("write").unwrap(),
+            },
+        ));
+        let evaluation = app.wait_for_tool_evaluation(request_id);
+        (evaluation.decision, evaluation.metadata.access)
+    };
+
+    assert_eq!(
+        evaluate(&mut app, 1, ".worktrees"),
+        (protocol::Decision::Allow, protocol::Access::Write)
+    );
+    assert_eq!(
+        // Temp dirs are "allow", so the external root must lie elsewhere.
+        evaluate(&mut app, 2, "/smelt-external-worktrees"),
+        (protocol::Decision::Ask, protocol::Access::Full)
+    );
+}
+
+#[test]
 fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
     let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create tool cwd tempdir");

@@ -1,4 +1,4 @@
-use protocol::{AgentMode, ToolDef};
+use protocol::{Access, AgentMode, ToolDef};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -62,6 +62,43 @@ pub fn smelt_tool(
         })
         .collect();
     Some((smelt, args))
+}
+
+/// Native tools that share no smelt tool and need less than `full`. `read`
+/// tools only read or change state of the Claude Code session itself.
+const NATIVE_ACCESS: &[(&str, Access)] = &[
+    ("ToolSearch", Access::Read),
+    ("Skill", Access::Read),
+    ("LSP", Access::Read),
+    ("NotebookRead", Access::Read),
+    ("BashOutput", Access::Read),
+    ("ListMcpResourcesTool", Access::Read),
+    ("ReadMcpResourceTool", Access::Read),
+    ("TodoWrite", Access::Read),
+    ("TaskCreate", Access::Read),
+    ("TaskGet", Access::Read),
+    ("TaskList", Access::Read),
+    ("TaskUpdate", Access::Read),
+    ("ListAgents", Access::Read),
+    ("CronList", Access::Read),
+    ("EnterPlanMode", Access::Read),
+    ("ReportFindings", Access::Read),
+    ("StructuredOutput", Access::Read),
+    ("ScheduleWakeup", Access::Read),
+    ("Sleep", Access::Read),
+    ("KillShell", Access::Write),
+    ("KillBash", Access::Write),
+];
+
+/// The access a call of `native` needs when it shares no smelt tool. Tools
+/// that act on their own or reach outside the machine, such as `Agent`,
+/// `SendMessage`, `CronCreate` and `PushNotification`, and tools smelt does
+/// not know, are `full`.
+pub fn native_access(native: &str) -> Access {
+    NATIVE_ACCESS
+        .iter()
+        .find(|(name, _)| *name == native)
+        .map_or(Access::Full, |(_, access)| *access)
 }
 
 impl Catalog {

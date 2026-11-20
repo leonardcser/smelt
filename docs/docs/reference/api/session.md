@@ -343,6 +343,14 @@ page first and each page in chronological order. Uses the transcript
 index without decoding assistant output. Returns `{ turns, next_before? }`;
 pass `next_before` to read older turns. Must run in a yieldable task.
 
+## `smelt.session.worktree_dir`
+
+```lua
+fun(): string?
+```
+
+Directory that holds the managed worktrees smelt creates from the current cwd, following `smelt.settings.worktree_root`. Returns `nil` outside a git repository or for an invalid root.
+
 ## `smelt.session.worktrees`
 
 ```lua

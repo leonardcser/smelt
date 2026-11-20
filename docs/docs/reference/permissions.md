@@ -193,14 +193,16 @@ a tool starts run in the call's [sandbox](#the-sandbox). See
 | ----------------------------------------------------------------------------------- | --------------------------------------- |
 | `read_file`, `glob`, `grep`, `show_image`                                           | `read`, `full` for an `"ask"` path      |
 | `web_fetch`, `web_search`, `read_process_output`, `load_skill`, `ask_user_question` | `read`                                  |
-| `edit_file`, `write_file`, `edit_notebook`, `switch_cwd`                            | `write`, `full` outside the workspace   |
+| `edit_file`, `write_file`, `edit_notebook`, `switch_cwd`, `enter_worktree`          | `write`, `full` outside the workspace   |
 | `stop_process`, `smelt_reload`                                                      | `write`                                 |
-| `enter_worktree`                                                                    | `full`                                  |
 | `bash`                                                                              | See [The Sandbox](#the-sandbox)         |
 
 MCP tools are `read` with `readOnlyHint`, else `full`. Claude Code native
 tools use the declaration of the smelt tool they map to (`Write` →
-`write_file`). Native `Bash` and unknown native tools are `full`.
+`write_file`). Native `Bash` is `full`. Other native tools are `read` when they
+only read or change the Claude Code session, such as `ToolSearch`, and `full`
+when they act on their own or reach outside the machine, such as `Agent`.
+Unknown native tools are `full`.
 
 ## Headless Mode
 

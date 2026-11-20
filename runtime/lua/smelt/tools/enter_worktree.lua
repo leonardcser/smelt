@@ -16,8 +16,15 @@ smelt.transcript.register_tool("enter_worktree", {
 smelt.tools.register({
   name = "enter_worktree",
   description = "Create or open a managed git worktree and switch smelt's actual process working directory into it. Use this when the user asks to implement in a new worktree.",
-  -- The new worktree may live outside the workspace.
-  access = "full",
+  -- Path rules on the worktree directory decide the access: "write" inside
+  -- the workspace, "full" for an external `worktree_root`. An unknown
+  -- directory counts as "full".
+  access = function()
+    return smelt.session.worktree_dir() and "write" or "full"
+  end,
+  paths = function()
+    return { smelt.session.worktree_dir() }
+  end,
   execution_mode = "sequential",
   headless = false,
   claude_code = { replaces = { "EnterWorktree" } },

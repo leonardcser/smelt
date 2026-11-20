@@ -14,7 +14,7 @@ mod messages;
 mod models;
 mod plans;
 pub use account::usage_scope;
-pub use catalog::smelt_tool;
+pub use catalog::{native_access, smelt_tool};
 pub use context::context_window;
 pub use models::{cached as cached_models, refresh as refresh_models, stale as models_stale};
 pub use plans::directory as plan_directory;

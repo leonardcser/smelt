@@ -386,6 +386,21 @@ pub(super) fn register(
             }
         },
     )?;
+    m.fn_(
+        "worktree_dir",
+        "Directory that holds the managed worktrees smelt creates from the current cwd, following `smelt.settings.worktree_root`. Returns `nil` outside a git repository or for an invalid root.",
+        &[],
+        |_, ()| -> LuaResult<Option<String>> {
+            Ok(
+                crate::lua::try_with_session_host(|host| host.worktree_paths()).and_then(
+                    |(cwd, root)| {
+                        smelt_worktree::managed_dir(&cwd, Some(&root))
+                            .map(|dir| dir.to_string_lossy().into_owned())
+                    },
+                ),
+            )
+        },
+    )?;
     m.live_only_fn(
         "context_note",
         "Set or clear a named hidden model-visible context note. `context_note(name, text)` creates or replaces that note for future turns; `context_note(name, nil)` clears it. Named notes do not replace each other, so plugins can maintain independent steering state. UiHost-only.",
