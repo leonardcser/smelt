@@ -2276,7 +2276,7 @@ mod tests {
             .load("return smelt.transcript.get_tool_presentation('write_file').cache_key")
             .eval()
             .expect("write_file presentation");
-        assert_eq!(cache_key, "smelt.tool-presentation.write_file:v2");
+        assert_eq!(cache_key, "smelt.tool-presentation.write_file:v3");
         let block = Block::ToolCall {
             call_id: "write-call".into(),
             name: "write_file".into(),

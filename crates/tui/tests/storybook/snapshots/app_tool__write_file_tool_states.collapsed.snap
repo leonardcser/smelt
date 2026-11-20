@@ -3,10 +3,10 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * write_file src/greet.rs
-  wrote 3 lines
+  3 lines
 
 * write_file src/pending.rs                                          14:37:03
-  wrote 1 lines
+  1 line
 
 * write_file src/greet.rs                                            14:37:03
   wrote 3 lines
