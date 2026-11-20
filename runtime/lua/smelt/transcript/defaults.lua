@@ -822,7 +822,7 @@ function M.render_agent_message(block, ctx)
     })
   end
 
-  local body = layout.content(block.output_id, { format = "markdown" })
+  local body = layout.content(block.output_id, { format = "markdown", dim = true })
   if ctx and ctx.view_state == "peek" then
     body = layout.cap(body, {
       rows = (ctx.limits and ctx.limits.tool_output_rows) or 20,
