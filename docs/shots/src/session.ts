@@ -1,6 +1,6 @@
 // Drives a real smelt binary inside tmux against a scripted provider and a throwaway project.
 import { $ } from "bun";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { MODEL, startMock } from "./mock";
@@ -97,14 +97,13 @@ const cache = CACHE;
 const project = PROJECT;
 const tmuxName = TMUX;
 
+/** `SMELT_BIN`, else the most recently built of the local profiles. */
 function smeltBinary() {
-  const candidates = [
-    process.env.SMELT_BIN,
-    path.resolve(root, "../../target/release-fast/smelt"),
-    path.resolve(root, "../../target/release/smelt"),
-    path.resolve(root, "../../target/debug/smelt"),
-  ];
-  const found = candidates.find((c) => c && existsSync(c));
+  if (process.env.SMELT_BIN) return process.env.SMELT_BIN;
+  const found = ["release-fast", "release", "debug"]
+    .map((profile) => path.resolve(root, `../../target/${profile}/smelt`))
+    .filter((c) => existsSync(c))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
   if (!found) throw new Error("smelt binary not found; run `cargo build` or set SMELT_BIN");
   return found;
 }
@@ -324,8 +323,8 @@ export async function run(
   // Live runs get a throwaway state dir holding a copy of the real codex login, so sessions and
   // other state stay out of the real state dir. The copy is written back if smelt refreshed the token.
   const state = `${home}/state`;
-  const realAuth = path.join(process.env.XDG_STATE_HOME ?? path.join(process.env.HOME!, ".local/state"), "smelt/codex_auth.json");
-  const tempAuth = path.join(state, "smelt/codex_auth.json");
+  const realAuth = path.join(process.env.XDG_STATE_HOME ?? path.join(process.env.HOME!, ".local/state"), "smelt/auth/codex.json");
+  const tempAuth = path.join(state, "smelt/auth/codex.json");
   if (opts.live) {
     await mkdir(path.dirname(tempAuth), { recursive: true });
     await copyFile(realAuth, tempAuth);
@@ -390,7 +389,7 @@ export async function run(
   };
 
   try {
-    await waitFor(opts.ready ?? /normal|yolo/);
+    await waitFor(opts.ready ?? /○ read|\byolo\b/);
     for (const step of steps) {
       if ("type" in step) {
         if (opts.typeDelay && !step.instant) {

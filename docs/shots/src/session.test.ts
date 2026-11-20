@@ -8,8 +8,8 @@ const options: RunOptions = {
 
 test("screen waits accept existing matches and follow finder transitions", async () => {
   await run([
-    { wait: /○ normal/, timeout: 1000 },
-    { wait: /○ normal/, timeout: 1000 },
+    { wait: /○ read/, timeout: 1000 },
+    { wait: /○ read/, timeout: 1000 },
     { type: "/files" },
     { key: "Enter" },
     { wait: /find files…\s+6 \/ 6/, timeout: 5000 },
@@ -21,5 +21,5 @@ test("screen waits accept existing matches and follow finder transitions", async
 test("missing screen match fails recording with the expected pattern and screen", async () => {
   await expect(run([
     { wait: /missing-screen-sentinel/, timeout: 200 },
-  ], options)).rejects.toThrow(/timed out waiting for \/missing-screen-sentinel\/[\s\S]*○ normal/);
+  ], options)).rejects.toThrow(/timed out waiting for \/missing-screen-sentinel\/[\s\S]*○ read/);
 }, 30_000);

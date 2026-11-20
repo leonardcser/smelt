@@ -148,11 +148,12 @@ Type a request and press `Enter`. Point the agent at files with `@`, as in
 
 <figure class="term" data-replay="../../assets/replays/prompt.json" aria-label="A smelt session answering a prompt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
-The agent reads freely but asks before it edits files or runs commands. A dialog
-shows what it wants to do. Choose **allow once**, allow for the **session** or
-**workspace**, or **deny** (`Esc`).
+smelt starts in read mode. The agent reads freely and runs commands in a
+read-only sandbox, but asks before it edits files. A dialog shows what it wants
+to do. Choose **allow once**, allow for the **session**, or **deny** (`Esc`).
+[Permissions](../reference/permissions.md) explains each mode and the sandbox.
 
-<figure class="term" data-replay="../../assets/replays/approval.json" aria-label="The approval dialog for a shell command" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+<figure class="term" data-replay="../../assets/replays/approval.json" aria-label="The approval dialog for a file edit" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 A few keys to know:
 

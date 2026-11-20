@@ -14,7 +14,7 @@ player, frame by frame, in headless Chromium.
 ## Run
 
 ```bash
-cargo build                      # or set SMELT_BIN to any smelt binary
+cargo build                      # newest of target/{release-fast,release,debug}, or set SMELT_BIN
 cd docs/shots
 bun install
 bunx playwright-core install chromium   # once, for the README GIF; or set CHROME_PATH

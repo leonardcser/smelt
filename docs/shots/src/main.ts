@@ -34,7 +34,7 @@ const base: RunOptions = { scheme: "dark", cols, rows: 30, typeDelay: 0, wordDel
 
 /** Each `shot` of the stills run becomes a one-frame replay of its top `rows` lines. */
 async function makeStills() {
-  const { captures } = await run(stills, base);
+  const { captures } = await run(stills, { ...base, init: () => `require("smelt.plugins.goal")\n` });
   for (const c of captures) {
     const ansi = c.ansi.split("\n").slice(0, c.rows).join("\n");
     await writeReplay(c.name, { cols, rows: c.rows }, [{ ansi, cols, rows: c.rows, keys: [], ms: END_HOLD_MS }]);

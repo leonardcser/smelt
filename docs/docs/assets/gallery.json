@@ -318,7 +318,7 @@
    "detail": "The session keeps working under it; /donut again stops it.  A straight port: a circle of radius 1 swept at radius 2 around the y axis, 5 units from the eye, turned by A about the x axis and B about the z axis, lit from behind the viewer and above. Only the scale follows the screen, and the turn follows the clock, so a late frame still lands where it should.",
    "command": "/donut",
    "source": "runtime/lua/smelt/plugins/donut.lua",
-   "bundled": true
+   "bundled": false
   },
   {
    "slug": "barrelroll",
@@ -327,8 +327,8 @@
    "summary": "`/barrelroll` spins the whole screen one full turn, pulling back as it goes so it spins clear of the edges.",
    "detail": "Letters stay upright; lines, corners and half blocks turn with it.",
    "command": "/barrelroll",
-   "source": "docs/shots/gallery/barrelroll.lua",
-   "bundled": false
+   "source": "runtime/lua/smelt/plugins/barrelroll.lua",
+   "bundled": true
   },
   {
    "slug": "flip",
