@@ -91,7 +91,9 @@ impl SessionWriter {
         let sid = self.sid.ok_or_else(|| StoreError::NotFound {
             session_id: self.session_id.clone(),
         })?;
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = crate::requests::append(&tx, sid, entry, mode)?;
         tx.commit()?;
         Ok(id)
@@ -626,6 +628,65 @@ mod tests {
             .unwrap()
             .query_row("SELECT count(*) FROM blobs", [], |row| row.get(0))
             .unwrap()
+    }
+
+    fn request(request_id: u64) -> protocol::request_log::RequestLogEntry {
+        protocol::request_log::RequestLogEntry {
+            request_id,
+            kind: "turn".into(),
+            turn_id: Some(request_id),
+            ask_id: None,
+            history_len: None,
+            timestamp_ms: 0,
+            provider_kind: "openai".into(),
+            api_base: "https://api.example.test".into(),
+            model: "model".into(),
+            url: "https://api.example.test/v1/chat/completions".into(),
+            http_status: Some(200),
+            body: serde_json::json!({}),
+            prompt_cache_key: None,
+            stream: false,
+            system_prompt: None,
+            messages: None,
+            tools: None,
+            response: None,
+            usage: None,
+            cost_usd: None,
+            tokens_per_sec: None,
+            elapsed_ms: None,
+            attempt: 1,
+            error: None,
+            background: false,
+        }
+    }
+
+    #[test]
+    fn request_audit_waits_for_a_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let mut writer = store.writer("a").unwrap();
+        writer
+            .commit(&identity("a"), &SessionCommit::default())
+            .unwrap();
+        writer
+            .append_request(&request(1), crate::RequestAuditPayloadMode::Full)
+            .unwrap();
+
+        // Another connection holds the write lock and commits a change while
+        // the audit waits for it.
+        let other = store.connect().unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        other
+            .execute_batch("UPDATE requests SET request_id = request_id")
+            .unwrap();
+        let committer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            other.execute_batch("COMMIT").unwrap();
+        });
+
+        let appended = writer.append_request(&request(2), crate::RequestAuditPayloadMode::Full);
+        committer.join().unwrap();
+        appended.unwrap();
     }
 
     #[test]
