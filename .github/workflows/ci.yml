@@ -161,10 +161,13 @@ jobs:
       - name: Install ripgrep and bubblewrap
         run: sudo apt-get update && sudo apt-get install -y ripgrep bubblewrap
 
+      # A test process killed while it writes its profile leaves a truncated
+      # file. --failure-mode all skips such files with a warning instead of
+      # failing the merge.
       - name: Run tests with coverage floor
         env:
           CARGO_INCREMENTAL: "0"
-        run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80
+        run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --failure-mode all --fail-under-lines 80
 
   linux-static:
     name: Linux static build
