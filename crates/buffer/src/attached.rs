@@ -108,6 +108,48 @@ impl AttachedText {
         Cow::Owned(out)
     }
 
+    /// The inverse of [`labelled`](Self::labelled). Each of `attachments`
+    /// takes the first free `[label]` of its own, wherever it is, and that
+    /// label becomes its marker, together with any grapheme the label shares.
+    /// Attachments with no label left come back unbound. Stray markers in
+    /// `labelled` are dropped.
+    pub fn from_labelled(labelled: &str, attachments: &[Attachment]) -> (Self, Vec<Attachment>) {
+        let labelled = strip_markers(labelled.to_string());
+        let mut claimed: Vec<(Range<usize>, &Attachment)> = Vec::new();
+        let mut unbound = Vec::new();
+        for attachment in attachments {
+            let display = attachment.display_label();
+            let raw = format!("[{}]", attachment.label());
+            let free = [display.as_str(), raw.as_str()]
+                .into_iter()
+                .find_map(|label| {
+                    labelled.match_indices(label).find_map(|(at, _)| {
+                        let range = text::covering_grapheme_range(&labelled, at..at + label.len());
+                        let overlaps = claimed
+                            .iter()
+                            .any(|(taken, _)| range.start < taken.end && taken.start < range.end);
+                        (!overlaps).then_some(range)
+                    })
+                });
+            match free {
+                Some(range) => claimed.push((range, attachment)),
+                None => unbound.push(attachment.clone()),
+            }
+        }
+        claimed.sort_by_key(|(range, _)| range.start);
+
+        let mut text = String::with_capacity(labelled.len());
+        let mut end = 0;
+        for (range, _) in &claimed {
+            text.push_str(text::slice(&labelled, end..range.start));
+            text.push(ATTACHMENT_MARKER);
+            end = range.end;
+        }
+        text.push_str(text::slice(&labelled, end..labelled.len()));
+        let bound = claimed.into_iter().map(|(_, a)| a.clone()).collect();
+        (Self::new(text, bound), unbound)
+    }
+
     pub fn push_str(&mut self, s: &str) {
         self.text.push_str(&strip_markers(s.to_string()));
     }
@@ -380,6 +422,50 @@ mod tests {
 
     fn id(n: u64) -> Attachment {
         Attachment::image(format!("{n}.png"), format!("data:{n}"))
+    }
+
+    #[test]
+    fn from_labelled_inverts_labelled() {
+        let m = ATTACHMENT_MARKER;
+        let text = AttachedText::new(format!("a {m} b {m}{m}"), vec![id(1), id(2), id(1)]);
+        let labelled = text.labelled();
+        assert_eq!(labelled, "a [1.png] b [2.png][1.png]");
+        assert_eq!(
+            AttachedText::from_labelled(&labelled, text.attachments()),
+            (text.clone(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn from_labelled_follows_labels_moved_out_of_order() {
+        let m = ATTACHMENT_MARKER;
+        let (one, two) = (id(1), id(2));
+        let rebound =
+            AttachedText::from_labelled("[2.png] then [1.png]", &[one.clone(), two.clone()]);
+        assert_eq!(
+            rebound,
+            (
+                AttachedText::new(format!("{m} then {m}"), vec![two, one]),
+                Vec::new()
+            )
+        );
+    }
+
+    #[test]
+    fn from_labelled_returns_attachments_whose_label_was_removed() {
+        let m = ATTACHMENT_MARKER;
+        let (one, two) = (id(1), id(2));
+        let rebound = AttachedText::from_labelled(
+            &format!("edited [2.png] {m}tail"),
+            &[one.clone(), two.clone()],
+        );
+        assert_eq!(
+            rebound,
+            (
+                AttachedText::new(format!("edited {m} tail"), vec![two]),
+                vec![one]
+            )
+        );
     }
 
     #[test]

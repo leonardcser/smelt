@@ -1034,6 +1034,11 @@ impl Buffer {
         }
     }
 
+    /// The whole source with its attachments.
+    pub fn attached_text(&self) -> AttachedText {
+        AttachedText::new(self.source.clone(), self.attachments.clone())
+    }
+
     /// Snapshot a byte range as a [`CopyOutput`]. The range is in the buffer's
     /// editable-byte space - `source` when the parser writes it, otherwise
     /// `lines.join("\n")`. Endpoints are snapped to grapheme boundaries and

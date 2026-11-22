@@ -156,6 +156,14 @@ impl PromptRuntime {
         self.input.from_paste = skip_shell_escape;
     }
 
+    pub(crate) fn labelled_text(&self, ctx: PromptCtxRef<'_>) -> String {
+        self.input.labelled_text(ctx)
+    }
+
+    pub(crate) fn replace_labelled_text(&mut self, ctx: &mut PromptCtx<'_>, text: &str) {
+        self.input.replace_labelled_text(ctx, text);
+    }
+
     pub(crate) fn replace_text(&mut self, ctx: &mut PromptCtx<'_>, text: String) {
         self.input.replace_text(ctx, text);
     }

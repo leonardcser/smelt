@@ -57,19 +57,14 @@ impl PromptState {
                 VimBridgeResult::Handled(self.submit_action(ctx, crate::app::QueueStage::Turn))
             }
             vim::Action::HistoryPrev => {
-                if let Some(entry) = history
-                    .as_deref_mut()
-                    .and_then(|h| h.up(&Self::strip_attachment_markers(ctx.buf.source())))
-                {
-                    let entry = entry.to_string();
-                    self.install_history_entry(ctx, &entry, false);
+                if let Some(history) = history.as_deref_mut() {
+                    self.history_up(ctx, history);
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::HistoryNext => {
-                if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    let entry = entry.to_string();
-                    self.install_history_entry(ctx, &entry, true);
+                if let Some(history) = history.as_deref_mut() {
+                    self.history_down(ctx, history);
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }

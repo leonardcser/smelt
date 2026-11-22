@@ -1,10 +1,21 @@
 use crate::fuzzy::history::HistoryIndex;
+use smelt_buffer::attached::AttachedText;
+
+/// What a history step brings back into the prompt.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recall<'a> {
+    /// A saved prompt.
+    Entry(&'a str),
+    /// The prompt as it was before browsing began, with its attachments.
+    Draft(AttachedText),
+}
 
 /// Input-history recall over the prompts saved in the store.
 pub struct History {
     entries: Vec<String>,
     cursor: usize,
-    draft: String,
+    /// The prompt set aside by the first step up, returned by the last step down.
+    draft: AttachedText,
     store: smelt_store::Store,
     /// Search index over `entries`, built on first search after a change.
     search_index: Option<HistoryIndex>,
@@ -16,7 +27,7 @@ impl History {
         Self {
             cursor: entries.len(),
             entries,
-            draft: String::new(),
+            draft: AttachedText::default(),
             store,
             search_index: None,
         }
@@ -33,15 +44,17 @@ impl History {
 
     fn reset(&mut self) {
         self.cursor = self.entries.len();
-        self.draft.clear();
+        self.draft = AttachedText::default();
     }
 
-    pub fn up(&mut self, current_buf: &str) -> Option<&str> {
+    /// Step to the next older entry. The first step sets `current` aside as
+    /// the draft; `current` is only built when that happens.
+    pub fn up(&mut self, current: impl FnOnce() -> AttachedText) -> Option<&str> {
         if self.entries.is_empty() {
             return None;
         }
         if self.cursor == self.entries.len() {
-            self.draft = current_buf.to_string();
+            self.draft = current();
         }
         if self.cursor > 0 {
             self.cursor -= 1;
@@ -51,15 +64,16 @@ impl History {
         }
     }
 
-    pub fn down(&mut self) -> Option<&str> {
+    /// Step to the next newer entry, or past the newest back to the draft.
+    pub fn down(&mut self) -> Option<Recall<'_>> {
         if self.cursor >= self.entries.len() {
             return None;
         }
         self.cursor += 1;
         if self.cursor == self.entries.len() {
-            Some(&self.draft)
+            Some(Recall::Draft(std::mem::take(&mut self.draft)))
         } else {
-            Some(&self.entries[self.cursor])
+            Some(Recall::Entry(&self.entries[self.cursor]))
         }
     }
 
@@ -125,27 +139,34 @@ mod tests {
         for entry in ["a", "b", "c"] {
             h.push(entry.into());
         }
-        assert_eq!(h.up("draft"), Some("c"));
-        assert_eq!(h.up("ignored"), Some("b"));
-        assert_eq!(h.up("ignored"), Some("a"));
-        assert_eq!(h.up("ignored"), None);
+        assert_eq!(h.up(|| AttachedText::plain("draft")), Some("c"));
+        assert_eq!(h.up(|| unreachable!()), Some("b"));
+        assert_eq!(h.up(|| unreachable!()), Some("a"));
+        assert_eq!(h.up(|| unreachable!()), None);
     }
 
     #[test]
     fn up_returns_none_when_history_empty() {
         let (_dir, mut h) = history();
-        assert_eq!(h.up("anything"), None);
+        assert_eq!(h.up(|| AttachedText::plain("anything")), None);
     }
 
     #[test]
-    fn down_returns_the_draft_saved_by_the_first_up() {
+    fn down_returns_the_draft_saved_by_the_first_up_with_its_attachments() {
         let (_dir, mut h) = history();
         h.push("a".into());
         h.push("b".into());
-        let _ = h.up("draft-buf");
-        let _ = h.up("ignored");
-        assert_eq!(h.down(), Some("b"));
-        assert_eq!(h.down(), Some("draft-buf"));
+        let draft = AttachedText::new(
+            format!("look {}", smelt_buffer::ATTACHMENT_MARKER),
+            vec![smelt_buffer::attachment::Attachment::image(
+                "shot.png".into(),
+                "data:image/png;base64,AAAA".into(),
+            )],
+        );
+        let _ = h.up(|| draft.clone());
+        let _ = h.up(|| unreachable!());
+        assert_eq!(h.down(), Some(Recall::Entry("b")));
+        assert_eq!(h.down(), Some(Recall::Draft(draft)));
         assert_eq!(h.down(), None);
     }
 
@@ -154,9 +175,9 @@ mod tests {
         let (_dir, mut h) = history();
         h.push("a".into());
         h.push("b".into());
-        let _ = h.up("");
+        let _ = h.up(AttachedText::default);
         h.push("c".into());
-        assert_eq!(h.up(""), Some("c"));
+        assert_eq!(h.up(AttachedText::default), Some("c"));
     }
 
     #[test]

@@ -2951,3 +2951,62 @@ fn cut_attachment_pastes_back_as_an_attachment() {
     assert_eq!(app.prompt_source(), format!("{marker}cdab"));
     assert_eq!(app.prompt_attachment_count(), 1);
 }
+
+#[test]
+fn history_browse_returns_the_draft_with_its_images() {
+    let marker = crate::input::ATTACHMENT_MARKER;
+    for vim in [false, true] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.push_history_entry("older prompt".into());
+        app.type_text("look ");
+        app.insert_image_attachment("shot.png".into(), "data:image/png;base64,SHOT".into());
+
+        if vim {
+            app.press(KeyCode::Esc);
+            app.type_char('k');
+        } else {
+            app.press(KeyCode::Up);
+        }
+        assert_eq!(app.state().prompt_text, "older prompt", "vim={vim}");
+        assert_eq!(app.prompt_attachment_count(), 0, "vim={vim}");
+
+        if vim {
+            app.type_char('j');
+            app.type_char('i');
+        } else {
+            app.press(KeyCode::Down);
+        }
+        assert_eq!(
+            app.state().prompt_text,
+            format!("look {marker}"),
+            "vim={vim}"
+        );
+        assert_eq!(app.prompt_attachment_count(), 1, "vim={vim}");
+
+        app.press(KeyCode::Enter);
+        let frame = app.render_to_frame().text();
+        assert!(frame.contains("look [shot.png]"), "vim={vim}:\n{frame}");
+        app.assert_invariants();
+    }
+}
+
+#[test]
+fn stash_and_unstash_keep_the_prompt_images() {
+    let marker = crate::input::ATTACHMENT_MARKER;
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.type_text("look ");
+    app.insert_image_attachment("shot.png".into(), "data:image/png;base64,SHOT".into());
+
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert_eq!(app.state().prompt_text, "");
+    assert_eq!(app.prompt_attachment_count(), 0);
+
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert_eq!(app.state().prompt_text, format!("look {marker}"));
+    assert_eq!(app.prompt_attachment_count(), 1);
+
+    app.press(KeyCode::Enter);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("look [shot.png]"), "{frame}");
+    app.assert_invariants();
+}

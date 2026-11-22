@@ -4,6 +4,7 @@ mod file_drop;
 mod vim_bridge;
 
 pub(crate) use smelt_core::history::History;
+use smelt_core::history::Recall;
 
 use crate::app::QueueStage;
 use crate::keymap::{self, KeyAction, KeyContext};
@@ -153,35 +154,23 @@ impl PromptReplay {
     }
 }
 
+/// Rewound text with its visible image labels turned back into markers.
+/// Images whose label is gone go at the end.
 fn rewind_source_and_attachments(
-    mut text: String,
+    text: String,
     images: Vec<(String, String)>,
 ) -> (String, Vec<Attachment>) {
-    let mut attachments = Vec::new();
-    for (label, data_url) in images {
-        let attachment = Attachment::image(label, data_url);
-        let display_label = attachment.display_label();
-        let raw_label = format!("[{}]", attachment.label());
-        let labels = if raw_label != display_label {
-            vec![raw_label, display_label]
-        } else {
-            vec![display_label]
-        };
-
-        if let Some((pos, len)) = labels
-            .iter()
-            .find_map(|label| text.find(label).map(|pos| (pos, label.len())))
-        {
-            let range = smelt_buffer::text::covering_grapheme_range(&text, pos..pos + len);
-            let mut marker = [0; 4];
-            let marker = ATTACHMENT_MARKER.encode_utf8(&mut marker);
-            smelt_buffer::text::replace_range(&mut text, range, marker);
-        } else {
-            if !text.is_empty() && !text.chars().last().is_some_and(char::is_whitespace) {
-                text.push(' ');
-            }
-            text.push(ATTACHMENT_MARKER);
+    let images: Vec<_> = images
+        .into_iter()
+        .map(|(label, data_url)| Attachment::image(label, data_url))
+        .collect();
+    let (bound, unbound) = AttachedText::from_labelled(&text, &images);
+    let (mut text, mut attachments) = bound.into_parts();
+    for attachment in unbound {
+        if !text.is_empty() && !text.chars().last().is_some_and(char::is_whitespace) {
+            text.push(' ');
         }
+        text.push(ATTACHMENT_MARKER);
         attachments.push(attachment);
     }
     (text, attachments)
@@ -382,7 +371,7 @@ impl PromptState {
     /// Snapshots undo, installs new source without attachments, cursor at end.
     ///
     /// Intended for callers feeding text from outside the prompt: Lua
-    /// `smelt.prompt.set_text`, placeholder accept, `$EDITOR` re-import.
+    /// `smelt.prompt.set_text`, placeholder accept.
     /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped - these
     /// callers can't carry attachments, so the markers would be
     /// orphaned (and trip the marker/attachment invariant in
@@ -394,23 +383,55 @@ impl PromptState {
         self.install_source(ctx, text, cpos, Vec::new());
     }
 
+    /// The prompt as `$EDITOR` sees it: each attachment as its `[label]`.
+    pub(crate) fn labelled_text(&self, ctx: PromptCtxRef<'_>) -> String {
+        ctx.buf.attached_text().labelled().into_owned()
+    }
+
+    /// Replace the prompt with text edited from [`labelled_text`](Self::labelled_text).
+    /// Each `[label]` still in `text` turns back into its attachment, and
+    /// attachments whose label is gone are dropped. The cursor goes to the
+    /// end. One step that can be undone.
+    pub(crate) fn replace_labelled_text(&mut self, ctx: &mut PromptCtx<'_>, text: &str) {
+        self.save_undo(ctx);
+        let (bound, _) = AttachedText::from_labelled(text, &ctx.buf.attachments);
+        let (text, attachments) = bound.into_parts();
+        let cpos = text.len();
+        self.install_source(ctx, text, cpos, attachments);
+    }
+
     /// Strip `ATTACHMENT_MARKER` bytes from `s`. Used at every seam where
     /// source bytes leave the buffer for storage that can't carry the
-    /// matching attachments: `History` draft slot, `replace_text`
-    /// install path, `$EDITOR` round-trip. Persisting raw markers
+    /// matching attachments: saved `History` entries, `replace_text`
+    /// install path. Persisting raw markers
     /// upstream would let them return without backing attachments,
     /// violating the marker/attachment invariant on install.
     pub(crate) fn strip_attachment_markers(s: &str) -> String {
         s.replace(ATTACHMENT_MARKER, "")
     }
 
-    /// Install a marker-stripped history entry into the prompt buffer.
-    /// `end_cursor = true` places the cursor at end (used by history-down
-    /// where shells conventionally land you after the recalled text).
-    fn install_history_entry(&mut self, ctx: &mut PromptCtx<'_>, entry: &str, end_cursor: bool) {
+    /// Recall the next older history entry, cursor at start. The first
+    /// step sets the prompt aside, attachments included.
+    fn history_up(&mut self, ctx: &mut PromptCtx<'_>, history: &mut History) -> bool {
+        let Some(entry) = history.up(|| ctx.buf.attached_text()) else {
+            return false;
+        };
         let text = Self::strip_attachment_markers(entry);
-        let cpos = if end_cursor { text.len() } else { 0 };
-        self.install_source(ctx, text, cpos, Vec::new());
+        self.install_source(ctx, text, 0, Vec::new());
+        true
+    }
+
+    /// Recall the next newer history entry, or the draft set aside by the
+    /// first step up. The cursor lands at the end, as in a shell.
+    fn history_down(&mut self, ctx: &mut PromptCtx<'_>, history: &mut History) -> bool {
+        let (text, attachments) = match history.down() {
+            None => return false,
+            Some(Recall::Entry(entry)) => (Self::strip_attachment_markers(entry), Vec::new()),
+            Some(Recall::Draft(draft)) => draft.into_parts(),
+        };
+        let cpos = text.len();
+        self.install_source(ctx, text, cpos, attachments);
+        true
     }
 
     /// Bring `text` back without losing what the prompt holds. An empty
@@ -866,11 +887,7 @@ impl PromptState {
                 if new_pos != ctx.win.cpos() {
                     ctx.win.set_cpos(new_pos);
                     Action::Redraw
-                } else if let Some(entry) =
-                    history.and_then(|h| h.up(&Self::strip_attachment_markers(ctx.buf.source())))
-                {
-                    let entry = entry.to_string();
-                    self.install_history_entry(ctx, &entry, false);
+                } else if history.is_some_and(|h| self.history_up(ctx, h)) {
                     ctx.win.set_curswant(None);
                     Action::Redraw
                 } else {
@@ -886,9 +903,7 @@ impl PromptState {
                 if new_pos != ctx.win.cpos() {
                     ctx.win.set_cpos(new_pos);
                     Action::Redraw
-                } else if let Some(entry) = history.and_then(|h| h.down()) {
-                    let entry = entry.to_string();
-                    self.install_history_entry(ctx, &entry, true);
+                } else if history.is_some_and(|h| self.history_down(ctx, h)) {
                     ctx.win.set_curswant(None);
                     Action::Redraw
                 } else {
@@ -916,20 +931,14 @@ impl PromptState {
                 Action::Redraw
             }
             KeyAction::HistoryPrev => {
-                if let Some(entry) =
-                    history.and_then(|h| h.up(&Self::strip_attachment_markers(ctx.buf.source())))
-                {
-                    let entry = entry.to_string();
-                    self.install_history_entry(ctx, &entry, false);
+                if history.is_some_and(|h| self.history_up(ctx, h)) {
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
             KeyAction::HistoryNext => {
-                if let Some(entry) = history.and_then(|h| h.down()) {
-                    let entry = entry.to_string();
-                    self.install_history_entry(ctx, &entry, true);
+                if history.is_some_and(|h| self.history_down(ctx, h)) {
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -1467,6 +1476,24 @@ mod tests {
     }
 
     #[test]
+    fn rewind_restore_pairs_each_marker_with_the_image_of_its_label() {
+        let (source, attachments) = rewind_source_and_attachments(
+            "[b.png] then [a.png]".into(),
+            vec![
+                ("a.png".into(), "data:image/png;base64,AAA".into()),
+                ("b.png".into(), "data:image/png;base64,BBB".into()),
+            ],
+        );
+
+        assert_eq!(
+            source,
+            format!("{ATTACHMENT_MARKER} then {ATTACHMENT_MARKER}")
+        );
+        let labels: Vec<_> = attachments.iter().map(Attachment::label).collect();
+        assert_eq!(labels, ["b.png", "a.png"]);
+    }
+
+    #[test]
     fn rewind_restore_replaces_complete_attachment_label_graphemes() {
         for text in ["[shot.png]\u{301}", "\u{600}[shot.png]"] {
             let (source, attachments) = rewind_source_and_attachments(
@@ -1477,6 +1504,36 @@ mod tests {
             assert_eq!(source, ATTACHMENT_MARKER.to_string());
             assert_eq!(attachments.len(), 1);
         }
+    }
+
+    #[test]
+    fn editor_round_trip_keeps_the_images_whose_labels_remain() {
+        let mut input = Harness::new();
+        let a = Attachment::image("a.png".into(), "data:image/png;base64,AAA".into());
+        let b = Attachment::image("b.png".into(), "data:image/png;base64,BBB".into());
+        let mut ctx = PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        };
+        input.state.insert_paste(&mut ctx, "see ".into());
+        input.state.insert_attachment(&mut ctx, a.clone());
+        input.state.insert_paste(&mut ctx, " and ".into());
+        input.state.insert_attachment(&mut ctx, b);
+
+        let labelled = input.state.labelled_text(ctx.as_ref());
+        assert_eq!(labelled, "see [a.png] and [b.png]");
+
+        input
+            .state
+            .replace_labelled_text(&mut ctx, "now see [a.png] only\n");
+        assert_eq!(
+            ctx.buf.source(),
+            format!("now see {ATTACHMENT_MARKER} only\n")
+        );
+        assert_eq!(ctx.buf.attachments, vec![a]);
+
+        input.state.undo(&mut ctx);
+        assert_eq!(ctx.buf.attachments.len(), 2);
     }
 
     #[test]

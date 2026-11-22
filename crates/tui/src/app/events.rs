@@ -1147,10 +1147,10 @@ impl TuiApp {
     }
 
     fn edit_in_editor(&mut self) {
-        let req = match crate::input::editor::prepare(
-            self.prompt_buf().source(),
-            self.core.env.runtime_dir(),
-        ) {
+        let text = self
+            .prompt
+            .labelled_text(crate::input::prompt_ctx_ref(&self.ui));
+        let req = match crate::input::editor::prepare(&text, self.core.env.runtime_dir()) {
             Ok(req) => req,
             Err(e) => {
                 self.notify_error(format!("editor: {e}"));
@@ -1161,7 +1161,7 @@ impl TuiApp {
         match crate::input::editor::finalize(req, status) {
             Ok(text) => {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.prompt.replace_text(&mut pctx, text);
+                self.prompt.replace_labelled_text(&mut pctx, &text);
             }
             Err(msg) => self.notify_error(msg),
         }
