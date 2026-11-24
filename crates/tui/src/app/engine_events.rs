@@ -136,14 +136,8 @@ impl TuiApp {
         }
         let lua = self.lua.execution();
         let summary = crate::lua::scope_app(self, || {
-            lua.tool_summary_with_context(tool_name, args, true)
+            crate::app::history::ToolSummaryResolver::new(&lua).resolve(tool_name, args)
         });
-        if summary.is_empty() && !lua.has_tool(tool_name) {
-            let summary = smelt_core::mcp::args_summary(args);
-            if !summary.is_empty() {
-                return summary;
-            }
-        }
         if summary.is_empty() {
             protocol::StyledLines::from_plain(tool_name)
         } else {

@@ -1669,6 +1669,33 @@ fn native_tool_permission_shows_its_provider_and_matches_rules_by_raw_name() {
 }
 
 #[test]
+fn native_monitor_block_keeps_its_name_and_shows_the_bash_summary() {
+    let mut app = TestApp::builder().build();
+    app.start_submitted_turn("watch");
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolStarted {
+        invocation_id: protocol::InvocationId::new(8),
+        call_id: "call-8".into(),
+        tool_name: "claude-code/Monitor".into(),
+        args: std::collections::HashMap::from([
+            (
+                "command".into(),
+                serde_json::json!("while true; do\n  sleep 120\ndone"),
+            ),
+            ("description".into(), serde_json::json!("watch runs")),
+            ("timeout_ms".into(), serde_json::json!(1_800_000)),
+        ]),
+        called_at_ms: 0,
+    }));
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("claude-code/Monitor while true; do  (background)"),
+        "{frame}"
+    );
+    assert!(frame.contains("  sleep 120"), "{frame}");
+    assert!(!frame.contains(r#""command""#), "{frame}");
+}
+
+#[test]
 fn request_permission_auto_allows_when_applied_turn_mode_allows() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);

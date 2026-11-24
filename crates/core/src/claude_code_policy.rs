@@ -7,35 +7,25 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// Decide a native tool call with `smelt.permissions.check`. A native tool
-/// that shares a smelt tool's capability uses that tool's access, paths and
-/// summary.
-/// Native `Bash` runs outside the sandbox, so it counts as `full`. Other
-/// native tools use [`engine::claude_code_native_access`]. Path arguments
-/// arrive absolute. Call inside a host scope.
+/// checked as a smelt tool ([`engine::claude_code_checked_as`]) uses that
+/// tool's rules, paths and summary. The access comes from
+/// [`engine::claude_code_native_access`].
+/// Path arguments arrive absolute. Call inside a host scope.
 pub fn evaluate(
     lua: &LuaRuntime,
     mode: AgentMode,
     name: &str,
     args: &HashMap<String, Value>,
 ) -> ToolEvaluation {
-    let (tool, args, access, summary) = match engine::claude_code_smelt_tool(name, args) {
+    let access = engine::claude_code_native_access(name);
+    let (tool, args, summary) = match engine::claude_code_checked_as(name, args) {
         Some((tool, args)) => {
             let summary = Some(lua.tool_summary(tool, &args))
                 .filter(|summary| !summary.is_empty())
                 .unwrap_or_else(|| crate::mcp::args_summary(&args));
-            (
-                tool,
-                args,
-                (tool == "bash").then_some(Access::Full),
-                summary,
-            )
+            (tool, args, summary)
         }
-        None => (
-            name,
-            args.clone(),
-            Some(engine::claude_code_native_access(name)),
-            crate::mcp::args_summary(args),
-        ),
+        None => (name, args.clone(), crate::mcp::args_summary(args)),
     };
     let (decision, access) = match lua.check_permission(tool, &args, mode, access) {
         Ok(check) => (check.decision, check.access),
@@ -91,6 +81,32 @@ mod tests {
         assert_eq!(
             evaluation.metadata.summary.as_plain_text(),
             "edit /w/init.lua"
+        );
+    }
+
+    #[test]
+    fn native_monitor_runs_as_bash() {
+        let lua = LuaRuntime::new();
+        lua.lua
+            .load(
+                r#"smelt.tools.register({
+                    name = "bash",
+                    access = "write",
+                    summary = function(args)
+                        return "$ " .. args.command .. (args.background and " &" or "")
+                    end,
+                    execute = function() return "ok" end,
+                })"#,
+            )
+            .exec()
+            .unwrap();
+        let args = HashMap::from([("command".to_string(), Value::from("tail -f log"))]);
+        let evaluation = evaluate(&lua, AgentMode::parse("write").unwrap(), "Monitor", &args);
+        assert_eq!(evaluation.decision, Ask);
+        assert_eq!(evaluation.metadata.access, Access::Full);
+        assert_eq!(
+            evaluation.metadata.summary.as_plain_text(),
+            "$ tail -f log &"
         );
     }
 }

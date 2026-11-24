@@ -14,7 +14,7 @@ mod messages;
 mod models;
 mod plans;
 pub use account::usage_scope;
-pub use catalog::{native_access, smelt_tool};
+pub use catalog::{checked_as, native_access};
 pub use context::context_window;
 pub use models::{cached as cached_models, refresh as refresh_models, stale as models_stale};
 pub use plans::directory as plan_directory;
@@ -1533,10 +1533,7 @@ impl Runtime<'_> {
                 let name = input["tool_name"]
                     .as_str()
                     .ok_or("Claude Code permission hook has no tool name")?;
-                if name.starts_with(SMELT_MCP_PREFIX)
-                    || (matches!(name, "AskUserQuestion" | "ExitPlanMode")
-                        && !self.catalog.owns(name))
-                {
+                if name.starts_with(SMELT_MCP_PREFIX) || self.answers_natively(name) {
                     // Defer interactive tools to can_use_tool so the native agent
                     // receives updated input from the host dialog.
                     self.write(reply(id, json!({}))).await?;
@@ -1564,9 +1561,7 @@ impl Runtime<'_> {
                         json!({"behavior":"allow", "updatedInput":request["input"]}),
                     ))
                     .await?;
-                } else if matches!(name, "AskUserQuestion" | "ExitPlanMode")
-                    && !self.catalog.owns(name)
-                {
+                } else if self.answers_natively(name) {
                     self.native_interaction(
                         id,
                         name,
@@ -1607,6 +1602,12 @@ impl Runtime<'_> {
                 mode: self.mode.clone(),
             });
         }
+    }
+
+    /// Whether smelt's dialog answers the native tool `name`. Its permission
+    /// check waits for `can_use_tool`, whose input the reply can update.
+    fn answers_natively(&self, name: &str) -> bool {
+        matches!(name, "AskUserQuestion" | "ExitPlanMode") && !self.catalog.owns(name)
     }
 
     async fn native_interaction(

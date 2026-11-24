@@ -11,35 +11,80 @@ pub(super) struct Catalog {
     pub(super) disabled_native: Vec<String>,
 }
 
-/// Native tools that are the same capability as a smelt tool. They share its
-/// permission rules and transcript presentation.
-const SHARED: &[(&str, &str)] = &[
-    ("Read", "read_file"),
-    ("Write", "write_file"),
-    ("Edit", "edit_file"),
-    ("MultiEdit", "edit_file"),
-    ("NotebookEdit", "edit_notebook"),
-    ("Bash", "bash"),
-    ("Glob", "glob"),
-    ("Grep", "grep"),
-    ("WebFetch", "web_fetch"),
-    ("WebSearch", "web_search"),
-    ("AskUserQuestion", "ask_user_question"),
-    ("ExitPlanMode", "present_plan"),
+/// How a native tool relates to a smelt tool.
+#[derive(Clone, Copy)]
+enum Smelt {
+    /// The same capability: the call takes the smelt tool's name, permission
+    /// rules, summary and renderer.
+    Shared(&'static str),
+    /// Runs the smelt tool's capability under its own name: the call uses the
+    /// smelt tool's permission rules and summary.
+    RunsAs(&'static str),
+    /// The smelt tool owns the capability with another argument shape.
+    Owned(&'static str),
+}
+
+use Access::{Full, Read, Write};
+use Smelt::{Owned, RunsAs, Shared};
+
+/// The native tools smelt knows, with the access a call asks for. `None`
+/// leaves the access to the smelt tool the call is checked as. Native shell
+/// commands run outside smelt's sandbox, so they need `full`. `read` tools
+/// only read or change state of the Claude Code session itself. Tools that
+/// act on their own or reach outside the machine, such as `Agent`,
+/// `SendMessage`, `CronCreate` and `PushNotification`, and tools smelt does
+/// not know need `full`.
+const NATIVE: &[(&str, Option<Smelt>, Option<Access>)] = &[
+    ("Read", Some(Shared("read_file")), None),
+    ("Write", Some(Shared("write_file")), None),
+    ("Edit", Some(Shared("edit_file")), None),
+    ("MultiEdit", Some(Shared("edit_file")), None),
+    ("NotebookEdit", Some(Shared("edit_notebook")), None),
+    ("Bash", Some(Shared("bash")), Some(Full)),
+    ("Glob", Some(Shared("glob")), None),
+    ("Grep", Some(Shared("grep")), None),
+    ("WebFetch", Some(Shared("web_fetch")), None),
+    ("WebSearch", Some(Shared("web_search")), None),
+    ("AskUserQuestion", Some(Shared("ask_user_question")), None),
+    ("ExitPlanMode", Some(Shared("present_plan")), None),
+    ("Monitor", Some(RunsAs("bash")), Some(Full)),
+    ("TaskOutput", Some(Owned("read_process_output")), Some(Full)),
+    ("TaskStop", Some(Owned("stop_process")), Some(Full)),
+    ("ToolSearch", None, Some(Read)),
+    ("Skill", None, Some(Read)),
+    ("LSP", None, Some(Read)),
+    ("NotebookRead", None, Some(Read)),
+    ("BashOutput", None, Some(Read)),
+    ("ListMcpResourcesTool", None, Some(Read)),
+    ("ReadMcpResourceTool", None, Some(Read)),
+    ("TodoWrite", None, Some(Read)),
+    ("TaskCreate", None, Some(Read)),
+    ("TaskGet", None, Some(Read)),
+    ("TaskList", None, Some(Read)),
+    ("TaskUpdate", None, Some(Read)),
+    ("ListAgents", None, Some(Read)),
+    ("CronList", None, Some(Read)),
+    ("EnterPlanMode", None, Some(Read)),
+    ("ReportFindings", None, Some(Read)),
+    ("StructuredOutput", None, Some(Read)),
+    ("ScheduleWakeup", None, Some(Read)),
+    ("Sleep", None, Some(Read)),
+    ("KillShell", None, Some(Write)),
+    ("KillBash", None, Some(Write)),
 ];
 
-/// Native tools whose capability a smelt tool owns without sharing its shape.
-const OWNED: &[(&str, &str)] = &[
-    ("TaskOutput", "read_process_output"),
-    ("TaskStop", "stop_process"),
-];
+fn smelt(native: &str) -> Option<Smelt> {
+    NATIVE
+        .iter()
+        .find(|(name, _, _)| *name == native)
+        .and_then(|(_, smelt, _)| *smelt)
+}
 
 fn native_equivalents(name: &str) -> Vec<&'static str> {
-    SHARED
+    NATIVE
         .iter()
-        .chain(OWNED)
-        .filter(|(_, smelt)| *smelt == name)
-        .map(|(native, _)| *native)
+        .filter(|(_, smelt, _)| matches!(smelt, Some(Shared(tool) | Owned(tool)) if *tool == name))
+        .map(|(native, _, _)| *native)
         .collect()
 }
 
@@ -49,8 +94,27 @@ pub fn smelt_tool(
     native: &str,
     args: &HashMap<String, Value>,
 ) -> Option<(&'static str, HashMap<String, Value>)> {
-    let (_, smelt) = SHARED.iter().find(|(name, _)| *name == native)?;
-    let args = args
+    match smelt(native)? {
+        Shared(tool) => Some((tool, smelt_args(native, args))),
+        RunsAs(_) | Owned(_) => None,
+    }
+}
+
+/// The smelt tool whose permission rules and summary a native call uses:
+/// the one sharing its capability or the one it runs as, with the call's
+/// arguments renamed to that tool's parameters.
+pub fn checked_as(
+    native: &str,
+    args: &HashMap<String, Value>,
+) -> Option<(&'static str, HashMap<String, Value>)> {
+    match smelt(native)? {
+        Shared(tool) | RunsAs(tool) => Some((tool, smelt_args(native, args))),
+        Owned(_) => None,
+    }
+}
+
+fn smelt_args(native: &str, args: &HashMap<String, Value>) -> HashMap<String, Value> {
+    let mut args: HashMap<String, Value> = args
         .iter()
         .map(|(key, value)| {
             let key = match (native, key.as_str()) {
@@ -61,44 +125,19 @@ pub fn smelt_tool(
             (key.to_owned(), value.clone())
         })
         .collect();
-    Some((smelt, args))
+    if native == "Monitor" {
+        // A monitor always runs in the background and streams its output.
+        args.insert("background".into(), Value::Bool(true));
+    }
+    args
 }
 
-/// Native tools that share no smelt tool and need less than `full`. `read`
-/// tools only read or change state of the Claude Code session itself.
-const NATIVE_ACCESS: &[(&str, Access)] = &[
-    ("ToolSearch", Access::Read),
-    ("Skill", Access::Read),
-    ("LSP", Access::Read),
-    ("NotebookRead", Access::Read),
-    ("BashOutput", Access::Read),
-    ("ListMcpResourcesTool", Access::Read),
-    ("ReadMcpResourceTool", Access::Read),
-    ("TodoWrite", Access::Read),
-    ("TaskCreate", Access::Read),
-    ("TaskGet", Access::Read),
-    ("TaskList", Access::Read),
-    ("TaskUpdate", Access::Read),
-    ("ListAgents", Access::Read),
-    ("CronList", Access::Read),
-    ("EnterPlanMode", Access::Read),
-    ("ReportFindings", Access::Read),
-    ("StructuredOutput", Access::Read),
-    ("ScheduleWakeup", Access::Read),
-    ("Sleep", Access::Read),
-    ("KillShell", Access::Write),
-    ("KillBash", Access::Write),
-];
-
-/// The access a call of `native` needs when it shares no smelt tool. Tools
-/// that act on their own or reach outside the machine, such as `Agent`,
-/// `SendMessage`, `CronCreate` and `PushNotification`, and tools smelt does
-/// not know, are `full`.
-pub fn native_access(native: &str) -> Access {
-    NATIVE_ACCESS
+/// The access a call of `native` asks for; see [`NATIVE`].
+pub fn native_access(native: &str) -> Option<Access> {
+    NATIVE
         .iter()
-        .find(|(name, _)| *name == native)
-        .map_or(Access::Full, |(_, access)| *access)
+        .find(|(name, _, _)| *name == native)
+        .map_or(Some(Full), |(_, _, access)| *access)
 }
 
 impl Catalog {

@@ -322,6 +322,17 @@ impl<'a> ToolSummaryResolver<'a> {
         args: &HashMap<String, serde_json::Value>,
         final_args: bool,
     ) -> protocol::StyledLines {
+        // A provider's native tool, shown as `provider/Name`, that a smelt tool
+        // checks takes that tool's summary, as in its permission dialog.
+        if let Some((tool, args)) = name
+            .split_once('/')
+            .and_then(|(_, native)| engine::claude_code_checked_as(native, args))
+        {
+            let summary = self.lua.tool_summary_with_context(tool, &args, final_args);
+            if !summary.is_empty() {
+                return summary;
+            }
+        }
         let summary = self.lua.tool_summary_with_context(name, args, final_args);
         if !summary.is_empty() || self.lua.has_tool(name) {
             return summary;
