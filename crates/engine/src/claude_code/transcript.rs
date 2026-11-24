@@ -32,6 +32,9 @@ pub(super) struct Transcript {
     seen: HashSet<String>,
     partial_text: String,
     partial_reasoning: String,
+    /// A message streams and has not ended. Notes wait for it like they wait
+    /// for a step's tool results.
+    streaming: bool,
     reasoning_id: String,
     thinking: HashMap<u64, (String, String)>,
     drafts: HashMap<u64, (String, String, String)>,
@@ -60,6 +63,7 @@ impl Transcript {
             seen: HashSet::new(),
             partial_text: String::new(),
             partial_reasoning: String::new(),
+            streaming: false,
             reasoning_id: String::new(),
             thinking: HashMap::new(),
             drafts: HashMap::new(),
@@ -226,6 +230,7 @@ impl Transcript {
         let index = event["index"].as_u64().unwrap_or(0);
         match event["type"].as_str() {
             Some("message_start") => {
+                self.streaming = true;
                 self.partial_text.clear();
                 self.partial_reasoning.clear();
                 self.reasoning_id = event["message"]["id"]
@@ -316,6 +321,10 @@ impl Transcript {
                         arguments: if args.is_empty() { "{}".into() } else { args },
                     });
                 }
+            }
+            Some("message_stop") => {
+                self.streaming = false;
+                self.flush();
             }
             _ => {}
         }
@@ -513,7 +522,7 @@ impl Transcript {
                 step.tools,
             )));
         }
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty() || self.streaming {
             return;
         }
         for item in self.take_notes() {
@@ -541,10 +550,12 @@ impl Transcript {
         self.steers.clear();
         self.partial_text.clear();
         self.partial_reasoning.clear();
+        self.streaming = false;
         self.flush();
     }
 
     pub(super) fn finish(&mut self) {
+        self.streaming = false;
         for (_, (id, content)) in std::mem::take(&mut self.thinking) {
             self.emit(EngineEvent::ReasoningPartFinished {
                 id,
@@ -870,6 +881,53 @@ mod tests {
         assert_eq!(transcript.held_notes(), joining);
         transcript.abandon();
         assert_eq!(transcript.committed, joining.map(HistoryItem::note));
+        assert!(transcript.held_notes().is_empty());
+    }
+
+    #[test]
+    fn a_note_waits_for_the_streaming_message_to_end() {
+        let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::EngineEventSender {
+            output_tx,
+            route: None,
+        };
+        let mut transcript = Transcript::new(tx, "claude-code".into(), 1, 0);
+        let stream =
+            |event: serde_json::Value| serde_json::json!({"type":"stream_event", "event":event});
+        transcript.frame(
+            &stream(serde_json::json!({"type":"message_start", "message":{"id":"m"}})),
+            0,
+        );
+        transcript.frame(
+            &stream(serde_json::json!({"type":"content_block_start", "index":0,
+                "content_block":{"type":"thinking"}})),
+            0,
+        );
+        transcript.frame(
+            &stream(serde_json::json!({"type":"content_block_delta", "index":0,
+                "delta":{"type":"thinking_delta", "thinking":"hmm"}})),
+            0,
+        );
+        let note = protocol::HistoryNote::process_status("done");
+        transcript.note(HistoryItem::note(note.clone()));
+        assert!(transcript.committed.is_empty(), "it waits for the message");
+        assert_eq!(transcript.held_notes(), std::slice::from_ref(&note));
+
+        transcript.frame(
+            &serde_json::json!({"type":"assistant", "message":{"id":"m", "content":[
+                {"type":"thinking", "thinking":"hmm"}
+            ]}}),
+            0,
+        );
+        transcript.frame(
+            &stream(serde_json::json!({"type":"content_block_stop", "index":0})),
+            0,
+        );
+        assert_eq!(transcript.committed.len(), 1, "the thinking step joins");
+        assert_eq!(transcript.held_notes(), std::slice::from_ref(&note));
+
+        transcript.frame(&stream(serde_json::json!({"type":"message_stop"})), 0);
+        assert_eq!(transcript.committed[1], HistoryItem::note(note));
         assert!(transcript.held_notes().is_empty());
     }
 
