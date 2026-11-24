@@ -36,6 +36,35 @@ fn slash_completion_tab_accepts_command_name() {
 }
 
 #[test]
+fn slash_completion_keeps_text_after_cursor() {
+    for tail in ["fix this", " fix this"] {
+        for accept in [KeyCode::Tab, KeyCode::Enter] {
+            let case = format!("{accept:?} with tail {tail:?}");
+            let mut app = TestApp::builder().build();
+            app.run_lua_result(
+                r#"smelt.cmd.register("keep-tail", function(arg) keep_tail_arg = arg end)"#,
+            )
+            .unwrap();
+            app.type_text(tail);
+            app.press(KeyCode::Home);
+            app.type_text("/keep-t");
+            app.press(accept);
+
+            if accept == KeyCode::Tab {
+                assert_eq!(app.prompt_source(), "/keep-tail fix this", "{case}");
+                app.type_text("x");
+                assert_eq!(app.prompt_source(), "/keep-tail xfix this", "{case}");
+            } else {
+                app.settle_lua();
+                let arg = app.eval_lua::<Option<String>>("return keep_tail_arg");
+                assert_eq!(arg.unwrap().as_deref(), Some("fix this"), "{case}");
+                assert_eq!(app.prompt_source(), "", "{case}");
+            }
+        }
+    }
+}
+
+#[test]
 fn slash_completion_stays_within_a_prompt_narrowed_by_a_sidebar() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);

@@ -1,7 +1,8 @@
 -- `/cmd` completer - opens when the buffer starts with `/` and the cursor sits
--- inside the unwhitespaced command name. Enter dispatches the command; Tab
--- accepts the name + trailing space (which shows the dim arg placeholder
--- when the command declared `args`).
+-- inside the unwhitespaced command name. Both keys complete the name in place
+-- and keep the text after the cursor. Tab stops after the name + trailing
+-- space (which shows the dim arg placeholder when the command declared
+-- `args`); Enter dispatches the command with that text as its argument.
 
 if not (smelt.prompt and smelt.prompt.register_completer) then return end
 
@@ -33,14 +34,16 @@ smelt.prompt.register_completer({
     return text:sub(2, cpos)
   end,
   accept = function(item, _, action)
-    if action == "tab" then
-      -- Insert "/cmd " (trailing space) so the arg completer can detect it.
-      smelt.prompt.set_text("/" .. item.label .. " ")
-      smelt.prompt.cursor(#item.label + 2)
-      return
-    end
-    -- Enter: submit the command as typing it would. Arg-taking commands
-    -- open their own picker via `smelt.cmd.register_picker`.
-    smelt.prompt.submit("/" .. item.label)
+    -- Replace the typed name with "/cmd " (trailing space, so the arg
+    -- completer can detect it) and keep the text after the cursor. A space
+    -- already after the cursor is reused as the separator.
+    local cpos = smelt.prompt.cursor()
+    local stop = cpos
+    if smelt.prompt.text():sub(cpos + 1, cpos + 1) == " " then stop = cpos + 1 end
+    smelt.prompt.replace_range(0, stop, "/" .. item.label .. " ")
+    -- Enter: submit the prompt as typing it would, so the kept text becomes
+    -- the argument. Arg-taking commands without one open their own picker
+    -- via `smelt.cmd.register_picker`.
+    if action == "enter" then smelt.prompt.submit() end
   end,
 })
