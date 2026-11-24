@@ -1482,11 +1482,6 @@ impl JobSupervisor {
             .map(|(_, sender)| sender)
     }
 
-    /// Whether a caller follows a foreground job it can leave running.
-    pub fn has_detachable_foreground(&self) -> bool {
-        self.latest_foreground_detach().is_some()
-    }
-
     pub fn detach_latest_foreground(&self) -> DetachResult {
         let Some(sender) = self.latest_foreground_detach() else {
             return DetachResult::NoForegroundJob;

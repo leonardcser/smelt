@@ -7,7 +7,6 @@ local detach = require("smelt._detach")
 local DEFAULT_TIMEOUT_MS = 120000
 local MAX_TIMEOUT_MS = 600000
 local DEFAULT_BACKGROUND_ON_TIMEOUT = true
-local BACKGROUND_HINT_AFTER_MS = 10000
 
 -- Models sometimes send numbers and booleans as strings ("30000", "true").
 local function num_arg(v, default)
@@ -41,16 +40,6 @@ end
 
 local function format_timeout(ms)
   return format_duration(math.floor(ms / 1000))
-end
-
--- How to leave the command running, when a key does that.
-local function background_hint()
-  local key = detach.key_label()
-  if not key then return nil end
-  return smelt.layout.line({
-    { text = key, hl = "SmeltAccent", selectable = false },
-    { text = " to run in background", dim = true, selectable = false },
-  })
 end
 
 local LEVEL = { read = 1, write = 2, full = 3 }
@@ -143,15 +132,10 @@ function M.execute(args, ctx)
   }
 end
 
-local function waiting_hint(block)
-  if not block.elapsed_active or (block.elapsed_ms or 0) < BACKGROUND_HINT_AFTER_MS then return nil end
-  return background_hint()
-end
-
 smelt.transcript.register_tool("bash", {
   cache_key = "smelt.tool-presentation.bash:v2",
   compact = function(block)
-    return waiting_hint(block)
+    return detach.waiting_hint(block)
   end,
   body = function(block, ctx)
     local items = {}
@@ -159,7 +143,7 @@ smelt.transcript.register_tool("bash", {
     if output and (tonumber(output.content_bytes) or 0) > 0 then
       items[#items + 1] = transcript_defaults.render_tool_output(output, ctx)
     end
-    local hint = waiting_hint(block)
+    local hint = detach.waiting_hint(block)
     if hint then items[#items + 1] = smelt.layout.gutter(hint, { text = "  " }) end
     if #items == 0 then return nil end
     return smelt.layout.vbox(items)

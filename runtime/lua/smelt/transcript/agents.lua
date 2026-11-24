@@ -2,6 +2,7 @@
 -- together: launching an agent, and sending another agent a message.
 
 local defaults = require("smelt.transcript.defaults")
+local detach = require("smelt._detach")
 local layout = smelt.layout
 
 local M = {}
@@ -54,10 +55,13 @@ end
 local function agent_body(block, ctx)
   if block.status == "pending" or block.status == "confirm" or block.status == "drafting" then
     -- What the agent works on, as Claude Code reports it.
-    if not block.output then return nil end
-    return defaults.render_tool_output_tail(block.output, ctx, {
-      rows = 4,
-    })
+    local items = {}
+    if block.output then
+      items[#items + 1] = defaults.render_tool_output_tail(block.output, ctx, { rows = 4 })
+    end
+    items[#items + 1] = detach.waiting_hint(block)
+    if #items == 0 then return nil end
+    return layout.vbox(items)
   end
   if not block.output or block.output.is_error then
     return block.output and defaults.render_tool_output_tail(block.output, ctx)
@@ -77,6 +81,7 @@ local function agent_body(block, ctx)
 end
 
 local function agent_compact(block)
+  if block.status == "pending" then return detach.waiting_hint(block) end
   if block.status ~= "ok" then return nil end
   return agent_usage(block)
 end
@@ -106,7 +111,7 @@ function M.register(provider)
   -- Claude Code names the tool `Agent`; older versions call it `Task`.
   for _, name in ipairs({ "Agent", "Task" }) do
     smelt.transcript.register_tool(provider .. "/" .. name, {
-      cache_key = "smelt.transcript.agents.agent:v2",
+      cache_key = "smelt.transcript.agents.agent:v3",
       background_hl = "SmeltAgent",
       title = agent_title,
       body = agent_body,

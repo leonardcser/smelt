@@ -99,6 +99,21 @@ app_story!(bash_background_hint_appears_after_ten_seconds, |ctx| {
     ctx.assert_snapshot_named("ten_seconds_collapsed");
 });
 
+app_story!(agent_background_hint_appears_after_ten_seconds, |ctx| {
+    ctx.set_viewport(72, 10);
+    ctx.tool_started(
+        "claude-code/Agent",
+        &[
+            ("description", json!("Review diff")),
+            ("prompt", json!("Review")),
+        ],
+    );
+    ctx.advance_time(9000);
+    ctx.assert_snapshot_named("nine_seconds");
+    ctx.advance_time(1500);
+    ctx.assert_snapshot_named("ten_seconds");
+});
+
 app_story!(write_file_tool_states, |ctx| {
     ctx.set_viewport(78, 22);
     ctx.tool_draft(

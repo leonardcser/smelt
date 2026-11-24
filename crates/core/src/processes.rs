@@ -84,12 +84,6 @@ impl Core {
                     .send_native(|session_id| UiCommand::BackgroundNativeProcesses { session_id }))
     }
 
-    /// Whether the agent waits for work `detach_foreground_process` can leave
-    /// running: a shell command, or an agent the native session launched.
-    pub fn has_foreground_work(&self) -> bool {
-        self.jobs.has_detachable_foreground() || self.native_session_has_foreground_work()
-    }
-
     /// Whether the native session's main agent waits for a shell command or
     /// an agent it launched.
     fn native_session_has_foreground_work(&self) -> bool {

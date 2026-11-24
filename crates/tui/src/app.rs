@@ -2387,10 +2387,6 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("running_agents", running_agents);
-        let foreground_work = self.core.has_foreground_work();
-        self.core
-            .signals
-            .publish_if_changed("foreground_work", foreground_work);
 
         let permission_pending = self.overlays.has_deferred_dialog();
         self.core

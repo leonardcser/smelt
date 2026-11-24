@@ -493,8 +493,6 @@ fn native_shells_join_the_process_list_and_stop_through_their_agent() {
     app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
         processes,
     }));
-    app.tick_signals();
-    assert!(app.run_lua(r#"assert(not smelt.signal.get("foreground_work"))"#));
     assert!(app.run_lua("assert(not smelt.process.detach_foreground())"));
 
     app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {

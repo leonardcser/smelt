@@ -26,4 +26,22 @@ function M.key_label()
   return nil
 end
 
+-- How long a call waits before its block says how to stop waiting.
+local HINT_AFTER_MS = 10000
+
+--- The hint under a call that has waited for 10 seconds or more: the key
+--- that leaves its work running in the background. Nil before then, once the
+--- call stops waiting, or when no key is bound to the action.
+---@param block smelt.transcript.Block
+---@return smelt.layout.Node?
+function M.waiting_hint(block)
+  if not block.elapsed_active or (block.elapsed_ms or 0) < HINT_AFTER_MS then return nil end
+  local key = M.key_label()
+  if not key then return nil end
+  return smelt.layout.line({
+    { text = key, hl = "SmeltAccent", selectable = false },
+    { text = " to run in background", dim = true, selectable = false },
+  })
+end
+
 return M

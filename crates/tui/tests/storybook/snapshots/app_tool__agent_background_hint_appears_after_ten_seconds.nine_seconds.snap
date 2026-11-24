@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* claude-code/Agent Review diff  waiting  9.0s                 14:37:03
+
+
+
+
+
+─ ● … 9s ───────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+ ○ read                                                         1:1 100%
