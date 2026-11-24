@@ -132,6 +132,17 @@ fn smelt_args(native: &str, args: &HashMap<String, Value>) -> HashMap<String, Va
     args
 }
 
+/// Whether a successful call of `native` left its work running in the
+/// background, read from Claude Code's structured result.
+pub(super) fn continues_in_background(native: &str, result: &Value) -> bool {
+    match native {
+        "Bash" => result["backgroundTaskId"].is_string(),
+        "Monitor" => true,
+        "Agent" | "Task" => result["isAsync"] == true || result["status"] == "async_launched",
+        _ => false,
+    }
+}
+
 /// The access a call of `native` asks for; see [`NATIVE`].
 pub fn native_access(native: &str) -> Option<Access> {
     NATIVE

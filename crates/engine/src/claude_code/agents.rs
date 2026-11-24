@@ -662,20 +662,10 @@ pub(super) fn launches(name: &str) -> bool {
     matches!(name, "Agent" | "Task")
 }
 
-/// The result of a call that launched an agent, read from Claude Code's
-/// structured result: the report of an agent the call waited for, or the
-/// note that the agent works in the background. The model keeps `content`.
+/// The result of a call that waited for the agent it launched, read from
+/// Claude Code's structured result: the agent's report. The model keeps
+/// `content`.
 pub(super) fn launch_result(content: &str, result: &Value) -> Option<ToolOutcome> {
-    if result["isAsync"] == true || result["status"] == "async_launched" {
-        return ToolOutcome::try_from_parts(
-            content.into(),
-            false,
-            Some(json!({"background": true})),
-            Vec::new(),
-            None,
-        )
-        .ok();
-    }
     let report = result["content"]
         .as_array()?
         .iter()
@@ -1264,16 +1254,5 @@ mod tests {
             result.metadata,
             Some(json!({"tokens":20130, "tool_uses":1}))
         );
-    }
-
-    #[test]
-    fn an_async_launch_result_says_the_agent_works_in_the_background() {
-        let result = launch_result(
-            "Async agent launched successfully.\nagentId: a1",
-            &json!({"isAsync":true}),
-        )
-        .unwrap();
-        assert_eq!(result.metadata, Some(json!({"background":true})));
-        assert!(result.display_content.is_empty());
     }
 }

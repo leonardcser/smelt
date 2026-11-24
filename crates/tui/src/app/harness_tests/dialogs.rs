@@ -1688,7 +1688,7 @@ fn native_monitor_block_keeps_its_name_and_shows_the_bash_summary() {
     }));
     let frame = app.render_to_frame().text();
     assert!(
-        frame.contains("claude-code/Monitor while true; do  (background)"),
+        frame.contains("claude-code/Monitor while true; do  background"),
         "{frame}"
     );
     assert!(frame.contains("  sleep 120"), "{frame}");

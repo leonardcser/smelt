@@ -1,0 +1,18 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash cargo build  background                                           14:37:03
+
+* claude-code/Agent Review diff  background                              14:37:03
+
+* claude-code/Monitor tail -f log  background                            14:37:03
+
+* bash npm run dev  background                                           14:37:03
+
+* claude-code/Agent Fix bug  background                                  14:37:03
+
+─ ● … ────────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────
+ ○ read                                                                   1:1 100%

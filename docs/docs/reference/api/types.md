@@ -1778,6 +1778,7 @@ Registrations are copied and immutable.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `cache_key` | `string` |  | Stable persisted-layout key. Omit for dynamic presentation state. |
+| `background_hl` | `string` |  | Highlight group of the `background` tag on a call whose work continues in the background. Default `SmeltProcess`. |
 | `render` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node` |  | Complete replacement renderer. |
 | `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker. Return nil to use the tool summary. |
 | `body` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Expanded body renderer. Return nil to suppress the body. |

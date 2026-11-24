@@ -703,3 +703,54 @@ app_story!(lsp_tool_states, |ctx| {
     ctx.run_lua("smelt.transcript.fold_all('close')");
     ctx.assert_snapshot_named("collapsed");
 });
+
+app_story!(background_calls_share_one_marker, |ctx| {
+    ctx.set_viewport(82, 14);
+    ctx.tool_call_with_metadata(
+        "bash",
+        &[
+            ("command", json!("cargo build")),
+            ("background", json!(true)),
+        ],
+        "started background process proc_1, you'll be notified when it completes",
+        json!({"background": true, "background_id": "proc_1"}),
+        Some(20),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/Agent",
+        &[
+            ("description", json!("Review diff")),
+            ("prompt", json!("Review")),
+            ("run_in_background", json!(true)),
+        ],
+        "Async agent launched successfully.",
+        json!({"background": true}),
+        Some(30),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/Monitor",
+        &[
+            ("command", json!("tail -f log")),
+            ("description", json!("watch log")),
+        ],
+        "Monitor started (task b1). You will be notified on each event.",
+        json!({"background": true}),
+        Some(30),
+    );
+    ctx.tool_started(
+        "bash",
+        &[
+            ("command", json!("npm run dev")),
+            ("background", json!(true)),
+        ],
+    );
+    ctx.tool_started(
+        "claude-code/Agent",
+        &[
+            ("description", json!("Fix bug")),
+            ("prompt", json!("Fix")),
+            ("run_in_background", json!(true)),
+        ],
+    );
+    ctx.assert_snapshot();
+});

@@ -178,6 +178,7 @@ smelt.transcript = smelt.transcript or {}
 --- Registrations are copied and immutable.
 ---@class smelt.transcript.ToolPresentation
 ---@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
+---@field background_hl? string Highlight group of the `background` tag on a call whose work continues in the background. Default `SmeltProcess`.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
 ---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
 ---@field body? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Expanded body renderer. Return nil to suppress the body.
@@ -185,7 +186,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field draft_error? fun(draft: smelt.transcript.Block): string|nil Reason smelt's tool preflight will reject the streamed call. When it returns a string the draft shows that error instead of the `draft` body. Not consulted for `native` drafts.
 ---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
-local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v6"
+local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v7"
 local internal_transcript = __smelt_internal.transcript
 local parts = {}
 local part_order = {
@@ -201,6 +202,7 @@ local tool_presentation_callbacks = { "render", "title", "body", "draft", "draft
 local function copy_tool_presentation(presentation)
   local copy = {}
   copy.cache_key = presentation.cache_key
+  copy.background_hl = presentation.background_hl
   for _, field in ipairs(tool_presentation_callbacks) do
     copy[field] = presentation[field]
   end
@@ -374,6 +376,9 @@ function smelt.transcript.register_tool(name, presentation)
     and (type(presentation.cache_key) ~= "string" or presentation.cache_key == "")
   then
     error("smelt.transcript.register_tool: presentation.cache_key must be a non-empty string", 2)
+  end
+  if presentation.background_hl ~= nil and type(presentation.background_hl) ~= "string" then
+    error("smelt.transcript.register_tool: presentation.background_hl must be a string", 2)
   end
 
   local retained = copy_tool_presentation(presentation)

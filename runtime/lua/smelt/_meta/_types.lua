@@ -1213,6 +1213,7 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ToolPresentation
 ---@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
+---@field background_hl? string Highlight group of the `background` tag on a call whose work continues in the background. Default `SmeltProcess`.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
 ---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
 ---@field body? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Expanded body renderer. Return nil to suppress the body.

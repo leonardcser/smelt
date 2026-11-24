@@ -151,10 +151,22 @@ local function render_tool_error_summary(block, ctx, presentation)
   })
 end
 
+--- Whether the call's work continues in the background: the tool reported
+--- `metadata.background = true` with its result. The header marks such calls
+--- and their launch note stays with the model.
+---@type fun(block: smelt.transcript.Block): boolean
+function M.in_background(block)
+  local output = block and block.output
+  if not output or output.is_error then return false end
+  local metadata = output.metadata
+  return type(metadata) == "table" and metadata.background == true
+end
+
 --- Render a compact tool summary: header plus an optional detail line.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 function M.render_tool_summary(block, ctx, presentation)
   presentation = tool_presentation(block, presentation)
+  if M.in_background(block) then return render_tool_header(block, ctx, presentation) end
   local detail = M.tool_collapsed_detail(block, ctx, presentation)
   local no_detail = detail == nil or detail == ""
   local output = block.output
@@ -185,6 +197,7 @@ function M.render_tool_full(block, ctx, presentation)
   end
   local items = {}
   items[#items + 1] = render_tool_header(block, ctx, presentation)
+  if M.in_background(block) then return layout.vbox(items) end
 
   if block.user_message and block.user_message ~= "" then
     items[#items + 1] = layout.gutter(
@@ -266,6 +279,13 @@ function M.render_tool_header_content(block, ctx)
   ctx = ctx or {}
   local status = block.status or "pending"
   local lines, tail, has_summary = tool_header_lines(block, status)
+  if M.in_background(block) then
+    local first = lines[1] or {}
+    first[#first + 1] = { text = "  ", selectable = false, dim = true }
+    local hl = tool_presentation(block).background_hl or "SmeltProcess"
+    first[#first + 1] = { text = "background", fg = hl, dim = true, selectable = false }
+    lines[1] = first
+  end
   local duration = status ~= "confirm" and elapsed_text(block.elapsed_ms) or nil
   if duration then
     local first = lines[1] or {}

@@ -3,7 +3,7 @@ use protocol::{
     displayed_tool_name, AssistantStep, Content, EngineEvent, HistoryItem, InvocationId,
     ReasoningKind, SteerId, ToolInvocation, ToolOutcome,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 struct Step {
@@ -13,13 +13,21 @@ struct Step {
     remaining: HashSet<String>,
 }
 
+/// A tool call Claude Code made, by call ID.
+struct Call {
+    invocation: InvocationId,
+    /// When the complete call arrived, in Unix milliseconds.
+    started_at: Option<u64>,
+    /// The native tool's name, once the complete call arrived.
+    native: Option<String>,
+}
+
 pub(super) struct Transcript {
     pub(super) committed: Vec<HistoryItem>,
     pub(super) context_tokens: Option<u32>,
     pending: VecDeque<Step>,
-    calls: HashMap<String, InvocationId>,
+    calls: HashMap<String, Call>,
     retained_results: HashMap<String, ToolOutcome>,
-    started: HashMap<String, u64>,
     claimed: HashSet<String>,
     seen: HashSet<String>,
     partial_text: String,
@@ -48,7 +56,6 @@ impl Transcript {
             pending: VecDeque::new(),
             calls: HashMap::new(),
             retained_results: HashMap::new(),
-            started: HashMap::new(),
             claimed: HashSet::new(),
             seen: HashSet::new(),
             partial_text: String::new(),
@@ -86,15 +93,19 @@ impl Transcript {
     }
 
     pub(super) fn invocation(&mut self, id: &str) -> InvocationId {
-        *self
-            .calls
+        self.calls
             .entry(id.to_owned())
-            .or_insert_with(crate::agent::next_invocation_id)
+            .or_insert_with(|| Call {
+                invocation: crate::agent::next_invocation_id(),
+                started_at: None,
+                native: None,
+            })
+            .invocation
     }
 
     /// Shows lines a running tool printed in its block.
     pub(super) fn printed(&self, id: &str, lines: Vec<String>) {
-        let Some(invocation_id) = self.calls.get(id).copied() else {
+        let Some(invocation_id) = self.calls.get(id).map(|call| call.invocation) else {
             return;
         };
         if !self.pending.iter().any(|step| step.remaining.contains(id)) {
@@ -346,13 +357,15 @@ impl Transcript {
                         continue;
                     };
                     let raw_name = block["name"].as_str().unwrap_or("unknown");
-                    if self.started.insert(id.to_owned(), now_ms).is_some() {
+                    let invocation_id = self.invocation(id);
+                    let call = self.calls.get_mut(id).expect("call just tracked");
+                    if call.started_at.replace(now_ms).is_some() {
                         continue;
                     }
+                    call.native = Some(raw_name.to_owned());
                     // Claude Code sends the complete message before the block's
                     // stream stop; the started tool supersedes its draft.
                     self.drafts.retain(|_, (draft, _, _)| draft != id);
-                    let invocation_id = self.invocation(id);
                     let input = block["input"]
                         .as_object()
                         .cloned()
@@ -435,20 +448,27 @@ impl Transcript {
             let Some(id) = block["tool_use_id"].as_str() else {
                 continue;
             };
-            let Some(invocation_id) = self.calls.get(id).copied() else {
+            let Some(call) = self.calls.get(id) else {
                 continue;
             };
+            let invocation_id = call.invocation;
+            let native = call.native.as_deref().unwrap_or_default();
+            let elapsed_ms = call.started_at.map(|at| now_ms.saturating_sub(at));
             let is_error = block["is_error"].as_bool().unwrap_or(false);
             let mut content = text_content(&block["content"]);
             if is_error {
                 content = strip_tool_use_error(&content);
             }
-            let launches_agent = self
-                .pending
-                .iter()
-                .flat_map(|step| &step.tools)
-                .any(|tool| tool.call_id == id && super::agents::launches(&tool.name));
+            let launches_agent = super::agents::launches(native);
+            let backgrounded = !is_error
+                && super::catalog::continues_in_background(
+                    native,
+                    structured.unwrap_or(&Value::Null),
+                );
             let result = self.retained_results.remove(id).unwrap_or_else(|| {
+                if backgrounded {
+                    return ToolOutcome::new(content, false, Some(json!({"background": true})));
+                }
                 let structured = structured.filter(|_| !is_error);
                 structured
                     .and_then(|result| {
@@ -460,7 +480,6 @@ impl Transcript {
                     })
                     .unwrap_or_else(|| ToolOutcome::new(content, is_error, None))
             });
-            let elapsed_ms = self.started.get(id).map(|at| now_ms.saturating_sub(*at));
             for step in &mut self.pending {
                 if step.remaining.remove(id) {
                     if let Some(tool) = step.tools.iter_mut().find(|tool| tool.call_id == id) {
@@ -536,7 +555,7 @@ impl Transcript {
         }
         for step in &mut self.pending {
             for id in step.remaining.drain() {
-                if let Some(invocation_id) = self.calls.get(&id) {
+                if let Some(invocation_id) = self.calls.get(&id).map(|call| call.invocation) {
                     let result = self.retained_results.remove(&id).unwrap_or_else(|| {
                         ToolOutcome::new(
                             "Claude Code turn ended before this tool returned".into(),
@@ -548,7 +567,7 @@ impl Transcript {
                         tool.result = result.clone();
                     }
                     let _ = self.tx.send(EngineEvent::ToolFinished {
-                        invocation_id: *invocation_id,
+                        invocation_id,
                         call_id: id,
                         result,
                         elapsed_ms: None,
@@ -751,6 +770,52 @@ fn strip_tool_use_error(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calls_that_continue_in_the_background_say_so_in_their_metadata() {
+        let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::EngineEventSender {
+            output_tx,
+            route: None,
+        };
+        let mut transcript = Transcript::new(tx, "claude-code".into(), 1, 0);
+        transcript.frame(
+            &serde_json::json!({"type":"assistant", "message":{"id":"step", "content":[
+                {"type":"tool_use", "id":"bg", "name":"Bash", "input":{"command":"make", "run_in_background":true}},
+                {"type":"tool_use", "id":"fg", "name":"Bash", "input":{"command":"ls"}},
+                {"type":"tool_use", "id":"watch", "name":"Monitor", "input":{"command":"tail -f log"}}
+            ]}}),
+            0,
+        );
+        for (id, result) in [
+            (
+                "bg",
+                serde_json::json!({"stdout":"", "backgroundTaskId":"b1"}),
+            ),
+            ("fg", serde_json::json!({"stdout":"a"})),
+            ("watch", serde_json::json!({"taskId":"m1"})),
+        ] {
+            transcript.frame(
+                &serde_json::json!({"type":"user", "message":{"content":[
+                    {"type":"tool_result", "tool_use_id":id, "content":"note"}
+                ]}, "tool_use_result":result}),
+                0,
+            );
+        }
+        let Some(HistoryItem::Assistant(step)) = transcript.committed.last() else {
+            panic!("expected the committed step: {:?}", transcript.committed);
+        };
+        let background: Vec<_> = step
+            .invocations
+            .iter()
+            .map(|tool| (tool.call_id.as_str(), tool.result.metadata.clone()))
+            .collect();
+        let marked = Some(serde_json::json!({"background": true}));
+        assert_eq!(
+            background,
+            [("bg", marked.clone()), ("fg", None), ("watch", marked)]
+        );
+    }
 
     #[test]
     fn a_note_waits_for_the_running_step_and_survives_its_cancel() {

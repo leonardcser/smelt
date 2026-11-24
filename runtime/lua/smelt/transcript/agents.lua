@@ -19,18 +19,15 @@ local function metadata(block)
   return output and type(output.metadata) == "table" and output.metadata or {}
 end
 
-local function in_background(block)
-  return (block.args or {}).run_in_background == true or metadata(block).background == true
-end
-
 local function agent_title(block)
   local spans = { { text = text_arg(block, "description") or "agent" } }
   local kind = text_arg(block, "subagent_type")
   if kind and kind ~= "general-purpose" then
     spans[#spans + 1] = { text = "  " .. kind, dim = true }
   end
-  if in_background(block) then
-    spans[#spans + 1] = { text = "  background", fg = "SmeltAgent" }
+  if (block.args or {}).run_in_background == true then
+    -- The same tag the transcript shows on any call that went to the background.
+    spans[#spans + 1] = { text = "background", fg = "SmeltAgent", title_suffix = true }
   else
     -- Shown while the call waits: the agent that launched it works on once it reports.
     spans[#spans + 1] = { text = "waiting", fg = "SmeltAgent", title_suffix = true }
@@ -65,13 +62,6 @@ local function agent_body(block, ctx)
   if not block.output or block.output.is_error then
     return block.output and defaults.render_tool_output_tail(block.output, ctx)
   end
-  if metadata(block).background then
-    return layout.runs({ { {
-      text = "works in the background; its report arrives as an agent message",
-      dim = true,
-      italic = true,
-    } } })
-  end
   local report = agent_report(block)
   if not report then return defaults.render_tool_output_tail(block.output, ctx) end
   local items = {
@@ -88,7 +78,6 @@ end
 
 local function agent_compact(block)
   if block.status ~= "ok" then return nil end
-  if metadata(block).background then return "works in the background" end
   return agent_usage(block)
 end
 
@@ -117,7 +106,8 @@ function M.register(provider)
   -- Claude Code names the tool `Agent`; older versions call it `Task`.
   for _, name in ipairs({ "Agent", "Task" }) do
     smelt.transcript.register_tool(provider .. "/" .. name, {
-      cache_key = "smelt.transcript.agents.agent:v1",
+      cache_key = "smelt.transcript.agents.agent:v2",
+      background_hl = "SmeltAgent",
       title = agent_title,
       body = agent_body,
       compact = agent_compact,

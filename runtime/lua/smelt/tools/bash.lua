@@ -115,7 +115,7 @@ function M.execute(args, ctx)
       content = "started background process " .. job_id
         .. (notify and ", you'll be notified when it completes" or ", completion notification disabled"),
       is_error = false,
-      metadata = { background_id = job_id },
+      metadata = { background = true, background_id = job_id },
     }
   end
 
@@ -128,6 +128,7 @@ function M.execute(args, ctx)
   local metadata
   if result.background_id or result.termination then
     metadata = {
+      background = result.background_id and true or nil,
       background_id = result.background_id,
       termination = result.termination,
     }
@@ -148,7 +149,7 @@ local function waiting_hint(block)
 end
 
 smelt.transcript.register_tool("bash", {
-  cache_key = "smelt.tool-presentation.bash:v1",
+  cache_key = "smelt.tool-presentation.bash:v2",
   compact = function(block)
     return waiting_hint(block)
   end,
@@ -197,13 +198,15 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
     for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
       local spans = { { text = line, syntax = "bash" } }
       if #lines == 0 then
-        local suffix = bool_arg(args.background, false) and "(background)" or ("(timeout: " .. format_timeout(timeout_ms) .. ")")
-        spans[#spans + 1] = {
-          text = suffix,
-          selectable = false,
-          title_suffix = true,
-          style = { dim = true },
-        }
+        -- The same tag the transcript shows on any call that went to the background.
+        spans[#spans + 1] = bool_arg(args.background, false)
+            and { text = "background", fg = "SmeltProcess", selectable = false, title_suffix = true }
+          or {
+            text = "(timeout: " .. format_timeout(timeout_ms) .. ")",
+            selectable = false,
+            title_suffix = true,
+            style = { dim = true },
+          }
       end
       lines[#lines + 1] = spans
     end
