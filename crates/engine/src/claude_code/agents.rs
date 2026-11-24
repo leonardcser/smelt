@@ -630,6 +630,11 @@ impl Agents {
             .map(|child| &mut child.transcript)
     }
 
+    /// Whether a child agent made the call `call_id`.
+    pub(super) fn owns_call(&self, call_id: &str) -> bool {
+        self.tool_owners.contains_key(call_id)
+    }
+
     pub(super) fn has_live(&self) -> bool {
         self.children
             .values()

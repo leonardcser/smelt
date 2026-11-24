@@ -322,6 +322,76 @@ async fn foreground_child_isolated_transcript_and_policy_callbacks() {
 
 #[tokio::test]
 #[serial(claude_code)]
+async fn a_background_child_waiting_on_smelt_leaves_the_main_agent_idle() {
+    let fixture = Fixture::new("subagent-background");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut completions = 0;
+    let mut working = None;
+    let held = loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::TurnComplete { .. }) => completions += 1,
+            EngineOutput::Event(EngineEvent::NativeSessionState { working: state, .. }) => {
+                working = Some(state);
+            }
+            EngineOutput::HostCall(HostCall::NativeToolEvaluation {
+                tool_name, reply, ..
+            }) if tool_name == "Read" => break reply,
+            EngineOutput::HostCall(HostCall::NativeToolEvaluation { reply, .. }) => {
+                let _ = reply.send(ToolEvaluation {
+                    decision: Decision::Allow,
+                    metadata: Default::default(),
+                });
+            }
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    };
+    assert_eq!(
+        completions, 1,
+        "the main agent answered before its child asks"
+    );
+    // The child's unanswered call does not make the main agent work.
+    while let Ok(output) =
+        tokio::time::timeout(Duration::from_millis(300), output(&mut handle)).await
+    {
+        match output {
+            EngineOutput::Event(EngineEvent::NativeSessionState { working: state, .. }) => {
+                working = Some(state);
+            }
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(working, Some(false), "idle while the child waits on smelt");
+    let _ = held.send(ToolEvaluation {
+        decision: Decision::Deny,
+        metadata: Default::default(),
+    });
+    // The child's report wakes the main agent once, which then goes idle.
+    let mut history = Vec::new();
+    let mut woke = false;
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
+                history.extend(delta.items);
+            }
+            EngineOutput::Event(EngineEvent::NativeSessionState { working: true, .. }) => {
+                woke = true;
+            }
+            EngineOutput::Event(EngineEvent::NativeSessionState { working: false, .. }) if woke => {
+                break;
+            }
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
+    let parent = serde_json::to_string(&history).unwrap();
+    assert_eq!(parent.matches("BACKGROUND_WAKE_REPLY").count(), 1);
+}
+
+#[tokio::test]
+#[serial(claude_code)]
 async fn background_child_outlives_parent_result_and_reports_only_its_summary_to_the_parent() {
     let fixture = Fixture::new("subagent-background");
     let mut handle = fixture.handle();
@@ -375,7 +445,7 @@ async fn background_child_outlives_parent_result_and_reports_only_its_summary_to
                 if child_completed {
                     break;
                 }
-                idle_beside_child |= completions == 1;
+                idle_beside_child = true;
             }
             EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
             _ => {}

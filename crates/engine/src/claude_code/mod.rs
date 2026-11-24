@@ -88,6 +88,14 @@ struct Gate {
     args: HashMap<String, Value>,
 }
 
+/// A control request Claude Code waits on smelt to answer.
+#[derive(Debug, Clone)]
+struct Control {
+    invocation: Option<protocol::InvocationId>,
+    /// The tool call the control answers, when Claude Code names it.
+    call_id: Option<String>,
+}
+
 struct InteractionRequest {
     policy_revision: u64,
     control_id: String,
@@ -186,7 +194,7 @@ struct Native<'a> {
     executions: HashMap<u64, ToolCall>,
     tool_results: FuturesUnordered<BoxFuture<'a, (ToolCall, crate::tools::ToolResult)>>,
     plan_inputs: FuturesUnordered<BoxFuture<'static, (InteractionRequest, Result<Value, String>)>>,
-    active_controls: HashMap<String, Option<protocol::InvocationId>>,
+    active_controls: HashMap<String, Control>,
     moving: Option<Move>,
     session_state: Option<String>,
     /// Tasks Claude Code runs in the background. When one ends, it wakes to
@@ -352,13 +360,17 @@ impl Runtime<'_> {
                 .is_some_and(|state| state != "idle")
     }
 
-    /// Whether nothing holds the next prompt back. Background tasks don't.
+    /// Whether nothing holds the next prompt back. Background tasks don't,
+    /// nor do the calls child agents wait on, like the children's own work.
+    /// Every gate, tool result and plan input holds an active control.
     fn quiet(&self) -> bool {
         !self.root_busy()
-            && self.native.active_controls.is_empty()
-            && self.native.gates.is_empty()
-            && self.native.tool_results.is_empty()
-            && self.native.plan_inputs.is_empty()
+            && self.native.active_controls.values().all(|control| {
+                control
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|id| self.native.agents.owns_call(id))
+            })
             && self.side_results.is_empty()
     }
 
@@ -884,10 +896,15 @@ impl Runtime<'_> {
         } else {
             self.commit();
         }
-        for invocation_id in self.native.active_controls.values().flatten() {
+        for invocation_id in self
+            .native
+            .active_controls
+            .values()
+            .filter_map(|c| c.invocation)
+        {
             let _ = self.session_tx().send(EngineEvent::ToolExecutionCancelled {
                 turn_id: self.payload.turn_id,
-                invocation_id: *invocation_id,
+                invocation_id,
             });
         }
         // Claude Code starts each shell in a session of its own, which closing
@@ -1196,7 +1213,11 @@ impl Runtime<'_> {
             Some("control_request") => self.control_request(&frame).await?,
             Some("control_cancel_request") => {
                 if let Some(id) = frame["request_id"].as_str() {
-                    if let Some(Some(invocation_id)) = self.native.active_controls.remove(id) {
+                    if let Some(Control {
+                        invocation: Some(invocation_id),
+                        ..
+                    }) = self.native.active_controls.remove(id)
+                    {
                         let _ = self.session_tx().send(EngineEvent::ToolExecutionCancelled {
                             turn_id: self.payload.turn_id,
                             invocation_id,
@@ -1539,15 +1560,16 @@ impl Runtime<'_> {
                     self.write(reply(id, json!({}))).await?;
                     return Ok(());
                 }
-                self.track_control(id)?;
+                let call_id = request["tool_use_id"]
+                    .as_str()
+                    .or(input["tool_use_id"].as_str());
+                self.track_control(id, call_id)?;
                 self.native_gate(
                     id,
                     true,
                     name,
                     &input["tool_input"],
-                    request["tool_use_id"]
-                        .as_str()
-                        .or(input["tool_use_id"].as_str()),
+                    call_id,
                     input["cwd"].as_str(),
                 );
             }
@@ -1570,7 +1592,7 @@ impl Runtime<'_> {
                     )
                     .await?;
                 } else {
-                    self.track_control(id)?;
+                    self.track_control(id, request["tool_use_id"].as_str())?;
                     self.native_gate(
                         id,
                         false,
@@ -1622,7 +1644,7 @@ impl Runtime<'_> {
             "ExitPlanMode" => "ExitPlanMode",
             _ => unreachable!(),
         };
-        self.track_control(id)?;
+        self.track_control(id, native_id)?;
         let request = InteractionRequest {
             policy_revision: self.policy_revision,
             control_id: id.into(),
@@ -1731,9 +1753,13 @@ impl Runtime<'_> {
     }
 
     fn request_evaluation(&mut self, call: ToolCall) {
+        let control = Control {
+            invocation: Some(call.invocation_id),
+            call_id: Some(call.call_id.clone()),
+        };
         self.native
             .active_controls
-            .insert(call.control_id.clone(), Some(call.invocation_id));
+            .insert(call.control_id.clone(), control);
         let request_id = agent::next_request_id();
         let _ = self.session_tx().send(EngineEvent::ToolEvaluationRequest {
             request_id,
@@ -1746,7 +1772,7 @@ impl Runtime<'_> {
         self.native.evaluations.insert(request_id, call);
     }
 
-    fn track_control(&mut self, id: &str) -> Result<(), String> {
+    fn track_control(&mut self, id: &str, call_id: Option<&str>) -> Result<(), String> {
         if self.native.active_controls.len()
             + self.native.gates.len()
             + self.native.tool_results.len()
@@ -1755,10 +1781,14 @@ impl Runtime<'_> {
         {
             return Err("Claude Code exceeded the pending control request limit".into());
         }
+        let control = Control {
+            invocation: None,
+            call_id: call_id.map(str::to_owned),
+        };
         if self
             .native
             .active_controls
-            .insert(id.to_owned(), None)
+            .insert(id.to_owned(), control)
             .is_some()
         {
             return Err("Claude Code reused a pending control request ID".into());
@@ -1850,9 +1880,13 @@ impl Runtime<'_> {
             .transcript_for_call(&gate.call_id)
             .unwrap_or(&mut self.transcript)
             .invocation(&gate.call_id);
+        let control = Control {
+            invocation: Some(invocation_id),
+            call_id: Some(gate.call_id.clone()),
+        };
         self.native
             .active_controls
-            .insert(gate.control_id.clone(), Some(invocation_id));
+            .insert(gate.control_id.clone(), control);
         let call = transcript::presented(&gate.tool_name, gate.args.clone());
         let _ = self.session_tx().send(EngineEvent::RequestPermission {
             request_id: id,
@@ -1930,7 +1964,7 @@ impl Runtime<'_> {
                 let name = message["params"]["name"]
                     .as_str()
                     .ok_or("smelt MCP call has no tool name")?;
-                self.track_control(control_id)?;
+                self.track_control(control_id, None)?;
                 let args: HashMap<_, _> = message["params"]["arguments"]
                     .as_object().cloned().unwrap_or_default().into_iter().collect();
                 let (call_id, invocation_id) = match self.native.agents.claim_tool(&mut self.transcript, name, &args) {
@@ -1941,7 +1975,11 @@ impl Runtime<'_> {
                         return self.write(reply(control_id, response)).await;
                     }
                 };
-                self.native.active_controls.insert(control_id.into(), Some(invocation_id));
+                let control = Control {
+                    invocation: Some(invocation_id),
+                    call_id: Some(call_id.clone()),
+                };
+                self.native.active_controls.insert(control_id.into(), control);
                 let call = ToolCall {
                     policy_revision: self.policy_revision,
                     control_id: control_id.into(),
