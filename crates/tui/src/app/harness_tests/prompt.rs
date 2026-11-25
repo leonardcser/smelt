@@ -2582,7 +2582,7 @@ fn statusline_built_ins_are_separate_sources() {
             r#"
             local names = {}
             for _, name in ipairs({ "slug", "vim_mode", "agent_mode", "tps", "permission",
-                "keymap", "procs", "worktree", "vim_pending", "cursor" }) do
+                "keymap", "procs", "vim_pending", "cursor" }) do
               if smelt.statusline:builtin(name) then names[#names + 1] = name end
             end
             return table.concat(names, ",")
@@ -2591,7 +2591,7 @@ fn statusline_built_ins_are_separate_sources() {
         .unwrap();
     assert_eq!(
         names,
-        "slug,vim_mode,agent_mode,tps,permission,keymap,procs,worktree,vim_pending,cursor"
+        "slug,vim_mode,agent_mode,tps,permission,keymap,procs,vim_pending,cursor"
     );
     let status = |app: &mut TestApp| {
         let frame = app.render_to_frame();

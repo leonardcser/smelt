@@ -1,8 +1,8 @@
 -- The statusline: a strip bar at the bottom of the screen.
 --
 -- The built-in sources, in display order (`slug`, `vim_mode`, `agent_mode`,
--- `tps`, `worktree`, `procs`, `agents`, `permission`, `keymap`,
--- `vim_pending`, `cursor`), read engine state from signals plus
+-- `tps`, `procs`, `agents`, `permission`, `keymap`, `vim_pending`,
+-- `cursor`), read engine state from signals plus
 -- `smelt.session.status()` for values that carry pending/stale markers.
 -- Plugins add sources with `smelt.statusline:add(name, fn)`, and replace or
 -- remove a built-in one by its name.
@@ -26,12 +26,23 @@ local function define(name, signals, render)
   sources[#sources + 1] = { name, { render = render, signals = signals } }
 end
 
+-- The pill label: the worktree name inside a managed worktree, otherwise the
+-- session slug when `show_slug` is on.
+local function pill_label()
+  local worktree = signal("cwd_worktree")
+  if signal("cwd_managed_worktree") and worktree and worktree ~= "" then
+    return "⎇ " .. worktree
+  end
+  local task_label = signal("task_label")
+  if smelt.settings.show_slug and task_label and task_label ~= "" then return task_label end
+end
+
 -- Slug pill. SmeltSlug carries fg only; fall back to SmeltAccent's fg as the
 -- pill bg when no explicit bg has been set (default), so `/color` (which
 -- writes SmeltSlug.bg) and theme swaps both propagate naturally.
-define("slug", { "task_label", "session_epoch" }, function()
-  local task_label = signal("task_label")
-  if not smelt.settings.show_slug or not task_label or task_label == "" then return nil end
+define("slug", { "task_label", "session_epoch", "cwd_managed_worktree", "cwd_worktree" }, function()
+  local label = pill_label()
+  if not label then return nil end
   local slug = smelt.theme.get("SmeltSlug") or {}
   local style = { hl_group = "SmeltSlug" }
   if not slug.bg then
@@ -41,7 +52,7 @@ define("slug", { "task_label", "session_epoch" }, function()
     end
   end
   return {
-    text = " " .. task_label .. " ",
+    text = " " .. label .. " ",
     style = style,
     priority = 5,
     truncatable = true,
@@ -79,18 +90,6 @@ define("tps", { "tps" }, function()
     style = { fg = "Comment" },
     priority = 4,
     separated = true,
-  }
-end)
-
-define("worktree", { "cwd_managed_worktree", "cwd_worktree" }, function()
-  local worktree = signal("cwd_worktree")
-  if not signal("cwd_managed_worktree") or not worktree or worktree == "" then return nil end
-  return {
-    text = "⎇ " .. worktree,
-    style = { fg = "Comment" },
-    priority = 7,
-    separated = true,
-    truncatable = true,
   }
 end)
 
@@ -166,9 +165,10 @@ define("cursor", { "cursor_pos", "viewport_pos", "input_epoch" }, function()
 end)
 
 --- The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
---- sources, in display order: `slug`, `vim_mode`, `agent_mode`, `tps`,
---- `worktree`, `procs`, `agents`, `permission`, `keymap`, `vim_pending` and
---- `cursor`. Items with `row = 2` or more make it taller.
+--- sources, in display order: `slug` (the managed worktree name, or else the
+--- session slug), `vim_mode`, `agent_mode`, `tps`, `procs`, `agents`,
+--- `permission`, `keymap`, `vim_pending` and `cursor`. Items with `row = 2`
+--- or more make it taller.
 ---@tier ui_host
 ---@type smelt.bar.Bar
 smelt.statusline = bar.new({

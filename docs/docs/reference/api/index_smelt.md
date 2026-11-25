@@ -122,7 +122,8 @@ Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
 **Availability:** Terminal UI only; raises in headless mode.
 
 The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
-sources, in display order: `slug`, `vim_mode`, `agent_mode`, `tps`,
-`worktree`, `procs`, `agents`, `permission`, `keymap`, `vim_pending` and
-`cursor`. Items with `row = 2` or more make it taller.
+sources, in display order: `slug` (the managed worktree name, or else the
+session slug), `vim_mode`, `agent_mode`, `tps`, `procs`, `agents`,
+`permission`, `keymap`, `vim_pending` and `cursor`. Items with `row = 2`
+or more make it taller.
 

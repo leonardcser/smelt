@@ -10,7 +10,7 @@ prompt bars all use the same `smelt.bar.Bar` API, available in the terminal UI.
 
 | Bar | Position | Built-in sources |
 | --- | -------- | ---------------- |
-| `smelt.statusline` | Bottom of the screen | `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`, `agents`, `procs`, `worktree`, `vim_pending`, `cursor` |
+| `smelt.statusline` | Bottom of the screen | `slug`, `vim_mode`, `agent_mode`, `tps`, `procs`, `agents`, `permission`, `keymap`, `vim_pending`, `cursor` |
 | `smelt.headerline` | Above the transcript | `goal` |
 | `smelt.prompt.aux` | Between transcript and prompt; notifications float over it | `tip` |
 | `smelt.prompt.queue` | Above the prompt, one row per queued message | `stash`, `queued` |

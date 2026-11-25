@@ -159,8 +159,9 @@ fn background_process(id: &str, command: &str) -> protocol::NativeProcess {
 
 app_story!(statusline_built_ins_all_visible, |ctx| {
     // Every built-in statusline source at once, fed through real app state:
-    // a session slug, vim mode, the agent mode, tok/s from the last turn, the
-    // managed worktree, running processes and agents, and the cursor.
+    // the pill naming the managed worktree in place of the session slug, vim
+    // mode, the agent mode, tok/s from the last turn, running processes and
+    // agents, and the cursor.
     let dir = tempfile::tempdir().unwrap();
     let worktree = managed_worktree(dir.path());
     ctx.relaunch_in(&worktree);

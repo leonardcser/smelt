@@ -9,17 +9,15 @@ dim: 82 10
   6   9  73 fg=AnsiValue(237)
   7  14   1 fg=Black bg=White
   8   0  82 fg=AnsiValue(237)
-  9   0  12 fg=AnsiValue(0) bg=AnsiValue(208)
-  9  12   8 fg=AnsiValue(74) bg=AnsiValue(236)
-  9  20   8 fg=AnsiValue(244) bg=AnsiValue(234)
-  9  28   1 bg=AnsiValue(233)
-  9  29  10 fg=AnsiValue(244) bg=AnsiValue(233)
-  9  39   2 bg=AnsiValue(233) attrs=dim
-  9  41   8 fg=AnsiValue(244) bg=AnsiValue(233)
-  9  49   2 bg=AnsiValue(233) attrs=dim
-  9  51   7 fg=AnsiValue(117) bg=AnsiValue(233)
-  9  58   2 bg=AnsiValue(233) attrs=dim
-  9  60   8 fg=AnsiValue(213) bg=AnsiValue(233)
-  9  68   3 bg=AnsiValue(233)
+  9   0  15 fg=AnsiValue(0) bg=AnsiValue(208)
+  9  15   8 fg=AnsiValue(74) bg=AnsiValue(236)
+  9  23   8 fg=AnsiValue(244) bg=AnsiValue(234)
+  9  31   1 bg=AnsiValue(233)
+  9  32  10 fg=AnsiValue(244) bg=AnsiValue(233)
+  9  42   2 bg=AnsiValue(233) attrs=dim
+  9  44   7 fg=AnsiValue(117) bg=AnsiValue(233)
+  9  51   2 bg=AnsiValue(233) attrs=dim
+  9  53   8 fg=AnsiValue(213) bg=AnsiValue(233)
+  9  61  10 bg=AnsiValue(233)
   9  71   2 bg=AnsiValue(233) attrs=dim
   9  73   9 fg=AnsiValue(244) bg=AnsiValue(233)
