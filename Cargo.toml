@@ -49,7 +49,7 @@ crossterm = { version = "0.29", default-features = false, features = ["event-str
 unicode-width = "0.2"
 
 # Cryptography / encoding
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.11"
 
 # Lua
@@ -61,7 +61,7 @@ globset = "0.4"
 ignore = "0.4"
 
 # Filesystem watch
-notify = "8.2.0"
+notify = "9.0.0"
 
 # System
 libc = "0.2"
@@ -165,5 +165,5 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
 smelt-store = { workspace = true }
-rusqlite = { version = "0.41.1", default-features = false }
+rusqlite = { version = "0.43.0", default-features = false }
 vt100 = "0.18.1"

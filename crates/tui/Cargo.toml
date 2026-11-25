@@ -29,7 +29,7 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util
 crossterm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-base64 = "0.22"
+base64 = { workspace = true }
 libc = { workspace = true }
 glob = { workspace = true }
 mlua = { workspace = true }
@@ -42,7 +42,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 insta = { workspace = true }
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 smelt-test-support = { workspace = true }
 
 [features]

@@ -12,7 +12,7 @@ smelt-protocol = { workspace = true }
 smelt-store = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.43.0", default-features = false, features = ["bundled"] }
 smelt-perf.workspace = true
 toml_edit = "0.25.13"
 semver = "1"

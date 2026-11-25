@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 libc.workspace = true
-rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "cache"] }
+rusqlite = { version = "0.43.0", default-features = false, features = ["bundled", "cache"] }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 smelt-text = { workspace = true }
