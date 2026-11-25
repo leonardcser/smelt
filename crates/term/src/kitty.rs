@@ -497,6 +497,102 @@ pub(crate) fn delete_image<W: Write>(w: &mut W, id: u32) -> std::io::Result<()> 
     w.write_all(&control_sequence(command.as_bytes()))
 }
 
+/// The images the terminal holds. An image stays uploaded after it leaves the
+/// screen, so scrolling it back in shows it at once instead of sending and
+/// decoding it again. Offscreen images are released once nothing retains
+/// them, or when they no longer fit the offscreen budget.
+#[derive(Clone, Default)]
+pub(crate) struct ResidentImages {
+    images: HashMap<u32, Resident>,
+    frame: u64,
+}
+
+#[derive(Clone)]
+struct Resident {
+    image: Weak<RasterImage>,
+    /// The last frame that showed the image.
+    shown: u64,
+}
+
+/// The terminal commands that bring [`ResidentImages`] to the next frame.
+pub(crate) struct ImageChanges {
+    pub uploads: Vec<Arc<RasterImage>>,
+    pub deletes: Vec<u32>,
+}
+
+impl ResidentImages {
+    /// The changes that make the terminal hold every image in `visible`.
+    /// `reset` means the terminal may have lost what it held, so visible images
+    /// are sent again and offscreen ones released. Offscreen images keep at
+    /// most `offscreen_cells` cells, the most recently shown first.
+    pub fn changes(
+        &self,
+        visible: &HashMap<u32, Arc<RasterImage>>,
+        reset: bool,
+        offscreen_cells: usize,
+    ) -> ImageChanges {
+        let mut uploads: Vec<Arc<RasterImage>> = visible
+            .iter()
+            .filter(|(id, image)| {
+                reset
+                    || self
+                        .images
+                        .get(id)
+                        .is_none_or(|r| !std::ptr::eq(r.image.as_ptr(), Arc::as_ptr(image)))
+            })
+            .map(|(_, image)| Arc::clone(image))
+            .collect();
+        uploads.sort_unstable_by_key(|image| image.id);
+        let mut offscreen: Vec<(u32, u64, usize)> = Vec::new();
+        let mut deletes = Vec::new();
+        for (&id, resident) in &self.images {
+            if visible.contains_key(&id) {
+                continue;
+            }
+            match resident.image.upgrade() {
+                Some(image) if !reset => offscreen.push((
+                    id,
+                    resident.shown,
+                    usize::from(image.cols) * usize::from(image.rows),
+                )),
+                _ => deletes.push(id),
+            }
+        }
+        offscreen.sort_unstable_by_key(|&(id, shown, _)| (std::cmp::Reverse(shown), id));
+        let mut kept = 0usize;
+        for (id, _, cells) in offscreen {
+            kept = kept.saturating_add(cells);
+            if kept > offscreen_cells {
+                deletes.push(id);
+            }
+        }
+        deletes.sort_unstable();
+        ImageChanges { uploads, deletes }
+    }
+
+    /// Record that the terminal applied `changes` and now shows `visible`.
+    pub fn commit(&mut self, visible: &HashMap<u32, Arc<RasterImage>>, changes: &ImageChanges) {
+        self.frame += 1;
+        for id in &changes.deletes {
+            self.images.remove(id);
+        }
+        for (&id, image) in visible {
+            self.images.insert(
+                id,
+                Resident {
+                    image: Arc::downgrade(image),
+                    shown: self.frame,
+                },
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub fn contains(&self, id: u32) -> bool {
+        self.images.contains_key(&id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

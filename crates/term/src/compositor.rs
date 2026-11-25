@@ -3,12 +3,15 @@ use super::grid::{Cell, Grid, RowSet};
 use super::kitty;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::QueueableCommand;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
 /// Most grids a frame holds at once: the composed frame and its presented copy.
 const MAX_SPARE_GRIDS: usize = 2;
+
+/// Offscreen images the terminal keeps, in screens' worth of cells.
+const OFFSCREEN_IMAGE_SCREENS: usize = 4;
 
 /// Double-buffered terminal renderer. Diffs each frame against `previous`
 /// and flushes only changed cells, scrolling the terminal first when whole
@@ -29,7 +32,7 @@ pub struct Compositor {
     width: u16,
     height: u16,
     force_redraw: bool,
-    uploaded_images: HashSet<u32>,
+    images: kitty::ResidentImages,
 }
 
 /// What `previous` holds besides the last flushed frame.
@@ -79,7 +82,7 @@ impl Compositor {
             width,
             height,
             force_redraw: true,
-            uploaded_images: HashSet::new(),
+            images: kitty::ResidentImages::default(),
         }
     }
 
@@ -128,7 +131,6 @@ impl Compositor {
         let size = (self.width, self.height);
         let incremental = self.screen == Screen::Presented(base_id)
             && !self.force_redraw
-            && self.uploaded_images.is_empty()
             && (base.width(), base.height()) == size
             && (self.previous.width(), self.previous.height()) == size;
         if !incremental {
@@ -230,44 +232,32 @@ impl Compositor {
         // A lent screen grid left a placeholder to diff against.
         self.force_redraw |= matches!(self.screen, Screen::Lent(_));
         self.screen = Screen::Unknown;
-        let mut images = HashMap::new();
+        let mut visible = HashMap::new();
         for y in 0..frame.height() {
             for x in 0..frame.width() {
                 if let Some(image) = &frame.cell(x, y).image {
-                    images.entry(image.id).or_insert_with(|| Arc::clone(image));
+                    visible.entry(image.id).or_insert_with(|| Arc::clone(image));
                 }
             }
         }
-        let visible_images: HashSet<u32> = images.keys().copied().collect();
-        let uploads: Vec<u32> = visible_images
-            .iter()
-            .copied()
-            .filter(|id| self.force_redraw || !self.uploaded_images.contains(id))
-            .collect();
-        let removed: Vec<u32> = self
-            .uploaded_images
-            .difference(&visible_images)
-            .copied()
-            .collect();
+        let offscreen_cells =
+            OFFSCREEN_IMAGE_SCREENS * usize::from(self.width) * usize::from(self.height);
+        let changes = self
+            .images
+            .changes(&visible, self.force_redraw, offscreen_cells);
         let result = (|| {
             w.queue(BeginSynchronizedUpdate)?;
-            for id in &removed {
-                // Offscreen images are retransmitted when needed, so release their terminal data.
+            for id in &changes.deletes {
                 kitty::delete_image(w, *id)?;
             }
-            for id in &uploads {
-                kitty::transmit_image(w, *id, &images[id])?;
+            for image in &changes.uploads {
+                kitty::transmit_image(w, image.id, image)?;
             }
 
-            if self.force_redraw || !uploads.is_empty() || !removed.is_empty() {
+            if self.force_redraw || !changes.uploads.is_empty() {
                 flush_full(&frame, w)?;
             } else {
-                // Images do not move with scrolled text in every terminal.
-                if let Some(scroll) = images
-                    .is_empty()
-                    .then(|| find_scroll(&frame, &self.previous))
-                    .flatten()
-                {
+                if let Some(scroll) = find_scroll(&frame, &self.previous) {
                     scroll.queue(w)?;
                     self.previous
                         .scroll_rows(scroll.top, scroll.bottom, scroll.dy);
@@ -285,7 +275,7 @@ impl Compositor {
         if result.is_ok() {
             frame.swap_with(&mut self.previous);
             self.force_redraw = false;
-            self.uploaded_images = visible_images;
+            self.images.commit(&visible, &changes);
         } else {
             self.force_redraw = true;
         }
@@ -492,6 +482,7 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::Style;
+    use smelt_style::cell_width;
     use std::sync::{Mutex, OnceLock};
 
     fn registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -518,41 +509,106 @@ mod tests {
         assert!(!output.windows(4).any(|window| window == b"a=T,"));
     }
 
+    fn contains(output: &[u8], needle: &[u8]) -> bool {
+        output.windows(needle.len()).any(|window| window == needle)
+    }
+
+    fn paint_image(grid: &mut Grid, x: u16, y: u16, image: &Arc<crate::RasterImage>) {
+        grid.as_mut_slice().set_image_symbol(
+            x,
+            y,
+            "\u{10eeee}\u{0305}\u{0305}",
+            Style::default(),
+            Arc::clone(image),
+        );
+    }
+
     #[test]
-    fn kitty_image_reappears_after_scrolling_out_of_view() {
+    fn image_scrolled_back_into_view_is_not_sent_again() {
         let _lock = registry_test_lock();
         let id = 0x010204;
         let image = kitty::register_image(id, "QUJDRA==".into(), 2, 2).unwrap();
-        let style = Style::new().fg(crate::Color::Rgb { r: 1, g: 2, b: 4 });
         let mut compositor = Compositor::new(4, 2);
         let mut first = Vec::new();
         compositor
-            .render_with(&mut first, |grid| {
-                grid.as_mut_slice().set_image_symbol(
-                    0,
-                    0,
-                    "\u{10eeee}\u{030d}\u{0305}",
-                    style,
-                    Arc::clone(&image),
-                );
-            })
+            .render_with(&mut first, |grid| paint_image(grid, 0, 0, &image))
             .unwrap();
-        assert!(first.windows(4).any(|window| window == b"a=T,"));
+        assert!(contains(&first, b"a=T,"));
 
-        compositor.render_with(&mut Vec::new(), |_| {}).unwrap();
+        let mut away = Vec::new();
+        compositor.render_with(&mut away, |_| {}).unwrap();
+        assert!(!contains(&away, b"a=d,"));
+
         let mut returned = Vec::new();
         compositor
-            .render_with(&mut returned, |grid| {
-                grid.as_mut_slice().set_image_symbol(
-                    0,
-                    0,
-                    "\u{10eeee}\u{030d}\u{0305}",
-                    style,
-                    Arc::clone(&image),
-                );
+            .render_with(&mut returned, |grid| paint_image(grid, 0, 1, &image))
+            .unwrap();
+        assert!(!contains(&returned, b"a=T,"));
+        assert!(contains(&returned, "\u{10eeee}".as_bytes()));
+    }
+
+    #[test]
+    fn redraw_releases_offscreen_images_and_resends_visible_ones() {
+        let _lock = registry_test_lock();
+        let shown = kitty::register_image(0x010206, "QUJDRA==".into(), 1, 1).unwrap();
+        let hidden = kitty::register_image(0x010207, "QUJDRA==".into(), 1, 1).unwrap();
+        let mut compositor = Compositor::new(4, 2);
+        compositor
+            .render_with(&mut Vec::new(), |grid| {
+                paint_image(grid, 0, 0, &shown);
+                paint_image(grid, 1, 0, &hidden);
             })
             .unwrap();
-        assert!(returned.windows(4).any(|window| window == b"a=T,"));
+
+        compositor.force_redraw();
+        let mut redrawn = Vec::new();
+        compositor
+            .render_with(&mut redrawn, |grid| paint_image(grid, 0, 0, &shown))
+            .unwrap();
+        assert!(contains(&redrawn, b"a=T,f=100,q=2,U=1,i=66054,"));
+        assert!(contains(&redrawn, b"a=d,d=I,i=66055,"));
+        assert!(!compositor.images.contains(hidden.id));
+    }
+
+    #[test]
+    fn offscreen_image_is_released_once_nothing_retains_it() {
+        let _lock = registry_test_lock();
+        let id = 0x0a0b0c;
+        let image = kitty::register_image(id, "QUJDRA==".into(), 1, 1).unwrap();
+        let mut compositor = Compositor::new(2, 1);
+        compositor
+            .render_with(&mut Vec::new(), |grid| paint_image(grid, 0, 0, &image))
+            .unwrap();
+        compositor.render_with(&mut Vec::new(), |_| {}).unwrap();
+        assert!(compositor.images.contains(id));
+
+        drop(image);
+        let mut released = Vec::new();
+        compositor.render_with(&mut released, |_| {}).unwrap();
+        assert!(contains(&released, b"a=d,d=I,i=658188,q=2;"));
+        assert!(!compositor.images.contains(id));
+    }
+
+    #[test]
+    fn offscreen_images_beyond_the_budget_are_released_oldest_first() {
+        let _lock = registry_test_lock();
+        // A 2x1 screen keeps OFFSCREEN_IMAGE_SCREENS * 2 offscreen cells.
+        let cells = (OFFSCREEN_IMAGE_SCREENS * 2) as u16;
+        let older = kitty::register_image(0x010208, "QUJDRA==".into(), cells, 1).unwrap();
+        let newer = kitty::register_image(0x010209, "QUJDRA==".into(), cells, 1).unwrap();
+        let mut compositor = Compositor::new(2, 1);
+        for image in [&older, &newer] {
+            compositor
+                .render_with(&mut Vec::new(), |grid| paint_image(grid, 0, 0, image))
+                .unwrap();
+        }
+        assert!(compositor.images.contains(older.id));
+
+        let mut cleared = Vec::new();
+        compositor.render_with(&mut cleared, |_| {}).unwrap();
+        assert!(contains(&cleared, b"a=d,d=I,i=66056,"));
+        assert!(!compositor.images.contains(older.id));
+        assert!(compositor.images.contains(newer.id));
     }
 
     #[test]
@@ -611,38 +667,6 @@ mod tests {
             })
             .unwrap();
         assert!(restored.windows(4).any(|window| window == b"a=T,"));
-    }
-
-    #[test]
-    fn offscreen_image_frees_terminal_data_but_retains_raster_handle() {
-        let _lock = registry_test_lock();
-        let id = 0x0a0b0c;
-        let image = kitty::register_image(id, "QUJDRA==".into(), 1, 1).unwrap();
-        let style = Style::new().fg(crate::Color::Rgb {
-            r: 10,
-            g: 11,
-            b: 12,
-        });
-        let mut compositor = Compositor::new(2, 1);
-        compositor
-            .render_with(&mut Vec::new(), |grid| {
-                grid.as_mut_slice().set_image_symbol(
-                    0,
-                    0,
-                    "\u{10eeee}\u{0305}\u{0305}",
-                    style,
-                    Arc::clone(&image),
-                );
-            })
-            .unwrap();
-        assert!(kitty::image_exists(id));
-        let mut cleared = Vec::new();
-        compositor.render_with(&mut cleared, |_| {}).unwrap();
-        assert!(kitty::image_exists(id));
-        assert!(cleared
-            .windows(b"a=d,d=I,i=658188,q=2;".len())
-            .any(|w| w == b"a=d,d=I,i=658188,q=2;"));
-        assert!(compositor.uploaded_images.is_empty());
     }
 
     #[test]
@@ -737,6 +761,39 @@ mod tests {
         let (writes, screen) = present(&[before, after.clone()]);
         assert_eq!(screen, after);
         assert!(String::from_utf8_lossy(&writes[1]).contains("\x1b[1;5r\x1b[2T\x1b[r"));
+    }
+
+    #[test]
+    fn visible_image_scrolls_with_its_text() {
+        let _lock = registry_test_lock();
+        let image = kitty::register_image(0x01020a, "QUJDRA==".into(), 4, 1).unwrap();
+        let row = kitty::placeholder_row(0, 4);
+        let paint = |grid: &mut Grid, image_y: u16| {
+            for y in 0..4 {
+                let line = char::from(b'a' + (y + 4 - image_y) as u8);
+                grid.as_mut_slice()
+                    .put_str(4, y, &line.to_string().repeat(4), Style::default());
+            }
+            for (x, cell) in cell_width::graphemes(&row).enumerate() {
+                grid.as_mut_slice().set_image_symbol(
+                    x as u16,
+                    image_y,
+                    cell,
+                    Style::default(),
+                    Arc::clone(&image),
+                );
+            }
+        };
+        let mut compositor = Compositor::new(8, 4);
+        compositor
+            .render_with(&mut Vec::new(), |grid| paint(grid, 3))
+            .unwrap();
+        let mut scrolled = Vec::new();
+        compositor
+            .render_with(&mut scrolled, |grid| paint(grid, 2))
+            .unwrap();
+        assert!(contains(&scrolled, b"\x1b[1S"));
+        assert!(!contains(&scrolled, "\u{10eeee}".as_bytes()));
     }
 
     #[test]
@@ -1047,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn image_drawn_over_a_presented_base_is_uploaded_and_later_released() {
+    fn image_drawn_over_a_presented_base_is_uploaded_and_stays_resident() {
         let _lock = registry_test_lock();
         let id = 0x010205;
         let image = kitty::register_image(id, "QUJDRA==".into(), 2, 2).unwrap();
@@ -1071,13 +1128,13 @@ mod tests {
             .flush_present(&mut uploaded, with_image, &base)
             .unwrap();
         assert!(uploaded.windows(4).any(|window| window == b"a=T,"));
-        assert!(compositor.uploaded_images.contains(&id));
+        assert!(compositor.images.contains(id));
 
-        let mut released = Vec::new();
-        present_mark(&mut compositor, &mut released, &base, 6).unwrap();
-        assert!(compositor.uploaded_images.is_empty());
+        let mut hidden = Vec::new();
+        present_mark(&mut compositor, &mut hidden, &base, 6).unwrap();
+        assert!(compositor.images.contains(id));
         output.extend_from_slice(&uploaded);
-        output.extend_from_slice(&released);
+        output.extend_from_slice(&hidden);
         assert_eq!(screen_after(12, 4, &output), full_screen(&marked(&base, 6)));
     }
 }
