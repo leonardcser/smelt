@@ -668,7 +668,7 @@ impl Block {
                 event: Some(event), ..
             } => Some((
                 event.process_id()?.to_owned(),
-                event.outcome(),
+                event.outcome()?,
                 event.ended_at_ms(),
             )),
             Block::AgentMessage { event, .. } => event

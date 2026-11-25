@@ -199,8 +199,8 @@ Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
 **Availability:** Terminal UI only; raises in headless mode.
 
 The strip of blocks that wait to join the transcript. It takes no rows
-while nothing is pending. Its built-in sources are `process_status` and
-`agent_message`, one row each, in the order they join.
+while nothing is pending. Its built-in sources are `process_status`,
+`monitor_event`, and `agent_message`, one row each when nonempty.
 
 ## `smelt.transcript.pending_blocks`
 

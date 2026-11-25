@@ -154,14 +154,15 @@ impl ProcessStatusEvent {
 
     /// The event, recording that the process ended at `ended_at_ms`.
     pub fn ended_at(mut self, at_ms: u64) -> Self {
-        match &mut self {
-            Self::BackgroundProcessCompleted { ended_at_ms, .. } => *ended_at_ms = Some(at_ms),
+        if let Self::BackgroundProcessCompleted { ended_at_ms, .. } = &mut self {
+            *ended_at_ms = Some(at_ms);
         }
         self
     }
 
     pub fn ended_at_ms(&self) -> Option<u64> {
         match self {
+            Self::MonitorEvent { .. } => None,
             Self::BackgroundProcessCompleted { ended_at_ms, .. } => *ended_at_ms,
         }
     }
@@ -195,8 +196,11 @@ impl ProcessStatusEvent {
     }
 
     /// How the background job ended.
-    pub fn outcome(&self) -> BackgroundOutcome {
-        BackgroundOutcome::of_process(self.termination(), self.exit_code())
+    pub fn outcome(&self) -> Option<BackgroundOutcome> {
+        Some(BackgroundOutcome::of_process(
+            self.termination()?,
+            self.exit_code(),
+        ))
     }
 
     pub fn field_value(&self, field: &str) -> Option<String> {

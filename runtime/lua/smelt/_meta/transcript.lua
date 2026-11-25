@@ -93,8 +93,8 @@ transcript.node_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- The strip of blocks that wait to join the transcript. It takes no rows
---- while nothing is pending. Its built-in sources are `process_status` and
---- `agent_message`, one row each, in the order they join.
+--- while nothing is pending. Its built-in sources are `process_status`,
+--- `monitor_event`, and `agent_message`, one row each when nonempty.
 ---@type smelt.bar.Bar
 transcript.pending = nil
 
