@@ -29,9 +29,11 @@ use Smelt::{Owned, RunsAs, Shared};
 
 /// The native tools smelt knows, with the access a call asks for. `None`
 /// leaves the access to the smelt tool the call is checked as. Native shell
-/// commands run outside smelt's sandbox, so they need `full`. `read` tools
-/// only read or change state of the Claude Code session itself. Tools that
-/// act on their own or reach outside the machine, such as `Agent`,
+/// commands run outside smelt's sandbox, so they need `full`. `TaskOutput`
+/// reads existing task output, and `TaskStop` stops an existing task, so
+/// neither needs the access required to start a native shell command.
+/// `read` tools only read or change state of the Claude Code session itself.
+/// Tools that act on their own or reach outside the machine, such as `Agent`,
 /// `SendMessage`, `CronCreate` and `PushNotification`, and tools smelt does
 /// not know need `full`.
 const NATIVE: &[(&str, Option<Smelt>, Option<Access>)] = &[
@@ -48,8 +50,8 @@ const NATIVE: &[(&str, Option<Smelt>, Option<Access>)] = &[
     ("AskUserQuestion", Some(Shared("ask_user_question")), None),
     ("ExitPlanMode", Some(Shared("present_plan")), None),
     ("Monitor", Some(RunsAs("bash")), Some(Full)),
-    ("TaskOutput", Some(Owned("read_process_output")), Some(Full)),
-    ("TaskStop", Some(Owned("stop_process")), Some(Full)),
+    ("TaskOutput", Some(Owned("read_process_output")), Some(Read)),
+    ("TaskStop", Some(Owned("stop_process")), Some(Write)),
     ("ToolSearch", None, Some(Read)),
     ("Skill", None, Some(Read)),
     ("LSP", None, Some(Read)),

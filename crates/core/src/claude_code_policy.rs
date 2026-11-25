@@ -58,6 +58,9 @@ mod tests {
         assert_eq!(decide("ToolSearch", "read"), (Allow, Access::Read));
         assert_eq!(decide("KillShell", "read"), (Ask, Access::Write));
         assert_eq!(decide("KillShell", "write"), (Allow, Access::Write));
+        assert_eq!(decide("TaskOutput", "read"), (Allow, Access::Read));
+        assert_eq!(decide("TaskStop", "read"), (Ask, Access::Write));
+        assert_eq!(decide("TaskStop", "write"), (Allow, Access::Write));
         assert_eq!(decide("Agent", "write"), (Ask, Access::Full));
         assert_eq!(decide("SomeFutureTool", "write"), (Ask, Access::Full));
     }
