@@ -43,6 +43,7 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/wt [name] [-b ref]`                    | Alias for `/worktree` |
 | `/help`                                  | Show keybindings (also `F1`) |
 | `/docs`                                  | Open the smelt documentation in your browser |
+| `/tip`                                   | Show a discovery tip, even when automatic tips are off |
 | `/inspect`                               | Open the local session/request inspector when the opt-in plugin is enabled |
 | `/btw <question>`                        | Ask a side question; answer streams into a dialog |
 | `/brief [scope] [focus]`                 | Summarize planned or completed changes compactly |

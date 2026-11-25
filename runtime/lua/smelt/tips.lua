@@ -120,6 +120,16 @@ function smelt.tips.list()
   return out
 end
 
+-- Ignores show_tips: an explicit /tip should always answer.
+function M.random_tip()
+  local visible = {}
+  for _, tip in ipairs(prompt_tips) do
+    if tip_visible(tip) then visible[#visible + 1] = tip end
+  end
+  if #visible == 0 then return nil end
+  return visible[math.random(#visible)]
+end
+
 function M.prompt_tip()
   if not tips_enabled() or #prompt_tips == 0 then return nil end
   local visible = {}
