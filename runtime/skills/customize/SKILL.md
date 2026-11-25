@@ -148,16 +148,15 @@ wizard does this normally, but you may be invoked when neither has happened yet.
 
 ## Hot reload
 
-Lua config edits are hot-reloaded automatically by default. The reload re-runs
-the built-in Lua, `init.lua`, and the user's `plugins/`.
-Persistent state (`smelt.state`, `smelt.signal`) survives across the cycle;
-module-local state in plugins is reset.
+A reload re-runs the built-in Lua, `init.lua` and the user's `plugins/`.
+`smelt.state` and `smelt.signal` survive it; module-local plugin state resets.
 
-**You (the agent) trigger the reload by calling the `smelt_reload` tool.** Do
-this once, at the end of your turn after every set of edits to files under
-`~/.config/smelt/` or `./.smelt/`. The tool schedules the reload to fire when
-the current turn completes, so it never cancels its own in-flight call. Multiple
-calls in the same turn collapse into one reload.
+**Call `smelt_reload` once, at the end of your turn,** after you edit files
+under `~/.config/smelt/` or `./.smelt/`. The reload fires when the turn ends, so
+it never cancels its own call. Several calls in one turn make one reload.
+
+A reload that changes a tool or the system prompt makes the next request miss
+the prompt cache. Group tool edits into one reload when you can.
 
 Do **not** silently flip `smelt.settings.auto_reload` in the user's config. It is
 enabled by default, but if the user disabled it, respect that choice.

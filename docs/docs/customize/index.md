@@ -53,13 +53,17 @@ invalidates the trust until you run `/trust` again. From Lua, use
 
 ## Reloading
 
-Saved Lua config reloads automatically; run `/reload` or press `F5` to reload
-manually. Reloading is all or nothing: if any file has a syntax or runtime error,
-the previous working config stays active and the error appears in `/messages`.
+Saved Lua config reloads automatically. To reload by hand, run `/reload` or
+press `F5`. A reload is all or nothing: if a file fails, the old config stays
+active and the error shows in `/messages`.
 
-A manual `/reload` also re-reads `AGENTS.md`, skills, MCP server declarations and
-`--system-prompt` files. Automatic reloads only cover Lua. Disable the file
-watcher with `smelt.settings.auto_reload = false`.
+Automatic reloads cover only Lua. `/reload` also re-reads `AGENTS.md`, skills,
+MCP server declarations and `--system-prompt` files. To stop the file watcher,
+set `smelt.settings.auto_reload = false`.
+
+A reload keeps the conversation as it is. But every request starts with the
+tools and the system prompt. If a reload changes either, the next request
+misses the provider's prompt cache, and later requests hit it again.
 
 ## Load order
 

@@ -232,10 +232,9 @@ worktree unless you explicitly ask. See
 
 ### `smelt_reload`
 
-Schedules a reload of smelt's Lua config at the end of the current agent turn.
-It takes no parameters. Use it after editing files under `~/.config/smelt/` or
-`.smelt/` so the in-flight tool call is not disrupted. Multiple calls in one
-turn coalesce into one reload.
+Reloads smelt's config when the current turn ends, the same as `/reload`. It
+takes no parameters. Several calls in one turn make one reload. See
+[Reloading](../customize/index.md#reloading).
 
 ## Web
 
