@@ -632,7 +632,10 @@ app_story!(search_dialog, |ctx| {
     ctx.write_workspace_file("notes.txt", "no match here\nTask list\n");
     ctx.run_command("search");
     ctx.type_prompt("task");
-    ctx.wait_for_text("3 matches");
+    // The count shows the searched share until the search finishes.
+    ctx.wait_for_frame("finished search", |frame| {
+        frame.contains("3 matches") && !frame.contains("3 matches ·")
+    });
     ctx.wait_for_document("smelt.search.preview");
     ctx.assert_snapshot();
 });
