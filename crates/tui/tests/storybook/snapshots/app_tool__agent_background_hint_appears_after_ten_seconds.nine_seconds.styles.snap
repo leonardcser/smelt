@@ -7,9 +7,7 @@ dim: 72 10
   0   1   1 attrs=dim
   0   2  12 attrs=dim|italic
   0  14   5 attrs=dim
-  0  31   2 attrs=dim
-  0  33   7 fg=AnsiValue(213) attrs=dim
-  0  40   6 attrs=dim
+  0  31   6 attrs=dim
   0  61  10 attrs=dim
   6   0   1 fg=AnsiValue(237)
   6   2   1 fg=Rgb { r: 39, g: 27, b: 27 } attrs=bold

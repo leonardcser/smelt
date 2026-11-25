@@ -29,9 +29,6 @@ local function agent_title(block)
   if (block.args or {}).run_in_background == true then
     -- The same tag the transcript shows on any call that went to the background.
     spans[#spans + 1] = { text = "background", fg = "SmeltAgent", title_suffix = true }
-  else
-    -- Shown while the call waits: the agent that launched it works on once it reports.
-    spans[#spans + 1] = { text = "waiting", fg = "SmeltAgent", title_suffix = true }
   end
   return { spans }
 end
@@ -111,7 +108,7 @@ function M.register(provider)
   -- Claude Code names the tool `Agent`; older versions call it `Task`.
   for _, name in ipairs({ "Agent", "Task" }) do
     smelt.transcript.register_tool(provider .. "/" .. name, {
-      cache_key = "smelt.transcript.agents.agent:v3",
+      cache_key = "smelt.transcript.agents.agent:v4",
       background_hl = "SmeltAgent",
       title = agent_title,
       body = agent_body,

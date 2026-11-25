@@ -7,9 +7,7 @@ dim: 72 10
   0   1   1 attrs=dim
   0   2  12 attrs=dim|italic
   0  14   5 attrs=dim
-  0  31   2 attrs=dim
-  0  33   7 fg=AnsiValue(213) attrs=dim
-  0  40   5 attrs=dim
+  0  31   5 attrs=dim
   0  61  10 attrs=dim
   1   2   6 fg=AnsiValue(208)
   1   8  21 attrs=dim
