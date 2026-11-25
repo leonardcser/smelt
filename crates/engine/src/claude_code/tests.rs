@@ -196,21 +196,31 @@ async fn stopping_one_native_child_preserves_sibling_and_parent() {
     let fixture = Fixture::new("subagent-stop");
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut refused = false;
     let mut stopped = false;
     let mut sibling_completed = false;
     let mut sibling_output = false;
+    let stop = |action| UiCommand::StopAgent {
+        session_id: "test-session".into(),
+        agent_id: "claude-code:one".into(),
+        action: protocol::ActionId::new(action),
+    };
     loop {
         match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::ActionFailed { action, error }) => {
+                // The first stop is refused; the retry stops it.
+                assert_eq!((action.get(), error.as_str()), (1, "busy"));
+                refused = true;
+                handle.send(stop(2));
+            }
             EngineOutput::Event(EngineEvent::AgentUpdated { agent, .. }) => {
                 if agent.id == "claude-code:two" && agent.status == protocol::AgentStatus::Running {
                     handle.send(UiCommand::StopAgent {
                         session_id: "other-session".into(),
                         agent_id: "claude-code:one".into(),
+                        action: protocol::ActionId::new(1),
                     });
-                    handle.send(UiCommand::StopAgent {
-                        session_id: "test-session".into(),
-                        agent_id: "claude-code:one".into(),
-                    });
+                    handle.send(stop(1));
                 }
                 stopped |= agent.id == "claude-code:one"
                     && agent.status == protocol::AgentStatus::Cancelled;
@@ -241,14 +251,14 @@ async fn stopping_one_native_child_preserves_sibling_and_parent() {
             _ => {}
         }
     }
-    assert!(stopped && sibling_completed && sibling_output);
+    assert!(refused && stopped && sibling_completed && sibling_output);
     let calls = fixture.calls();
     assert_eq!(
         calls
             .iter()
             .filter(|call| call["request"]["subtype"] == "stop_task")
             .count(),
-        1
+        2
     );
     assert!(!calls
         .iter()

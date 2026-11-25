@@ -1152,6 +1152,7 @@ impl TuiApp {
         // Lua renderers run so the prompt top-bar indicator they paint
         // this frame already reflects the pause.
         self.set_agent_blocked_paused(self.ui.active_modal_blocks_agent());
+        self.sync_tool_calls_in_background();
         let now = self.core.clock.instant_now();
         self.conversation.sync_active_tool_elapsed(now);
         self.sync_transcript_renderer_generation();

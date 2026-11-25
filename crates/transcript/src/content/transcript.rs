@@ -250,6 +250,7 @@ mod tests {
             output: None,
             user_message: None,
             preview_output: None,
+            in_background: false,
         }
     }
 

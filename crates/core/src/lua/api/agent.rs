@@ -56,7 +56,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let records = crate::host::try_with_core(|core| {
                 core.agents.restore(&core.sessions, &parent_id)?;
                 Ok::<_, String>(core.agents.runs(&parent_id).map(|agent| {
-                    let mut record = serde_json::to_value(&agent.info).expect("agent record serializes");
+                    let mut record = serde_json::to_value(core.agent_view(agent)).expect("agent record serializes");
                     record["session_id"] = serde_json::json!(agent.session.id);
                     record["persistence_error"] = serde_json::json!(core.agents.archive_error(&parent_id, &agent.info.id));
                     record
@@ -67,17 +67,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.live_only_fn(
         "stop",
-        "Request cancellation from an observed agent's execution owner. Returns false for unknown, terminal or unsupported agents; never interrupts the parent as a fallback.",
+        "Request cancellation from an observed agent's execution owner. `runs` shows the agent cancelled at once; it runs again, with an error notification, when the owner refuses or does not answer. Returns false for unknown, terminal or unsupported agents; never interrupts the parent as a fallback.",
         &["parent_id", "id"],
         |_, (parent_id, id): (String, String)| -> LuaResult<bool> {
-            Ok(crate::host::try_with_core(|core| {
-                let supported = core.agents.runs(&parent_id).any(|agent| agent.info.id == id
-                    && agent.info.capabilities.stop && !agent.info.status.is_terminal());
-                if supported {
-                    core.engine.send(protocol::UiCommand::StopAgent { session_id: parent_id, agent_id: id });
-                }
-                supported
-            }).unwrap_or(false))
+            Ok(crate::host::try_with_core(|core| core.stop_agent(&parent_id, &id)).unwrap_or(false))
         },
     )?;
     Ok(())

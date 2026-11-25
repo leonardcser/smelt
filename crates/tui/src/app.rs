@@ -2263,6 +2263,22 @@ impl TuiApp {
     }
 
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
+    /// Tells the user about each action no report showed in time.
+    fn expire_actions(&mut self) {
+        for message in self.core.expire_actions() {
+            self.notify_error(message);
+        }
+    }
+
+    /// Shows each running tool call whose work runs in the background, as
+    /// the user sees it, there.
+    fn sync_tool_calls_in_background(&mut self) {
+        let now = self.core.clock.instant_now();
+        let core = &self.core;
+        self.conversation
+            .set_tools_in_background(|call| core.call_in_background(call), now);
+    }
+
     pub(crate) fn tick_timers(&mut self) {
         let due = self.core.timers.drain_due(self.lua.lua());
         if due.is_empty() {
@@ -3605,6 +3621,7 @@ impl TuiApp {
 
     fn tick_runtime(&mut self) {
         self.tick_timers();
+        self.expire_actions();
         self.drain_persist_reports();
         self.publish_diff_signals();
         self.publish_public_status();
@@ -3849,6 +3866,9 @@ impl TuiApp {
                 .core
                 .timers
                 .next_deadline()
+                .into_iter()
+                .chain(self.core.actions.deadline())
+                .min()
                 .map(|deadline| deadline.saturating_duration_since(now));
             let next_notification_delay = self.notification_expiry_delay();
             let next_keymap_delay = self.pending_keymap_chord_expiry_delay();

@@ -1019,6 +1019,7 @@
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
 ---@field preview_output? smelt.transcript.ToolOutput Immutable pending output metadata for a promoted finished draft.
+---@field background? boolean True when the call's work continues in the background: its result has `metadata.background = true`, or the user moved the running call there. Such a call shows status `"ok"` before its result arrives.
 ---@field output? smelt.transcript.ToolOutput Tool output metadata.
 ---@field event? string Process status event type, e.g. `"background_process_completed"`.
 ---@field event_type? string Alias for `event`.

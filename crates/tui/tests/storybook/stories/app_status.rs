@@ -132,6 +132,7 @@ fn running_agent(session_id: String, id: &str, title: &str) -> EngineEvent {
             task: title.into(),
             status: protocol::AgentStatus::Running,
             background: true,
+            call_id: None,
             activity: "Working".into(),
             result: None,
             error: None,
@@ -153,6 +154,7 @@ fn background_process(id: &str, command: &str) -> protocol::NativeProcess {
         started_at_ms: 1_742_567_823_000,
         background: true,
         agent_id: None,
+        call_id: None,
         output: String::new(),
     }
 }

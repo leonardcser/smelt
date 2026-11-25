@@ -1,21 +1,35 @@
 //! The shell commands smelt lists: jobs of its own supervisor, and commands a
 //! native agent such as Claude Code runs inside its own process.
 
+use crate::actions::{Effect, Target};
 use crate::process::{JobInfo, JobOutput};
 use crate::runtime::Core;
 use protocol::{NativeProcess, UiCommand};
 
 impl Core {
-    /// Running jobs, then the native session's shell commands.
+    /// Running jobs, then the native session's shell commands, without
+    /// those the user stopped.
     pub fn processes(&self) -> Vec<JobInfo> {
         let mut processes = self.jobs.list();
-        processes.extend(self.native_processes.iter().map(|process| JobInfo {
+        processes.retain(|job| self.lists_process(&job.id));
+        processes.extend(self.listed_native_processes().map(|process| JobInfo {
             id: process.id.clone(),
             pid: None,
             command: process.command.clone(),
             elapsed_secs: self.native_elapsed_secs(process),
         }));
         processes
+    }
+
+    /// Whether `processes` lists process `id`: the user did not stop it.
+    fn lists_process(&self, id: &str) -> bool {
+        self.actions.process_effect(id) != Some(Effect::Stop)
+    }
+
+    fn listed_native_processes(&self) -> impl Iterator<Item = &NativeProcess> {
+        self.native_processes
+            .iter()
+            .filter(|process| self.lists_process(&process.id))
     }
 
     /// Whether the native session runs work of its own, such as a monitor or
@@ -39,7 +53,12 @@ impl Core {
 
     /// How many processes `processes` lists.
     pub fn running_process_count(&self) -> usize {
-        self.jobs.running_count() + self.native_processes.len()
+        self.jobs
+            .list()
+            .iter()
+            .filter(|job| self.lists_process(&job.id))
+            .count()
+            + self.listed_native_processes().count()
     }
 
     /// The output of process `id` without draining it. A native shell command
@@ -62,10 +81,15 @@ impl Core {
         })
     }
 
-    /// Stops process `id` asynchronously.
-    pub fn stop_process(&self, id: String) {
+    /// Stops process `id` asynchronously, and stops listing it at once.
+    pub fn stop_process(&mut self, id: String) {
+        let action = self.begin_action(Target::Process(id.clone()), Effect::Stop);
         if self.native_process(&id).is_some() {
-            self.send_native(|session_id| UiCommand::StopNativeProcess { session_id, id });
+            self.send_native(|session_id| UiCommand::StopNativeProcess {
+                session_id,
+                id,
+                action,
+            });
             return;
         }
         let supervisor = self.jobs.clone();
@@ -74,37 +98,62 @@ impl Core {
         });
     }
 
-    /// Leaves the latest foreground job, or else the native session's
-    /// foreground shell commands and the agents its main agent waits for,
-    /// running in the background. Returns whether it asked for that.
-    pub fn detach_foreground_process(&self) -> bool {
-        self.jobs.detach_latest_foreground().requested()
-            || (self.native_session_has_foreground_work()
-                && self
-                    .send_native(|session_id| UiCommand::BackgroundNativeProcesses { session_id }))
-    }
-
-    /// Whether the native session's main agent waits for a shell command or
-    /// an agent it launched.
-    fn native_session_has_foreground_work(&self) -> bool {
-        let Some(session) = self.native_session.as_deref() else {
+    /// Leaves the latest foreground job, or else each shell command and
+    /// agent the native session's main agent waits for, running in the
+    /// background, and shows them there at once. Returns whether it asked
+    /// for that.
+    pub fn detach_foreground_process(&mut self) -> bool {
+        if self.jobs.detach_latest_foreground().requested() {
+            return true;
+        }
+        let Some(session_id) = self.native_session.clone() else {
             return false;
         };
-        self.native_processes
-            .iter()
-            .any(|process| !process.background && process.agent_id.is_none())
-            || self.agents.runs(session).any(|agent| {
-                !agent.info.status.is_terminal()
-                    && !agent.info.background
-                    && agent.info.parent_agent_id.is_none()
+        let work = self.native_foreground_work(&session_id);
+        for (target, call_id) in &work {
+            let action = self.begin_action(target.clone(), Effect::Background);
+            self.engine.send(UiCommand::BackgroundNativeCall {
+                session_id: session_id.clone(),
+                call_id: call_id.clone(),
+                action,
+            });
+        }
+        !work.is_empty()
+    }
+
+    /// What the main agent of native session `session` waits for: its shell
+    /// commands and the agents it launched, each by its tool call.
+    fn native_foreground_work(&self, session: &str) -> Vec<(Target, String)> {
+        let processes = self
+            .listed_native_processes()
+            .filter(|process| {
+                process.agent_id.is_none() && !self.native_process_in_background(process)
             })
+            .filter_map(|process| {
+                let call = process.call_id.clone()?;
+                Some((Target::Process(process.id.clone()), call))
+            });
+        let agents = self
+            .agents
+            .runs(session)
+            .filter(|agent| self.agent_runs(agent))
+            .map(|agent| self.agent_view(agent))
+            .filter(|agent| !agent.background && agent.parent_agent_id.is_none())
+            .filter_map(|agent| {
+                let target = Target::Agent {
+                    parent: session.into(),
+                    id: agent.id,
+                };
+                Some((target, agent.call_id?))
+            });
+        processes.chain(agents).collect()
     }
 
     /// How many agents of session `session` run.
     pub fn running_agent_count(&self, session: &str) -> usize {
         self.agents
             .runs(session)
-            .filter(|agent| !agent.info.status.is_terminal())
+            .filter(|agent| self.agent_runs(agent))
             .count()
     }
 

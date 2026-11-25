@@ -60,7 +60,7 @@ impl StreamParser {
             let Some(state) = history.tool_state(tool.block_id) else {
                 continue;
             };
-            if state.status != ToolStatus::Pending {
+            if state.status != ToolStatus::Pending || state.in_background {
                 continue;
             }
             let elapsed = tool.elapsed_at(now);
@@ -83,7 +83,10 @@ impl StreamParser {
             let Some(state) = history.tool_state(tool.block_id) else {
                 continue;
             };
-            if state.status != ToolStatus::Pending || state.elapsed_active != paused {
+            if state.status != ToolStatus::Pending
+                || state.elapsed_active != paused
+                || state.in_background
+            {
                 continue;
             }
             if paused {
@@ -99,6 +102,49 @@ impl StreamParser {
                 ToolStateMutation::SetElapsedActive {
                     elapsed,
                     active: !paused,
+                },
+            );
+        }
+    }
+
+    /// The call IDs of the running tool calls.
+    pub fn active_call_ids<'a>(
+        &'a self,
+        history: &'a BlockHistory,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.active_tools
+            .iter()
+            .filter_map(|tool| history.tool_call_id(tool.block_id))
+    }
+
+    /// Shows each running call in the background when `in_background` says
+    /// so for its call ID, its time held where it is, and as waited for
+    /// otherwise.
+    pub fn set_active_in_background(
+        &self,
+        history: &mut BlockHistory,
+        in_background: impl Fn(&str) -> bool,
+        now: Instant,
+    ) {
+        let mut updates = Vec::new();
+        for tool in &self.active_tools {
+            let Some(call_id) = history.tool_call_id(tool.block_id) else {
+                continue;
+            };
+            let shown = in_background(call_id);
+            if history
+                .tool_state(tool.block_id)
+                .is_some_and(|state| state.in_background != shown)
+            {
+                updates.push((tool.block_id, shown, tool.elapsed_at(now)));
+            }
+        }
+        for (block_id, in_background, elapsed) in updates {
+            history.apply_tool_state_mutation(
+                block_id,
+                ToolStateMutation::SetInBackground {
+                    in_background,
+                    elapsed,
                 },
             );
         }
@@ -314,6 +360,7 @@ impl StreamParser {
             output: None,
             user_message: None,
             preview_output,
+            in_background: false,
         };
         history.rewrite_with_tool_state(block_id, block, state);
         history.set_status(block_id, Status::Streaming);
@@ -354,6 +401,7 @@ impl StreamParser {
             output: None,
             user_message: None,
             preview_output,
+            in_background: false,
         };
         let block_id = history.push_with_state(block, state);
         history.set_status(block_id, Status::Streaming);

@@ -35,5 +35,5 @@ List observed agents for a parent session. Records expose owner, parent_agent_id
 fun(parent_id: string, id: string): boolean
 ```
 
-Request cancellation from an observed agent's execution owner. Returns false for unknown, terminal or unsupported agents; never interrupts the parent as a fallback.
+Request cancellation from an observed agent's execution owner. `runs` shows the agent cancelled at once; it runs again, with an error notification, when the owner refuses or does not answer. Returns false for unknown, terminal or unsupported agents; never interrupts the parent as a fallback.
 

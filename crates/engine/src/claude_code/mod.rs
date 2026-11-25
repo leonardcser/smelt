@@ -195,6 +195,8 @@ struct Native<'a> {
     tool_results: FuturesUnordered<BoxFuture<'a, (ToolCall, crate::tools::ToolResult)>>,
     plan_inputs: FuturesUnordered<BoxFuture<'static, (InteractionRequest, Result<Value, String>)>>,
     active_controls: HashMap<String, Control>,
+    /// The user action each control request smelt sent applies.
+    actions: HashMap<String, protocol::ActionId>,
     moving: Option<Move>,
     session_state: Option<String>,
     /// Tasks Claude Code runs in the background. When one ends, it wakes to
@@ -236,6 +238,7 @@ impl Native<'_> {
             tool_results: FuturesUnordered::new(),
             plan_inputs: FuturesUnordered::new(),
             active_controls: HashMap::new(),
+            actions: HashMap::new(),
             moving: None,
             session_state: None,
             background: HashSet::new(),
@@ -986,7 +989,6 @@ impl Runtime<'_> {
             self.report();
             self.publish_shells();
             self.publish_held_notes();
-            let stop_deadline = self.native.agents.stop_deadline();
             let init_deadline = self.native.init_deadline;
             if self.native.shells.is_empty() {
                 self.native.next_read = None;
@@ -1002,9 +1004,6 @@ impl Runtime<'_> {
                 .then(|| tokio::time::Instant::now() + self.config.native_idle_timeout);
             tokio::select! {
                 biased;
-                _ = until(stop_deadline) => {
-                    self.native.agents.expire_stops();
-                }
                 _ = until(next_read) => {
                     self.native.next_read = None;
                     for read in self.native.shells.reads() {
@@ -1165,6 +1164,7 @@ impl Runtime<'_> {
         }
         match frame["type"].as_str() {
             Some("control_response") => {
+                self.settle_action(&frame["response"]);
                 if let Some(printed) = self.native.shells.output(&frame["response"]) {
                     self.transcript.printed(&printed.tool_use_id, printed.lines);
                 }
@@ -1356,17 +1356,20 @@ impl Runtime<'_> {
             UiCommand::StopAgent {
                 session_id,
                 agent_id,
-            } => {
-                if let Some(request) = self.native.agents.stop_request(&session_id, &agent_id) {
-                    self.write(request).await?;
-                }
+                action,
+            } if session_id == self.payload.session_id => {
+                let request = self.native.agents.stop_request(&session_id, &agent_id);
+                self.apply_action(action, request, "it is no longer running")
+                    .await?;
             }
-            UiCommand::StopNativeProcess { session_id, id }
-                if session_id == self.payload.session_id =>
-            {
-                if let Some(request) = self.native.shells.stop_request(&id) {
-                    self.write(request).await?;
-                }
+            UiCommand::StopNativeProcess {
+                session_id,
+                id,
+                action,
+            } if session_id == self.payload.session_id => {
+                let request = self.native.shells.stop_request(&id);
+                self.apply_action(action, request, "it is no longer running")
+                    .await?;
             }
             UiCommand::ReadNativeProcess { session_id, id }
                 if session_id == self.payload.session_id =>
@@ -1375,16 +1378,18 @@ impl Runtime<'_> {
                     self.write(request).await?;
                 }
             }
-            UiCommand::BackgroundNativeProcesses { session_id }
-                if session_id == self.payload.session_id =>
-            {
-                let shells = self.native.shells.background_requests();
-                for request in shells
-                    .into_iter()
-                    .chain(self.native.agents.background_requests())
-                {
-                    self.write(request).await?;
-                }
+            UiCommand::BackgroundNativeCall {
+                session_id,
+                call_id,
+                action,
+            } if session_id == self.payload.session_id => {
+                let request = self
+                    .native
+                    .shells
+                    .background_request(&call_id)
+                    .or_else(|| self.native.agents.background_request(&call_id));
+                self.apply_action(action, request, "it no longer waits in the foreground")
+                    .await?;
             }
             // A steer that finds no turn arrived after it ended, and the host
             // takes it back with the turn.
@@ -1750,6 +1755,45 @@ impl Runtime<'_> {
             args,
         });
         Ok(())
+    }
+
+    /// Sends the control request that applies the user action `action`, or
+    /// reports it failed with `idle` when there is none.
+    async fn apply_action(
+        &mut self,
+        action: protocol::ActionId,
+        request: Option<Value>,
+        idle: &str,
+    ) -> Result<(), String> {
+        let Some(request) = request else {
+            self.fail_action(action, idle);
+            return Ok(());
+        };
+        let id = format!("smelt-action-{}", agent::next_request_id());
+        self.native.actions.insert(id.clone(), action);
+        self.write(control(&id, request)).await
+    }
+
+    /// Reports a user action Claude Code refused, in its words. Success needs no answer:
+    /// the host sees the effect in what Claude Code reports next.
+    fn settle_action(&mut self, response: &Value) {
+        let Some(action) = response["request_id"]
+            .as_str()
+            .and_then(|id| self.native.actions.remove(id))
+        else {
+            return;
+        };
+        if response["subtype"] == "error" {
+            let error = response["error"].as_str().unwrap_or("unknown error");
+            self.fail_action(action, error);
+        }
+    }
+
+    fn fail_action(&self, action: protocol::ActionId, error: &str) {
+        let _ = self.tx.send(EngineEvent::ActionFailed {
+            action,
+            error: error.into(),
+        });
     }
 
     fn request_evaluation(&mut self, call: ToolCall) {

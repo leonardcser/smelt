@@ -35,6 +35,8 @@ pub struct Core {
     /// The shell commands the native session runs inside its own process.
     pub native_processes: Vec<protocol::NativeProcess>,
     pub agents: crate::agents::Agents,
+    /// User actions shown as done while the engine applies them.
+    pub actions: crate::actions::Actions,
     pub config: RuntimeState,
     pub startup_overrides: StartupOverrides,
     /// Identity of the committed Lua generation. Candidate callbacks compare
@@ -105,6 +107,7 @@ impl Core {
             native_session: None,
             native_processes: Vec::new(),
             agents: crate::agents::Agents::default(),
+            actions: crate::actions::Actions::default(),
             config,
             startup_overrides,
             lua_generation: 0,

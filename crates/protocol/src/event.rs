@@ -112,6 +112,23 @@ impl InvocationId {
     }
 }
 
+/// Identity of one user action the host asks the engine to apply, such as
+/// stopping a process. The host shows the action's effect at once; the engine
+/// answers only when the action fails, with `ActionFailed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ActionId(u64);
+
+impl ActionId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Session-unique identity for one message the host steered into a turn.
 ///
 /// The engine answers each steer once: `Steered` when it joins the
@@ -421,6 +438,8 @@ pub enum EngineEvent {
         session_id: String,
         agent: Box<crate::AgentInfo>,
     },
+    /// The engine could not apply the user action `action`.
+    ActionFailed { action: ActionId, error: String },
     /// The shell commands the native session runs, replacing the previous list.
     NativeProcesses { processes: Vec<NativeProcess> },
     /// The notes the native session holds until the steps before them
@@ -918,6 +937,9 @@ pub struct NativeProcess {
     /// The agent that runs it, when that is not the session's main agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// The tool call that started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     /// The end of what it printed so far.
     pub output: String,
 }
@@ -928,6 +950,7 @@ pub enum UiCommand {
     StopAgent {
         session_id: String,
         agent_id: String,
+        action: ActionId,
     },
     /// End the native session: stop its agent process and everything it runs.
     /// `Cancel` only cancels the turn.
@@ -935,10 +958,19 @@ pub enum UiCommand {
     /// Read the latest output of a shell command of the native session.
     ReadNativeProcess { session_id: String, id: String },
     /// Stop a shell command of the native session.
-    StopNativeProcess { session_id: String, id: String },
-    /// Leave the native session's foreground shell commands running in the
-    /// background, so its turn continues without them.
-    BackgroundNativeProcesses { session_id: String },
+    StopNativeProcess {
+        session_id: String,
+        id: String,
+        action: ActionId,
+    },
+    /// Leave the work tool call `call_id` of the native session's main agent
+    /// waits for, a shell command or an agent, running in the background, so
+    /// its turn continues without it.
+    BackgroundNativeCall {
+        session_id: String,
+        call_id: String,
+        action: ActionId,
+    },
     /// Start a new agent turn.
     StartTurn(Box<StartTurnPayload>),
 

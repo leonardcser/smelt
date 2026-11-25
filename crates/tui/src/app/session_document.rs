@@ -864,6 +864,12 @@ pub(crate) enum StreamMutation {
         invocation_id: protocol::InvocationId,
         message: String,
     },
+    /// Shows the running tool calls of `calls` in the background, and the
+    /// rest as waited for.
+    SetToolsInBackground {
+        calls: Vec<String>,
+        now: Instant,
+    },
     FinishTool {
         invocation_id: protocol::InvocationId,
         status: ToolStatus,
@@ -1492,6 +1498,13 @@ impl SessionDocument {
                 message,
             } => {
                 parser.set_active_user_message(transcript.history_mut(), invocation_id, message);
+            }
+            StreamMutation::SetToolsInBackground { calls, now } => {
+                parser.set_active_in_background(
+                    transcript.history_mut(),
+                    |call| calls.iter().any(|shown| shown == call),
+                    now,
+                );
             }
             StreamMutation::FinishTool {
                 invocation_id,

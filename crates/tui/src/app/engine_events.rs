@@ -461,7 +461,13 @@ impl TuiApp {
                 return true;
             }
             EngineEvent::NativeProcesses { processes } => {
-                self.core.native_processes = processes;
+                self.core.set_native_processes(processes);
+                return true;
+            }
+            EngineEvent::ActionFailed { action, error } => {
+                if let Some(message) = self.core.action_failed(action, &error) {
+                    self.notify_error(message);
+                }
                 return true;
             }
             EngineEvent::NativeHeldNotes { notes } => {
@@ -730,6 +736,7 @@ impl TuiApp {
             | EngineEvent::NativeSessionState { .. }
             | EngineEvent::NativeSessionEvent { .. }
             | EngineEvent::NativeProcesses { .. }
+            | EngineEvent::ActionFailed { .. }
             | EngineEvent::NativeHeldNotes { .. }
             | EngineEvent::AgentUpdated { .. }
             | EngineEvent::AgentOutput { .. } => SessionControl::Continue,

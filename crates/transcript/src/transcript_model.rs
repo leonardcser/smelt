@@ -161,6 +161,12 @@ pub enum ToolStateMutation {
         elapsed: Option<Duration>,
     },
     SetUserMessage(String),
+    /// Shows the running call in the background, with its time stopped at
+    /// `elapsed`, or, with `false`, as waited for again.
+    SetInBackground {
+        in_background: bool,
+        elapsed: Duration,
+    },
     Finish {
         status: ToolStatus,
         output: Option<ToolOutputRef>,
@@ -195,6 +201,14 @@ impl ToolStateMutation {
                 }
             }
             Self::SetUserMessage(message) => state.user_message = Some(message),
+            Self::SetInBackground {
+                in_background,
+                elapsed,
+            } => {
+                state.in_background = in_background;
+                state.elapsed = Some(elapsed);
+                state.elapsed_active = !in_background && state.status == ToolStatus::Pending;
+            }
             Self::Finish {
                 status,
                 output,
@@ -207,6 +221,7 @@ impl ToolStateMutation {
                 state.elapsed = elapsed;
                 state.elapsed_active = false;
                 state.preview_output = None;
+                state.in_background = false;
             }
         }
     }
@@ -225,6 +240,10 @@ pub struct ToolState {
     pub user_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_output: Option<ToolOutputRef>,
+    /// Live only: the running call's work continues in the background, so
+    /// nothing waits for its result.
+    #[serde(skip)]
+    pub in_background: bool,
 }
 
 impl ToolState {
@@ -4766,6 +4785,7 @@ mod tests {
             })),
             user_message: None,
             preview_output: None,
+            in_background: false,
         }
     }
 
@@ -4833,6 +4853,7 @@ mod tests {
                     metadata: None,
                     content_fields: Vec::new(),
                 })),
+                in_background: false,
             },
         );
         assert!(history.content_by_id(output_id).is_some());
@@ -4917,6 +4938,7 @@ mod tests {
             output: Some(Box::new(ToolOutput::new(output_text, false, None))),
             user_message: None,
             preview_output: None,
+            in_background: false,
         };
         assert!(
             tool_state_retained_bytes(&state)
@@ -4978,6 +5000,7 @@ mod tests {
                 output: Some(Box::new(output)),
                 user_message: None,
                 preview_output: None,
+                in_background: false,
             },
         );
 
@@ -5510,6 +5533,7 @@ mod tests {
                     output: Some(output()),
                     user_message: Some("captured message".into()),
                     preview_output: Some(output()),
+                    in_background: false,
                 }),
                 tool_render_revision: 3,
             },
@@ -5662,6 +5686,7 @@ mod tests {
                 output: None,
                 user_message: None,
                 preview_output: None,
+                in_background: false,
             },
         );
         let before_attach = history.sidecar_hash(id);
@@ -5733,6 +5758,7 @@ mod tests {
                 output: None,
                 user_message: None,
                 preview_output: None,
+                in_background: false,
             },
         );
         for index in 0..3_000 {
@@ -6243,6 +6269,7 @@ mod tests {
             })),
             user_message: None,
             preview_output: None,
+            in_background: false,
         };
         let record = TranscriptBlockRecord {
             block: Block::ToolCall {
@@ -6394,6 +6421,7 @@ mod tests {
             })),
             user_message: None,
             preview_output: None,
+            in_background: false,
         };
         let record = TranscriptBlockRecord {
             block: Block::ToolCall {
@@ -6627,6 +6655,7 @@ mod tests {
             output: None,
             user_message: None,
             preview_output: None,
+            in_background: false,
         }
     }
 

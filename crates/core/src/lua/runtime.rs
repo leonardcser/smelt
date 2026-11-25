@@ -3368,6 +3368,7 @@ fn render_fields_to_lua_table(
             elapsed_active,
             user_message,
             preview_output,
+            background,
         } => {
             table.set("call_id", call_id.as_str())?;
             table.set("name", name.as_str())?;
@@ -3390,6 +3391,9 @@ fn render_fields_to_lua_table(
                     "preview_output",
                     tool_output_to_lua_table(lua, preview_output)?,
                 )?;
+            }
+            if *background {
+                table.set("background", true)?;
             }
         }
         TranscriptRenderFields::Exec {
@@ -3630,6 +3634,7 @@ enum TranscriptRenderFields {
         elapsed_active: bool,
         user_message: Option<String>,
         preview_output: Option<Box<TranscriptToolOutputMetadata>>,
+        background: bool,
     },
     Exec {
         command: String,
@@ -3790,9 +3795,23 @@ fn transcript_block_render_fields(
             summary,
             args,
         } => {
-            let status = state
-                .map(|state| state.status)
-                .unwrap_or(ToolStatus::Pending);
+            // A call running in the background shows as it will once its
+            // result arrives.
+            let running_in_background = state.is_some_and(|state| state.in_background);
+            let status = if running_in_background {
+                ToolStatus::Ok
+            } else {
+                state.map_or(ToolStatus::Pending, |state| state.status)
+            };
+            let output = state.and_then(|state| state.output.as_deref());
+            let background = running_in_background
+                || output.is_some_and(|output| {
+                    !output.is_error
+                        && output
+                            .metadata
+                            .as_ref()
+                            .is_some_and(|metadata| metadata["background"] == true)
+                });
             let elapsed_ms = state
                 .and_then(|state| state.elapsed)
                 .map(|elapsed| elapsed.as_millis() as u64);
@@ -3801,10 +3820,7 @@ fn transcript_block_render_fields(
                 name: name.clone(),
                 summary: summary.clone(),
                 summary_text: summary.as_plain_text(),
-                presentation: ToolPresentation::new(
-                    args,
-                    state.and_then(|state| state.output.as_deref()),
-                ),
+                presentation: ToolPresentation::new(args, output),
                 status: status.label(),
                 called_at_ms: state.and_then(|state| state.called_at_ms),
                 elapsed_ms,
@@ -3814,6 +3830,7 @@ fn transcript_block_render_fields(
                     .and_then(|state| state.preview_output.as_deref())
                     .map(transcript_tool_output_metadata)
                     .map(Box::new),
+                background,
             }
         }
         Block::Exec { command, output } => TranscriptRenderFields::Exec {
@@ -5089,6 +5106,7 @@ mod tests {
             })),
             user_message: None,
             preview_output: None,
+            in_background: false,
         };
         let tool_node =
             transcript_block_render_node(BlockId::new(4), 3, &tool_block, Some(&tool_state));
@@ -5178,6 +5196,7 @@ mod tests {
             output: None,
             user_message: None,
             preview_output: None,
+            in_background: false,
         };
 
         let active_node = transcript_block_render_node(BlockId::new(1), 0, &block, Some(&state));

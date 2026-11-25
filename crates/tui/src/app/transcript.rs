@@ -7952,6 +7952,7 @@ mod document_tests {
                 output: None,
                 user_message: None,
                 preview_output: None,
+                in_background: false,
             },
         );
         source.history.clear_record_dirty();
@@ -9243,6 +9244,7 @@ mod document_tests {
                         })),
                         user_message: None,
                         preview_output: None,
+                        in_background: false,
                     },
                 ),
             }
@@ -10557,6 +10559,7 @@ mod document_tests {
                     })),
                     user_message: None,
                     preview_output: None,
+                    in_background: false,
                 },
             );
         }

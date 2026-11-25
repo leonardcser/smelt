@@ -202,6 +202,7 @@ impl Agent {
                         output: None,
                         user_message: None,
                         preview_output: None,
+                        in_background: false,
                     },
                 ));
             }
@@ -288,6 +289,7 @@ impl crate::Core {
                 }
             }
         }
+        self.settle_actions();
         true
     }
 }
@@ -306,6 +308,7 @@ mod tests {
             task: "Inspect".into(),
             status,
             background: false,
+            call_id: None,
             activity: String::new(),
             result: None,
             error: None,

@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash npm run dev  (timeout: 2m 0s)  10s                      14:37:03
+  ctrl+g to run in background
+
+
+
+
+─ ● … 10s ──────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+ ○ read  1 proc                                                 1:1 100%

@@ -17,7 +17,7 @@ Run subprocesses and manage contained shell jobs. Background jobs are non-blocki
 fun(): boolean
 ```
 
-Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Without one, moves the native agent's foreground shell commands to the background. Returns true when a detach request was sent.
+Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Without one, moves the native agent's foreground shell commands and agents to the background, where their transcript blocks show them at once; they return, with an error notification, when the agent refuses or does not answer. Returns true when a detach request was sent.
 
 ## `smelt.process.get_default_shell`
 
@@ -33,7 +33,7 @@ Return the current default shell as `{ program, args }`, or `nil` when the built
 fun(id: string): nil
 ```
 
-Stop the supervised shell job with `id`, or ask the native agent to stop its shell command `id`. Schedules termination asynchronously; no-op when no host is installed.
+Stop the supervised shell job with `id`, or ask the native agent to stop its shell command `id`. Schedules termination asynchronously, and `list` leaves the process out at once; it returns, with an error notification, when the stop fails or gets no answer. No-op when no host is installed.
 
 ## `smelt.process.list`
 

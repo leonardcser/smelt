@@ -14,6 +14,7 @@ fn observed(app: &mut TestApp, status: protocol::AgentStatus) -> String {
             task: "Read-only review".into(),
             status,
             background: false,
+            call_id: None,
             activity: "Reviewing".into(),
             result: None,
             error: None,
@@ -51,6 +52,7 @@ fn agent_observation_viewer_shows_nested_tree_tokens_and_agent_errors() {
                 task: "Review".into(),
                 status: protocol::AgentStatus::Running,
                 background: false,
+                call_id: None,
                 activity: String::new(),
                 result: None,
                 error: (id == "z").then(|| "Stop refused".into()),
@@ -140,6 +142,7 @@ fn agent(
             task: "Review".into(),
             status,
             background: false,
+            call_id: None,
             activity: String::new(),
             result: None,
             error: None,
@@ -243,11 +246,41 @@ fn agent_observation_viewer_does_not_enable_delegation_or_require_a_parent_turn(
     "#
     ));
     assert!(app.drain_engine_sends().into_iter().any(|command| matches!(command,
-        protocol::UiCommand::StopAgent { session_id, agent_id } if session_id == parent && agent_id == "native-child")));
+        protocol::UiCommand::StopAgent { session_id, agent_id, .. } if session_id == parent && agent_id == "native-child")));
     observed(&mut app, protocol::AgentStatus::Completed);
     assert!(app.run_lua("assert(not smelt.agent.stop(smelt.session.info().id, 'native-child'))"));
     app.press(KeyCode::Esc);
     assert!(app.state().focused_overlay.is_none());
+}
+
+#[test]
+fn a_stopped_agent_shows_stopped_at_once_and_runs_again_when_refused() {
+    let mut app = TestApp::builder().build();
+    observed(&mut app, protocol::AgentStatus::Running);
+    let status = r#"return smelt.agent.runs(smelt.session.info().id)[1].status"#;
+    assert!(app.run_lua("assert(smelt.agent.stop(smelt.session.info().id, 'native-child'))"));
+    let action = app
+        .drain_engine_sends()
+        .into_iter()
+        .find_map(|command| match command {
+            protocol::UiCommand::StopAgent { action, .. } => Some(action),
+            _ => None,
+        })
+        .expect("stop request");
+    assert_eq!(app.eval_lua::<String>(status).unwrap(), "cancelled");
+    assert!(app.run_lua("assert(not smelt.agent.stop(smelt.session.info().id, 'native-child'))"));
+
+    // An update that still runs does not show the stop yet.
+    observed(&mut app, protocol::AgentStatus::Running);
+    assert_eq!(app.eval_lua::<String>(status).unwrap(), "cancelled");
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ActionFailed {
+        action,
+        error: "busy".into(),
+    }));
+    assert_eq!(app.eval_lua::<String>(status).unwrap(), "running");
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("cannot stop the agent: busy"), "{frame}");
 }
 
 fn native_session(app: &mut TestApp, active: bool, working: bool) -> String {
@@ -495,6 +528,7 @@ fn native_shell(started_at_ms: u64, background: bool) -> EngineEvent {
             started_at_ms,
             background,
             agent_id: None,
+            call_id: Some("call-dev".into()),
             output: "ready\n".into(),
         }],
     }
@@ -565,15 +599,24 @@ fn native_shells_join_the_process_list_and_stop_through_their_agent() {
     assert!(sent(&mut app, |command| matches!(command,
         protocol::UiCommand::ReadNativeProcess { session_id: to, id } if *to == session_id && id == "claude-code:task")));
 
+    // A stopped shell leaves the list at once.
     assert!(app.run_lua("smelt.process.kill('claude-code:task')"));
     assert!(sent(&mut app, |command| matches!(command,
-        protocol::UiCommand::StopNativeProcess { session_id: to, id } if *to == session_id && id == "claude-code:task")));
+        protocol::UiCommand::StopNativeProcess { session_id: to, id, .. } if *to == session_id && id == "claude-code:task")));
+    let rows: i64 = app.eval_lua("return #smelt.process.list()").unwrap();
+    assert_eq!(rows, 0);
+    assert!(!app.render_to_frame().text().contains("proc"));
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
+        processes: Vec::new(),
+    }));
     assert!(app.run_lua("assert(not smelt.process.detach_foreground())"));
 
     app.feed_one(SourceEvent::engine(native_shell(now, false)));
     assert!(app.run_lua("assert(smelt.process.detach_foreground())"));
     assert!(sent(&mut app, |command| matches!(command,
-        protocol::UiCommand::BackgroundNativeProcesses { session_id: to } if *to == session_id)));
+        protocol::UiCommand::BackgroundNativeCall { session_id: to, call_id, .. } if *to == session_id && call_id == "call-dev")));
+    // It shows in the background at once, so asking again sends nothing.
+    assert!(app.run_lua("assert(not smelt.process.detach_foreground())"));
 
     // A subagent waits for its own shell; the main agent has nothing to leave.
     let EngineEvent::NativeProcesses { mut processes } = native_shell(now, false) else {

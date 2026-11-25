@@ -315,7 +315,11 @@ impl AppStoryCtx {
     /// Emit only `ToolStarted` - the pending state. Use this when the
     /// snapshot should capture the streaming/spinner chrome before any
     /// result arrives.
-    pub fn tool_started(&mut self, tool_name: &str, args: &[(&str, serde_json::Value)]) {
+    pub fn tool_started(
+        &mut self,
+        tool_name: &str,
+        args: &[(&str, serde_json::Value)],
+    ) -> protocol::InvocationId {
         let call_id = self.next_call_id(tool_name);
         self.start_turn();
         self.app.tool_started(
@@ -324,7 +328,19 @@ impl AppStoryCtx {
             args.iter()
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
-        );
+        )
+    }
+
+    /// Emit `ToolFinished` for a call `tool_started` began.
+    pub fn tool_finished(
+        &mut self,
+        invocation_id: protocol::InvocationId,
+        call_id: &str,
+        result: protocol::ToolOutcome,
+        elapsed_ms: Option<u64>,
+    ) {
+        self.app
+            .tool_finished(invocation_id, call_id, result, elapsed_ms);
     }
 
     /// Emit a display-only streaming tool-call draft. The final tool

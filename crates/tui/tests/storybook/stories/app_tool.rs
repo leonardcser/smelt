@@ -2,6 +2,8 @@
 //! lifecycle states together: drafting, pending, expanded success,
 //! expanded error, then the same transcript collapsed in a second step.
 
+use crossterm::event::{KeyCode, KeyModifiers};
+use protocol::EngineEvent;
 use serde_json::json;
 
 use crate::app_story;
@@ -97,6 +99,66 @@ app_story!(bash_background_hint_appears_after_ten_seconds, |ctx| {
 
     ctx.run_lua("smelt.transcript.fold_all('close')");
     ctx.assert_snapshot_named("ten_seconds_collapsed");
+});
+
+/// Claude Code's report of the dev server the Bash call `bash-1` runs.
+fn dev_server(background: bool) -> EngineEvent {
+    EngineEvent::NativeProcesses {
+        processes: vec![protocol::NativeProcess {
+            id: "claude-code:task".into(),
+            command: "npm run dev".into(),
+            started_at_ms: 0,
+            background,
+            agent_id: None,
+            call_id: Some("bash-1".into()),
+            output: String::new(),
+        }],
+    }
+}
+
+app_story!(native_call_moves_to_background_at_once, |ctx| {
+    ctx.set_viewport(72, 10);
+    // Claude Code's Bash shows as smelt's bash.
+    let invocation = ctx.tool_started("bash", &[("command", json!("npm run dev"))]);
+    let session_id = ctx.session_id();
+    ctx.engine(EngineEvent::NativeSessionState {
+        session_id,
+        active: true,
+        working: true,
+    });
+    ctx.engine(dev_server(false));
+    ctx.advance_time(10500);
+    ctx.assert_snapshot_named("waiting");
+
+    ctx.press_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    ctx.assert_snapshot_named("moved");
+    // Nothing waits for it now, so its time holds.
+    ctx.advance_time(2000);
+    ctx.assert_snapshot_named("held");
+
+    ctx.engine(EngineEvent::ActionFailed {
+        action: protocol::ActionId::new(1),
+        error: "busy".into(),
+    });
+    ctx.advance_time(100);
+    ctx.assert_snapshot_named("refused");
+
+    // Asked again, what Claude Code reports next shows the same: first the
+    // shell in the background, then the call's result.
+    ctx.press_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    ctx.engine(dev_server(true));
+    ctx.assert_snapshot_named("reported");
+    ctx.tool_finished(
+        invocation,
+        "bash-1",
+        protocol::ToolOutcome::new(
+            "Command running in background with ID: task".into(),
+            false,
+            Some(json!({"background": true})),
+        ),
+        Some(12_000),
+    );
+    ctx.assert_snapshot_named("confirmed");
 });
 
 app_story!(agent_background_hint_appears_after_ten_seconds, |ctx| {

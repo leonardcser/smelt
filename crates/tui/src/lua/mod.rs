@@ -1924,6 +1924,7 @@ mod tests {
                 })),
                 user_message: None,
                 preview_output: None,
+                in_background: false,
             },
         )
     }
@@ -2293,6 +2294,7 @@ mod tests {
             output: None,
             user_message: None,
             preview_output: None,
+            in_background: false,
         };
 
         let node = smelt_core::lua::runtime::transcript_block_render_node(
@@ -2869,6 +2871,7 @@ mod tests {
             })),
             user_message: Some("done".into()),
             preview_output: None,
+            in_background: false,
         };
         let layout = render_transcript_block(&rt, &tool, Some(&state));
         let BlockLayout::Vbox(items) = layout else {

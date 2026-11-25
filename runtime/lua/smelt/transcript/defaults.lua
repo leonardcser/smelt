@@ -151,15 +151,11 @@ local function render_tool_error_summary(block, ctx, presentation)
   })
 end
 
---- Whether the call's work continues in the background: the tool reported
---- `metadata.background = true` with its result. The header marks such calls
---- and their launch note stays with the model.
+--- Whether the call's work continues in the background. The header marks
+--- such calls and their launch note stays with the model.
 ---@type fun(block: smelt.transcript.Block): boolean
 function M.in_background(block)
-  local output = block and block.output
-  if not output or output.is_error then return false end
-  local metadata = output.metadata
-  return type(metadata) == "table" and metadata.background == true
+  return block ~= nil and block.background == true
 end
 
 --- Render a compact tool summary: header plus an optional detail line.

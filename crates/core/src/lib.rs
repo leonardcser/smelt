@@ -7,6 +7,7 @@ extern crate self as smelt_core;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: allocator::Allocator = allocator::ALLOCATOR;
 
+pub mod actions;
 pub mod agents;
 pub mod allocator;
 pub mod claude_code_policy;

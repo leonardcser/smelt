@@ -9,8 +9,6 @@ use protocol::{
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::time::Duration;
-use tokio::time::Instant;
 
 const MAX_PENDING_FRAMES: usize = 1024;
 const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
@@ -23,15 +21,9 @@ struct Launch {
 
 struct Child {
     info: AgentInfo,
-    launch_id: Option<String>,
     transcript: Transcript,
     /// Whether the end of its background work was reported to its owner.
     reported: bool,
-}
-
-struct Stop {
-    control_id: String,
-    deadline: Instant,
 }
 
 struct PendingFrame {
@@ -52,7 +44,6 @@ pub(super) struct Agents {
     tool_owners: HashMap<String, String>,
     pending: Vec<PendingFrame>,
     pending_bytes: usize,
-    stops: HashMap<String, Stop>,
     /// What agents add to the main agent's transcript.
     deliveries: Vec<Delivery>,
 }
@@ -94,7 +85,6 @@ impl Agents {
             tool_owners: HashMap::new(),
             pending: Vec::new(),
             pending_bytes: 0,
-            stops: HashMap::new(),
             deliveries: Vec::new(),
         }
     }
@@ -106,9 +96,6 @@ impl Agents {
 
     /// Returns true for child frames and task telemetry, including buffered frames.
     pub(super) fn frame(&mut self, frame: &Value, now_ms: u64) -> Result<bool, String> {
-        if frame["type"] == "control_response" {
-            return Ok(self.stop_response(frame));
-        }
         if frame["type"] == "system" {
             match frame["subtype"].as_str() {
                 Some("task_started") => {
@@ -235,7 +222,7 @@ impl Agents {
             .to_owned();
         let generation = match self.children.get(task) {
             Some(child) if child.info.status.is_terminal() => {
-                if launch_id.is_none() || launch_id == child.launch_id.as_deref() {
+                if launch_id.is_none() || launch_id == child.info.call_id.as_deref() {
                     return Ok(());
                 }
                 child
@@ -263,6 +250,7 @@ impl Agents {
             status: AgentStatus::Running,
             // Claude Code registers a task in the background unless it says otherwise.
             background: frame["is_backgrounded"] != false,
+            call_id: launch_id.map(str::to_owned),
             activity: String::new(),
             result: None,
             error: None,
@@ -290,7 +278,6 @@ impl Agents {
             task.into(),
             Child {
                 info,
-                launch_id: launch_id.map(str::to_owned),
                 transcript,
                 reported: false,
             },
@@ -339,7 +326,8 @@ impl Agents {
         let mut changed = Vec::new();
         for (task, child) in &mut self.children {
             let Some(launch) = child
-                .launch_id
+                .info
+                .call_id
                 .as_ref()
                 .and_then(|id| self.launches.get(id))
             else {
@@ -374,7 +362,8 @@ impl Agents {
         };
         if let Some(launch) = frame["tool_use_id"].as_str() {
             if child
-                .launch_id
+                .info
+                .call_id
                 .as_deref()
                 .is_some_and(|current| current != launch)
             {
@@ -407,7 +396,6 @@ impl Agents {
                 if status != AgentStatus::Failed {
                     child.info.error = None;
                 }
-                self.stops.remove(task);
             }
             child.info.status = status;
             if let Some(summary) = frame["summary"].as_str() {
@@ -422,7 +410,7 @@ impl Agents {
             child.info.background = true;
         }
         let mut deliveries = Vec::new();
-        let launch_id = child.launch_id.clone();
+        let launch_id = child.info.call_id.clone();
         if let Some(description) = frame["description"].as_str() {
             if let Some(call_id) = launch_id.clone().filter(|_| {
                 frame["subtype"] == "task_progress"
@@ -487,25 +475,21 @@ impl Agents {
         }
     }
 
-    /// Moves the main agent's foreground agents to the background, so it stops
-    /// waiting for them.
-    pub(super) fn background_requests(&self) -> Vec<Value> {
+    /// The request that moves the main agent's foreground agent of call
+    /// `call_id` to the background, so it stops waiting for it.
+    pub(super) fn background_request(&self, call_id: &str) -> Option<Value> {
         self.children
             .values()
-            .filter(|child| !child.info.status.is_terminal() && !child.info.background)
-            .filter_map(|child| child.launch_id.as_deref())
-            .filter(|id| {
-                self.launches
-                    .get(*id)
-                    .is_some_and(|launch| launch.owner.is_none())
+            .any(|child| {
+                !child.info.status.is_terminal()
+                    && !child.info.background
+                    && child.info.call_id.as_deref() == Some(call_id)
+                    && self
+                        .launches
+                        .get(call_id)
+                        .is_some_and(|launch| launch.owner.is_none())
             })
-            .map(|id| {
-                super::transport::control(
-                    &format!("smelt-background-{id}"),
-                    json!({"subtype":"background_tasks", "tool_use_id":id}),
-                )
-            })
-            .collect()
+            .then(|| json!({"subtype":"background_tasks", "tool_use_id":call_id}))
     }
 
     fn announce(&self, task: &str) {
@@ -517,84 +501,18 @@ impl Agents {
         }
     }
 
-    pub(super) fn stop_request(&mut self, session_id: &str, agent_id: &str) -> Option<Value> {
+    /// The request that stops agent `agent_id`, unless it ended or cannot
+    /// stop.
+    pub(super) fn stop_request(&self, session_id: &str, agent_id: &str) -> Option<Value> {
         if session_id != self.session_id {
             return None;
         }
         let (task, child) = self
             .children
-            .iter_mut()
+            .iter()
             .find(|(_, child)| child.info.id == agent_id)?;
-        if child.info.status.is_terminal()
-            || !child.info.capabilities.stop
-            || self.stops.contains_key(task)
-        {
-            return None;
-        }
-        let control_id = format!("smelt-stop-task-{}", crate::agent::next_request_id());
-        let request =
-            super::transport::control(&control_id, json!({"subtype":"stop_task", "task_id":task}));
-        self.stops.insert(
-            task.clone(),
-            Stop {
-                control_id,
-                deadline: Instant::now() + Duration::from_secs(30),
-            },
-        );
-        child.info.activity = "Stop requested; waiting for Claude Code".into();
-        child.info.error = None;
-        let task = task.clone();
-        self.announce(&task);
-        Some(request)
-    }
-
-    fn stop_response(&mut self, frame: &Value) -> bool {
-        let Some(id) = frame["response"]["request_id"].as_str() else {
-            return false;
-        };
-        let Some(task) = self
-            .stops
-            .iter()
-            .find_map(|(task, stop)| (stop.control_id == id).then(|| task.clone()))
-        else {
-            return false;
-        };
-        if frame["response"]["subtype"] == "error" {
-            self.stops.remove(&task);
-            if let Some(child) = self.children.get_mut(&task) {
-                child.info.error = Some(format!(
-                    "Claude Code could not stop this agent: {}",
-                    frame["response"]["error"]
-                        .as_str()
-                        .unwrap_or("unknown control error")
-                ));
-                child.info.activity.clear();
-                self.announce(&task);
-            }
-        }
-        // A successful control response is not a terminal task outcome.
-        true
-    }
-
-    pub(super) fn stop_deadline(&self) -> Option<Instant> {
-        self.stops.values().map(|stop| stop.deadline).min()
-    }
-
-    pub(super) fn expire_stops(&mut self) {
-        let expired: Vec<_> = self
-            .stops
-            .iter()
-            .filter(|(_, stop)| stop.deadline <= Instant::now())
-            .map(|(task, _)| task.clone())
-            .collect();
-        for task in expired {
-            self.stops.remove(&task);
-            if let Some(child) = self.children.get_mut(&task) {
-                child.info.error = Some("Claude Code did not confirm this agent's stop. Its outcome is still unknown; retry or cancel the native session.".into());
-                child.info.activity.clear();
-                self.announce(&task);
-            }
-        }
+        (!child.info.status.is_terminal() && child.info.capabilities.stop)
+            .then(|| json!({"subtype":"stop_task", "task_id":task}))
     }
 
     pub(super) fn claim_tool(
@@ -1039,8 +957,8 @@ mod tests {
     }
 
     #[test]
-    fn stop_controls_are_scoped_and_acknowledgement_does_not_fabricate_an_outcome() {
-        let (mut agents, mut rx) = registry();
+    fn stop_requests_are_scoped_and_only_a_task_update_ends_the_agent() {
+        let (mut agents, _) = registry();
         agents.frame(&start("one", "launch-one"), 0).unwrap();
         agents.frame(&start("two", "launch-two"), 0).unwrap();
         assert!(agents
@@ -1048,55 +966,19 @@ mod tests {
             .is_none());
         assert!(agents.stop_request("root", "unknown").is_none());
         let request = agents.stop_request("root", "claude-code:one").unwrap();
-        assert_eq!(request["request"]["subtype"], "stop_task");
-        assert_eq!(request["request"]["task_id"], "one");
-        assert!(agents.stop_request("root", "claude-code:one").is_none());
-        agents
-            .frame(
-                &json!({"type":"control_response", "response":{"subtype":"success",
-            "request_id":request["request_id"], "response":{}}}),
-                1,
-            )
-            .unwrap();
+        assert_eq!(request, json!({"subtype":"stop_task", "task_id":"one"}));
         assert_eq!(agents.children["one"].info.status, AgentStatus::Running);
         assert_eq!(agents.children["two"].info.status, AgentStatus::Running);
-        agents.stops.get_mut("one").unwrap().deadline = Instant::now();
-        agents.expire_stops();
-        assert_eq!(agents.children["one"].info.status, AgentStatus::Running);
-        assert!(agents.children["one"]
-            .info
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("outcome is still unknown"));
-        let retry = agents.stop_request("root", "claude-code:one").unwrap();
-        agents
-            .frame(
-                &json!({"type":"control_response", "response":{"subtype":"error",
-            "request_id":retry["request_id"], "error":"Unsupported task control"}}),
-                2,
-            )
-            .unwrap();
-        assert!(agents.children["one"]
-            .info
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("Unsupported task control"));
         agents
             .frame(
                 &json!({"type":"system", "subtype":"task_updated", "task_id":"one",
             "patch":{"status":"killed"}}),
-                3,
+                1,
             )
             .unwrap();
         assert_eq!(agents.children["one"].info.status, AgentStatus::Cancelled);
         assert!(!agents.children["one"].info.capabilities.stop);
         assert!(agents.stop_request("root", "claude-code:one").is_none());
-        assert!(events(&mut rx).iter().all(|event| matches!(
-            event,
-            EngineEvent::AgentUpdated { .. } | EngineEvent::AgentOutput { .. }
-        )));
     }
 
     #[test]
@@ -1202,11 +1084,9 @@ mod tests {
         let (mut agents, _rx) = registry();
         launch(&mut agents, "call");
         agents.frame(&started("task", "call", false), 1).unwrap();
-        let requests = agents.background_requests();
-        assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0]["request"],
-            json!({"subtype":"background_tasks", "tool_use_id":"call"})
+            agents.background_request("call"),
+            Some(json!({"subtype":"background_tasks", "tool_use_id":"call"}))
         );
         agents
             .frame(
@@ -1216,7 +1096,7 @@ mod tests {
             )
             .unwrap();
         assert!(agents.children["task"].info.background);
-        assert!(agents.background_requests().is_empty());
+        assert!(agents.background_request("call").is_none());
         agents.frame(&notified("task", "Late report"), 3).unwrap();
         assert!(matches!(&agents.deliveries()[..], [Delivery::Report(_)]));
     }
@@ -1239,7 +1119,7 @@ mod tests {
         agents
             .frame(&started("nested", "nested-call", false), 3)
             .unwrap();
-        assert!(agents.background_requests().is_empty());
+        assert!(agents.background_request("nested-call").is_none());
     }
 
     #[test]

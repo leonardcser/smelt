@@ -14,7 +14,6 @@ const FINISHED_OUTPUT_BYTES: u64 = 64 * 1024;
 
 struct Shell {
     process: NativeProcess,
-    tool_use_id: Option<String>,
     /// Output bytes already streamed into the tool's transcript block.
     streamed: u64,
     /// The streamed output's unfinished last line.
@@ -79,7 +78,7 @@ impl Shells {
                 let shell = self.track(task, now_ms);
                 shell.process.command = command;
                 shell.process.background = frame["is_backgrounded"] == true;
-                shell.tool_use_id = tool_use_id;
+                shell.process.call_id = tool_use_id;
                 shell.process.agent_id = agent_id;
                 self.changed = true;
                 true
@@ -145,9 +144,9 @@ impl Shells {
                 started_at_ms: now_ms,
                 background: false,
                 agent_id: None,
+                call_id: None,
                 output: String::new(),
             },
-            tool_use_id: None,
             streamed: 0,
             partial: String::new(),
         })
@@ -215,7 +214,7 @@ impl Shells {
         if shell.process.background || total <= shell.streamed {
             return None;
         }
-        let tool_use_id = shell.tool_use_id.clone()?;
+        let tool_use_id = shell.process.call_id.clone()?;
         // The output holds only its end, so bytes older than it are gone.
         let fresh = usize::try_from(total - shell.streamed).unwrap_or(usize::MAX);
         let mut start = output.len().saturating_sub(fresh);
@@ -254,8 +253,10 @@ impl Shells {
         self.live.contains_key(task).then_some(task)
     }
 
+    /// The request that stops the shell a namespaced process ID names.
     pub(super) fn stop_request(&self, id: &str) -> Option<Value> {
-        self.task(id).map(stop)
+        self.task(id)
+            .map(|task| json!({"subtype":"stop_task", "task_id":task}))
     }
 
     pub(super) fn stop_all(&self) -> Vec<Value> {
@@ -264,18 +265,17 @@ impl Shells {
 
     /// Moves each foreground shell of the main agent to the background. An
     /// agent it launched keeps waiting for its own.
-    pub(super) fn background_requests(&self) -> Vec<Value> {
+    /// The request that moves the main agent's foreground shell of call
+    /// `call_id` to the background.
+    pub(super) fn background_request(&self, call_id: &str) -> Option<Value> {
         self.live
             .values()
-            .filter(|shell| !shell.process.background && shell.process.agent_id.is_none())
-            .filter_map(|shell| shell.tool_use_id.as_deref())
-            .map(|tool_use_id| {
-                control(
-                    &format!("smelt-background-{tool_use_id}"),
-                    json!({"subtype":"background_tasks", "tool_use_id":tool_use_id}),
-                )
+            .any(|shell| {
+                !shell.process.background
+                    && shell.process.agent_id.is_none()
+                    && shell.process.call_id.as_deref() == Some(call_id)
             })
-            .collect()
+            .then(|| json!({"subtype":"background_tasks", "tool_use_id":call_id}))
     }
 }
 
@@ -356,9 +356,11 @@ mod tests {
         owned["parent_task_id"] = json!("agent-task");
         shells.frame(&owned, 0);
         shells.frame(&started("root-shell", "root-call", false), 0);
-        let requests = shells.background_requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["request"]["tool_use_id"], "root-call");
+        assert!(shells.background_request("child-call").is_none());
+        assert_eq!(
+            shells.background_request("root-call").unwrap()["tool_use_id"],
+            "root-call"
+        );
 
         let mut owned_background = started("child-bg", "child-bg-call", true);
         owned_background["owned_by_subagent"] = json!(true);
@@ -401,7 +403,7 @@ mod tests {
         let list = shells.changed().unwrap();
         assert_eq!(list[0].command, "npm run dev");
         assert_eq!(list[0].started_at_ms, 1);
-        assert_eq!(shells.background_requests().len(), 0);
+        assert!(shells.background_request("call").is_none());
     }
 
     #[test]
@@ -484,20 +486,20 @@ mod tests {
         );
         assert!(shells.output(&read("task", "tick\n")).is_none());
         assert_eq!(shells.changed().unwrap()[0].output, "tick\n");
-        assert!(shells.background_requests().is_empty());
+        assert!(shells.background_request("call").is_none());
     }
 
     #[test]
-    fn backgrounds_each_foreground_shell_by_its_call() {
+    fn backgrounds_a_foreground_shell_by_its_call() {
         let mut shells = Shells::new("claude-code");
         shells.frame(&started("task", "call", false), 0);
         shells.frame(&started("other", "detached", true), 0);
-        let requests = shells.background_requests();
-        assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0]["request"],
-            json!({"subtype":"background_tasks", "tool_use_id":"call"})
+            shells.background_request("call"),
+            Some(json!({"subtype":"background_tasks", "tool_use_id":"call"}))
         );
+        assert!(shells.background_request("detached").is_none());
+        assert!(shells.background_request("unknown").is_none());
     }
 
     #[test]
@@ -507,10 +509,7 @@ mod tests {
         assert!(shells.stop_request("codex:task").is_none());
         assert!(shells.stop_request("claude-code:other").is_none());
         let request = shells.stop_request("claude-code:task").unwrap();
-        assert_eq!(
-            request["request"],
-            json!({"subtype":"stop_task", "task_id":"task"})
-        );
+        assert_eq!(request, json!({"subtype":"stop_task", "task_id":"task"}));
         assert_eq!(shells.stop_all().len(), 1);
     }
 

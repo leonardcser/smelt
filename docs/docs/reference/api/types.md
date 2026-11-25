@@ -1489,6 +1489,7 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `thinking_summary` | `string` |  | Folded thinking summary text. |
 | `user_message` | `string` |  | Tool user-facing status message. |
 | `preview_output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Immutable pending output metadata for a promoted finished draft. |
+| `background` | `boolean` |  | True when the call's work continues in the background: its result has `metadata.background = true`, or the user moved the running call there. Such a call shows status `"ok"` before its result arrives. |
 | `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output metadata. |
 | `event` | `string` |  | Process status event type, e.g. `"background_process_completed"`. |
 | `event_type` | `string` |  | Alias for `event`. |

@@ -293,6 +293,9 @@ while True:
             assistant([{"type": "tool_use", "id": launch, "name": "Agent", "input": args}], launch)
             control("gate-" + task, {"subtype": "hook_callback", "callback_id": "smelt-permission", "tool_use_id": launch, "input": {"tool_name": "Agent", "tool_input": args}})
             send({"type": "system", "subtype": "task_started", "task_id": task, "tool_use_id": launch, "task_type": "local_agent", "description": task})
+        refused = receive()
+        assert refused["request"]["subtype"] == "stop_task", refused
+        send({"type": "control_response", "response": {"subtype": "error", "request_id": refused["request_id"], "error": "busy"}})
         stopped = receive()
         assert stopped["request"]["subtype"] == "stop_task", stopped
         assert stopped["request"]["task_id"] == "one", stopped

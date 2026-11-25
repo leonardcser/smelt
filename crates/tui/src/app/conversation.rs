@@ -1723,6 +1723,29 @@ impl ConversationRuntime {
         });
     }
 
+    /// Shows each running tool call `in_background` names there, and the
+    /// rest as waited for.
+    pub(crate) fn set_tools_in_background(
+        &mut self,
+        in_background: impl Fn(&str) -> bool,
+        now: std::time::Instant,
+    ) {
+        let mut running = self
+            .parser
+            .active_call_ids(self.document.transcript.history())
+            .peekable();
+        if running.peek().is_none() {
+            return;
+        }
+        let calls = running
+            .filter(|call| in_background(call))
+            .map(str::to_owned)
+            .collect();
+        self.apply_stream_mutation(
+            super::session_document::StreamMutation::SetToolsInBackground { calls, now },
+        );
+    }
+
     pub(crate) fn set_tool_user_message(
         &mut self,
         invocation_id: protocol::InvocationId,

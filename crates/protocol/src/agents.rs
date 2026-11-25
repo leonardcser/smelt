@@ -62,6 +62,10 @@ pub struct AgentInfo {
     /// it waits for its report.
     #[serde(default)]
     pub background: bool,
+    /// The tool call that launched it, in the transcript of the agent that
+    /// launched it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     pub activity: String,
     pub result: Option<String>,
     pub error: Option<String>,
