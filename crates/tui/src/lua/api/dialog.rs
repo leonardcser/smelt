@@ -2,11 +2,7 @@
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
-use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
-use smelt_core::lua::reg::LuaReg;
-
-use crate::lua::parse_keybind;
 
 struct LuaDialogOpenOpts(mlua::Table);
 
@@ -44,13 +40,15 @@ impl mlua::UserData for LuaDockedDialog {
             crate::lua::with_ui_host(|host| host.toggle_docked_dialog_expanded(this.id));
             Ok(())
         });
-        methods.add_function(
-            "key",
-            |lua,
-             (this_ud, chord, func): (mlua::AnyUserData, String, LuaCallback<mlua::Table, ()>)|
-             -> LuaResult<LuaReg> {
-                let this = *this_ud.borrow::<LuaDockedDialog>()?;
-                install_modal_key(lua, this.modal, chord, func.into_inner())
+        methods.add_method(
+            "scope",
+            |lua, this, (name, actions): (String, Option<mlua::Table>)| {
+                super::keymap::install_scope(
+                    lua,
+                    crate::smelt_edit::ScopeOwner::Modal(this.modal),
+                    name,
+                    actions,
+                )
             },
         );
     }
@@ -69,43 +67,6 @@ fn optional_constraint(
         .map_err(mlua::Error::external)
 }
 
-fn install_modal_key(
-    lua: &Lua,
-    modal: crate::smelt_edit::ModalId,
-    chord: String,
-    func: mlua::Function,
-) -> LuaResult<LuaReg> {
-    let Some(key) = parse_keybind(&chord) else {
-        return Err(mlua::Error::RuntimeError(format!(
-            "dialog:key: unknown chord `{chord}`"
-        )));
-    };
-    let shared = lua
-        .named_registry_value::<mlua::AnyUserData>("__smelt_shared")?
-        .borrow::<super::win::SharedHandle>()?
-        .0
-        .clone();
-    let callback = crate::lua::register_callback_handle(&shared, lua, func)?;
-    crate::lua::with_ui_host(|host| {
-        host.set_modal_keymap(
-            modal,
-            key,
-            crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(callback)),
-        );
-    });
-    Ok(LuaReg::new(move || {
-        crate::lua::app_ref::defer_registered_lua_operation(
-            &shared,
-            callback,
-            crate::lua::app_ref::DeferredLuaOperation::ModalKeymap {
-                modal,
-                key,
-                callback_id: callback,
-            },
-        )
-    }))
-}
-
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let module = LuaMod::supported(
         lua,
@@ -113,15 +74,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "dialog",
         "Root-docked modal dialog primitives. UiHost-only.",
         Tier::UiHost,
-    )?;
-    module.private_fn(
-        "__check_chord",
-        &["chord"],
-        |_, (chord,): (String,)| -> LuaResult<()> {
-            parse_keybind(&chord).map(|_| ()).ok_or_else(|| {
-                mlua::Error::RuntimeError(format!("dialog:key: unknown chord `{chord}`"))
-            })
-        },
     )?;
     module.private_fn(
         "__open",

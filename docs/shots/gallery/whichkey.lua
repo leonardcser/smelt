@@ -30,15 +30,6 @@ local function open()
   ui = { win = smelt.win.new(smelt.buf.new(), { surface = "readonly_text", hide_cursor = true }) }
   ui.paint = smelt.paint.register(draw)
   local layout = smelt.ui.layout
-  local keymaps = {
-    { key = "<Esc>", on_press = close }, { key = "q", on_press = close }, { key = "<C-c>", on_press = close },
-  }
-  for _, k in ipairs(KEYS) do
-    keymaps[#keymaps + 1] = { key = k[1], on_press = function()
-      close()
-      smelt.cmd.run(k[3])
-    end }
-  end
   smelt.overlay.new({
     name = "whichkey", title = " ctrl+space ", anchor = "screen_at", corner = "se", row = 4, col = 2,
     width = 34, height = #KEYS + 2, modal = false,
@@ -46,8 +37,14 @@ local function open()
       { layout.leaf(ui.win), height = 0 },
       { layout.leaf(ui.paint, { measure = { 32, #KEYS } }), height = "fit" },
     }),
-    keymaps = keymaps,
   })
+  for _, key in ipairs({ "<Esc>", "q", "<C-c>" }) do ui.win:key(key, close) end
+  for _, k in ipairs(KEYS) do
+    ui.win:key(k[1], function()
+      close()
+      smelt.cmd.run(k[3])
+    end)
+  end
   ui.win:focus()
 end
 

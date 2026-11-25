@@ -1,5 +1,54 @@
 -- Read-only agent observation. Does not enable delegation or add model tools.
 local M = smelt.plugin("agent_view")
+
+smelt.keymap.scope("subagents", {
+  desc = "/subagents viewer",
+  actions = {
+    back        = "Leave the transcript, or close the viewer",
+    close       = "Close the viewer",
+    switch_pane = "Switch between the run list and the transcript",
+    open        = "Show the selected run's transcript",
+    stop        = "Stop the selected run",
+  },
+  keys = {
+    { "", "<Esc>", "back"        },
+    { "", "q",     "back"        },
+    { "", "<C-c>", "close"       },
+    { "", "<Tab>", "switch_pane" },
+    { "", "<CR>",  "open"        },
+    { "", "<M-s>", "stop"        },
+  },
+})
+
+smelt.keymap.scope("subagents.runs", {
+  desc = "/subagents run list",
+  actions = {
+    down      = "Select the next run",
+    up        = "Select the previous run",
+    first     = "Select the first run",
+    last      = "Select the last run",
+    half_up   = "Move the selection up half a page",
+    half_down = "Move the selection down half a page",
+    page_up   = "Move the selection up a page",
+    page_down = "Move the selection down a page",
+  },
+  keys = {
+    { "", "j",          "down"      },
+    { "", "k",          "up"        },
+    { "", "<Down>",     "down"      },
+    { "", "<Up>",       "up"        },
+    { "", "g",          "first"     },
+    { "", "<Home>",     "first"     },
+    { "", "G",          "last"      },
+    { "", "<End>",      "last"      },
+    { "", "<C-u>",      "half_up"   },
+    { "", "<C-d>",      "half_down" },
+    { "", "<C-b>",      "page_up"   },
+    { "", "<PageUp>",   "page_up"   },
+    { "", "<C-f>",      "page_down" },
+    { "", "<PageDown>", "page_down" },
+  },
+})
 local active
 
 local PROBLEM_NS = smelt.ns("smelt.subagents.problem")
@@ -210,13 +259,13 @@ function M.open()
     render_preview()
   end
   local function back() if detail then detail = false; focus("runs") else close() end end
-  opts.keymaps = {
-    { key = "esc", on_press = back },
-    { key = "q", on_press = back },
-    { key = "ctrl-c", on_press = close },
-    { key = "tab", on_press = function() detail = false; focus(focused == "runs" and "preview" or "runs") end },
-    { key = "enter", on_press = function() detail = true; focus("preview") end },
-    { key = "alt-s", hint = "⌥s: stop", on_press = function() local run = list:selected(); if run then smelt.agent.stop(parent_id, run.id); refresh() end end },
+  opts.scope = "subagents"
+  opts.actions = {
+    back = back,
+    close = close,
+    switch_pane = function() detail = false; focus(focused == "runs" and "preview" or "runs") end,
+    open = function() detail = true; focus("preview") end,
+    stop = function() local run = list:selected(); if run then smelt.agent.stop(parent_id, run.id); refresh() end end,
   }
   local count
   local function nav(delta)
@@ -224,26 +273,32 @@ function M.open()
     draw()
     render_preview()
   end
-  local function key(binding, action)
-    sidebar:key(binding, function() local n = count or 1; count = nil; action(n) end)
+  -- A typed count repeats the next motion, as in Vim.
+  local function counted(action)
+    return function() local n = count or 1; count = nil; action(n) end
   end
   for digit = 0, 9 do
     sidebar:key(tostring(digit), function() if count or digit > 0 then count = math.min((count or 0) * 10 + digit, #rows) end end)
   end
-  for _, binding in ipairs({ { "j", 1 }, { "k", -1 }, { "down", 1 }, { "up", -1 } }) do
-    key(binding[1], function(n) nav(binding[2] * n) end)
+  local function pages(fraction)
+    return counted(function(n) local height = (sidebar:rect() or {}).height or 10; nav(math.floor(height * fraction) * n) end)
   end
-  for _, binding in ipairs({ "g", "home" }) do key(binding, function() nav(-#rows) end) end
-  for _, binding in ipairs({ "G", "end" }) do key(binding, function() nav(#rows) end) end
-  for _, binding in ipairs({ { "ctrl-u", -0.5 }, { "ctrl-d", 0.5 }, { "ctrl-b", -1 }, { "ctrl-f", 1 }, { "pgup", -1 }, { "pgdn", 1 } }) do
-    key(binding[1], function(n) local height = (sidebar:rect() or {}).height or 10; nav(math.floor(height * binding[2]) * n) end)
-  end
+  sidebar:scope("subagents.runs", {
+    down = counted(function(n) nav(n) end),
+    up = counted(function(n) nav(-n) end),
+    first = counted(function() nav(-#rows) end),
+    last = counted(function() nav(#rows) end),
+    half_up = pages(-0.5),
+    half_down = pages(0.5),
+    page_up = pages(-1),
+    page_down = pages(1),
+  })
   sidebar:on("selection_changed", function() draw(); render_preview() end)
   sidebar:on("resized", function() draw(); render_preview() end)
   preview:on("resized", function() draw(); render_preview() end)
   active = close
   refresh()
-  opts.keymaps = nil
+  opts.scope, opts.actions = nil, nil
   sidebar:focus()
   timer = smelt.timer.every(250, refresh)
 end

@@ -3,14 +3,13 @@ use crate::app::{
     TuiApp,
 };
 
+use crate::app::lua_bridge::{KeymapChain, KeymapReach};
 use crate::input::{Action, PromptSubmission};
-use crate::keymap::{self, KeyAction};
 use crate::smelt_edit::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const ESC_TOKEN: &str = "<Esc>";
 /// How long a second Ctrl+C after a prompt clear counts as the same press.
-const CTRL_C_REPEAT_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GlobalLuaKeymapRoute {
@@ -77,34 +76,6 @@ impl TuiApp {
 
         if matches!(ev, Event::Key(_) | Event::Paste(_)) {
             self.ui.finish_pointer_interaction_for_keyboard();
-        }
-
-        // Global chords fire before focus-specific routing so no handler can swallow them.
-        if let Event::Key(KeyEvent {
-            code, modifiers, ..
-        }) = &ev
-        {
-            // Skip when transient modal UI or cmdline is focused - it gets first dibs.
-            if self.ui.focused_overlay().is_none()
-                && self.ui.focused_modal().is_none()
-                && self.well_known.cmdline.is_none()
-            {
-                let pctx = crate::input::prompt_ctx_ref(&self.ui);
-                let ctx = self.prompt.key_context(pctx, self.turn_input_is_active());
-                match keymap::lookup(*code, *modifiers, &ctx) {
-                    Some(KeyAction::ToggleMode) => {
-                        let lua = self.lua.execution();
-                        crate::lua::scope_app(self, move || lua.cycle_mode());
-                        return false;
-                    }
-                    Some(KeyAction::CycleReasoning) => {
-                        let lua = self.lua.execution();
-                        crate::lua::scope_app(self, move || lua.cycle_reasoning());
-                        return false;
-                    }
-                    _ => {}
-                }
-            }
         }
 
         // A pending pane chord owns its follow-up before local shortcuts or Vim.
@@ -230,7 +201,7 @@ impl TuiApp {
         redraw
     }
 
-    fn apply_event_outcome(&mut self, outcome: EventOutcome) -> bool {
+    pub(super) fn apply_event_outcome(&mut self, outcome: EventOutcome) -> bool {
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
@@ -378,6 +349,12 @@ impl TuiApp {
         } else {
             self.dispatch_input_action(action)
         };
+        self.finish_outside_dispatch(outcome);
+    }
+
+    /// Settle `outcome` of work Lua started outside key dispatch, as the
+    /// event loop does after a key.
+    pub(super) fn finish_outside_dispatch(&mut self, outcome: EventOutcome) {
         self.emit_prompt_text_changed_if_dirty();
         self.emit_split_resizes();
         if matches!(outcome, EventOutcome::Quit) {
@@ -517,7 +494,7 @@ impl TuiApp {
         &self,
         key: KeyEvent,
         token: &str,
-        vim_mode: Option<&str>,
+        chain: &KeymapChain,
     ) -> bool {
         let Some(pending) = &self.timers.pending_chord else {
             return false;
@@ -531,32 +508,49 @@ impl TuiApp {
 
         let mut candidate = pending.tokens.concat();
         candidate.push_str(token);
-        !self.lua.chord_has_binding(&candidate, vim_mode)
-            && !self.lua.chord_has_longer(&candidate, vim_mode)
+        let frames = chain.frames();
+        !self.lua.chord_has_binding(&frames, &candidate)
+            && !self.lua.chord_has_longer(&frames, &candidate)
     }
 
-    fn dispatch_single_global_lua_keymap(&mut self, key: KeyEvent) -> bool {
+    /// Run the binding `seq` resolves to around focus. A native action comes
+    /// back for the caller to run.
+    fn run_lua_keymap(
+        &mut self,
+        chain: &KeymapChain,
+        seq: &str,
+    ) -> (
+        smelt_core::lua::runtime::KeymapResult,
+        Option<crate::app::lua_bridge::NativeCall>,
+    ) {
+        let lua = self.lua.execution();
+        let frames = chain.frames();
+        let mut native = None;
+        let result = crate::lua::scope_app(self, || {
+            lua.run_keymap(&frames, seq, &[], &mut |frame, name| {
+                resolve_action(chain, frame, name, &mut native)
+            })
+        });
+        (result, native)
+    }
+
+    /// Run a single-key binding of the frames `reach` covers, without
+    /// buffering a chord.
+    fn dispatch_single_lua_keymap(&mut self, key: KeyEvent, reach: KeymapReach) -> bool {
         if self.global_lua_keymap_route(key) != GlobalLuaKeymapRoute::Dispatch {
             return false;
         }
         let Some(token) = crate::lua::chord_string(key) else {
             return false;
         };
-        let vim_mode = self.current_vim_mode_label();
-        let lua = self.lua.execution();
+        let chain = self.keymap_chain().reach(reach);
         use smelt_core::lua::runtime::KeymapResult;
-        let result =
-            crate::lua::scope_app(self, || lua.run_keymap(&token, vim_mode.as_deref(), None));
-        match result {
-            KeymapResult::Consumed => {
-                self.flush_lua_callbacks();
-                true
-            }
-            KeymapResult::PassThrough | KeymapResult::NoBinding => {
-                self.flush_lua_callbacks();
-                false
-            }
+        let (result, native) = self.run_lua_keymap(&chain, &token);
+        self.flush_lua_callbacks();
+        if let Some(call) = native {
+            self.run_native_action(call, Some(key));
         }
+        result == KeymapResult::Consumed
     }
 
     fn pending_lua_chord_policy(
@@ -573,7 +567,9 @@ impl TuiApp {
         }
     }
 
-    fn dispatch_global_lua_keymap(&mut self, key: KeyEvent) -> Option<EventOutcome> {
+    /// Dispatch a key to the bindings of the frames `reach` covers, buffering
+    /// multi-key chords.
+    fn dispatch_lua_keymap(&mut self, key: KeyEvent, reach: KeymapReach) -> Option<EventOutcome> {
         self.expire_pending_keymap_chord();
         let route = self.global_lua_keymap_route(key);
         if route == GlobalLuaKeymapRoute::Skip {
@@ -586,8 +582,8 @@ impl TuiApp {
         };
 
         let had_pending = self.timers.pending_chord.is_some();
-        let vim_mode = self.current_vim_mode_label();
-        if self.pending_lua_keymap_cancelled_by(key, &token, vim_mode.as_deref()) {
+        let chain = self.keymap_chain().reach(reach);
+        if self.pending_lua_keymap_cancelled_by(key, &token, &chain) {
             self.timers.pending_chord = None;
             return Some(EventOutcome::Noop);
         }
@@ -598,18 +594,15 @@ impl TuiApp {
         // single-key binding gets a chance, matching Vim's modal mapping feel.
         // Observe-only keys seed prefixes without stealing the local key action.
         if !had_pending && !observe_prefix {
-            let lua = self.lua.execution();
-            let result =
-                crate::lua::scope_app(self, || lua.run_keymap(&token, vim_mode.as_deref(), None));
-            match result {
-                KeymapResult::Consumed => {
-                    self.timers.pending_chord = None;
-                    self.flush_lua_callbacks();
-                    return Some(EventOutcome::Noop);
-                }
-                KeymapResult::PassThrough | KeymapResult::NoBinding => {
-                    self.flush_lua_callbacks();
-                }
+            let (result, native) = self.run_lua_keymap(&chain, &token);
+            self.flush_lua_callbacks();
+            if let Some(call) = native {
+                self.timers.pending_chord = None;
+                return Some(self.run_native_action(call, Some(key)));
+            }
+            if result == KeymapResult::Consumed {
+                self.timers.pending_chord = None;
+                return Some(EventOutcome::Noop);
             }
         }
 
@@ -635,15 +628,21 @@ impl TuiApp {
         let lua = self.lua.execution();
         let mut oracle = LuaChordOracle {
             lua: &lua,
-            vim_mode: vim_mode.as_deref(),
+            chain: &chain,
+            frames: chain.frames(),
             vim_mode_at_start,
+            native: None,
         };
         let outcome = crate::lua::scope_app(self, || {
             smelt_core::keymap::match_chord(tokens, &mut oracle)
         });
+        let native = oracle.native.take();
         self.flush_lua_callbacks();
         match outcome {
-            smelt_core::keymap::ChordOutcome::Consumed => Some(EventOutcome::Noop),
+            smelt_core::keymap::ChordOutcome::Consumed => Some(match native {
+                Some(call) => self.run_native_action(call, Some(key)),
+                None => EventOutcome::Noop,
+            }),
             smelt_core::keymap::ChordOutcome::Pending { tokens } => {
                 if tokens.is_empty() {
                     self.timers.pending_chord = None;
@@ -676,9 +675,11 @@ impl TuiApp {
     ///
     /// Returns `Some(outcome)` when consumed; `None` to continue with path-specific logic.
     ///
-    /// Dispatch priority: resize/mouse → notification dismissal → pending prompt Vim input
-    /// → content search opener → window-local Lua keymaps → global Lua keymaps
-    /// → pane chords → cmdline `:` → content focus.
+    /// Dispatch priority: resize/mouse → notification dismissal → pending
+    /// prompt or transcript Vim input → content search opener → window keys
+    /// (`win:key`) → keymap scopes, the native `prompt` or `transcript` scope
+    /// included, then global bindings → pane chords → cmdline `:` → content
+    /// focus.
     fn dispatch_common(&mut self, ev: &Event, running: bool) -> Option<EventOutcome> {
         if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
@@ -691,8 +692,13 @@ impl TuiApp {
             if let Some(outcome) = self.handle_notification_key(k) {
                 return Some(outcome);
             }
-            if self.prompt_vim_pending_input_owns_key(k) {
-                return Some(self.dispatch_prompt_event_to_input(Event::Key(k), running));
+            if self.vim_pending_input_owns_key(k) {
+                return Some(match self.app_focus {
+                    crate::app::AppFocus::Prompt => {
+                        self.dispatch_prompt_event_to_input(Event::Key(k), running)
+                    }
+                    crate::app::AppFocus::Content => self.handle_event_app_history(&Event::Key(k)),
+                });
             }
             if self.handle_focused_search_key(k) {
                 return Some(EventOutcome::Noop);
@@ -703,7 +709,7 @@ impl TuiApp {
             if let Some(outcome) = self.dispatch_window_lua_keymap(k) {
                 return Some(outcome);
             }
-            if let Some(outcome) = self.dispatch_global_lua_keymap(k) {
+            if let Some(outcome) = self.dispatch_lua_keymap(k, KeymapReach::All) {
                 return Some(outcome);
             }
         }
@@ -760,21 +766,6 @@ impl TuiApp {
             {
                 return outcome;
             }
-
-            let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
-            let ctx = self.prompt.key_context(pctx_ref, false);
-
-            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                match action {
-                    KeyAction::Quit if self.ctrl_c_repeats_clear() => return EventOutcome::Noop,
-                    KeyAction::Quit => return EventOutcome::Quit,
-                    KeyAction::ClearBuffer => {
-                        self.clear_prompt_on_ctrl_c();
-                        return EventOutcome::Redraw;
-                    }
-                    _ => {}
-                }
-            }
         }
 
         let now = self.core.clock.instant_now();
@@ -785,58 +776,16 @@ impl TuiApp {
         self.dispatch_input_action(action)
     }
 
-    fn clear_prompt_on_ctrl_c(&mut self) {
-        self.timers.last_prompt_clear = Some(self.core.clock.instant_now());
-        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        self.prompt.clear_with_undo(&mut pctx);
-    }
-
-    /// A Ctrl+C this soon after the one that cleared the prompt is a repeated
-    /// press: it must not also quit or cancel the turn.
-    fn ctrl_c_repeats_clear(&self) -> bool {
-        self.timers.last_prompt_clear.is_some_and(|cleared| {
-            self.core
-                .clock
-                .instant_now()
-                .saturating_duration_since(cleared)
-                < CTRL_C_REPEAT_GRACE
-        })
-    }
-
     // ── Running event handler ────────────────────────────────────────────
 
     fn handle_event_running(&mut self, ev: Event) -> EventOutcome {
-        if let Some(outcome) = self.dispatch_common(&ev, true) {
-            return outcome;
-        }
-
         // Record last keypress for deferred permission dialogs.
         if matches!(ev, Event::Key(_)) {
             self.timers.last_keypress = Some(self.core.clock.instant_now());
         }
 
-        if let Event::Key(KeyEvent {
-            code, modifiers, ..
-        }) = ev
-        {
-            // A paused continuation has no active work to cancel; Ctrl-C can quit.
-            let cancellable = self.turn_input_is_active() || self.busy_stack.is_busy();
-            let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
-            let ctx = self.prompt.key_context(pctx_ref, cancellable);
-            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                match action {
-                    KeyAction::Quit | KeyAction::CancelAgent if self.ctrl_c_repeats_clear() => {
-                        return EventOutcome::Noop;
-                    }
-                    KeyAction::Quit => return EventOutcome::Quit,
-                    KeyAction::CancelAgent => return EventOutcome::CancelAgent,
-                    KeyAction::ClearBuffer => {
-                        self.clear_prompt_on_ctrl_c();
-                        return EventOutcome::Noop;
-                    }
-                    _ => {}
-                }
-            }
+        if let Some(outcome) = self.dispatch_common(&ev, true) {
+            return outcome;
         }
 
         if matches!(
@@ -857,7 +806,7 @@ impl TuiApp {
         self.dispatch_running_input_action(input_action)
     }
 
-    fn dispatch_running_input_action(&mut self, input_action: Action) -> EventOutcome {
+    pub(super) fn dispatch_running_input_action(&mut self, input_action: Action) -> EventOutcome {
         match input_action {
             Action::Submit {
                 submission,
@@ -870,9 +819,6 @@ impl TuiApp {
                 return self.handle_empty_submit();
             }
             Action::Redraw => {}
-            Action::EditInEditor => {
-                self.edit_in_editor();
-            }
             Action::CenterScroll => {
                 self.prompt_win_mut().pending_recenter = true;
             }
@@ -1038,17 +984,22 @@ impl TuiApp {
         EventOutcome::Noop
     }
 
-    fn prompt_vim_pending_input_owns_key(&self, key: KeyEvent) -> bool {
-        if self.app_focus != crate::app::AppFocus::Prompt {
-            return false;
-        }
+    /// A count or operator the focused pane's Vim has pending takes the next
+    /// plain key before keymap scopes.
+    fn vim_pending_input_owns_key(&self, key: KeyEvent) -> bool {
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
         {
             return false;
         }
-        self.prompt_vim_has_pending_input()
+        match self.app_focus {
+            crate::app::AppFocus::Prompt => self.prompt_vim_has_pending_input(),
+            crate::app::AppFocus::Content => {
+                let win = self.transcript_win();
+                win.vim_enabled() && !win.vim_state().is_idle()
+            }
+        }
     }
 
     fn prompt_vim_has_pending_input(&self) -> bool {
@@ -1104,7 +1055,7 @@ impl TuiApp {
         None
     }
 
-    fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
+    pub(super) fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
             Action::Submit {
                 submission,
@@ -1117,10 +1068,6 @@ impl TuiApp {
                 submission, cut, ..
             } => EventOutcome::Submit { submission, cut },
             Action::SubmitEmpty => self.handle_empty_submit(),
-            Action::EditInEditor => {
-                self.edit_in_editor();
-                EventOutcome::Noop
-            }
             Action::CenterScroll => {
                 self.prompt_win_mut().pending_recenter = true;
                 EventOutcome::Noop
@@ -1146,7 +1093,7 @@ impl TuiApp {
         }
     }
 
-    fn edit_in_editor(&mut self) {
+    pub(super) fn edit_in_editor(&mut self) {
         let text = self
             .prompt
             .labelled_text(crate::input::prompt_ctx_ref(&self.ui));
@@ -1315,37 +1262,28 @@ impl TuiApp {
     /// Orchestrates the per-key dispatch cascade when an overlay or modal is
     /// focused. Tiers fire in order; the first to return `Consumed` wins:
     ///
-    /// - Tier 1: specific keymap on the focused leaf (`win_set_keymap`).
+    /// - Tier 1: keymap on the focused leaf (`win:key`).
     /// - Tier 1b: stateful Vim input on the focused transient viewer.
-    /// - Tier 1c: modal- or overlay-scoped keymap on the focused container.
-    /// - Tier 2: global Lua keymap (`smelt.keymap.set("", chord, fn)`).
+    /// - Tier 2: Lua bindings of the focused window's, modal's and overlay's
+    ///   keymap scopes, innermost first. Multi-key chords buffer here. Lists
+    ///   navigate through their `list` scope here.
+    /// - Tier 2b: global Lua bindings, single keys only, so a global `Esc Esc`
+    ///   never holds back the `Esc` that dismisses the surface.
     /// - Tier 3: vim viewer keys on the focused leaf.
-    /// - Tier 4: per-window catch-all fallback (`win_set_key_fallback`).
+    /// - Tier 4: per-window catch-all fallback (`win_set_key_fallback`), such
+    ///   as the line editing of inputs.
     /// - Tier 5: modal dismiss for bare Esc / Ctrl-C.
     ///
-    /// Putting global keymaps between tiers 1c and 3 lets a site-wide chord
-    /// like `?` -> /help win over a dialog input's blanket printable-char
-    /// fallback, without each leaf needing a bespoke carve-out. Overlay-scoped
-    /// keymaps sit above global so an open dialog/picker's local intent
-    /// (e.g. `Tab` cycles items) beats a site-wide rebinding of the same chord.
+    /// Putting Lua bindings above tier 4 lets a site-wide chord like `?` ->
+    /// /help win over a dialog input's blanket printable-char fallback.
+    /// Scoped bindings sit above global ones, so an open dialog's local intent
+    /// (e.g. `Tab` cycles items) beats a site-wide binding of the same chord.
     pub(crate) fn run_key_cascade(&mut self, k: KeyEvent) -> crate::smelt_edit::Status {
         use crate::smelt_edit::Status;
 
-        // Tier 1: specific keymap on the focused leaf.
-        {
-            let lua = &self.lua;
-            let mut lua_invoke =
-                |handle: crate::smelt_edit::LuaHandle,
-                 win: crate::smelt_edit::WinId,
-                 payload: &crate::smelt_edit::Payload| {
-                    lua.queue_invocation(handle, win, payload);
-                };
-            if matches!(
-                self.ui.dispatch_key(k.code, k.modifiers, &mut lua_invoke),
-                Status::Consumed
-            ) {
-                return Status::Consumed;
-            }
+        // Tier 1: keymap on the focused leaf.
+        if self.dispatch_leaf_key(k) {
+            return Status::Consumed;
         }
 
         // Tier 1b: explicit Visual mappings can override viewer defaults;
@@ -1361,33 +1299,15 @@ impl TuiApp {
             StatefulViewerKeyDispatch::NotApplicable => (None, false),
         };
 
-        // Tier 1c: modal- and overlay-scoped keymaps shared by every leaf in
-        // their container.
-        {
-            let lua = &self.lua;
-            let mut lua_invoke =
-                |handle: crate::smelt_edit::LuaHandle,
-                 win: crate::smelt_edit::WinId,
-                 payload: &crate::smelt_edit::Payload| {
-                    lua.queue_invocation(handle, win, payload);
-                };
-            if matches!(
-                self.ui
-                    .dispatch_modal_key(k.code, k.modifiers, &mut lua_invoke),
-                Status::Consumed
-            ) || matches!(
-                self.ui
-                    .dispatch_overlay_key(k.code, k.modifiers, &mut lua_invoke),
-                Status::Consumed
-            ) {
-                return Status::Consumed;
-            }
+        // Tier 2: Lua bindings of the scopes around focus, with multi-key
+        // chords.
+        if self.dispatch_lua_keymap(k, KeymapReach::Scoped).is_some() {
+            return Status::Consumed;
         }
 
-        // Tier 2: global Lua keymap (single-chord lookup only - overlays
-        // don't participate in the chord-buffering path). Visual mode checked
-        // this tier before Vim so explicit remaps can override viewer defaults.
-        if !global_keymap_checked && self.dispatch_single_global_lua_keymap(k) {
+        // Tier 2b: global Lua bindings. Visual mode checked them before Vim
+        // so explicit remaps can override viewer defaults.
+        if !global_keymap_checked && self.dispatch_single_lua_keymap(k, KeymapReach::Global) {
             return Status::Consumed;
         }
 
@@ -1438,6 +1358,20 @@ impl TuiApp {
             .try_dismiss_modal_for_chord(k.code, k.modifiers, &mut lua_invoke)
     }
 
+    /// Run the focused leaf's keymap for `k`.
+    fn dispatch_leaf_key(&mut self, k: KeyEvent) -> bool {
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
+                              win: crate::smelt_edit::WinId,
+                              payload: &crate::smelt_edit::Payload| {
+            lua.queue_invocation(handle, win, payload);
+        };
+        matches!(
+            self.ui.dispatch_key(k.code, k.modifiers, &mut lua_invoke),
+            crate::smelt_edit::Status::Consumed
+        )
+    }
+
     pub(crate) fn run_paste_fallback(&mut self, content: String) -> crate::smelt_edit::Status {
         let lua = &self.lua;
         let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
@@ -1469,7 +1403,8 @@ impl TuiApp {
             }
         };
 
-        if visual && self.dispatch_single_global_lua_keymap(k) {
+        // Only global bindings beat Vim here; scoped keys sit below it.
+        if visual && self.dispatch_single_lua_keymap(k, KeymapReach::Global) {
             return StatefulViewerKeyDispatch::Consumed;
         }
         if matches!(
@@ -1576,17 +1511,6 @@ impl TuiApp {
         }
     }
 
-    fn dispatch_viewer_buffer_key(
-        &mut self,
-        win_id: crate::smelt_edit::WinId,
-        k: KeyEvent,
-    ) -> crate::smelt_edit::Status {
-        let Some((buf_id, viewport_rows, _)) = self.viewer_key_context(win_id) else {
-            return crate::smelt_edit::Status::Ignored;
-        };
-        self.dispatch_buffer_action(win_id, buf_id, k, viewport_rows)
-    }
-
     fn dispatch_window_viewer_fallback_key(
         &mut self,
         win_id: crate::smelt_edit::WinId,
@@ -1595,24 +1519,13 @@ impl TuiApp {
         if self.handle_search_key_for_target(win_id, k) {
             return crate::smelt_edit::Status::Consumed;
         }
-        self.dispatch_viewer_buffer_key(win_id, k)
+        crate::smelt_edit::Status::Ignored
     }
 
-    /// Unified viewer-key dispatcher shared between transcript, overlay leaves,
-    /// and any future scrollable read-only window. Resolution order:
-    ///   1. Viewer Vim engine for `readonly_text` surfaces - handles motions,
-    ///      counts, visual selection, and yanks as viewer commands. Prompt/editor
-    ///      actions such as history never run for read-only viewers.
-    ///   2. Shared keymap dispatch via [`Self::dispatch_buffer_action`].
-    ///      The keymap uses the window's actual `vim_enabled`/`vim_mode`
-    ///      context so vim-Normal-only chords (Ctrl-U/D, Ctrl-B/F page
-    ///      motion, Ctrl-Y/E line scroll) and emacs chords (Ctrl-V/Alt-V,
-    ///      Alt-</>, Ctrl-P/N) route correctly.
-    ///
-    /// Editing actions (kill, delete, yank, etc.) are silently dropped on
-    /// `buf.readonly` buffers - the same dispatcher serves the read-only
-    /// transcript and a future read-write Lua-created buffer without
-    /// branching the call site.
+    /// Viewer keys of the transcript and overlay leaves: search navigation,
+    /// then the viewer Vim engine for `readonly_text` surfaces, which handles
+    /// motions, counts, visual selection and yanks as viewer commands. Plain
+    /// motion keys belong to the `viewer` keymap scope.
     pub(crate) fn dispatch_window_viewer_key(
         &mut self,
         win_id: crate::smelt_edit::WinId,
@@ -1622,10 +1535,7 @@ impl TuiApp {
         if self.handle_search_key_for_target(win_id, k) {
             return Status::Consumed;
         }
-        if matches!(self.dispatch_viewer_vim_key(win_id, k), Status::Consumed) {
-            return Status::Consumed;
-        }
-        self.dispatch_viewer_buffer_key(win_id, k)
+        self.dispatch_viewer_vim_key(win_id, k)
     }
 
     /// Walk the jump list of the viewer window `win_id` as `Ctrl-O`, `Ctrl-I`
@@ -1857,46 +1767,22 @@ impl TuiApp {
         self.record_notice(MessageKind::Warning, "actions".into(), body);
     }
 
-    /// Keymap-driven dispatcher: looks up the binding under the window's
-    /// real vim context, executes the resolved [`KeyAction`] against the
-    /// (win, buf) pair, and honours `buf.readonly` for editing actions.
-    /// Mirrors the prompt's `PromptState::execute_key_action` for the
-    /// motion + selection + copy + page-motion subset; non-motion actions
-    /// (editing, history) are handled elsewhere (the prompt) or dropped
-    /// (read-only buffers).
-    fn dispatch_buffer_action(
+    /// Run text action `action` of the `viewer` scope on window `win_id`:
+    /// motion, selection, page motion and copy. Editing actions do nothing.
+    pub(super) fn run_viewer_action(
         &mut self,
         win_id: crate::smelt_edit::WinId,
-        buf_id: crate::smelt_edit::BufId,
-        k: KeyEvent,
-        viewport_rows: u16,
+        action: crate::keymap::TextAction,
     ) -> crate::smelt_edit::Status {
-        use crate::keymap::{lookup, KeyAction, KeyContext};
-        use crate::smelt_edit::{Status, VimMode};
+        use crate::keymap::TextAction;
+        use crate::smelt_edit::Status;
 
-        let (vim_enabled, vim_mode, readonly, readonly_text, buf_empty) =
-            match (self.ui.win(win_id), self.ui.buf(buf_id)) {
-                (Some(w), Some(b)) => (
-                    w.vim_enabled(),
-                    w.vim_mode(),
-                    b.readonly,
-                    w.surface().is_readonly_text(),
-                    b.text().is_empty(),
-                ),
-                _ => return Status::Ignored,
-            };
-        let ctx = KeyContext {
-            buf_empty,
-            vim_non_insert: vim_enabled
-                && matches!(
-                    vim_mode,
-                    VimMode::Normal | VimMode::Visual | VimMode::VisualLine
-                ),
-            vim_enabled,
-            agent_running: false,
-        };
-        let Some(action) = lookup(k.code, k.modifiers, &ctx) else {
+        let Some((buf_id, viewport_rows, uses_vim)) = self.viewer_key_context(win_id) else {
             return Status::Ignored;
+        };
+        let (readonly, readonly_text) = match (self.ui.win(win_id), self.ui.buf(buf_id)) {
+            (Some(w), Some(b)) => (b.readonly, w.surface().is_readonly_text()),
+            _ => return Status::Ignored,
         };
 
         if readonly_text
@@ -1907,12 +1793,12 @@ impl TuiApp {
         {
             let extending = matches!(
                 action,
-                KeyAction::SelectUp
-                    | KeyAction::SelectDown
-                    | KeyAction::SelectStartOfLine
-                    | KeyAction::SelectEndOfLine
-                    | KeyAction::SelectWordForward
-                    | KeyAction::SelectWordBackward
+                TextAction::SelectUp
+                    | TextAction::SelectDown
+                    | TextAction::SelectStartOfLine
+                    | TextAction::SelectEndOfLine
+                    | TextAction::SelectWordForward
+                    | TextAction::SelectWordBackward
             );
             use crate::smelt_edit::text::CharClass;
             use crate::smelt_edit::{Motion, WordTo};
@@ -1921,42 +1807,50 @@ impl TuiApp {
                 count: None,
             };
             let command = match action {
-                KeyAction::MoveUp | KeyAction::SelectUp => {
+                TextAction::MoveUp | TextAction::SelectUp => {
                     Some(crate::smelt_edit::DocumentCommand::MoveRows(-1))
                 }
-                KeyAction::MoveDown | KeyAction::SelectDown => {
+                TextAction::MoveDown | TextAction::SelectDown => {
                     Some(crate::smelt_edit::DocumentCommand::MoveRows(1))
                 }
-                KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
+                TextAction::MoveWordForward | TextAction::SelectWordForward => {
                     Some(move_command(Motion::Word(WordTo::Next, CharClass::Word)))
                 }
-                KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
+                TextAction::MoveWordBackward | TextAction::SelectWordBackward => {
                     Some(move_command(Motion::Word(WordTo::Prev, CharClass::Word)))
                 }
-                KeyAction::PageUp => Some(crate::smelt_edit::DocumentCommand::PageRows(-1)),
-                KeyAction::PageDown => Some(crate::smelt_edit::DocumentCommand::PageRows(1)),
-                KeyAction::HalfPageUp => Some(crate::smelt_edit::DocumentCommand::MoveRows(
-                    -((viewport_rows as isize) / 2).max(1),
-                )),
-                KeyAction::HalfPageDown => Some(crate::smelt_edit::DocumentCommand::MoveRows(
-                    ((viewport_rows as isize) / 2).max(1),
-                )),
-                KeyAction::ScrollLineUp => Some(crate::smelt_edit::DocumentCommand::ScrollRows(-1)),
-                KeyAction::ScrollLineDown => {
+                TextAction::PageUp => Some(crate::smelt_edit::DocumentCommand::PageRows(-1)),
+                TextAction::PageDown => Some(crate::smelt_edit::DocumentCommand::PageRows(1)),
+                TextAction::HalfPageUp => {
+                    Some(crate::smelt_edit::DocumentCommand::HalfPageRows(-1))
+                }
+                TextAction::HalfPageDown => {
+                    Some(crate::smelt_edit::DocumentCommand::HalfPageRows(1))
+                }
+                TextAction::ScrollLineUp => {
+                    Some(crate::smelt_edit::DocumentCommand::ScrollRows(-1))
+                }
+                TextAction::ScrollLineDown => {
                     Some(crate::smelt_edit::DocumentCommand::ScrollRows(1))
                 }
-                KeyAction::MoveStartOfBuffer => Some(move_command(Motion::BufferStart)),
-                KeyAction::MoveEndOfBuffer => Some(move_command(Motion::BufferEnd)),
-                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
+                TextAction::MoveStartOfBuffer => Some(move_command(Motion::BufferStart)),
+                TextAction::MoveEndOfBuffer => Some(move_command(Motion::BufferEnd)),
+                TextAction::MoveStartOfLine | TextAction::SelectStartOfLine => {
                     Some(move_command(Motion::LineStart))
                 }
-                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
+                TextAction::MoveEndOfLine | TextAction::SelectEndOfLine => {
                     Some(move_command(Motion::LineEnd))
                 }
-                KeyAction::CopySelection => Some(crate::smelt_edit::DocumentCommand::YankSelection),
+                TextAction::CopySelection => {
+                    Some(crate::smelt_edit::DocumentCommand::YankSelection)
+                }
                 _ => None,
             };
             if let Some(command) = command {
+                // Under Vim, motions run as the Vim engine runs them.
+                if uses_vim && !extending {
+                    return self.execute_viewer_command(win_id, buf_id, command, viewport_rows);
+                }
                 let now = self.core.clock.instant_now();
                 let anchor_active = self
                     .ui
@@ -1992,33 +1886,33 @@ impl TuiApp {
 
         let extending = matches!(
             action,
-            KeyAction::SelectLeft
-                | KeyAction::SelectRight
-                | KeyAction::SelectUp
-                | KeyAction::SelectDown
-                | KeyAction::SelectWordForward
-                | KeyAction::SelectWordBackward
-                | KeyAction::SelectStartOfLine
-                | KeyAction::SelectEndOfLine
+            TextAction::SelectLeft
+                | TextAction::SelectRight
+                | TextAction::SelectUp
+                | TextAction::SelectDown
+                | TextAction::SelectWordForward
+                | TextAction::SelectWordBackward
+                | TextAction::SelectStartOfLine
+                | TextAction::SelectEndOfLine
         );
         let is_motion = matches!(
             action,
-            KeyAction::MoveLeft
-                | KeyAction::MoveRight
-                | KeyAction::MoveUp
-                | KeyAction::MoveDown
-                | KeyAction::MoveStartOfLine
-                | KeyAction::MoveEndOfLine
-                | KeyAction::MoveWordForward
-                | KeyAction::MoveWordBackward
-                | KeyAction::MoveStartOfBuffer
-                | KeyAction::MoveEndOfBuffer
-                | KeyAction::PageUp
-                | KeyAction::PageDown
-                | KeyAction::HalfPageUp
-                | KeyAction::HalfPageDown
-                | KeyAction::ScrollLineUp
-                | KeyAction::ScrollLineDown
+            TextAction::MoveLeft
+                | TextAction::MoveRight
+                | TextAction::MoveUp
+                | TextAction::MoveDown
+                | TextAction::MoveStartOfLine
+                | TextAction::MoveEndOfLine
+                | TextAction::MoveWordForward
+                | TextAction::MoveWordBackward
+                | TextAction::MoveStartOfBuffer
+                | TextAction::MoveEndOfBuffer
+                | TextAction::PageUp
+                | TextAction::PageDown
+                | TextAction::HalfPageUp
+                | TextAction::HalfPageDown
+                | TextAction::ScrollLineUp
+                | TextAction::ScrollLineDown
         );
 
         let cpos_before = self.ui.win(win_id).expect("window").cpos();
@@ -2032,14 +1926,14 @@ impl TuiApp {
         // Line-delta motions resolve through the window's display-line API,
         // which respects soft-wrap and gutter math.
         let line_delta: Option<isize> = match action {
-            KeyAction::MoveUp | KeyAction::SelectUp => Some(-1),
-            KeyAction::MoveDown | KeyAction::SelectDown => Some(1),
-            KeyAction::PageUp => Some(-(viewport_rows as isize)),
-            KeyAction::PageDown => Some(viewport_rows as isize),
-            KeyAction::HalfPageUp => Some(-((viewport_rows as isize) / 2).max(1)),
-            KeyAction::HalfPageDown => Some(((viewport_rows as isize) / 2).max(1)),
-            KeyAction::ScrollLineUp => Some(-1),
-            KeyAction::ScrollLineDown => Some(1),
+            TextAction::MoveUp | TextAction::SelectUp => Some(-1),
+            TextAction::MoveDown | TextAction::SelectDown => Some(1),
+            TextAction::PageUp => Some(-(viewport_rows as isize)),
+            TextAction::PageDown => Some(viewport_rows as isize),
+            TextAction::HalfPageUp => Some(-((viewport_rows as isize) / 2).max(1)),
+            TextAction::HalfPageDown => Some(((viewport_rows as isize) / 2).max(1)),
+            TextAction::ScrollLineUp => Some(-1),
+            TextAction::ScrollLineDown => Some(1),
             _ => None,
         };
         if let Some(d) = line_delta {
@@ -2058,35 +1952,35 @@ impl TuiApp {
         let text = buf.text().to_string();
         let cpos = self.ui.win(win_id).expect("window").cpos();
         let mv: Option<usize> = match action {
-            KeyAction::MoveLeft | KeyAction::SelectLeft => {
+            TextAction::MoveLeft | TextAction::SelectLeft => {
                 Some(crate::smelt_edit::text::prev_grapheme_boundary(&text, cpos))
             }
-            KeyAction::MoveRight | KeyAction::SelectRight => {
+            TextAction::MoveRight | TextAction::SelectRight => {
                 Some(crate::smelt_edit::text::next_grapheme_boundary(&text, cpos))
             }
-            KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
+            TextAction::MoveStartOfLine | TextAction::SelectStartOfLine => {
                 Some(crate::smelt_edit::text::line_start(&text, cpos))
             }
-            KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
+            TextAction::MoveEndOfLine | TextAction::SelectEndOfLine => {
                 Some(crate::smelt_edit::text::line_end(&text, cpos))
             }
-            KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
+            TextAction::MoveWordForward | TextAction::SelectWordForward => {
                 Some(crate::smelt_edit::text::word_forward_pos(
                     &text,
                     cpos,
                     crate::smelt_edit::text::CharClass::Word,
                 ))
             }
-            KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
+            TextAction::MoveWordBackward | TextAction::SelectWordBackward => {
                 Some(crate::smelt_edit::text::word_backward_pos(
                     &text,
                     cpos,
                     crate::smelt_edit::text::CharClass::Word,
                 ))
             }
-            KeyAction::MoveStartOfBuffer => Some(0),
-            KeyAction::MoveEndOfBuffer => Some(text.len()),
-            KeyAction::CopySelection => {
+            TextAction::MoveStartOfBuffer => Some(0),
+            TextAction::MoveEndOfBuffer => Some(text.len()),
+            TextAction::CopySelection => {
                 let win = self.ui.win(win_id).expect("window");
                 if let Some((s, e)) = win.selection_range(buf) {
                     let s = crate::smelt_edit::text::snap_grapheme(&text, s);
@@ -2132,23 +2026,48 @@ impl TuiApp {
 /// context pair that handlers see on multi-key matches.
 struct LuaChordOracle<'a> {
     lua: &'a crate::lua::LuaExecution,
-    vim_mode: Option<&'a str>,
+    chain: &'a KeymapChain,
+    frames: Vec<smelt_core::lua::keymaps::Frame<'a>>,
     vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
+    /// The native action a matched chord resolved to.
+    native: Option<crate::app::lua_bridge::NativeCall>,
+}
+
+/// Resolve action `name` of the scope at `frame`, keeping a native one in
+/// `native` for the app to run once dispatch returns.
+fn resolve_action(
+    chain: &KeymapChain,
+    frame: usize,
+    name: &str,
+    native: &mut Option<crate::app::lua_bridge::NativeCall>,
+) -> Option<smelt_core::lua::runtime::ScopeActionImpl> {
+    use smelt_core::lua::runtime::ScopeActionImpl;
+    match chain.action(frame, name)? {
+        crate::app::lua_bridge::ScopeAction::Lua(id) => Some(ScopeActionImpl::Lua(id)),
+        crate::app::lua_bridge::ScopeAction::Native(call) => {
+            *native = Some(call);
+            Some(ScopeActionImpl::Native)
+        }
+    }
 }
 
 impl smelt_core::keymap::ChordOracle for LuaChordOracle<'_> {
     fn has_longer(&self, seq: &str) -> bool {
-        self.lua.chord_has_longer(seq, self.vim_mode)
+        self.lua.chord_has_longer(&self.frames, seq)
     }
     fn try_keymap(&mut self, seq: &str) -> smelt_core::lua::runtime::KeymapResult {
-        let ctx: Vec<(&str, String)> = vec![(
+        let ctx = [(
             "vim_mode_at_chord_start",
             self.vim_mode_at_start
                 .map(|m| crate::lua::LuaVimMode::from(m).label().to_string())
                 .unwrap_or_default(),
         )];
+        let chain = self.chain;
+        let native = &mut self.native;
         self.lua
-            .run_keymap(seq, self.vim_mode, Some(ctx.as_slice()))
+            .run_keymap(&self.frames, seq, &ctx, &mut |frame, name| {
+                resolve_action(chain, frame, name, native)
+            })
     }
 }
 
@@ -2262,7 +2181,8 @@ mod tests {
         ctrl_c(&mut app);
         ctrl_c(&mut app);
         assert!(!app.quit_requested());
-        app.clock.advance(super::CTRL_C_REPEAT_GRACE);
+        app.clock
+            .advance(crate::app::scope_actions::CTRL_C_REPEAT_GRACE);
         ctrl_c(&mut app);
         assert!(app.quit_requested());
 
@@ -2272,7 +2192,8 @@ mod tests {
         ctrl_c(&mut app);
         ctrl_c(&mut app);
         assert!(app.agent_running());
-        app.clock.advance(super::CTRL_C_REPEAT_GRACE);
+        app.clock
+            .advance(crate::app::scope_actions::CTRL_C_REPEAT_GRACE);
         ctrl_c(&mut app);
         assert!(!app.agent_running());
     }

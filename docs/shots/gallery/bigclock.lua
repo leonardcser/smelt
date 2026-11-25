@@ -29,17 +29,13 @@ local function open()
   local layout = smelt.ui.layout
   smelt.overlay.new({
     name = "bigclock", anchor = "center", width = 27, height = 5, border = "none", modal = false,
-    -- The empty window holds focus so the keymaps fire; the clock is a paint.
+    -- The empty window holds focus so its keys fire; the clock is a paint.
     layout = layout.vbox({
       { layout.leaf(ui.win), height = 0 },
       { layout.leaf(ui.paint, { measure = { 27, 5 } }), height = "fit" },
     }),
-    keymaps = {
-      { key = "q", on_press = close },
-      { key = "<Esc>", on_press = close },
-      { key = "<C-c>", on_press = close },
-    },
   })
+  for _, key in ipairs({ "q", "<Esc>", "<C-c>" }) do ui.win:key(key, close) end
   ui.win:focus()
 end
 

@@ -324,17 +324,20 @@ impl TestApp {
                 }),
             })
             "#,
-            // 4: leaf with overlay-level keymap (deferred-safe path)
+            // 4: leaf in an overlay keymap scope
             r#"
+            smelt.keymap.scope("fuzz.ov.4", {
+                actions = { noop = "Do nothing" },
+                keys = { { "", "<C-x>", "noop" } },
+            })
             local b = smelt.buf.new({ name = "fuzz.ov.4.buf" })
             local w = smelt.win.new(b, { name = "fuzz.ov.4.win" })
             smelt.overlay.new({
                 name = "fuzz.ov.4", anchor = "screen_at", corner = "nw",
                 row = 1, col = 1, width = 18, height = 5,
                 layout = smelt.ui.layout.leaf(w),
-                keymaps = {
-                    { key = "<C-x>", on_press = function() end },
-                },
+                scope = "fuzz.ov.4",
+                actions = { noop = function() end },
             })
             "#,
         ];

@@ -49,6 +49,7 @@ pub(crate) enum EditCommand {
 }
 
 impl LineEdit {
+    #[cfg(test)]
     pub(crate) fn new(text: String, cursor: usize) -> Self {
         let cursor = text::snap_grapheme(&text, cursor);
         Self {

@@ -3,48 +3,19 @@
 //! `smelt.overlay.new(opts)` opens an overlay rendered from `opts.layout`
 //! (a `smelt.ui.layout` userdata tree) and returns an `Overlay`
 //! userdata. `opts.name` opts the overlay into hot-reload survival.
-//! `opts.keymaps` installs overlay-scoped bindings that fire when any
-//! leaf of the overlay holds focus, without each leaf re-registering.
+//! `opts.scope` puts the overlay in a keymap scope, whose bindings fire when
+//! any leaf of the overlay holds focus, with `opts.actions` implementing it.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
-use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaClassField, LuaType};
+use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
-use smelt_core::lua::reg::LuaReg;
-use std::sync::Arc;
-
-use crate::lua::{parse_keybind, LuaShared};
 
 /// Options accepted by `smelt.overlay.new(opts)`.
 struct LuaOverlayNewOpts(mlua::Table);
 
 impl LuaType for LuaOverlayNewOpts {
     fn lua_type() -> String {
-        record_class(LuaClassDecl {
-            name: "smelt.overlay.Keymap",
-            classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.Keymap"),
-            doc: "One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... })`.",
-            fields: vec![
-                LuaClassField {
-                    name: "key",
-                    ty: "string".into(),
-                    optional: false,
-                                        doc: "Key chord such as `<Esc>`, `<C-j>`, or `q`.",
-                },
-                LuaClassField {
-                    name: "on_press",
-                    ty: "fun(ctx: table)".into(),
-                    optional: false,
-                                        doc: "Handler invoked when the key fires while any overlay leaf has focus.",
-                },
-                LuaClassField {
-                    name: "hint",
-                    ty: "string".into(),
-                    optional: true,
-                                        doc: "Human-readable hint for key-discovery plugins.",
-                },
-            ],
-        });
         record_class(LuaClassDecl {
             name: "smelt.overlay.NewOpts",
             classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.NewOpts"),
@@ -76,7 +47,8 @@ impl LuaType for LuaOverlayNewOpts {
                 LuaClassField { name: "z", ty: "integer".into(), optional: true, doc: "Z-index. Higher overlays render above lower overlays." },
                 LuaClassField { name: "draggable", ty: "boolean | smelt.overlay.DragConfig".into(), optional: true, doc: "Enable or configure mouse dragging." },
                 LuaClassField { name: "resizable", ty: "boolean | smelt.overlay.ResizeConfig".into(), optional: true, doc: "Enable or configure mouse resize handles." },
-                LuaClassField { name: "keymaps", ty: "smelt.overlay.Keymap[]".into(), optional: true, doc: "Overlay-scoped key bindings." },
+                LuaClassField { name: "scope", ty: "string".into(), optional: true, doc: "Keymap scope of the overlay. Its bindings fire while any leaf of the overlay has focus, after the focused window's own scope." },
+                LuaClassField { name: "actions", ty: "table<string, fun(ctx: table): boolean?>".into(), optional: true, doc: "Implementations of the scope's actions, by action name. Requires `scope`." },
             ],
         });
         "smelt.overlay.NewOpts".into()
@@ -124,58 +96,18 @@ impl mlua::UserData for LuaOverlay {
             Ok(())
         });
 
-        // ── key(chord, fn) → Reg ───────────────────────────────────
-        methods.add_function(
-            "key",
-            |lua,
-             (this_ud, chord, func): (mlua::AnyUserData, String, LuaCallback<mlua::Table, ()>)|
-             -> LuaResult<LuaReg> {
-                let this = *this_ud.borrow::<LuaOverlay>()?;
-                install_overlay_key(lua, this.id, chord, func.into_inner())
+        methods.add_method(
+            "scope",
+            |lua, this, (name, actions): (String, Option<mlua::Table>)| {
+                super::keymap::install_scope(
+                    lua,
+                    crate::smelt_edit::ScopeOwner::Overlay(this.id),
+                    name,
+                    actions,
+                )
             },
         );
     }
-}
-
-/// Register one overlay-scoped key binding. Returns a `Reg` whose `:remove()`
-/// undoes the binding (and drops the Lua callback handle).
-pub(crate) fn install_overlay_key(
-    lua: &Lua,
-    overlay: crate::smelt_edit::OverlayId,
-    chord: String,
-    func: mlua::Function,
-) -> LuaResult<LuaReg> {
-    let Some(key) = parse_keybind(&chord) else {
-        return Err(mlua::Error::RuntimeError(format!(
-            "overlay:key: unknown chord `{chord}`"
-        )));
-    };
-    let shared = current_shared(lua)?;
-    let id = crate::lua::register_callback_handle(&shared, lua, func)?;
-    crate::lua::with_ui_host(|host| {
-        host.set_overlay_keymap(
-            overlay,
-            key,
-            crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
-        );
-    });
-    Ok(LuaReg::new(move || {
-        crate::lua::app_ref::defer_registered_lua_operation(
-            &shared,
-            id,
-            crate::lua::app_ref::DeferredLuaOperation::OverlayKeymap {
-                overlay,
-                key,
-                callback_id: id,
-            },
-        )
-    }))
-}
-
-fn current_shared(lua: &Lua) -> LuaResult<Arc<LuaShared>> {
-    lua.named_registry_value::<mlua::AnyUserData>("__smelt_shared")?
-        .borrow::<super::win::SharedHandle>()
-        .map(|h| h.0.clone())
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -184,7 +116,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         smelt,
         "overlay",
         "Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.ui.layout` userdata) and returns an `Overlay` userdata. \
-`opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `true` enables title drag plus inert-body drag. `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`; `true` enables floating-safe left/right/bottom handles without stealing the title row. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings. UiHost-only.",
+`opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `true` enables title drag plus inert-body drag. `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`; `true` enables floating-safe left/right/bottom handles without stealing the title row. `opts.scope` names the overlay's keymap scope and `opts.actions` implements its actions. UiHost-only.",
         Tier::UiHost,
     )?;
 
@@ -253,20 +185,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         fields: smelt_core::class_methods! {
             "rect" => fn() -> Option<mlua::Table>, "Return the current compositor-resolved rectangle, including chrome, or nil when closed or its anchor is unavailable.",
             "close" => fn() -> (), "Close the overlay. No-op if already closed.",
-            "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.",
+            "scope" => fn(name: String, actions: Option<mlua::Table>) -> (), "Put the overlay in keymap scope `name`, with `actions` mapping the scope's action names to functions. Replaces its previous scope.",
         },
     });
 
     m.fn_(
         "new",
-        "Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings.",
+        "Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`. `opts.scope` names the overlay's keymap scope and `opts.actions` implements its actions.",
         &["opts"],
         |lua, (opts,): (LuaOverlayNewOpts,)| -> LuaResult<LuaOverlay> {
             if smelt_core::lua::reg::RegistrationScope::active() {
                 return Err(LuaError::external("view factories return layouts; open overlays outside construction"));
             }
             let opts = opts.0;
-            let keymaps: Option<mlua::Table> = opts.get("keymaps").ok().flatten();
+            let scope: Option<String> = opts.get("scope")?;
+            let actions: Option<mlua::Table> = opts.get("actions")?;
+            if scope.is_none() && actions.is_some() {
+                return Err(LuaError::RuntimeError("overlay: `actions` requires `scope`".into()));
+            }
             // Auto-name overlays declared without `opts.name` inside a
             // module body so they survive `/reload` keyed by their
             // declaration site. Skipped when the caller already passed
@@ -285,23 +221,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .map_err(|e| LuaError::RuntimeError(format!("overlay: {e}")))?;
             let overlay_id = crate::smelt_edit::OverlayId(id as u32);
 
-            if let Some(kms) = keymaps {
-                // Clear any prior overlay-scoped bindings on a named re-open so the
-                // freshly parsed list fully replaces the old one (no stale chords
-                // hanging around when a plugin hot-reloads).
-                crate::lua::with_ui_host(|host| host.clear_overlay_callbacks(overlay_id));
-                for pair in kms.sequence_values::<mlua::Table>() {
-                    let entry = pair?;
-                    let chord: String = entry
-                        .get("key")
-                        .map_err(|e| LuaError::RuntimeError(format!("overlay keymaps: {e}")))?;
-                    let func: mlua::Function = entry.get("on_press").map_err(|e| {
-                        LuaError::RuntimeError(format!(
-                            "overlay keymaps: missing on_press for `{chord}`: {e}"
-                        ))
-                    })?;
-                    install_overlay_key(lua, overlay_id, chord, func)?;
-                }
+            if let Some(scope) = scope {
+                super::keymap::install_scope(
+                    lua,
+                    crate::smelt_edit::ScopeOwner::Overlay(overlay_id),
+                    scope,
+                    actions,
+                )?;
             }
 
             Ok(LuaOverlay { id: overlay_id })

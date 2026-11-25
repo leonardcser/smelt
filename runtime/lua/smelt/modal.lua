@@ -2,6 +2,26 @@
 
 local M = {}
 
+smelt.keymap.scope("modal", {
+  desc = "Centered modals with action buttons",
+  actions = {
+    submit = "Choose the selected button",
+    prev   = "Select the previous button",
+    next   = "Select the next button",
+    close  = "Close the modal",
+  },
+  keys = {
+    { "",  "<CR>",    "submit" },
+    { "",  "<Left>",  "prev"   },
+    { "",  "<S-Tab>", "prev"   },
+    { "",  "<Right>", "next"   },
+    { "",  "<Tab>",   "next"   },
+    { "",  "<Esc>",   "close"  },
+    { "",  "<C-c>",   "close"  },
+    { "n", "q",       "close"  },
+  },
+})
+
 local NS_ACTION_LABEL = smelt.ns("smelt.modal.action.label")
 local NS_ACTION_DISABLED = smelt.ns("smelt.modal.action.disabled")
 
@@ -142,14 +162,12 @@ function M.open(opts)
     end
   end
 
-  action_leaf:key("enter", function() submit() end)
-  action_leaf:key("left", function() select_action(selected - 1) end)
-  action_leaf:key("right", function() select_action(selected + 1) end)
-  action_leaf:key("tab", function() select_action(selected + 1) end)
-  action_leaf:key("s-tab", function() select_action(selected - 1) end)
-  action_leaf:key("esc", close)
-  if opts.close_with_q ~= false then action_leaf:key("q", close) end
-  action_leaf:key("c-c", close)
+  action_leaf:scope("modal", {
+    submit = function() submit() end,
+    prev   = function() select_action(selected - 1) end,
+    next   = function() select_action(selected + 1) end,
+    close  = close,
+  })
   action_leaf:on("dismiss", close)
 
   local layout = smelt.ui.layout.vbox({

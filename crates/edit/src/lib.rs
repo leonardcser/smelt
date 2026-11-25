@@ -64,10 +64,11 @@ impl From<WinId> for PaintId {
 /// Routes `Callback::Lua` handles out to the host's Lua runtime.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, WinId, &callback::Payload) + 'a;
 
+use callback::Callbacks;
 pub use callback::{
-    Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, MouseButton, Payload, WinEvent,
+    Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, MouseButton, Payload, ScopeOwner,
+    WinEvent,
 };
-use callback::{Callbacks, KeymapScope};
 pub use event::{Event, Status};
 pub use modal::{ModalId, ModalOwner};
 pub use motions::{FindKind, LineTo, Motion, WordTo};
@@ -1482,7 +1483,7 @@ impl Ui {
             return Vec::new();
         };
         self.modals.remove(pos);
-        self.callbacks.clear_scope(KeymapScope::Modal(id))
+        self.callbacks.clear_scope(ScopeOwner::Modal(id))
     }
 
     pub(crate) fn modal(&self, id: ModalId) -> Option<&modal::Modal> {
@@ -2099,7 +2100,7 @@ impl Ui {
                 all_ids.extend(self.callbacks.clear_all(win));
             }
         }
-        all_ids.extend(self.callbacks.clear_scope(KeymapScope::Overlay(id)));
+        all_ids.extend(self.callbacks.clear_scope(ScopeOwner::Overlay(id)));
         all_ids
     }
 
@@ -2141,58 +2142,63 @@ impl Ui {
         self.callbacks.set_key_fallback(win, cb)
     }
 
-    /// Bind a key on an overlay. Fires when any leaf of the overlay holds focus,
-    /// after a per-window keymap miss but before global Lua keymaps.
-    /// Returns the displaced callback, if any.
+    // ── Keymap scopes ────────────────────────────────────────────────
+
+    /// Put `owner` in keymap scope `name` with `actions`, replacing its
+    /// previous scope. Returns Lua handle ids of the replaced actions.
     #[must_use]
-    pub fn overlay_set_keymap(
+    pub fn set_scope(
         &mut self,
-        overlay: OverlayId,
-        key: KeyBind,
-        cb: Callback,
-    ) -> Option<Callback> {
-        self.callbacks
-            .set_scoped_keymap(KeymapScope::Overlay(overlay), key, cb)
+        owner: ScopeOwner,
+        name: String,
+        actions: HashMap<String, LuaHandle>,
+    ) -> Vec<u64> {
+        self.callbacks.set_scope(owner, name, actions)
     }
 
+    /// Take `owner` out of its keymap scope. Returns Lua handle ids for cleanup.
     #[must_use]
-    pub fn overlay_clear_keymap(
-        &mut self,
-        overlay: OverlayId,
-        key: KeyBind,
-        id: u64,
-    ) -> Option<Callback> {
-        self.callbacks
-            .clear_scoped_keymap(KeymapScope::Overlay(overlay), key, id)
+    pub fn clear_scope(&mut self, owner: ScopeOwner) -> Vec<u64> {
+        self.callbacks.clear_scope(owner)
     }
 
-    /// Remove every overlay-scoped binding. Returns Lua handle ids for caller cleanup.
-    #[must_use]
-    pub fn overlay_clear_callbacks(&mut self, overlay: OverlayId) -> Vec<u64> {
-        self.callbacks.clear_scope(KeymapScope::Overlay(overlay))
+    /// Keymap scopes around the focused window, innermost first: the window
+    /// itself, its modal, then its overlay. Containers without a scope are
+    /// skipped.
+    pub fn scope_chain(&self) -> Vec<(ScopeOwner, &str)> {
+        let Some(win) = self.focus else {
+            return Vec::new();
+        };
+        [
+            Some(ScopeOwner::Win(win)),
+            self.focused_modal().map(ScopeOwner::Modal),
+            self.overlay_for_leaf(win).map(ScopeOwner::Overlay),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|owner| {
+            self.callbacks
+                .scope(owner)
+                .map(|frame| (owner, frame.name.as_str()))
+        })
+        .collect()
     }
 
-    /// Bind a key across every leaf in a modal focus scope.
-    #[must_use]
-    pub fn modal_set_keymap(
-        &mut self,
-        modal: ModalId,
-        key: KeyBind,
-        cb: Callback,
-    ) -> Option<Callback> {
-        self.callbacks
-            .set_scoped_keymap(KeymapScope::Modal(modal), key, cb)
+    /// Put `win` in native keymap scope `name`, whose actions the host
+    /// implements, or with `None` take it out. A native scope sits under the
+    /// window's own scope frame and survives Lua reloads.
+    pub fn set_base_scope(&mut self, win: WinId, name: Option<&'static str>) {
+        self.callbacks.set_base_scope(win, name);
     }
 
-    #[must_use]
-    pub fn modal_clear_keymap(
-        &mut self,
-        modal: ModalId,
-        key: KeyBind,
-        id: u64,
-    ) -> Option<Callback> {
-        self.callbacks
-            .clear_scoped_keymap(KeymapScope::Modal(modal), key, id)
+    /// The native keymap scope of `win`.
+    pub fn base_scope(&self, win: WinId) -> Option<&'static str> {
+        self.callbacks.base_scope(win)
+    }
+
+    /// The Lua callback implementing action `name` of `owner`'s scope.
+    pub fn scope_action(&self, owner: ScopeOwner, name: &str) -> Option<LuaHandle> {
+        self.callbacks.action(owner, name)
     }
 
     /// Register an event callback. Multiple callbacks per (win, event) fire in registration order.
@@ -3633,62 +3639,6 @@ impl Ui {
             lua_invoke,
             |s, win| s.callbacks.take_keymap(win, key),
             |s, win, cb| s.callbacks.restore_keymap(win, key, cb),
-        )
-    }
-
-    /// Dispatch a keymap shared by every leaf in the focused modal.
-    pub fn dispatch_modal_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-        mods: crossterm::event::KeyModifiers,
-        lua_invoke: &mut LuaInvoke,
-    ) -> Status {
-        let Some(modal) = self.focused_modal() else {
-            return Status::Ignored;
-        };
-        let key = KeyBind::new(code, mods);
-        self.run_key_callback(
-            code,
-            mods,
-            lua_invoke,
-            |ui, _| {
-                ui.callbacks
-                    .take_scoped_keymap(KeymapScope::Modal(modal), key)
-            },
-            |ui, _, callback| {
-                ui.callbacks
-                    .restore_scoped_keymap(KeymapScope::Modal(modal), key, callback)
-            },
-        )
-    }
-
-    /// Overlay-scoped keymaps fire when the focused window belongs to an
-    /// overlay and the overlay has a binding for the chord.
-    pub fn dispatch_overlay_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-        mods: crossterm::event::KeyModifiers,
-        lua_invoke: &mut LuaInvoke,
-    ) -> Status {
-        let Some(win) = self.focus() else {
-            return Status::Ignored;
-        };
-        let Some(overlay) = self.overlay_for_leaf(win) else {
-            return Status::Ignored;
-        };
-        let key = KeyBind::new(code, mods);
-        self.run_key_callback(
-            code,
-            mods,
-            lua_invoke,
-            |ui, _| {
-                ui.callbacks
-                    .take_scoped_keymap(KeymapScope::Overlay(overlay), key)
-            },
-            |ui, _, callback| {
-                ui.callbacks
-                    .restore_scoped_keymap(KeymapScope::Overlay(overlay), key, callback);
-            },
         )
     }
 
@@ -6776,84 +6726,61 @@ mod tests {
         assert!(ui.overlay(id).is_some());
     }
 
+    fn named(actions: &[(&str, u64)]) -> HashMap<String, LuaHandle> {
+        actions
+            .iter()
+            .map(|(name, id)| (name.to_string(), LuaHandle(*id)))
+            .collect()
+    }
+
     #[test]
-    fn dispatch_overlay_key_fires_when_focus_in_overlay() {
-        // Overlay-scoped keymap fires when the focused leaf belongs to that
-        // overlay, even though the leaf itself has no specific keymap.
+    fn scope_chain_lists_the_focused_window_then_its_containers() {
         let mut ui = make_ui();
         let a = WinId(70);
         let id = ui.overlay_open(modal_overlay_with_leaves(a, WinId(71), WinId(72)));
         ui.set_focus(a);
-
-        let fired = std::sync::Arc::new(std::sync::Mutex::new(false));
-        let fired_cb = fired.clone();
-        let cb: Callback = Callback::Rust(Box::new(move |_| {
-            *fired_cb.lock().unwrap() = true;
-            CallbackResult::Consumed
-        }));
-        let _ = ui.overlay_set_keymap(id, KeyBind::plain(crossterm::event::KeyCode::Tab), cb);
-
-        let result = ui.dispatch_overlay_key(
-            crossterm::event::KeyCode::Tab,
-            crossterm::event::KeyModifiers::NONE,
-            &mut |_, _, _| {},
+        let _ = ui.set_scope(ScopeOwner::Overlay(id), "diff".into(), HashMap::new());
+        let _ = ui.set_scope(ScopeOwner::Win(a), "diff.files".into(), HashMap::new());
+        let _ = ui.set_scope(
+            ScopeOwner::Win(WinId(71)),
+            "diff.preview".into(),
+            HashMap::new(),
         );
-        assert_eq!(result, Status::Consumed);
-        assert!(*fired.lock().unwrap());
+        let names: Vec<_> = ui.scope_chain().into_iter().map(|(_, name)| name).collect();
+        assert_eq!(names, ["diff.files", "diff"]);
     }
 
     #[test]
-    fn dispatch_overlay_key_ignored_when_focus_outside_overlay() {
-        // A non-modal overlay keymap stays inert if the focused leaf is in a
-        // different overlay (or none): the cascade routes through
-        // `overlay_for_leaf`.
+    fn scope_chain_ignores_overlays_without_focus() {
         let mut ui = make_ui();
         let outside = WinId(80);
         make_split(&mut ui, outside);
+        let id = ui
+            .overlay_open(modal_overlay_with_leaves(WinId(81), WinId(82), WinId(83)).modal(false));
+        let _ = ui.set_scope(ScopeOwner::Overlay(id), "diff".into(), HashMap::new());
         ui.set_focus(outside);
-        let overlay_only_leaf = WinId(81);
-        let id = ui.overlay_open(
-            modal_overlay_with_leaves(overlay_only_leaf, WinId(82), WinId(83)).modal(false),
-        );
-        ui.set_focus(outside);
-
-        let fired = std::sync::Arc::new(std::sync::Mutex::new(false));
-        let fired_cb = fired.clone();
-        let cb: Callback = Callback::Rust(Box::new(move |_| {
-            *fired_cb.lock().unwrap() = true;
-            CallbackResult::Consumed
-        }));
-        let _ = ui.overlay_set_keymap(id, KeyBind::plain(crossterm::event::KeyCode::Tab), cb);
-
-        let result = ui.dispatch_overlay_key(
-            crossterm::event::KeyCode::Tab,
-            crossterm::event::KeyModifiers::NONE,
-            &mut |_, _, _| {},
-        );
-        assert_eq!(result, Status::Ignored);
-        assert!(!*fired.lock().unwrap());
+        assert!(ui.scope_chain().is_empty());
     }
 
     #[test]
-    fn overlay_keymaps_reaped_on_overlay_close() {
-        // Closing an overlay must clear its overlay-scoped keymaps so a
-        // subsequent overlay reusing the same id (or a stale dispatch) can't
-        // hit a freed Lua callback.
+    fn closing_an_overlay_releases_its_scope_actions() {
         let mut ui = make_ui();
         let a = WinId(90);
         let id = ui.overlay_open(modal_overlay_with_leaves(a, WinId(91), WinId(92)));
         ui.set_focus(a);
-
-        let _ = ui.overlay_set_keymap(
-            id,
-            KeyBind::plain(crossterm::event::KeyCode::Tab),
-            Callback::Lua(LuaHandle(999)),
+        let _ = ui.set_scope(
+            ScopeOwner::Overlay(id),
+            "diff".into(),
+            named(&[("stage", 999)]),
         );
-
-        // Closing the focused leaf cascades to overlay close + cleanup.
+        let _ = ui.set_scope(
+            ScopeOwner::Win(a),
+            "diff.files".into(),
+            named(&[("collapse", 998)]),
+        );
         let lua_ids = ui.win_close(a);
         assert!(
-            lua_ids.contains(&999),
+            lua_ids.contains(&999) && lua_ids.contains(&998),
             "expected reaped lua ids: {lua_ids:?}"
         );
     }

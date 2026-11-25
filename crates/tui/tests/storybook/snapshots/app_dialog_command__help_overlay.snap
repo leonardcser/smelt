@@ -5,17 +5,17 @@ expression: frame.text()
 
 
     ┌ help (F1 to close) ─────────────────────────────┐
-    │prefixes                                         │
-    │  /command  commands (try /resume, /compact,     │
-    │            /fork, /ps, /color…)                 │
-    │  @<path>  attach a file or URL                  │
-    │  !<cmd>  run a shell command                    │
+    │prompt input                                     │
+    │  /command  Run a command (try /resume,          │
+    │            /compact, /fork, /ps, /color…)       │
+    │  @<path>  Attach a file or URL                  │
+    │  !<cmd>  Run a shell command                    │
+    │  tab  Autocomplete, or accept the ghost text    │
+    │  esc  Dismiss, or unqueue messages              │
     │                                                 │
-    │keys                                             │
-    │  enter  send / queue for later                  │
-    │  ctrl+enter / ctrl+q  steer current response    │
-    │  ctrl+j / shift+enter  insert newline           │
-    │  ctrl+c  clear / cancel / quit                  │
+    │the prompt                                       │
+    │  ctrl+c  Clear the prompt, else cancel the work │
+    │          in progress, else quit                 │
 ────└─────────────────────────────────────────────────┘─────
 
 ────────────────────────────────────────────────────────────

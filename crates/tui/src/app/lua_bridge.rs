@@ -1,19 +1,193 @@
 //! Per-tick glue between `TuiApp` and the Lua runtime.
 
 use crate::app::TuiApp;
+use crate::keymap::{native_action, NativeAction};
+use crate::smelt_edit::{ScopeOwner, WinId};
+use smelt_core::lua::keymaps::Frame;
+
+/// Which frames of a [`KeymapChain`] a lookup covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeymapReach {
+    All,
+    /// The scopes around focus, without global bindings.
+    Scoped,
+    /// Global bindings alone.
+    Global,
+}
+
+/// Keymap scopes around focus, innermost first, then the global scope, all
+/// looked up in the mode of the focused surface.
+pub(crate) struct KeymapChain {
+    links: Vec<KeymapLink>,
+    mode: &'static str,
+}
+
+#[derive(Clone)]
+struct KeymapLink {
+    owner: LinkOwner,
+    scope: String,
+}
+
+/// Who implements the actions of a chain link.
+#[derive(Clone, Copy)]
+enum LinkOwner {
+    /// A window, modal or overlay with Lua actions.
+    Lua(ScopeOwner),
+    /// A window in a native scope.
+    Native(WinId),
+    /// Global bindings, which have no actions.
+    Global,
+}
+
+/// A native scope action a key resolved to. The app runs it after the key
+/// dispatch returns.
+pub(crate) struct NativeCall {
+    pub(crate) win: WinId,
+    pub(crate) action: NativeAction,
+}
+
+impl KeymapChain {
+    /// Number of frames, the global scope included.
+    pub(crate) fn len(&self) -> usize {
+        self.links.len()
+    }
+
+    /// The mode keys look bindings up in.
+    pub(crate) fn mode(&self) -> &'static str {
+        self.mode
+    }
+
+    /// Names of the scopes around focus, innermost first, without the global one.
+    pub(crate) fn scopes(&self) -> Vec<String> {
+        self.links
+            .iter()
+            .filter(|link| !matches!(link.owner, LinkOwner::Global))
+            .map(|link| link.scope.clone())
+            .collect()
+    }
+
+    pub(crate) fn frames(&self) -> Vec<Frame<'_>> {
+        self.links
+            .iter()
+            .map(|link| Frame {
+                scope: &link.scope,
+                mode: self.mode,
+            })
+            .collect()
+    }
+
+    /// The part of the chain `reach` covers.
+    pub(crate) fn reach(&self, reach: KeymapReach) -> KeymapChain {
+        let links = self
+            .links
+            .iter()
+            .filter(|link| {
+                let global = matches!(link.owner, LinkOwner::Global);
+                match reach {
+                    KeymapReach::All => true,
+                    KeymapReach::Scoped => !global,
+                    KeymapReach::Global => global,
+                }
+            })
+            .cloned()
+            .collect();
+        KeymapChain {
+            links,
+            mode: self.mode,
+        }
+    }
+
+    /// What runs action `name` of the scope at `frame`.
+    pub(crate) fn action(&self, frame: usize, name: &str) -> Option<ScopeAction> {
+        let link = self.links.get(frame)?;
+        match link.owner {
+            LinkOwner::Lua(owner) => {
+                crate::lua::try_with_ui_host(|host| host.with_ui(|ui| ui.scope_action(owner, name)))
+                    .flatten()
+                    .map(|handle| ScopeAction::Lua(handle.0))
+            }
+            LinkOwner::Native(win) => native_action(&link.scope, name)
+                .map(|action| ScopeAction::Native(NativeCall { win, action })),
+            LinkOwner::Global => None,
+        }
+    }
+}
+
+/// What runs a scope action.
+pub(crate) enum ScopeAction {
+    /// The Lua callback with this id.
+    Lua(u64),
+    Native(NativeCall),
+}
 
 impl TuiApp {
-    /// Vim-mode label for the focused window, or `None` for non-vim surfaces.
-    pub(crate) fn current_vim_mode_label(&self) -> Option<String> {
-        self.focused_vim_mode_label()
+    /// The scopes a key looks up bindings in, around focus: the focused
+    /// window's own scope, its modal and overlay, the window's native scope,
+    /// then global bindings. Native scopes come after the containers, so a
+    /// dialog's keys beat the built-in keys of its lists and inputs.
+    pub(crate) fn keymap_chain(&self) -> KeymapChain {
+        let mut links: Vec<_> = self
+            .ui
+            .scope_chain()
+            .into_iter()
+            .map(|(owner, scope)| KeymapLink {
+                owner: LinkOwner::Lua(owner),
+                scope: scope.to_string(),
+            })
+            .collect();
+        if let Some(win) = self.ui.focus() {
+            if let Some(scope) = self.native_scope(win) {
+                links.push(KeymapLink {
+                    owner: LinkOwner::Native(win),
+                    scope: scope.to_string(),
+                });
+            }
+        }
+        links.push(KeymapLink {
+            owner: LinkOwner::Global,
+            scope: String::new(),
+        });
+        KeymapChain {
+            links,
+            mode: self.keymap_mode(),
+        }
+    }
+
+    /// The native scope of `win`: the one it was put in, else `viewer` for
+    /// read-only text.
+    fn native_scope(&self, win: WinId) -> Option<&'static str> {
+        self.ui.base_scope(win).or_else(|| {
+            self.ui
+                .win(win)
+                .is_some_and(|w| w.surface().is_readonly_text())
+                .then_some("viewer")
+        })
+    }
+
+    /// The mode keys dispatch in: the focused surface's Vim mode, or without
+    /// Vim, Insert in a text input and Normal anywhere else.
+    fn keymap_mode(&self) -> &'static str {
+        use crate::smelt_edit::VimMode;
+        match self.focused_vim_mode() {
+            Some(VimMode::Insert) => "i",
+            Some(VimMode::Normal) => "n",
+            Some(VimMode::Visual | VimMode::VisualLine) => "v",
+            None => {
+                let editable = match self.ui.focused_window() {
+                    Some(win) => win.surface().is_editable_text(),
+                    None => self.app_focus == crate::app::AppFocus::Prompt,
+                };
+                if editable {
+                    "i"
+                } else {
+                    "n"
+                }
+            }
+        }
     }
 
     /// Vim mode of the surface the user is currently driving (focused overlay > app pane).
     /// Returns `None` when the focused surface isn't vim-enabled.
-    pub(crate) fn focused_vim_mode_label(&self) -> Option<String> {
-        self.focused_vim_mode().map(|m| format!("{m:?}"))
-    }
-
     pub(crate) fn focused_vim_mode(&self) -> Option<crate::smelt_edit::VimMode> {
         if let Some(win) = self.ui.focused_window() {
             if win.vim_enabled() {

@@ -108,6 +108,7 @@ pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
     BootstrapChunk::host("bootstrap/model.lua"),
     BootstrapChunk::host("transcript/defaults.lua"),
     BootstrapChunk::host("transcript.lua"),
+    BootstrapChunk::ui("keymaps.lua"),
     BootstrapChunk::ui("dialog.lua"),
     BootstrapChunk::ui("list.lua"),
     BootstrapChunk::ui("session.lua"),
@@ -177,39 +178,15 @@ pub enum KeymapResult {
     NoBinding,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeymapPrefix {
-    pub mode: String,
-    pub chord: String,
-    pub suffix: String,
-    pub description: Option<String>,
-}
+pub use super::keymaps::KeymapPrefix;
 
-fn keymap_mode_char(mode: &str) -> Option<&'static str> {
-    match mode.trim().to_ascii_lowercase().as_str() {
-        "" | "*" | "any" | "all" => Some(""),
-        "n" | "normal" => Some("n"),
-        "i" | "insert" => Some("i"),
-        "v" | "visual" | "visual_line" | "visualline" => Some("v"),
-        _ => match mode {
-            "Normal" => Some("n"),
-            "Insert" => Some("i"),
-            "Visual" | "VisualLine" => Some("v"),
-            _ => None,
-        },
-    }
-}
-
-fn dispatch_mode_char(current_mode: Option<&str>) -> Option<&'static str> {
-    current_mode.map(|mode| keymap_mode_char(mode).unwrap_or("n"))
-}
-
-fn query_mode_char(current_mode: Option<&str>) -> &'static str {
-    current_mode.and_then(keymap_mode_char).unwrap_or("n")
-}
-
-fn keymap_mode_matches(binding_mode: &str, active_mode: &str) -> bool {
-    binding_mode.is_empty() || binding_mode == active_mode
+/// How the scope instance at a frame implements an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeActionImpl {
+    /// The Lua callback with this id.
+    Lua(u64),
+    /// The host runs it after dispatch returns.
+    Native,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1595,156 +1572,116 @@ impl LuaRuntime {
         true
     }
 
-    /// Dispatch a keymap chord to any Lua-registered handler.
-    /// `chord_ctx` is passed as a table for multi-key sequences; `None` for single-key.
+    /// Run the binding `chord` resolves to in `frames`, innermost first.
+    /// An action binding runs what `action(frame, name)` resolves to: the
+    /// action of that frame's scope instance. A Lua callback gets a context
+    /// table with the binding's `scope` plus `chord_ctx`. A native action is
+    /// left to the host, which `action` told about it, and consumes the key.
+    /// When the instance does not implement the action, or the callback
+    /// returns `false`, the key goes on to the outer frames.
     pub fn run_keymap(
         &self,
+        frames: &[super::keymaps::Frame<'_>],
         chord: &str,
-        current_mode: Option<&str>,
-        chord_ctx: Option<&[(&str, String)]>,
+        chord_ctx: &[(&str, String)],
+        action: &mut dyn FnMut(usize, &str) -> Option<ScopeActionImpl>,
     ) -> KeymapResult {
-        let func = {
-            let Ok(map) = self.shared.keymaps.lock() else {
-                return KeymapResult::NoBinding;
-            };
-            let mode_char = dispatch_mode_char(current_mode);
-            let entry = mode_char
-                .and_then(|mc| map.get(&(mc.to_string(), chord.to_string())))
-                .or_else(|| map.get(&(String::new(), chord.to_string())));
-            let Some(entry) = entry else {
-                return KeymapResult::NoBinding;
-            };
-            let Ok(f) = self.lua.registry_value::<mlua::Function>(&entry.handle.key) else {
-                return KeymapResult::NoBinding;
-            };
-            f
-        };
-        let result = match chord_ctx {
-            Some(pairs) => {
-                let ctx = match self.lua.create_table() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.record_error(format!("keymap `{chord}`: {e}"));
-                        return KeymapResult::Consumed;
-                    }
+        enum Bound {
+            Handler(mlua::Function),
+            Action(String),
+        }
+        let mut start = 0;
+        let mut passed = false;
+        while start < frames.len() {
+            let (frame, bound) = {
+                let Ok(map) = self.shared.keymaps.lock() else {
+                    return KeymapResult::NoBinding;
                 };
-                for (k, v) in pairs {
-                    if let Err(e) = ctx.set(*k, v.as_str()) {
-                        self.record_error(format!("keymap `{chord}`: {e}"));
-                        return KeymapResult::Consumed;
-                    }
+                let Some(hit) = map.resolve(&frames[start..], chord) else {
+                    break;
+                };
+                let bound = match (hit.handler, hit.action) {
+                    (Some(handle), _) => self
+                        .lua
+                        .registry_value::<mlua::Function>(&handle.key)
+                        .ok()
+                        .map(Bound::Handler),
+                    (None, Some(name)) => Some(Bound::Action(name.to_string())),
+                    (None, None) => None,
+                };
+                (start + hit.frame, bound)
+            };
+            start = frame + 1;
+            // Look the action up after releasing the keymap lock: the host reads UI state.
+            let func = match bound {
+                Some(Bound::Handler(func)) => Some(func),
+                Some(Bound::Action(name)) => match action(frame, &name) {
+                    Some(ScopeActionImpl::Lua(id)) => self.callback_function(id),
+                    Some(ScopeActionImpl::Native) => return KeymapResult::Consumed,
+                    None => None,
+                },
+                None => None,
+            };
+            let Some(func) = func else { continue };
+            let result = (|| {
+                let ctx = self.lua.create_table()?;
+                ctx.set("scope", frames[frame].scope)?;
+                for (k, v) in chord_ctx {
+                    ctx.set(*k, v.as_str())?;
                 }
                 let _perf = smelt_perf::perf::begin("lua:keymap");
                 func.call::<mlua::Value>(ctx)
-            }
-            None => {
-                let _perf = smelt_perf::perf::begin("lua:keymap");
-                func.call::<mlua::Value>(())
-            }
-        };
-        match result {
-            Ok(mlua::Value::Boolean(false)) => KeymapResult::PassThrough,
-            Ok(_) => KeymapResult::Consumed,
-            Err(e) => {
-                self.record_error(format!("keymap `{chord}`: {e}"));
-                KeymapResult::Consumed
-            }
-        }
-    }
-
-    /// Returns true if a registered chord would be considered for this mode.
-    /// Does not execute the handler, so pass-through callbacks are still treated
-    /// as bindings by conservative callers.
-    pub fn chord_has_binding(&self, chord: &str, current_mode: Option<&str>) -> bool {
-        let Ok(map) = self.shared.keymaps.lock() else {
-            return false;
-        };
-        let mode_char = dispatch_mode_char(current_mode);
-        mode_char
-            .map(|mc| map.contains_key(&(mc.to_string(), chord.to_string())))
-            .unwrap_or(false)
-            || map.contains_key(&(String::new(), chord.to_string()))
-    }
-
-    /// Returns true if `sequence` is a strict prefix of a registered chord (exact match excluded).
-    pub fn chord_has_longer(&self, sequence: &str, current_mode: Option<&str>) -> bool {
-        let Ok(map) = self.shared.keymaps.lock() else {
-            return false;
-        };
-        let mode_char = dispatch_mode_char(current_mode);
-        for (m, chord) in map.keys() {
-            if (m.is_empty() || mode_char == Some(m.as_str()))
-                && chord.len() > sequence.len()
-                && crate::keymap::chord_sequence_starts_with(chord, sequence)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Return effective registered chords that strictly extend `sequence` in `current_mode`.
-    pub fn keymap_prefixes(&self, sequence: &str, current_mode: Option<&str>) -> Vec<KeymapPrefix> {
-        let Ok(map) = self.shared.keymaps.lock() else {
-            return Vec::new();
-        };
-        let mode_char = query_mode_char(current_mode);
-        let mut rows: Vec<KeymapPrefix> = map
-            .iter()
-            .filter_map(|((mode, chord), entry)| {
-                if !keymap_mode_matches(mode, mode_char)
-                    || chord.len() <= sequence.len()
-                    || !crate::keymap::chord_sequence_starts_with(chord, sequence)
-                {
-                    return None;
+            })();
+            match result {
+                Ok(mlua::Value::Boolean(false)) => passed = true,
+                Ok(_) => return KeymapResult::Consumed,
+                Err(e) => {
+                    self.record_error(format!("keymap `{chord}`: {e}"));
+                    return KeymapResult::Consumed;
                 }
-                Some(KeymapPrefix {
-                    mode: mode.clone(),
-                    chord: chord.clone(),
-                    suffix: chord[sequence.len()..].to_string(),
-                    description: entry.description.clone(),
-                })
-            })
-            .collect();
-
-        rows.sort_by(|a, b| {
-            a.chord
-                .cmp(&b.chord)
-                .then_with(|| a.mode.is_empty().cmp(&b.mode.is_empty()))
-                .then_with(|| a.description.cmp(&b.description))
-        });
-        rows.dedup_by(|a, b| a.chord == b.chord);
-        rows.sort_by(|a, b| {
-            a.suffix
-                .cmp(&b.suffix)
-                .then_with(|| a.description.cmp(&b.description))
-                .then_with(|| a.mode.cmp(&b.mode))
-        });
-        rows
-    }
-
-    pub fn cycle_mode(&self) {
-        let result: mlua::Result<()> = (|| {
-            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
-            let mode: mlua::Table = smelt.get("mode")?;
-            let cycle: mlua::Function = mode.get("cycle")?;
-            cycle.call::<()>(())
-        })();
-        if let Err(e) = result {
-            self.record_error(format!("smelt.mode.cycle: {e}"));
+            }
+        }
+        if passed {
+            KeymapResult::PassThrough
+        } else {
+            KeymapResult::NoBinding
         }
     }
 
-    pub fn cycle_reasoning(&self) {
-        let result: mlua::Result<()> = (|| {
-            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
-            let reasoning: mlua::Table = smelt.get("reasoning")?;
-            let cycle: mlua::Function = reasoning.get("cycle")?;
-            cycle.call::<()>(())
-        })();
-        if let Err(e) = result {
-            self.record_error(format!("smelt.reasoning.cycle: {e}"));
-        }
+    /// The Lua function registered as callback `id`.
+    pub fn callback_function(&self, id: u64) -> Option<mlua::Function> {
+        let callbacks = self.shared.callbacks.lock().ok()?;
+        self.lua.registry_value(&callbacks.get(&id)?.key).ok()
+    }
+
+    /// Whether `chord` has a binding in `frames`. Does not run it, so
+    /// pass-through handlers still count as bindings for conservative callers.
+    pub fn chord_has_binding(&self, frames: &[super::keymaps::Frame<'_>], chord: &str) -> bool {
+        self.shared
+            .keymaps
+            .lock()
+            .is_ok_and(|map| map.resolve(frames, chord).is_some())
+    }
+
+    /// Whether `sequence` is a strict prefix of a binding in `frames`.
+    pub fn chord_has_longer(&self, frames: &[super::keymaps::Frame<'_>], sequence: &str) -> bool {
+        self.shared
+            .keymaps
+            .lock()
+            .is_ok_and(|map| map.has_longer(frames, sequence))
+    }
+
+    /// Effective bindings in `frames` that strictly extend `sequence`.
+    pub fn keymap_prefixes(
+        &self,
+        frames: &[super::keymaps::Frame<'_>],
+        sequence: &str,
+    ) -> Vec<KeymapPrefix> {
+        self.shared
+            .keymaps
+            .lock()
+            .map(|map| map.prefixes(frames, sequence))
+            .unwrap_or_default()
     }
 
     /// Surface an error to the user. Routes through `smelt.notify.error`,

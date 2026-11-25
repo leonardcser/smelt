@@ -115,5 +115,17 @@ end)
 ```
 
 Returning `false` from a handler lets the key fall through to the next binding.
+
+Dialogs and overlays have their own keymap scopes, such as `resume`, `diff` or
+`dialog.view`. Pass `opts.scope` to rebind one of their actions, and
+`smelt.keymap.unset` to drop a default key:
+
+```lua
+smelt.keymap.set("n", "x", "close", { scope = "dialog.view" })
+smelt.keymap.unset("", "<M-d>", { scope = "resume" })
+```
+
+[Keybindings](../reference/keybindings.md#dialogs-and-overlays) lists every
+scope with its actions and default keys.
 Built-in chords are listed in [Keybindings](../reference/keybindings.md); for
 per-window bindings and richer UI, see [Extend smelt](../extend/index.md).

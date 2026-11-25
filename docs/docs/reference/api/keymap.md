@@ -1,6 +1,6 @@
 ---
 title: "smelt.keymap: Lua API reference"
-description: "Register chord→callback bindings and inspect the layered help index. Lua API reference for smelt.keymap in smelt, the Lua-scriptable terminal coding agent."
+description: "Key bindings, global or per keymap scope. Lua API reference for smelt.keymap in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.keymap`
@@ -9,15 +9,31 @@ description: "Register chord→callback bindings and inspect the layered help in
 
 **Availability:** Everywhere, including headless mode.
 
-Register chord→callback bindings and inspect the layered help index. Chords and modes are canonicalized at registration; unknown values raise immediately.
+Key bindings, global or per keymap scope. A scope names a part of the UI, such as `"diff"` or `"resume"`: windows, dialogs and overlays declare the scope they belong to and implement its actions, and `keymap.scope` declares each scope's actions and default keys. Keys look up the scopes around focus innermost first, then global bindings. User bindings override a scope's defaults whatever the load order. Chords and modes are canonicalized at registration; unknown values raise immediately.
 
-## `smelt.keymap.help_sections`
+## `smelt.keymap.active`
 
 ```lua
-fun(): table
+fun(): string[]
 ```
 
-Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows. Filters vim-only chords when vim mode is disabled.
+Return the names of the keymap scopes around focus, innermost first.
+
+## `smelt.keymap.key_for`
+
+```lua
+fun(scope: string, action: string, mode: string?): string?
+```
+
+Return the display chord that runs `action` of `scope` in `mode` (default Normal), preferring user bindings, then the shortest chord. Nil when no key runs it. Use it for hints, so they show the user's keys.
+
+## `smelt.keymap.label`
+
+```lua
+fun(chord: string?): string?
+```
+
+Return `chord` as a short hint label, the form footers and tips use: `<C-r>` is `ctrl+r`, `<M-d>` is `alt+d` and `<CR>` is `enter`. Nil input returns nil, so `smelt.keymap.label(smelt.keymap.key_for(...))` is safe for unbound actions.
 
 ## `smelt.keymap.leader`
 
@@ -30,10 +46,18 @@ Return the current `<leader>` expansion used when registering keymaps. Defaults 
 ## `smelt.keymap.list`
 
 ```lua
-fun(): table
+fun(opts: table?): table
 ```
 
-Return the set of currently-bound `{ mode, chord, desc? }` rows. `mode` is the canonical short form (`"n"`/`"i"`/`"v"`/`""`). `chord` is the display form after canonicalization and `<leader>` expansion.
+Return effective bindings as `{ scope, mode, chord, action?, desc?, source }` rows sorted by scope, mode and chord. `scope` is `""` for global bindings and `source` is `"default"` or `"user"`. `mode` is the canonical short form and `chord` the display form. `opts.scope` lists only that scope.
+
+## `smelt.keymap.mode`
+
+```lua
+fun(): string
+```
+
+Return the mode keys look bindings up in now: `"n"`, `"i"` or `"v"`. It is the Vim mode of the focused surface, or without Vim, `"i"` in a text input and `"n"` anywhere else.
 
 ## `smelt.keymap.prefixes`
 
@@ -41,17 +65,41 @@ Return the set of currently-bound `{ mode, chord, desc? }` rows. `mode` is the c
 fun(pending: string, mode: string?): table
 ```
 
-Return effective keymaps that extend `pending` in `mode` as `{ mode, chord, suffix, desc? }` rows. `pending` may be empty to list top-level mappings, otherwise it is canonicalized with the current leader. `mode` accepts the same forms as `set`; when omitted, the focused Vim mode is used (or Normal outside an app). Mode-specific bindings shadow global bindings for the same chord.
+Return effective bindings around focus that extend `pending` as `{ mode, chord, suffix, desc? }` rows, inner scopes shadowing outer ones. `pending` may be empty to list top-level bindings, otherwise it is canonicalized with the current leader. `mode` accepts the same forms as `set` and replaces the focused mode; outside an app, global bindings are listed in Normal mode.
+
+## `smelt.keymap.run`
+
+```lua
+fun(action: string): boolean
+```
+
+Run `action` of the innermost scope around focus that implements it, as if its key was pressed. Returns `false` when no scope around focus has the action or the action passed.
+
+## `smelt.keymap.scope`
+
+```lua
+fun(name: string, spec: table): nil
+```
+
+Declare keymap scope `name`: `spec.desc` describes it, `spec.actions` maps its action names to one-line descriptions, and `spec.keys` lists its default keys as `{ mode, chord, action }` rows. `spec.extends` names a declared scope to inherit actions and bindings from; the scope's own defaults and user bindings override inherited ones, and containers in the scope implement the inherited actions too. Containers in the scope implement the actions (`win:scope`, `opts.scope` of overlays and dialogs). Declaring a scope again replaces its actions and defaults; user bindings stay.
+
+## `smelt.keymap.scopes`
+
+```lua
+fun(): table
+```
+
+Return declared keymap scopes as `{ name, desc?, extends?, actions = { { name, desc, keys } } }` rows sorted by name. `actions` lists the scope's own actions, in the order of their first default key, then the actions without one by name. `keys` lists the display chords that run the action now, user bindings included.
 
 ## `smelt.keymap.set`
 
 ```lua
-fun(mode: string, chord: string, handler: fun(), opts: table?): smelt.Reg
+fun(mode: string, chord: string, target: any, opts: table?): smelt.Reg
 ```
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. `opts.desc` is an optional one-line description used by keybinding help UIs. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
+Bind `chord` in `mode` to `target`: a function, or with `opts.scope` the name of one of the scope's actions. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`). Bindings follow the mode of the focused surface: its Vim mode, or without Vim, Insert in a text input and Normal anywhere else. A function receives a context table with the binding's `scope`; returning `false` passes the key on. `opts.desc` describes the binding for help UIs. Binding the same `(scope, mode, chord)` again replaces it, and a scoped binding overrides that scope's default. Returns a `Reg` whose `:remove()` drops the binding.
 
 ## `smelt.keymap.set_leader`
 
@@ -64,8 +112,8 @@ Set the `<leader>` expansion for subsequent keymap registrations. `leader` must 
 ## `smelt.keymap.unset`
 
 ```lua
-fun(mode: string, chord: string): boolean
+fun(mode: string, chord: string, opts: table?): boolean
 ```
 
-Drop the binding for `chord` in `mode`. `mode` accepts the same forms as `set`. Returns `true` if a binding was removed.
+Drop the binding for `chord` in `mode`. With `opts.scope`, also hide that scope's default for the chord until a later `set`. `mode` accepts the same forms as `set`. Returns `true` if a binding was removed or hidden.
 

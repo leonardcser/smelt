@@ -691,6 +691,10 @@ impl WindowSurface {
         )
     }
 
+    pub fn is_editable_text(self) -> bool {
+        matches!(self.kind, WindowSurfaceKind::EditableText)
+    }
+
     pub fn is_readonly_text(self) -> bool {
         matches!(self.kind, WindowSurfaceKind::ReadonlyText)
     }

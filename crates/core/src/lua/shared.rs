@@ -91,11 +91,6 @@ pub struct RegisteredCommand {
     pub hidden: bool,
 }
 
-pub struct RegisteredKeymap {
-    pub handle: LuaHandle,
-    pub description: Option<String>,
-}
-
 pub struct RegisteredWinRenderer {
     pub handle: LuaHandle,
     pub dirty: bool,
@@ -204,7 +199,7 @@ pub struct LuaShared {
     /// Send+Sync mirror of `commands`' key set. Host code can recognize a
     /// command without touching the `!Send` Lua handler stored with it.
     pub command_names: crate::commands::CommandNames,
-    pub keymaps: Mutex<HashMap<(String, String), RegisteredKeymap>>,
+    pub keymaps: Mutex<super::keymaps::Keymaps>,
     /// Canonical single-token expansion for `<leader>` in keymap registrations.
     /// Matches nvim's default leader (`\\`) unless user config sets another token.
     pub keymap_leader: Mutex<String>,
@@ -437,7 +432,7 @@ impl Default for LuaShared {
         Self {
             commands: Mutex::new(HashMap::new()),
             command_names: Arc::new(Mutex::new(HashSet::new())),
-            keymaps: Mutex::new(HashMap::new()),
+            keymaps: Mutex::default(),
             keymap_leader: Mutex::new("\\".to_string()),
             main_layout_composer: Mutex::new(None),
             win_renderers: Mutex::new(HashMap::new()),

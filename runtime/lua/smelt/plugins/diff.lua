@@ -9,6 +9,115 @@ local active
 local RETAIN_MS = 5 * 60 * 1000
 local retained
 
+smelt.keymap.scope("diff", {
+  desc = "/diff viewer",
+  actions = {
+    changes      = "Show working changes",
+    branch       = "Show the branch against its base",
+    history      = "Show commit history",
+    commits      = "Go back to the commit list",
+    switch_pane  = "Switch between the file list and the diff on narrow screens",
+    revision     = "Show a commit or revision",
+    base         = "Change the comparison base",
+    close        = "Close the viewer",
+    refresh      = "Reload the diff",
+    next_file    = "Show the next file",
+    prev_file    = "Show the previous file",
+    stage        = "Stage the selected file or hunk",
+    unstage      = "Unstage the selected file or hunk",
+    toggle_stage = "Stage or unstage the selected file or hunk",
+    next_view    = "Show the next view",
+    prev_view    = "Show the previous view",
+    prev_hunk    = "Jump to the previous hunk",
+    next_hunk    = "Jump to the next hunk",
+  },
+  keys = {
+    { "",  "<M-1>",   "changes"      },
+    { "",  "<M-2>",   "branch"       },
+    { "",  "<M-3>",   "history"      },
+    { "",  "<M-w>",   "switch_pane"  },
+    { "",  "<M-r>",   "revision"     },
+    { "",  "<M-b>",   "base"         },
+    { "",  "<Esc>",   "close"        },
+    { "",  "<C-c>",   "close"        },
+    { "",  "<Tab>",   "next_view"    },
+    { "",  "<S-Tab>", "prev_view"    },
+    { "n", "<BS>",    "commits"      },
+    { "n", "q",       "close"        },
+    { "n", "r",       "refresh"      },
+    { "n", "<C-j>",   "next_file"    },
+    { "n", "<C-k>",   "prev_file"    },
+    { "n", "s",       "stage"        },
+    { "n", "u",       "unstage"      },
+    { "n", "-",       "toggle_stage" },
+    { "n", "{",       "prev_hunk"    },
+    { "n", "}",       "next_hunk"    },
+    { "n", "[",       "prev_file"    },
+    { "n", "]",       "next_file"    },
+  },
+})
+
+smelt.keymap.scope("diff.files", {
+  desc = "/diff file list",
+  actions = {
+    next_file = "Show the next file",
+    prev_file = "Show the previous file",
+    down      = "Select the next row",
+    up        = "Select the previous row",
+    first     = "Select the first row",
+    last      = "Select the last row",
+    open      = "Open the selected file, or toggle the folder",
+    collapse  = "Collapse the folder, or select its parent",
+    expand    = "Expand the folder, or open the file",
+    half_up   = "Move the selection up half a page",
+    half_down = "Move the selection down half a page",
+    page_up   = "Move the selection up a page",
+    page_down = "Move the selection down a page",
+  },
+  keys = {
+    { "", "<C-j>",      "next_file" },
+    { "", "<C-k>",      "prev_file" },
+    { "", "j",          "down"      },
+    { "", "k",          "up"        },
+    { "", "<Down>",     "down"      },
+    { "", "<Up>",       "up"        },
+    { "", "<C-n>",      "down"      },
+    { "", "<C-p>",      "up"        },
+    { "", "g",          "first"     },
+    { "", "<Home>",     "first"     },
+    { "", "G",          "last"      },
+    { "", "<End>",      "last"      },
+    { "", "<CR>",       "open"      },
+    { "", "<Space>",    "open"      },
+    { "", "h",          "collapse"  },
+    { "", "<Left>",     "collapse"  },
+    { "", "l",          "expand"    },
+    { "", "<Right>",    "expand"    },
+    { "", "<C-u>",      "half_up"   },
+    { "", "<C-d>",      "half_down" },
+    { "", "<C-b>",      "page_up"   },
+    { "", "<C-f>",      "page_down" },
+    { "", "<PageUp>",   "page_up"   },
+    { "", "<PageDown>", "page_down" },
+  },
+})
+
+smelt.keymap.scope("diff.preview", {
+  desc = "/diff patch view",
+  actions = {
+    fold      = "Fold or unfold the hunk or file under the cursor",
+    pan_left  = "Scroll the patch left",
+    pan_right = "Scroll the patch right",
+  },
+  keys = {
+    { "n", "<CR>",      "fold"      },
+    { "n", "H",         "pan_left"  },
+    { "n", "L",         "pan_right" },
+    { "",  "<S-Left>",  "pan_left"  },
+    { "",  "<S-Right>", "pan_right" },
+  },
+})
+
 local function display(text)
   return (text or ""):gsub("%c", function(c) return string.format("\\x%02x", c:byte()) end)
 end
@@ -345,12 +454,13 @@ function M.open(opts)
       open_node()
     end
   end
-  local function sidebar_key(key, action)
-    sidebar:key(key, function()
+  -- A typed count repeats the next motion, as in Vim.
+  local function counted(action)
+    return function()
       local count = sidebar_count or 1
       sidebar_count, folder_press = nil, nil
       action(count)
-    end)
+    end
   end
   for digit = 0, 9 do
     sidebar:key(tostring(digit), function()
@@ -360,41 +470,33 @@ function M.open(opts)
       end
     end)
   end
-  sidebar_key("ctrl-j", function() nav_file(1) end)
-  sidebar_key("ctrl-k", function() nav_file(-1) end)
-  for _, binding in ipairs({
-    { "j", 1 }, { "k", -1 }, { "down", 1 }, { "up", -1 },
-    { "ctrl-n", 1 }, { "ctrl-p", -1 },
-  }) do
-    sidebar_key(binding[1], function(count) nav_tree(binding[2] * count) end)
+  local function pages(fraction)
+    return counted(function(count)
+      local height = (sidebar:rect() or {}).height or 10
+      local delta = math.max(1, math.floor(height * math.abs(fraction))) * count
+      nav_tree(fraction < 0 and -delta or delta)
+    end)
   end
-  for _, key in ipairs({ "g", "home" }) do
-    sidebar_key(key, function() sidebar:cursor(0); select_file() end)
-  end
-  for _, key in ipairs({ "G", "end" }) do
-    sidebar_key(key, function()
+  sidebar:scope("diff.files", {
+    next_file = counted(function() nav_file(1) end),
+    prev_file = counted(function() nav_file(-1) end),
+    down = counted(function(count) nav_tree(count) end),
+    up = counted(function(count) nav_tree(-count) end),
+    first = counted(function() sidebar:cursor(0); select_file() end),
+    last = counted(function()
       if tree or browsing then
         sidebar:cursor(math.max(0, (browsing and #entries or tree:document():row_count()) - 1))
         select_file()
       end
-    end)
-  end
-  sidebar_key("enter", open_node)
-  sidebar_key("space", open_node)
-  sidebar_key("h", left)
-  sidebar_key("left", left)
-  sidebar_key("l", right)
-  sidebar_key("right", right)
-  for _, binding in ipairs({
-    { "ctrl-u", -0.5 }, { "ctrl-d", 0.5 },
-    { "ctrl-b", -1 }, { "ctrl-f", 1 }, { "pgup", -1 }, { "pgdn", 1 },
-  }) do
-    sidebar_key(binding[1], function(count)
-      local height = (sidebar:rect() or {}).height or 10
-      local delta = math.max(1, math.floor(height * math.abs(binding[2]))) * count
-      nav_tree(binding[2] < 0 and -delta or delta)
-    end)
-  end
+    end),
+    open = counted(open_node),
+    collapse = counted(left),
+    expand = counted(right),
+    half_up = pages(-0.5),
+    half_down = pages(0.5),
+    page_up = pages(-1),
+    page_down = pages(1),
+  })
 
   local function hunk(forward)
     if not diff or not selected then return end
@@ -406,11 +508,11 @@ function M.open(opts)
     local row = diff:toggle_fold(preview:cursor() or 0)
     if row then preview:scroll(row); preview:cursor(row) end
   end
-  preview:key("enter", fold)
-  preview:key("H", function() preview:pan(-4) end)
-  preview:key("L", function() preview:pan(4) end)
-  preview:key("<S-Left>", function() preview:pan(-4) end)
-  preview:key("<S-Right>", function() preview:pan(4) end)
+  preview:scope("diff.preview", {
+    fold = fold,
+    pan_left = function() preview:pan(-4) end,
+    pan_right = function() preview:pan(4) end,
+  })
 
   local function install(result, keep, next_file, restore_position)
     local previous_tree = tree
@@ -766,61 +868,36 @@ function M.open(opts)
     end
   end)
 
-  overlay_opts.keymaps = {
-      { key = "alt-1", on_press = function() switch_view("changes") end },
-      { key = "alt-2", on_press = function() switch_view("branch") end },
-      { key = "alt-3", on_press = function() switch_view("history") end },
-      { key = "backspace", on_press = function()
-        if view ~= "changes" and not browsing then
-          if #entries == 0 then load_history(false) else show_commits() end
-        end
-      end },
-      { key = "alt-w", on_press = function()
-        if single_pane then focus_pane(focused == "files" and "preview" or "files") end
-      end },
-      { key = "alt-r", on_press = function() edit_query("revision") end },
-      { key = "alt-b", on_press = function() edit_query("base") end },
-      { key = "q", on_press = close },
-      { key = "esc", on_press = close },
-      { key = "ctrl-c", on_press = close },
-      { key = "r", on_press = refresh },
-      { key = "ctrl-j", on_press = function() nav_file(1) end },
-      { key = "ctrl-k", on_press = function() nav_file(-1) end },
-      { key = "s", on_press = function() change_index("stage") end },
-      { key = "u", on_press = function() change_index("unstage") end },
-      { key = "-", on_press = function() change_index("toggle") end },
-      { key = "tab", on_press = function() cycle_view(1) end },
-      { key = "<S-Tab>", on_press = function() cycle_view(-1) end },
-      { key = "{", on_press = function() hunk(false) end },
-      { key = "}", on_press = function() hunk(true) end },
-      { key = "[", on_press = function() nav_file(-1) end },
-      { key = "]", on_press = function() nav_file(1) end },
-  }
-  local shared_keys, view_keys, view_regs = {}, {}, {}
-  for _, binding in ipairs(overlay_opts.keymaps) do
-    if binding.key:match("^alt%-") or binding.key == "esc" or binding.key == "ctrl-c" or
-        binding.key == "tab" or binding.key == "<S-Tab>" then
-      shared_keys[#shared_keys + 1] = binding
-    else
-      view_keys[#view_keys + 1] = binding
-    end
-  end
-  overlay_opts.keymaps = shared_keys
-  status()
-  overlay_opts.keymaps = nil
-  local function view_shortcuts(enabled)
-    for _, reg in ipairs(view_regs) do reg:remove() end
-    view_regs = {}
-    if enabled and not closed then
-      for _, binding in ipairs(view_keys) do
-        view_regs[#view_regs + 1] = overlay:key(binding.key, binding.on_press)
+  -- Letter keys are Normal-mode defaults, so they stay out of the text input.
+  overlay_opts.scope = "diff"
+  overlay_opts.actions = {
+    changes = function() switch_view("changes") end,
+    branch = function() switch_view("branch") end,
+    history = function() switch_view("history") end,
+    commits = function()
+      if view ~= "changes" and not browsing then
+        if #entries == 0 then load_history(false) else show_commits() end
       end
-    end
-  end
-  -- Keep viewer shortcuts below Vim's pending motions, but out of text input.
-  input:on("focus", function() view_shortcuts(false) end)
-  input:on("blur", function() view_shortcuts(true) end)
-  view_shortcuts(true)
+    end,
+    switch_pane = function()
+      if single_pane then focus_pane(focused == "files" and "preview" or "files") end
+    end,
+    revision = function() edit_query("revision") end,
+    base = function() edit_query("base") end,
+    close = close,
+    refresh = refresh,
+    next_file = function() nav_file(1) end,
+    prev_file = function() nav_file(-1) end,
+    stage = function() change_index("stage") end,
+    unstage = function() change_index("unstage") end,
+    toggle_stage = function() change_index("toggle") end,
+    next_view = function() cycle_view(1) end,
+    prev_view = function() cycle_view(-1) end,
+    prev_hunk = function() hunk(false) end,
+    next_hunk = function() hunk(true) end,
+  }
+  status()
+  overlay_opts.scope, overlay_opts.actions = nil, nil
   active = { close = close }
   if revision then
     revision_info(revision)

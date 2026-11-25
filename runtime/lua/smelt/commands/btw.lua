@@ -149,7 +149,7 @@ smelt.cmd.register("btw", function(args)
         stop_waiting()
         stream:reset()
       end,
-      close_with_q = true,
+      scope = "dialog.view",
     })
   end)
 end, { desc = "ask a side question", args = { "<question>" } })

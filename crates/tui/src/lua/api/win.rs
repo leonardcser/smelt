@@ -421,6 +421,18 @@ impl mlua::UserData for LuaWin {
             },
         );
 
+        methods.add_method(
+            "scope",
+            |lua, this, (name, actions): (String, Option<mlua::Table>)| {
+                super::keymap::install_scope(
+                    lua,
+                    crate::smelt_edit::ScopeOwner::Win(this.id),
+                    name,
+                    actions,
+                )
+            },
+        );
+
         // ── key(chord, fn) → Reg ───────────────────────────────────
         methods.add_function(
             "key",
@@ -912,6 +924,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         Tier::UiHost,
     )?;
 
+    // Rows each navigation action of the `list` scope moves by, so Lua
+    // lists that drive their own selection step the same way.
+    m.private_fn("__list_steps", &[], |lua, ()| -> LuaResult<mlua::Table> {
+        lua.create_table_from(crate::keymap::LIST_STEPS)
+    })?;
+
     // Stash the shared state so per-method registrations (key/on) can
     // recover it without each method capturing its own clone.
     lua.set_named_registry_value(
@@ -939,7 +957,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "reveal" => fn(row: u64, opts: Option<mlua::Table>) -> LuaWin, "Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor; `opts.jump = true` first leaves the current cursor in the window's jump list so `win:jump{ older = 1 }` or vim's `Ctrl-O` returns to it. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should resolve a target from a committed `smelt.transcript.View` and pass it to `smelt.transcript.reveal`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "jump" => fn(opts: mlua::Table) -> bool, "Walk the window's jump list, the positions its vim jumps (`G`, `}`, `]u`, searches) left from; vim's `Ctrl-O`, `Ctrl-I` and `''`. Pass exactly one of `opts.older = n` (back `n` jumps), `opts.newer = n` (forward again) or `opts.previous = true` (toggle between the last two positions). Returns whether the cursor moved. The built-in prompt window has no jump list and returns false.",
-            "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",
+            "scope" => fn(name: String, actions: Option<mlua::Table>) -> (), "Put the window in keymap scope `name`, with `actions` mapping the scope's action names to functions. The window's scope comes before its dialog's or overlay's. Replaces its previous scope.",
+            "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window, before any keymap scope. Users cannot rebind it: prefer a scope action for keys a user may want to change. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",
             "on" => fn(event: LuaWinEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.",
             "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.",
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
@@ -1003,7 +1022,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     static NEW_DOC: OnceLock<String> = OnceLock::new();
     let new_doc = NEW_DOC.get_or_init(|| {
         format!(
-            "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell. `opts.pad_left` / `opts.pad_right` inset the content. `opts.style` accepts a shared style value layered over `Normal` as the window's base style. `opts.prefix` paints text into the left padding (see `Win:configure`). `Win:configure(opts)` changes these later.",
+            "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf in keymap scope `list`, whose actions move the selection and fire `submit`; `win:scope(\"list\", actions)` replaces them. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell. `opts.pad_left` / `opts.pad_right` inset the content. `opts.style` accepts a shared style value layered over `Normal` as the window's base style. `opts.prefix` paints text into the left padding (see `Win:configure`). `Win:configure(opts)` changes these later.",
             crate::smelt_edit::Gutters::default().scrollbar
         )
     });
@@ -1023,7 +1042,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             opts.name = opts
                 .name
                 .or_else(|| crate::lua::auto_name_for_scope(lua, "win"));
-            Ok(opts.open(buf.id).map(|id| LuaWin { id }))
+            let Some(id) = opts.open(buf.id) else {
+                return Ok(None);
+            };
+            Ok(Some(LuaWin { id }))
         },
     )?;
 

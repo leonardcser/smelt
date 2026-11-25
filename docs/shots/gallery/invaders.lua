@@ -75,18 +75,15 @@ local function open()
   smelt.overlay.new({
     name = "invaders", title = " invaders · ←→ space ", anchor = "screen_at", corner = "ne", row = 1, col = 1,
     width = W + 2, height = H + 2, modal = false,
-    -- The empty window holds focus so the keymaps fire; the game is a paint.
+    -- The empty window holds focus so its keys fire; the game is a paint.
     layout = layout.vbox({
       { layout.leaf(ui.win), height = 0 },
       { layout.leaf(ui.paint, { measure = { W, H } }), height = "fit" },
     }),
-    keymaps = {
-      { key = "h", on_press = move(-1) }, { key = "<Left>", on_press = move(-1) },
-      { key = "l", on_press = move(1) }, { key = "<Right>", on_press = move(1) },
-      { key = "<Space>", on_press = play(fire) },
-      { key = "q", on_press = close }, { key = "<Esc>", on_press = close }, { key = "<C-c>", on_press = close },
-    },
   })
+  local keys = { h = move(-1), ["<Left>"] = move(-1), l = move(1), ["<Right>"] = move(1), ["<Space>"] = play(fire) }
+  for _, key in ipairs({ "q", "<Esc>", "<C-c>" }) do keys[key] = close end
+  for key, action in pairs(keys) do ui.win:key(key, action) end
   ui.win:focus()
   ui.timer = smelt.timer.every(80, tick)
 end

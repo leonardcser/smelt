@@ -556,7 +556,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | `smelt.plugins.notebook` | Optional notebook editing: edit_notebook with cell previews, staleness preflight, and per-path locking. |
 | `smelt.plugins.plot` | Optional plot tool: line, area, scatter, bar, histogram and heatmap charts drawn as text, sized to the transcript width. |
 | `smelt.plugins.show_ansi` | Optional show_ansi tool: shows ANSI-colored text, from a file of program output or hand-written escapes. |
-| `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
+| `smelt.plugins.which_key` | Which-key style popup for pending Lua keymaps: the scopes around focus, innermost first, then global bindings. |
 
 <!-- PLUGINS_END -->
 
@@ -673,7 +673,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.http.cache` - Runtime-owned HTTP response cache.
 - `smelt.image` - Image file detection and base64 data-URL loading.
 - `smelt.json` - Encode/decode JSON for Lua plugins.
-- `smelt.keymap` - Register chord→callback bindings and inspect the layered help index.
+- `smelt.keymap` - Key bindings, global or per keymap scope.
 - `smelt.layout` - Declarative, width-independent content layout primitives for transcript/tool display.
 - `smelt.lifecycle` - Host-phase hooks keyed by event name.
 - `smelt.log` - Structured JSONL log entries written to the engine log file.

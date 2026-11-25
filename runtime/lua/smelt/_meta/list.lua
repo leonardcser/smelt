@@ -8,6 +8,12 @@
 ---@class smelt.list
 local list = {}
 
+--- Actions of the `list.nav` scope. Each calls `move(delta)` with the rows it
+--- moves the selection by, the same steps native lists use. Install them on
+--- an input that drives a list: `input:scope("list.nav", smelt.list.nav(move))`.
+---@type fun(move: fun(delta: integer)): table<string, fun()>
+list.nav = nil
+
 --- Build a structured list bound to the dialog-list `opts.leaf` and its
 --- backing `opts.buf`. `opts.items` is the data source; `opts.render(item)`
 --- returns `{ text, spans?, marks }`; `opts.filter(item)` is optional and re-runs

@@ -15,7 +15,7 @@ expression: frame.text()
      │   85.7K 1d   first pass at the resume picker              │
      │   12.1K 5m   investigate parser regression                │
      ├───────────────────────────────────────────────────────────┤
-  tip│ parser                            ⌥d: delete · workspace  │ing…
+  tip│ parser                         alt+d: delete · workspace  │ing…
 ─────└───────────────────────────────────────────────────────────┘──────
 
 ────────────────────────────────────────────────────────────────────────

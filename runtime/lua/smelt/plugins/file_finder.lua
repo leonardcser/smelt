@@ -3,6 +3,19 @@
 local active = false
 local FILE_LIMIT = 500
 
+smelt.keymap.scope("file_finder", {
+  desc = "/files and /search pickers",
+  actions = {
+    open  = "Open the selected result",
+    close = "Close the picker",
+  },
+  keys = {
+    { "", "<CR>",  "open"  },
+    { "", "<Esc>", "close" },
+    { "", "<C-c>", "close" },
+  },
+})
+
 -- Shows one file in the preview pane. Previews are native documents that
 -- build only visible rows, so every selection change renders immediately.
 local function previewer(preview, preview_buf)
@@ -88,19 +101,8 @@ local function shell(spec)
     if overlay then overlay:close() end
   end
 
-  local keymaps = {
-    { key = "enter", on_press = spec.submit },
-    { key = "esc", on_press = ui.close },
-    { key = "ctrl-c", on_press = ui.close },
-  }
-  for _, binding in ipairs({
-    { "up", -1 }, { "down", 1 }, { "ctrl-k", -1 }, { "ctrl-j", 1 },
-    { "ctrl-p", -1 }, { "ctrl-n", 1 }, { "pgup", -10 }, { "pgdn", 10 },
-  }) do
-    local function handler() spec.move(binding[2]) end
-    input:key(binding[1], handler)
-    keymaps[#keymaps + 1] = { key = binding[1], on_press = handler }
-  end
+  input:scope("list.nav", smelt.list.nav(spec.move))
+  local actions = { open = function() spec.submit() end, close = function() ui.close() end }
   input:on("text_changed", function(event) spec.query((event and event.text) or "") end)
   input:on("submit", spec.submit)
   ui.list_win:on("submit", spec.submit)
@@ -135,7 +137,8 @@ local function shell(spec)
     end
     overlay = smelt.overlay.new({
       name = spec.name, anchor = "center", border = "none", modal = true,
-      width = "85%", height = "75%", layout = root, keymaps = keymaps,
+      width = "85%", height = "75%", layout = root,
+      scope = "file_finder", actions = actions,
     })
   end
   mount()

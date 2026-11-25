@@ -15,6 +15,7 @@ mod error_queue;
 mod file_finder;
 mod gallery;
 mod goal;
+mod keymaps;
 mod lua_reload;
 mod misc;
 mod mouse;

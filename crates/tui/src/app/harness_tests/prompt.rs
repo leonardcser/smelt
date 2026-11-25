@@ -2678,12 +2678,12 @@ fn steered_text(app: &TestApp) -> Option<String> {
 }
 
 #[test]
-fn lua_keymaps_can_swap_queue_and_steer_keys() {
+fn prompt_scope_bindings_can_swap_queue_and_steer_keys() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(
         r#"
-        smelt.keymap.set("", "<C-q>", function() smelt.prompt.submit() end)
-        smelt.keymap.set("", "<M-CR>", function() smelt.prompt.steer() end)
+        smelt.keymap.set("i", "<C-q>", "submit", { scope = "prompt" })
+        smelt.keymap.set("i", "<M-CR>", "steer", { scope = "prompt" })
         "#
     ));
     app.start_turn(1);

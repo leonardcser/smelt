@@ -1,5 +1,12 @@
 -- Built-in /messages command. Full-body log of Lua errors, warnings, and notices.
 
+smelt.keymap.scope("messages", {
+  desc = "/messages dialog",
+  extends = "dialog.view",
+  actions = { clear = "Clear recorded messages and close" },
+  keys = { { "n", "c", "clear" } },
+})
+
 local function format_lines(entries)
   if #entries == 0 then
     return { "  (no messages)" }
@@ -33,10 +40,9 @@ smelt.cmd.register("messages", function()
       title      = string.format("messages (%d)", #entries),
       max_height = "50%",
       panels     = { { leaf = body_leaf } },
-      close_with_q = true,
-      keymaps    = {
-        { key = "<Esc>", on_press = function(ctx) ctx.close() end },
-        { key = "c",     on_press = function(ctx) smelt.messages.clear(); ctx.close() end },
+      scope      = "messages",
+      actions    = {
+        clear = function(ctx) smelt.messages.clear(); ctx.close() end,
       },
     })
   end)

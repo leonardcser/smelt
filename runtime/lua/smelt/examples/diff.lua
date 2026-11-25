@@ -116,9 +116,8 @@ local function open(filepath)
 		modal = true,
 		draggable = true,
 		resizable = true,
-		keymaps = {
-			{ key = "q", on_press = close },
-		},
+		scope = "dialog.view",
+		actions = { close = close },
 	})
 
 	STATE = { overlay = overlay, left_win = left_win, right_win = right_win }

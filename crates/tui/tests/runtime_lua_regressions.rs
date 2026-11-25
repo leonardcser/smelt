@@ -830,6 +830,12 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
           ns = function(name) return name end,
           log = { error = function() end },
           notify = __smelt_notify_stub(nil, nil),
+          keymap = { scope = function() end },
+          list = {
+            nav = function(move)
+              return { next = function() move(1) end, prev = function() move(-1) end }
+            end,
+          },
           text = {
             width = function(s) return #(s or "") end,
             wrap_prefixed = function(text, width, opts)
@@ -857,6 +863,7 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
             new = function(buf, opts)
               local leaf = { buf = buf, opts = opts or {}, keys = {}, cursor_row = (opts and opts.initial_cursor) or 0 }
               function leaf:key(key, fn) self.keys[key] = fn end
+              function leaf:scope(name, actions) self.scope_name, self.actions = name, actions end
               function leaf:cursor(row)
                 if row == nil then return self.cursor_row end
                 self.cursor_row = row
@@ -907,14 +914,14 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
             local cursor_skips_disabled = ctrl:cursor()
 
             leaf:cursor(1)
-            leaf.keys.enter()
+            leaf.actions.submit()
             local after_disabled_enter = #submitted
 
             leaf.keys["2"]()
             local after_disabled_digit = #submitted
 
-            leaf.keys.j()
-            leaf.keys.enter()
+            leaf.actions.next()
+            leaf.actions.submit()
             return { cursor_skips_disabled, after_disabled_enter, after_disabled_digit, submitted[1] or 0 }
             "#,
         )

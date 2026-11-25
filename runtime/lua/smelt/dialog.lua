@@ -9,22 +9,22 @@
 -- the leaves in `opts.panels`. Dialog handles only:
 --   1. Mounting the panel tree in the root composer with a top border.
 --   2. Setting and containing focus.
---   3. Installing dialog-level keymaps across the modal scope.
+--   3. Putting the dialog in a keymap scope and implementing its actions.
 --   4. Bridging Submit/Dismiss/Tick events to user callbacks.
 --   5. Coroutine lifecycle: `open(opts)` blocks until `ctx.resolve(v)` is called.
 --
--- Keymap scoping (important):
---   - `opts.keymaps` are DIALOG-WIDE - installed on the modal scope so they
---     fire regardless of which panel is focused.
---     Use these for shortcuts that should always work in the dialog (e.g.
---     Alt-W, Ctrl-D).
---   - Ctrl-O toggles the dialog between its context-preserving height and an
---     expanded review layout.
---   - To scope a key to a specific panel, install it directly on that leaf via
---     `leaf:key(key, fn)` after `new` returns. Example:
---     the confirm dialog binds `tab` only on the options leaf (jump into the
---     reason input) and `esc` only on the reason leaf (pop focus back to the
---     options leaf instead of dismissing the dialog).
+-- Keys (important):
+--   - A dialog belongs to the keymap scope `opts.scope` (default `"dialog"`)
+--     and implements `opts.actions`, so its keys work whichever panel has
+--     focus and users can rebind them. Declare the scope with
+--     `smelt.keymap.scope(name, { extends = "dialog", ... })` to keep the
+--     built-in `close` and `expand` actions; `<C-o>` runs `expand`.
+--   - `"dialog.view"` adds `q` to close for read-only dialogs, and
+--     `"dialog.viewer"` also closes on `?`.
+--   - To bind a key on one panel only, use `leaf:key(key, fn)` after `new`
+--     returns. Example: the confirm dialog binds `tab` only on the options
+--     leaf (jump into the reason input) and `esc` only on the reason leaf
+--     (pop focus back to the options leaf instead of dismissing the dialog).
 --
 -- Buffer helpers:
 --   smelt.dialog.input(placeholder, opts)   -> leaf, buf, input  (line input; opts.wrap soft-wraps)
@@ -52,20 +52,26 @@ local function report_callback_error(event, err)
   smelt.notify.error("dialog " .. event .. ": " .. msg)
 end
 
-local function dialog_keymaps(opts)
-  local keymaps = {}
-  local has_q = false
-  for _, km in ipairs(opts.keymaps or {}) do
-    if type(km) == "table" then
-      if km.key == "q" then has_q = true end
-      keymaps[#keymaps + 1] = km
-    end
-  end
-  if opts.close_with_q and not has_q then
-    table.insert(keymaps, 1, { key = "q", on_press = function(ctx) ctx.close() end })
-  end
-  return keymaps
-end
+smelt.keymap.scope("dialog", {
+  desc = "Docked dialogs",
+  actions = {
+    close  = "Close the dialog",
+    expand = "Toggle the expanded dialog layout",
+  },
+  keys = { { "", "<C-o>", "expand" } },
+})
+
+smelt.keymap.scope("dialog.view", {
+  desc = "Read-only dialogs",
+  extends = "dialog",
+  keys = { { "n", "q", "close" } },
+})
+
+smelt.keymap.scope("dialog.viewer", {
+  desc = "Read-only content viewers",
+  extends = "dialog.view",
+  keys = { { "n", "?", "close" } },
+})
 
 -- Stack of active dialog contexts. Pushed by `setup_lifecycle` at open
 -- time, popped on resolve. `smelt.dialog.current()` returns the topmost
@@ -104,14 +110,6 @@ local GUTTER = 1
 ---@field leaf smelt.win.Win A leaf returned by `smelt.dialog.input/options/list/markdown/content`.
 ---@field height? any Integer cells, `"N%"`, `"fill"`, or `"fit"`.
 
---- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
---- context exposing `ctx.close()` and `ctx.resolve(value)` so the
---- handler can dismiss the dialog or resolve the blocking `open` call.
----@class smelt.dialog.Keymap
----@field key string Chord string (e.g. `"q"`, `"<Esc>"`, `"ctrl-j"`).
----@field hint? string Optional one-line hint surfaced in the dialog footer.
----@field on_press fun(ctx: any): any Handler invoked when the key fires.
-
 --- Options accepted by `smelt.dialog.open` / `smelt.dialog.new`.
 --- Dialogs fit their content by default while preserving transcript context.
 --- Sizes describe the complete composed view, including chrome, just like overlays.
@@ -129,8 +127,8 @@ local GUTTER = 1
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
 ---@field border? table Top border style override; defaults to `{ top = "SmeltAccent" }`.
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
----@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
----@field close_with_q? boolean Bind `q` to close for read-only/list dialogs. Leave false for dialogs that accept text input.
+---@field scope? string Keymap scope of the dialog, default `"dialog"`. Use `"dialog.view"` for read-only dialogs that close on `q`, or a scope declared with `smelt.keymap.scope` that extends one of them.
+---@field actions? table<string, fun(ctx: any): any> Actions of the dialog's scope by name. Each receives the dialog ctx (`resolve`, `close`, `panels`, `focused_leaf`, ...); returning `false` passes the key on. `close` and `expand` are built in.
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter. Without a handler, Enter leaves the dialog open.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
 ---@field on_close? fun(ctx: any): nil Handler invoked once whenever the dialog resolves or closes.
@@ -147,7 +145,8 @@ local GUTTER = 1
 ---@field on_query? fun(query: string, ctx: any): nil Fires on every keystroke; default re-applies `filter`.
 ---@field on_submit? fun(ctx: any): any Fires on Enter. `ctx.item` is the highlighted row; defaults to resolving with `ctx.item` when non-nil.
 ---@field on_dismiss? fun(): nil Fires when the dialog is dismissed.
----@field keymaps? smelt.dialog.Keymap[] Extra dialog-level keymaps merged on top of navigation bindings.
+---@field scope? string Keymap scope of the picker dialog, default `"dialog"`. Navigation keys come from the `list.nav` scope of its input.
+---@field actions? table<string, fun(ctx: any): any> Extra actions of the picker's scope. Each receives the picker ctx with `list`, `input` and `input_buf`.
 ---@field title? string Forwarded to `smelt.dialog.open`.
 ---@field height? any Forwarded to `smelt.dialog.open`.
 ---@field max_height? any Forwarded to `smelt.dialog.open`.
@@ -528,30 +527,17 @@ function smelt.dialog.menu(items, opts)
   end
 
   local function move(units)
-    return function()
-      local cur = ctrl:cursor()
-      local target = cur + units
-      if target < 1 then target = 1 end
-      if target > item_count then target = item_count end
-      select(target, units < 0 and -1 or 1)
-    end
+    local target = ctrl:cursor() + units
+    if target < 1 then target = 1 end
+    if target > item_count then target = item_count end
+    select(target, units < 0 and -1 or 1)
   end
-  leaf:key("up",   move(-1))
-  leaf:key("down", move(1))
-  leaf:key("k",    move(-1))
-  leaf:key("j",    move(1))
-  leaf:key("c-k",  move(-1))
-  leaf:key("c-j",  move(1))
-  leaf:key("c-p",  move(-1))
-  leaf:key("c-n",  move(1))
-  leaf:key("pgup", move(-10))
-  leaf:key("pgdn", move(10))
-  leaf:key("c-u",  move(-5))
-  leaf:key("c-d",  move(5))
-  leaf:key("home", function() ctrl:cursor(1) end)
-  leaf:key("end",  function() ctrl:cursor(item_count) end)
-
-  leaf:key("enter", function() ctrl:submit() end)
+  -- The menu is a `list` that skips disabled items.
+  local actions = smelt.list.nav(move)
+  actions.first  = function() ctrl:cursor(1) end
+  actions.last   = function() ctrl:cursor(item_count) end
+  actions.submit = function() ctrl:submit() end
+  leaf:scope("list", actions)
 
   -- Digit shortcuts. `key = "X"` on an item overrides its digit binding;
   -- without an override items 1..9 use their 1-based index. Bindings live
@@ -655,17 +641,10 @@ function smelt.dialog.content(opts)
   return leaf, buf
 end
 
-local function viewer_keymaps(extra)
-  local keymaps = {
-    { key = "?", on_press = function(ctx) ctx.close() end },
-  }
-  for _, km in ipairs(extra or {}) do keymaps[#keymaps + 1] = km end
-  return keymaps
-end
-
 --- Open a read-only content dialog. Pass `text` for plain text, `lines` for
 --- plain line tables, `styled` for styled lines, or `buf` for a live buffer the
---- caller will update after opening. Returns `(handle, buf, leaf)`.
+--- caller will update after opening. `scope` defaults to `"dialog.viewer"`
+--- and `actions` implements its actions. Returns `(handle, buf, leaf)`.
 ---@type fun(opts: table): table, smelt.buf.Buf, smelt.win.Win
 function smelt.dialog.viewer(opts)
   opts = opts or {}
@@ -694,8 +673,8 @@ function smelt.dialog.viewer(opts)
     max_height = max_height,
     min_height = opts.min_height,
     panels     = { panel },
-    keymaps    = viewer_keymaps(opts.keymaps),
-    close_with_q = opts.close_with_q ~= false,
+    scope      = opts.scope or "dialog.viewer",
+    actions    = opts.actions,
   })
   return handle, buf, leaf
 end
@@ -836,7 +815,7 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
 
   -- Shared dialog ctx. `focused_leaf` is mutated live by the focus event
   -- handlers below so callbacks always read the current value. Exposed via
-  -- `smelt.dialog.current()` and as the `ctx` arg to `opts.keymaps` /
+  -- `smelt.dialog.current()` and as the `ctx` arg to `opts.actions` /
   -- `on_submit` handlers.
   local ctx = {
     win          = root,
@@ -873,13 +852,25 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
   if opts.focus ~= nil and not contains_window(leaves, opts.focus) then
     error("smelt.dialog: focus must be a window handle in the composed view", 4)
   end
-  local keymaps = dialog_keymaps(opts)
-  for _, km in ipairs(keymaps) do
-    if km.key and type(km.on_press) == "function" then
-      if type(km.key) ~= "string" then
-        error("smelt.dialog: keymap key must be a string", 4)
+  local scope = opts.scope or "dialog"
+  if type(scope) ~= "string" or scope == "" then
+    error("smelt.dialog: scope must be a non-empty string", 4)
+  end
+  local actions = {
+    close  = function() ctx.close() end,
+    expand = function() ctx.toggle_expanded() end,
+  }
+  for name, fn in pairs(opts.actions or {}) do
+    if type(name) ~= "string" or type(fn) ~= "function" then
+      error("smelt.dialog: actions must map names to functions", 4)
+    end
+    actions[name] = function(raw_ctx)
+      local ok, result = pcall(fn, make_ctx(raw_ctx))
+      if not ok then
+        report_callback_error("action " .. name, result)
+        return
       end
-      __smelt_internal.dialog.__check_chord(km.key)
+      return result
     end
   end
 
@@ -968,26 +959,14 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
   -- focusable leaf after mounting the dialog in the root layout.
   if opts.focus then opts.focus:focus() end
 
-  -- Dialog-level keymaps belong to the modal scope, independent of whether
-  -- the dialog is mounted in the root layout or a future floating container.
-  ctx.host:key("ctrl-o", function() ctx.toggle_expanded() end)
-  if #keymaps > 0 then
-    for _, km in ipairs(keymaps) do
-      if type(km) == "table" and km.key and type(km.on_press) == "function" then
-        local on_press = km.on_press
-        ctx.host:key(km.key, function(raw_ctx)
-          local ok, err = pcall(on_press, make_ctx(raw_ctx))
-          if not ok then report_callback_error("keymap", err) end
-        end)
-      end
-    end
-  end
+  -- The modal owns the dialog's scope, so its keys work in every panel.
+  ctx.host:scope(scope, actions)
 
   return resolve, root
 end
 
 -- Coroutine-blocking dialog opener. Builds the root dialog from `opts.panels`
--- (each `{ leaf, height }`), wires `opts.keymaps`, then yields the
+-- (each `{ leaf, height }`), installs `opts.actions`, then yields the
 -- caller until a handler calls `ctx.resolve(value)`. Must run inside a
 -- `smelt.spawn` (or tool execute) frame; returns the resolved value or
 -- `nil` on dismiss.
@@ -1044,30 +1023,18 @@ end
 --                     `ctx.list`/`ctx.input`/`ctx.input_buf` are added
 --                     by the picker. Default resolves with `ctx.item`
 --                     when non-nil.
---   * `keymaps`     - extra dialog-level keymaps merged on top of the
---                     built-in navigation bindings. Each entry's
---                     `on_press(ctx)` receives the picker ctx with
---                     `ctx.list`, `ctx.input`, `ctx.input_buf` added.
+--   * `scope`       - keymap scope of the dialog, default `"dialog"`. The
+--                     input carries `list.nav` for the navigation keys.
+--   * `actions`     - extra actions of the scope. Each receives the picker
+--                     ctx with `ctx.list`, `ctx.input`, `ctx.input_buf`
+--                     added.
 --   * `title`, `height`, `max_height`, `min_height`, `blocks_agent` - forwarded to
 --                     `smelt.dialog.open`.
-
-local NAV_KEYS = {
-  { "up",     -1  },
-  { "down",   1   },
-  { "ctrl-k", -1  },
-  { "ctrl-j", 1   },
-  { "ctrl-p", -1  },
-  { "ctrl-n", 1   },
-  { "pgup",   -10 },
-  { "pgdn",   10  },
-  { "ctrl-u", -5  },
-  { "ctrl-d", 5   },
-}
 
 -- Coroutine-blocking Telescope-style picker. Stacks a single-line input
 -- on top of a list driven by `smelt.list.new`; navigation forwards from
 -- input to list, Enter resolves with the selected item. See the doc
--- block above `NAV_KEYS` for every accepted `opts` field. Returns the
+-- block above for every accepted `opts` field. Returns the
 -- value resolved from `on_submit` (defaults to the highlighted item) or
 -- `nil` on dismiss.
 ---@type fun(opts: smelt.dialog.PickerOpts): any
@@ -1115,23 +1082,11 @@ function smelt.dialog.picker(opts)
     end
   end)
 
-  local function nav(delta)
-    return function() list:move_cursor(delta) end
-  end
+  input_leaf:scope("list.nav", smelt.list.nav(function(delta) list:move_cursor(delta) end))
 
-  local keymaps = {}
-  for _, n in ipairs(NAV_KEYS) do
-    table.insert(keymaps, { key = n[1], on_press = nav(n[2]) })
-  end
-  if type(opts.keymaps) == "table" then
-    for _, km in ipairs(opts.keymaps) do
-      local fn = km.on_press
-      table.insert(keymaps, {
-        key      = km.key,
-        hint     = km.hint,
-        on_press = function(ctx) return fn(augment(ctx)) end,
-      })
-    end
+  local actions = {}
+  for name, fn in pairs(opts.actions or {}) do
+    actions[name] = function(ctx) return fn(augment(ctx)) end
   end
 
   local on_submit
@@ -1158,7 +1113,8 @@ function smelt.dialog.picker(opts)
       { leaf = list_leaf,  height = "fill" },
     },
     focus     = input_leaf,
-    keymaps   = keymaps,
+    scope     = opts.scope,
+    actions   = actions,
     on_submit = on_submit,
     on_dismiss = opts.on_dismiss,
   })

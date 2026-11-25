@@ -9,7 +9,7 @@ description: "Reference for every namespace of the smelt Lua API: commands, keym
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 93 namespace(s), 485 function(s), 122 class(es), 16 alias(es).
+**Coverage:** 93 namespace(s), 492 function(s), 120 class(es), 16 alias(es).
 
 Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).
 
@@ -26,7 +26,7 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.config`](config.md) (UI only): Resolved application configuration introspection.
 - [`smelt.defaults`](defaults.md): Startup fallbacks for new sessions.
 - [`smelt.events`](events.md): Occurrence-oriented subscriptions for events such as `turn_start`, `tool_start`, and `turn_complete`.
-- [`smelt.keymap`](keymap.md): Register chord→callback bindings and inspect the layered help index.
+- [`smelt.keymap`](keymap.md): Key bindings, global or per keymap scope.
 - [`smelt.lifecycle`](lifecycle.md): Host-phase hooks keyed by event name.
 - [`smelt.reg`](reg.md): Helpers for constructing `Reg` handles.
 - [`smelt.remember`](remember.md): Per-key opt-in to last-used recall on launch.

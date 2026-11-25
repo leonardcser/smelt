@@ -11,6 +11,16 @@ description: "Picker-style virtual list widget. Lua API reference for smelt.list
 
 Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.
 
+## `smelt.list.nav`
+
+```lua
+fun(move: fun(delta: integer)): table<string, fun()>
+```
+
+Actions of the `list.nav` scope. Each calls `move(delta)` with the rows it
+moves the selection by, the same steps native lists use. Install them on
+an input that drives a list: `input:scope("list.nav", smelt.list.nav(move))`.
+
 ## `smelt.list.new`
 
 ```lua

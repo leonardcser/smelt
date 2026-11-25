@@ -812,9 +812,10 @@ impl TestApp {
     }
 
     pub fn prompt_plain_char_has_lua_keymap(&self, ch: char) -> bool {
-        let chord = ch.to_string();
-        let mode = self.tui.current_vim_mode_label();
-        self.tui.lua.chord_has_binding(&chord, mode.as_deref())
+        let chain = self.tui.keymap_chain();
+        self.tui
+            .lua
+            .chord_has_binding(&chain.frames(), &ch.to_string())
     }
 
     pub fn model_history(&self) -> Vec<protocol::HistoryItem> {

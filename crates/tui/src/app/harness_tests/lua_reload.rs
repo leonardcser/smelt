@@ -3026,8 +3026,8 @@ fn lua_buf_win_overlay_contracts_are_available() {
                 layout = layout,
             })
             assert(tostring(overlay):find("Overlay#", 1, true) == 1)
-            local overlay_reg = overlay:key("y", function() end)
-            assert(overlay_reg:remove() == true)
+            overlay:scope("coverage.contract", { close = function() overlay:close() end })
+            assert(table.concat(smelt.keymap.active(), ",") == "prompt", "an unfocused overlay adds no scope")
         "##,
     )
     .expect("lua buf/win/overlay contracts");
@@ -3098,7 +3098,6 @@ fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
             assert(reg:remove() == true, "keymap reg remove")
             assert(smelt.keymap.unset("n", "<leader>t") == false, "keymap already removed")
             smelt.keymap.set_leader(old_leader)
-            assert(type(smelt.keymap.help_sections()) == "table", "help sections")
 
             assert(smelt.vim.mode() == "insert", "initial vim mode")
             smelt.vim.set_mode("normal")
@@ -4060,8 +4059,9 @@ fn reload_clears_every_lua_surface() {
         .keymaps
         .lock()
         .unwrap()
-        .keys()
-        .any(|(_, c)| c == "<C-o>"));
+        .effective("")
+        .iter()
+        .any(|row| row.chord == "<C-o>"));
     assert!(shared.tools.lock().unwrap().contains_key("seed_tool"));
     assert!(shared.default_shell.lock().unwrap().is_some());
     assert!(shared
@@ -4103,8 +4103,9 @@ fn reload_clears_every_lua_surface() {
             .keymaps
             .lock()
             .unwrap()
-            .keys()
-            .any(|(_, c)| c == "<C-o>"),
+            .effective("")
+            .iter()
+            .any(|row| row.chord == "<C-o>"),
         "user keymap cleared"
     );
     assert!(

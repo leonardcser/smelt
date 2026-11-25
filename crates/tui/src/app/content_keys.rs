@@ -1,8 +1,9 @@
-//! Content-pane key dispatch: thin wrapper around the shared viewer-key
-//! dispatcher with transcript-specific extras (Ctrl-C to leave the pane,
-//! cursor snapping past non-selectable cells).
+//! Content-pane key dispatch: the keys the `transcript` keymap scope leaves
+//! over go to the shared viewer-key dispatcher, after the `z` fold chords,
+//! with cursor snapping past non-selectable cells.
 
 use crate::app::{EventOutcome, TuiApp};
+use crate::keymap::Fold;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use smelt_view::transcript_buf::{FoldAction, FoldActivation};
 use std::time::Duration;
@@ -47,58 +48,44 @@ impl TuiApp {
             return None;
         }
         if pending {
-            let action = match k.code {
-                KeyCode::Char('a') => Some(FoldAction::Toggle),
-                KeyCode::Char('o') => Some(FoldAction::Open),
-                KeyCode::Char('c') => Some(FoldAction::Close),
-                KeyCode::Char('R') => {
-                    return Some(if self.fold_all_transcript_nodes(FoldAction::Open) {
-                        EventOutcome::Redraw
-                    } else {
-                        EventOutcome::Noop
-                    });
-                }
-                KeyCode::Char('M') => {
-                    return Some(if self.fold_all_transcript_nodes(FoldAction::Close) {
-                        EventOutcome::Redraw
-                    } else {
-                        EventOutcome::Noop
-                    });
-                }
-                _ => None,
-            }?;
-            let Some(row) = self.transcript_cursor_row() else {
-                return Some(EventOutcome::Noop);
+            let fold = match k.code {
+                KeyCode::Char('a') => Fold::Toggle,
+                KeyCode::Char('o') => Fold::Open,
+                KeyCode::Char('c') => Fold::Close,
+                KeyCode::Char('R') => Fold::OpenAll,
+                KeyCode::Char('M') => Fold::CloseAll,
+                _ => return None,
             };
-            return Some(
-                if self.fold_transcript_node_at_row(row, action, FoldActivation::AnyNodeRow) {
-                    EventOutcome::Redraw
-                } else {
-                    EventOutcome::Noop
-                },
-            );
+            return Some(self.fold_transcript(fold));
         }
 
-        match k.code {
-            KeyCode::Char('z') => {
-                self.timers.pending_transcript_fold_chord = Some(now);
-                Some(EventOutcome::Noop)
+        if k.code == KeyCode::Char('z') {
+            self.timers.pending_transcript_fold_chord = Some(now);
+            return Some(EventOutcome::Noop);
+        }
+        None
+    }
+
+    /// Fold or unfold transcript blocks: the one under the cursor, or all.
+    pub(crate) fn fold_transcript(&mut self, fold: Fold) -> EventOutcome {
+        let changed = match fold {
+            Fold::OpenAll => self.fold_all_transcript_nodes(FoldAction::Open),
+            Fold::CloseAll => self.fold_all_transcript_nodes(FoldAction::Close),
+            Fold::Toggle | Fold::Open | Fold::Close => {
+                let action = match fold {
+                    Fold::Open => FoldAction::Open,
+                    Fold::Close => FoldAction::Close,
+                    _ => FoldAction::Toggle,
+                };
+                self.transcript_cursor_row().is_some_and(|row| {
+                    self.fold_transcript_node_at_row(row, action, FoldActivation::AnyNodeRow)
+                })
             }
-            KeyCode::Enter => {
-                let row = self.transcript_cursor_row()?;
-                Some(
-                    if self.fold_transcript_node_at_row(
-                        row,
-                        FoldAction::Toggle,
-                        FoldActivation::AnyNodeRow,
-                    ) {
-                        EventOutcome::Redraw
-                    } else {
-                        EventOutcome::Noop
-                    },
-                )
-            }
-            _ => None,
+        };
+        if changed {
+            EventOutcome::Redraw
+        } else {
+            EventOutcome::Noop
         }
     }
 
@@ -107,16 +94,6 @@ impl TuiApp {
             Event::Key(k) => *k,
             _ => return EventOutcome::Noop,
         };
-        use crossterm::event::KeyModifiers as M;
-
-        // Ctrl-C with no selection leaves the content pane back to the prompt.
-        // This is transcript-only - the same chord on an overlay viewer is
-        // claimed by the modal-dismiss tier instead.
-        if k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
-            self.app_focus = crate::app::AppFocus::Prompt;
-            return EventOutcome::Redraw;
-        }
-
         let win_id = self.well_known.transcript;
         if self.try_open_search_for_key(k) {
             return EventOutcome::Noop;

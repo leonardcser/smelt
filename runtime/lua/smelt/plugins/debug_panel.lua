@@ -265,6 +265,16 @@ local function close()
 	state.win = nil
 end
 
+smelt.keymap.scope("debug_panel", {
+	desc = "Debug panel",
+	actions = { close = "Close the panel" },
+	keys = {
+		{ "", "<Esc>", "close" },
+		{ "", "<C-c>", "close" },
+		{ "n", "q", "close" },
+	},
+})
+
 local function attach()
 	state.buf = smelt.buf.new({ name = "debug_panel.buf", readonly = true })
 	state.win = smelt.win.new(state.buf, {
@@ -273,9 +283,7 @@ local function attach()
 		hide_cursor = true,
 		vim_enabled = smelt.settings.vim and true or false,
 	})
-	state.win:key("esc", close)
-	state.win:key("q", close)
-	state.win:key("c-c", close)
+	state.win:scope("debug_panel", { close = close })
 	state.overlay = smelt.overlay.new({
 		name = "debug_panel",
 		title = panel_title(),

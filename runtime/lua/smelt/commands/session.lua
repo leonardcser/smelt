@@ -1,5 +1,18 @@
 -- Session metadata and lifecycle commands: /session, /clear, /new, /fork, /branch.
 
+smelt.keymap.scope("session.info", {
+  desc = "/session viewer",
+  extends = "dialog.viewer",
+  actions = {
+    copy    = "Copy session metadata",
+    copy_id = "Copy the session id",
+  },
+  keys = {
+    { "n", "y", "copy" },
+    { "n", "c", "copy_id" },
+  },
+})
+
 local DIM = { fg = "Comment" }
 local HEAD = { fg = "SmeltAccent", bold = true }
 local VALUE = { fg = "Normal" }
@@ -155,21 +168,16 @@ smelt.cmd.register("session", function()
     styled = styled,
     wrap = false,
     max_height = "70%",
-    keymaps = {
-      {
-        key = "c",
-        on_press = function()
-          smelt.clipboard.write(info.id or "")
-          smelt.notify.info("session id copied")
-        end,
-      },
-      {
-        key = "y",
-        on_press = function()
-          smelt.clipboard.write(plain)
-          smelt.notify.info("session metadata copied")
-        end,
-      },
+    scope = "session.info",
+    actions = {
+      copy_id = function()
+        smelt.clipboard.write(info.id or "")
+        smelt.notify.info("session id copied")
+      end,
+      copy = function()
+        smelt.clipboard.write(plain)
+        smelt.notify.info("session metadata copied")
+      end,
     },
   })
 end, { desc = "show current session metadata" })

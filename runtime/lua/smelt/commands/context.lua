@@ -92,6 +92,5 @@ smelt.cmd.register("context", function()
     title = "context",
     styled = lines,
     max_height = "85%",
-    keymaps = { { key = "<Esc>", on_press = function(ctx) ctx.close() end } },
   })
 end, { desc = "show context usage as a colored grid" })

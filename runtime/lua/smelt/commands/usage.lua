@@ -415,7 +415,7 @@ local function open_usage()
       { leaf = actions_leaf, height = "fit", border = { style = "dashed", top = "Comment" } },
     },
     focus = actions_leaf,
-    close_with_q = true,
+    scope = "dialog.view",
   })
 
   callback = function(entry)

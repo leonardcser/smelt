@@ -31,6 +31,7 @@ pub(crate) mod queue;
 pub(crate) mod render_loop;
 pub(crate) mod reveal;
 pub(crate) mod runtime_sync;
+pub(crate) mod scope_actions;
 pub(crate) mod search;
 pub(crate) mod session_document;
 pub(crate) mod session_load;
@@ -2029,6 +2030,7 @@ impl TuiApp {
                 crate::app::TRANSCRIPT_WIN,
                 Some(crate::app::TRANSCRIPT_DOCUMENT),
             );
+            ui.set_base_scope(crate::app::TRANSCRIPT_WIN, Some("transcript"));
             if let Some(w) = ui.win_mut(crate::app::TRANSCRIPT_WIN) {
                 w.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
                 w.set_vim_enabled(vim_enabled);
@@ -2058,6 +2060,7 @@ impl TuiApp {
                     },
                 },
             ));
+            ui.set_base_scope(crate::app::PROMPT_WIN, Some("prompt"));
             if let Some(w) = ui.win_mut(crate::app::PROMPT_WIN) {
                 w.set_vim_enabled(vim_enabled);
                 w.wrap = true;

@@ -4,6 +4,7 @@ pub mod api;
 pub mod ask;
 pub mod doc;
 pub mod hooks;
+pub mod keymaps;
 pub mod lua_type;
 pub mod module;
 pub mod options;
@@ -26,9 +27,9 @@ pub use runtime::{
 pub use shared::{
     AskCallbacks, CliFlagKind, CliFlagSpec, CliFlagValue, CommandBusyBehavior, DefaultShell, Hooks,
     LuaHostServices, LuaResumeSink, LuaShared, LuaWorkGuard, Phase, RegisteredCommand,
-    RegisteredKeymap, RegisteredWinRenderer, ToolHandles, TranscriptGroupBucket,
-    TranscriptGroupFieldMatch, TranscriptGroupSelector, TranscriptGroupSpec, LUA_BUF_ID_BASE,
-    LUA_WORK_BATCH, MAX_LUA_WORK_PER_PUMP,
+    RegisteredWinRenderer, ToolHandles, TranscriptGroupBucket, TranscriptGroupFieldMatch,
+    TranscriptGroupSelector, TranscriptGroupSpec, LUA_BUF_ID_BASE, LUA_WORK_BATCH,
+    MAX_LUA_WORK_PER_PUMP,
 };
 pub(crate) use task::step_task_owned;
 pub use task::{

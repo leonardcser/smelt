@@ -128,7 +128,7 @@ fun(opts: smelt.dialog.Opts): any
 Types: [`smelt.dialog.Opts`](types.md#smeltdialogopts)
 
 Coroutine-blocking dialog opener. Builds the root dialog from `opts.panels`
-(each `{ leaf, height }`), wires `opts.keymaps`, then yields the
+(each `{ leaf, height }`), installs `opts.actions`, then yields the
 caller until a handler calls `ctx.resolve(value)`. Must run inside a
 `smelt.spawn` (or tool execute) frame; returns the resolved value or
 `nil` on dismiss.
@@ -141,10 +141,48 @@ fun(opts: smelt.dialog.PickerOpts): any
 
 Types: [`smelt.dialog.PickerOpts`](types.md#smeltdialogpickeropts)
 
+── Picker preset ─────────────────────────────────────────────────────
+
+`smelt.dialog.picker(opts)` is a thin wrapper that bundles the recurring
+Telescope-style shape: a single-line input on top, a non-focusable list
+below, navigation forwarded from the input to the list, Enter submits.
+Coroutine-blocking like `smelt.dialog.open`; returns the value resolved
+from `on_submit` (or `nil` on dismiss).
+
+Opts:
+  * `items`       - array of arbitrary item tables (passed to `render`).
+  * `render`      - `function(item) -> { text = ..., marks = ... }` (see
+                    `smelt.list`).
+  * `filter`      - optional predicate `function(item) -> bool` applied
+                    to every refilter; the picker re-runs it whenever
+                    the query changes (so it can close over the live
+                    query state).
+  * `placeholder` - input prompt text. Defaults to `""`.
+  * `empty_text`  - shown in the list when nothing matches.
+  * `on_open`     - `function(ctx)` fires once before the dialog blocks,
+                    after the input/list have been built. Use it to seed
+                    marks on the input buffer or to set an initial cursor
+                    row on the list.
+  * `on_query`    - `function(query, ctx)` fires on every keystroke.
+                    The default is `list:set_filter(opts.filter)`. Pass
+                    this when you want to swap the filter (e.g. rebuild
+                    it from a fresh query).
+  * `on_submit`   - `function(ctx)` fires on Enter. `ctx.item` is the
+                    highlighted row (nil when the list is empty);
+                    `ctx.list`/`ctx.input`/`ctx.input_buf` are added
+                    by the picker. Default resolves with `ctx.item`
+                    when non-nil.
+  * `scope`       - keymap scope of the dialog, default `"dialog"`. The
+                    input carries `list.nav` for the navigation keys.
+  * `actions`     - extra actions of the scope. Each receives the picker
+                    ctx with `ctx.list`, `ctx.input`, `ctx.input_buf`
+                    added.
+  * `title`, `height`, `max_height`, `min_height`, `blocks_agent` - forwarded to
+                    `smelt.dialog.open`.
 Coroutine-blocking Telescope-style picker. Stacks a single-line input
 on top of a list driven by `smelt.list.new`; navigation forwards from
 input to list, Enter resolves with the selected item. See the doc
-block above `NAV_KEYS` for every accepted `opts` field. Returns the
+block above for every accepted `opts` field. Returns the
 value resolved from `on_submit` (defaults to the highlighted item) or
 `nil` on dismiss.
 
@@ -168,5 +206,6 @@ Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smelt
 
 Open a read-only content dialog. Pass `text` for plain text, `lines` for
 plain line tables, `styled` for styled lines, or `buf` for a live buffer the
-caller will update after opening. Returns `(handle, buf, leaf)`.
+caller will update after opening. `scope` defaults to `"dialog.viewer"`
+and `actions` implements its actions. Returns `(handle, buf, leaf)`.
 

@@ -58,7 +58,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | `smelt.plugins.notebook` | Optional notebook editing: edit_notebook with cell previews, staleness preflight, and per-path locking. |
 | `smelt.plugins.plot` | Optional plot tool: line, area, scatter, bar, histogram and heatmap charts drawn as text, sized to the transcript width. |
 | `smelt.plugins.show_ansi` | Optional show_ansi tool: shows ANSI-colored text, from a file of program output or hand-written escapes. |
-| `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
+| `smelt.plugins.which_key` | Which-key style popup for pending Lua keymaps: the scopes around focus, innermost first, then global bindings. |
 
 <!-- BUNDLED_PLUGINS_END -->
 

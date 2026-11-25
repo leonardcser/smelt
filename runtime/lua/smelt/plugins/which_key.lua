@@ -1,4 +1,5 @@
--- Which-key style popup for pending global Lua keymaps. Opt-in with
+-- Which-key style popup for pending Lua keymaps: the scopes around focus,
+-- innermost first, then global bindings. Opt-in with
 -- `require("smelt.plugins.which_key")`.
 
 local M = {}

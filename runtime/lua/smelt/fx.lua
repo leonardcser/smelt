@@ -201,9 +201,8 @@ function M.cover(paint, on_close)
   end
   -- Typing, Enter and Esc reach the empty input; the keys that don't type anything are bound.
   for _, event in ipairs({ "change", "submit", "cancel" }) do input:on(event, close) end
-  local keymaps = {}
   for _, key in ipairs({ "<Up>", "<Down>", "<Left>", "<Right>", "<Tab>", "<BS>", "<C-c>" }) do
-    keymaps[#keymaps + 1] = { key = key, on_press = close }
+    input:win():key(key, close)
   end
   local layout = smelt.ui.layout
   overlay = smelt.overlay.new({
@@ -212,7 +211,6 @@ function M.cover(paint, on_close)
       { layout.leaf(input:win()), height = 0 },
       { layout.leaf(paint), height = "fill" },
     }),
-    keymaps = keymaps,
   })
   input:win():focus()
   return close

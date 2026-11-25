@@ -61,17 +61,15 @@ local function open()
   smelt.overlay.new({
     name = "pong", title = " pong · ↑↓ ", anchor = "screen_at", corner = "ne", row = 1, col = 1,
     width = W + 2, height = H + 2, modal = false,
-    -- The empty window holds focus so the keymaps fire; the game is a paint.
+    -- The empty window holds focus so its keys fire; the game is a paint.
     layout = layout.vbox({
       { layout.leaf(ui.win), height = 0 },
       { layout.leaf(ui.paint, { measure = { W, H } }), height = "fit" },
     }),
-    keymaps = {
-      { key = "k", on_press = move(-1) }, { key = "<Up>", on_press = move(-1) },
-      { key = "j", on_press = move(1) }, { key = "<Down>", on_press = move(1) },
-      { key = "q", on_press = close }, { key = "<Esc>", on_press = close }, { key = "<C-c>", on_press = close },
-    },
   })
+  local keys = { k = move(-1), ["<Up>"] = move(-1), j = move(1), ["<Down>"] = move(1) }
+  for _, key in ipairs({ "q", "<Esc>", "<C-c>" }) do keys[key] = close end
+  for key, action in pairs(keys) do ui.win:key(key, action) end
   ui.win:focus()
   ui.timer = smelt.timer.every(70, tick)
 end

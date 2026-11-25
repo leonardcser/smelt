@@ -7,7 +7,7 @@ pub(crate) use smelt_core::history::History;
 use smelt_core::history::Recall;
 
 use crate::app::QueueStage;
-use crate::keymap::{self, KeyAction, KeyContext};
+use crate::keymap::TextAction;
 use crate::smelt_edit::AttachedText;
 use crate::smelt_edit::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -108,8 +108,6 @@ pub(crate) struct PromptState {
     runtime_dir: std::path::PathBuf,
     /// True when content came from a paste; cleared on manual character input.
     pub(super) from_paste: bool,
-    /// Chord state: true after Ctrl+X, waiting for second key.
-    pending_ctrl_x: bool,
 }
 
 /// What the caller should do after `handle_event`.
@@ -121,7 +119,6 @@ pub(crate) enum Action {
         stage: QueueStage,
     },
     SubmitEmpty,
-    EditInEditor,
     CenterScroll,
     PanColumns(isize),
     NotifyError(String),
@@ -197,7 +194,6 @@ impl PromptState {
             cwd,
             runtime_dir,
             from_paste: false,
-            pending_ctrl_x: false,
         }
     }
 
@@ -729,19 +725,6 @@ impl PromptState {
         }
     }
 
-    pub(crate) fn key_context(&self, ctx: PromptCtxRef<'_>, agent_running: bool) -> KeyContext {
-        KeyContext {
-            buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty(),
-            vim_non_insert: ctx.win.vim_enabled()
-                && matches!(
-                    ctx.win.vim_mode(),
-                    VimMode::Normal | VimMode::Visual | VimMode::VisualLine
-                ),
-            vim_enabled: ctx.win.vim_enabled(),
-            agent_running,
-        }
-    }
-
     /// Sync `win.cursor_row`, `win.cursor_col`, and `win.scroll_top` from the current
     /// source `cpos` using the buffer's parser (if any) or identity mapping.
     pub(crate) fn sync_display_coords(&mut self, ctx: &mut PromptCtx<'_>, viewport_rows: u16) {
@@ -760,77 +743,71 @@ impl PromptState {
         }
     }
 
-    fn execute_key_action(
+    /// Run text action `action` on the prompt, as its key binding does.
+    pub(crate) fn run_text_action(
         &mut self,
         ctx: &mut PromptCtx<'_>,
-        action: KeyAction,
+        action: TextAction,
         history: Option<&mut History>,
         clipboard: &mut crate::smelt_edit::Clipboard,
         now: std::time::Instant,
     ) -> Action {
-        if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
+        if !matches!(action, TextAction::Yank | TextAction::YankPop) {
             clipboard.kill_ring.clear_yank();
         }
         // Any non-vertical action abandons the preferred column so the
         // next vertical motion picks up wherever the user is now.
         if !matches!(
             action,
-            KeyAction::MoveUp | KeyAction::MoveDown | KeyAction::SelectUp | KeyAction::SelectDown
+            TextAction::MoveUp
+                | TextAction::MoveDown
+                | TextAction::SelectUp
+                | TextAction::SelectDown
         ) {
             ctx.win.set_curswant(None);
         }
         // Selection actions extend; editing actions consume; everything else clears.
         let is_select = matches!(
             action,
-            KeyAction::SelectLeft
-                | KeyAction::SelectRight
-                | KeyAction::SelectUp
-                | KeyAction::SelectDown
-                | KeyAction::SelectWordForward
-                | KeyAction::SelectWordBackward
-                | KeyAction::SelectStartOfLine
-                | KeyAction::SelectEndOfLine
+            TextAction::SelectLeft
+                | TextAction::SelectRight
+                | TextAction::SelectUp
+                | TextAction::SelectDown
+                | TextAction::SelectWordForward
+                | TextAction::SelectWordBackward
+                | TextAction::SelectStartOfLine
+                | TextAction::SelectEndOfLine
         );
         let is_editing = matches!(
             action,
-            KeyAction::Backspace
-                | KeyAction::DeleteCharForward
-                | KeyAction::DeleteWordBackward
-                | KeyAction::DeleteWordForward
-                | KeyAction::DeleteToStartOfLine
-                | KeyAction::KillToEndOfLine
-                | KeyAction::KillToStartOfLine
-                | KeyAction::InsertNewline
-                | KeyAction::Yank
-                | KeyAction::CutSelection
+            TextAction::Backspace
+                | TextAction::DeleteCharForward
+                | TextAction::DeleteWordBackward
+                | TextAction::DeleteWordForward
+                | TextAction::DeleteToStartOfLine
+                | TextAction::KillToEndOfLine
+                | TextAction::KillToStartOfLine
+                | TextAction::InsertNewline
+                | TextAction::Yank
+                | TextAction::CutSelection
         );
         let preserves_selection = matches!(
             action,
-            KeyAction::CopySelection | KeyAction::Submit | KeyAction::SubmitToRequestQueue
+            TextAction::CopySelection | TextAction::Submit | TextAction::SubmitToRequestQueue
         );
         if !is_select && !is_editing && !preserves_selection {
             self.clear_selection(ctx.win);
         }
         match action {
-            // Caller handles these.
-            KeyAction::Quit | KeyAction::CancelAgent => Action::Noop,
-
-            // ── TuiApp control ─────────────────────────────────────────────
-            KeyAction::ClearBuffer => {
-                self.clear_with_undo(ctx);
-                Action::Redraw
-            }
-            // Intercepted by the global chord layer; these arms are unreachable in practice.
-            KeyAction::ToggleMode | KeyAction::CycleReasoning => Action::Noop,
-            KeyAction::ToggleStash => {
+            TextAction::ToggleStash => {
                 self.toggle_stash(ctx);
                 Action::Redraw
             }
 
             // ── Submit / newline ─────────────────────────────────────────
-            KeyAction::Submit => self.submit_action(ctx, QueueStage::Turn),
-            KeyAction::SubmitToRequestQueue => self.submit_action(ctx, QueueStage::Request),
-            KeyAction::InsertNewline => {
+            TextAction::Submit => self.submit_action(ctx, QueueStage::Turn),
+            TextAction::SubmitToRequestQueue => self.submit_action(ctx, QueueStage::Request),
+            TextAction::InsertNewline => {
                 if self.selection_range(ctx.as_ref()).is_some() {
                     self.save_undo(ctx);
                     self.delete_selection(ctx);
@@ -842,7 +819,7 @@ impl PromptState {
             }
 
             // ── Navigation ──────────────────────────────────────────────
-            KeyAction::MoveLeft => {
+            TextAction::MoveLeft => {
                 if ctx.win.cpos() > 0 {
                     let cpos = ctx.win.cpos();
                     let source = ctx.buf.source();
@@ -853,7 +830,7 @@ impl PromptState {
                     Action::Noop
                 }
             }
-            KeyAction::MoveRight => {
+            TextAction::MoveRight => {
                 let cpos = ctx.win.cpos();
                 if cpos < ctx.buf.source().len() {
                     let source = ctx.buf.source();
@@ -864,21 +841,21 @@ impl PromptState {
                     Action::Noop
                 }
             }
-            KeyAction::MoveWordForward => {
+            TextAction::MoveWordForward => {
                 if self.move_word_forward(ctx) {
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
-            KeyAction::MoveWordBackward => {
+            TextAction::MoveWordBackward => {
                 if self.move_word_backward(ctx) {
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
-            KeyAction::MoveUp => {
+            TextAction::MoveUp => {
                 let cpos = ctx.win.cpos();
                 let source = ctx.buf.source();
                 let (new_pos, new_want) =
@@ -894,7 +871,7 @@ impl PromptState {
                     Action::Noop
                 }
             }
-            KeyAction::MoveDown => {
+            TextAction::MoveDown => {
                 let cpos = ctx.win.cpos();
                 let source = ctx.buf.source();
                 let (new_pos, new_want) =
@@ -910,34 +887,34 @@ impl PromptState {
                     Action::Noop
                 }
             }
-            KeyAction::MoveStartOfLine => {
+            TextAction::MoveStartOfLine => {
                 let cpos = ctx.win.cpos();
                 ctx.win
                     .set_cpos(crate::smelt_edit::text::line_start(ctx.buf.source(), cpos));
                 Action::Redraw
             }
-            KeyAction::MoveEndOfLine => {
+            TextAction::MoveEndOfLine => {
                 let cpos = ctx.win.cpos();
                 ctx.win
                     .set_cpos(crate::smelt_edit::text::line_end(ctx.buf.source(), cpos));
                 Action::Redraw
             }
-            KeyAction::MoveStartOfBuffer => {
+            TextAction::MoveStartOfBuffer => {
                 ctx.win.set_cpos(0);
                 Action::Redraw
             }
-            KeyAction::MoveEndOfBuffer => {
+            TextAction::MoveEndOfBuffer => {
                 ctx.win.set_cpos(ctx.buf.source().len());
                 Action::Redraw
             }
-            KeyAction::HistoryPrev => {
+            TextAction::HistoryPrev => {
                 if history.is_some_and(|h| self.history_up(ctx, h)) {
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
-            KeyAction::HistoryNext => {
+            TextAction::HistoryNext => {
                 if history.is_some_and(|h| self.history_down(ctx, h)) {
                     Action::Redraw
                 } else {
@@ -946,11 +923,11 @@ impl PromptState {
             }
 
             // ── Editing ─────────────────────────────────────────────────
-            KeyAction::Backspace => {
+            TextAction::Backspace => {
                 self.backspace(ctx);
                 Action::Redraw
             }
-            KeyAction::DeleteCharForward => {
+            TextAction::DeleteCharForward => {
                 self.save_undo(ctx);
                 if self.has_selection(ctx.as_ref()) {
                     self.delete_selection(ctx);
@@ -959,7 +936,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::DeleteWordBackward => {
+            TextAction::DeleteWordBackward => {
                 self.save_undo(ctx);
                 if self.has_selection(ctx.as_ref()) {
                     self.delete_selection(ctx);
@@ -968,7 +945,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::DeleteWordForward => {
+            TextAction::DeleteWordForward => {
                 self.save_undo(ctx);
                 if self.has_selection(ctx.as_ref()) {
                     self.delete_selection(ctx);
@@ -977,7 +954,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::DeleteToStartOfLine => {
+            TextAction::DeleteToStartOfLine => {
                 self.save_undo(ctx);
                 if self.has_selection(ctx.as_ref()) {
                     self.delete_selection(ctx);
@@ -986,7 +963,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::KillToEndOfLine => {
+            TextAction::KillToEndOfLine => {
                 self.save_undo(ctx);
                 if self.has_selection(ctx.as_ref()) {
                     let deleted = self.delete_selection(ctx);
@@ -998,7 +975,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::KillToStartOfLine => {
+            TextAction::KillToStartOfLine => {
                 self.save_undo(ctx);
                 if self.has_selection(ctx.as_ref()) {
                     let deleted = self.delete_selection(ctx);
@@ -1010,7 +987,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::Yank => {
+            TextAction::Yank => {
                 self.save_undo(ctx);
                 if self.has_selection(ctx.as_ref()) {
                     self.delete_selection(ctx);
@@ -1023,33 +1000,33 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::YankPop => {
+            TextAction::YankPop => {
                 if let Some(new_cpos) = clipboard.kill_ring.yank_pop(&mut ctx.buf.text_mut()) {
                     ctx.win.set_cpos(new_cpos);
                     ctx.win.clamp_anchors_to_source(ctx.buf.source());
                 }
                 Action::Redraw
             }
-            KeyAction::UppercaseWord => {
+            TextAction::UppercaseWord => {
                 self.save_undo(ctx);
                 self.uppercase_word(ctx);
                 Action::Redraw
             }
-            KeyAction::LowercaseWord => {
+            TextAction::LowercaseWord => {
                 self.save_undo(ctx);
                 self.lowercase_word(ctx);
                 Action::Redraw
             }
-            KeyAction::CapitalizeWord => {
+            TextAction::CapitalizeWord => {
                 self.save_undo(ctx);
                 self.capitalize_word(ctx);
                 Action::Redraw
             }
-            KeyAction::Undo => {
+            TextAction::Undo => {
                 self.undo(ctx);
                 Action::Redraw
             }
-            KeyAction::Redo => {
+            TextAction::Redo => {
                 self.redo(ctx);
                 Action::Redraw
             }
@@ -1058,33 +1035,33 @@ impl PromptState {
             // The prompt is a single edit buffer; page motion clamps to its
             // bounds. Used in vim Normal (Ctrl-B/F/U/D/Y/E) and emacs
             // (Ctrl-V/Alt-V) - both surface through the shared keymap.
-            KeyAction::PageUp => {
+            TextAction::PageUp => {
                 self.scroll_lines(ctx, -(content::term_height() as isize));
                 Action::Redraw
             }
-            KeyAction::PageDown => {
+            TextAction::PageDown => {
                 self.scroll_lines(ctx, content::term_height() as isize);
                 Action::Redraw
             }
-            KeyAction::HalfPageUp => {
+            TextAction::HalfPageUp => {
                 self.scroll_lines(ctx, -((content::term_height() / 2) as isize));
                 Action::Redraw
             }
-            KeyAction::HalfPageDown => {
+            TextAction::HalfPageDown => {
                 self.scroll_lines(ctx, (content::term_height() / 2) as isize);
                 Action::Redraw
             }
-            KeyAction::ScrollLineUp => {
+            TextAction::ScrollLineUp => {
                 self.scroll_lines(ctx, -1);
                 Action::Redraw
             }
-            KeyAction::ScrollLineDown => {
+            TextAction::ScrollLineDown => {
                 self.scroll_lines(ctx, 1);
                 Action::Redraw
             }
 
             // ── Clipboard ───────────────────────────────────────────────
-            KeyAction::CopySelection => {
+            TextAction::CopySelection => {
                 if let Some((start, end)) = self.selection_range(ctx.as_ref()) {
                     let out = ctx.buf.copy_range(start..end);
                     if clipboard.write(&out.clipboard).is_ok() {
@@ -1097,7 +1074,7 @@ impl PromptState {
                 }
                 Action::Noop
             }
-            KeyAction::CutSelection => {
+            TextAction::CutSelection => {
                 if self.selection_range(ctx.as_ref()).is_some() {
                     self.save_undo(ctx);
                     if let Some(out) = self.delete_selection(ctx) {
@@ -1113,7 +1090,7 @@ impl PromptState {
                     Action::Noop
                 }
             }
-            KeyAction::ClipboardImage => {
+            TextAction::ClipboardImage => {
                 // Bracketed-paste terminals forward Cmd+V as `Event::Paste`, bypassing this arm.
                 // Terminals with bracketed paste off send it as a key - handle both paths.
                 if let Some(url) = clipboard_image_to_data_url(&self.cwd, &self.runtime_dir) {
@@ -1134,7 +1111,7 @@ impl PromptState {
             }
 
             // ── Selection (shift+movement) ─────────────────────────────
-            KeyAction::SelectLeft => {
+            TextAction::SelectLeft => {
                 self.extend_selection(ctx.win);
                 if ctx.win.cpos() > 0 {
                     let cpos = ctx.win.cpos();
@@ -1144,7 +1121,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::SelectRight => {
+            TextAction::SelectRight => {
                 self.extend_selection(ctx.win);
                 if ctx.win.cpos() < ctx.buf.source().len() {
                     let cpos = ctx.win.cpos();
@@ -1154,7 +1131,7 @@ impl PromptState {
                 }
                 Action::Redraw
             }
-            KeyAction::SelectUp => {
+            TextAction::SelectUp => {
                 self.extend_selection(ctx.win);
                 let cpos = ctx.win.cpos();
                 let source = ctx.buf.source();
@@ -1164,7 +1141,7 @@ impl PromptState {
                 ctx.win.set_cpos(new_pos);
                 Action::Redraw
             }
-            KeyAction::SelectDown => {
+            TextAction::SelectDown => {
                 self.extend_selection(ctx.win);
                 let cpos = ctx.win.cpos();
                 let source = ctx.buf.source();
@@ -1174,7 +1151,7 @@ impl PromptState {
                 ctx.win.set_cpos(new_pos);
                 Action::Redraw
             }
-            KeyAction::SelectWordForward => {
+            TextAction::SelectWordForward => {
                 self.extend_selection(ctx.win);
                 let cpos = ctx.win.cpos();
                 let new_cpos = crate::smelt_edit::text::word_forward_pos(
@@ -1185,7 +1162,7 @@ impl PromptState {
                 ctx.win.set_cpos(new_cpos);
                 Action::Redraw
             }
-            KeyAction::SelectWordBackward => {
+            TextAction::SelectWordBackward => {
                 self.extend_selection(ctx.win);
                 let cpos = ctx.win.cpos();
                 let new_cpos = crate::smelt_edit::text::word_backward_pos(
@@ -1196,14 +1173,14 @@ impl PromptState {
                 ctx.win.set_cpos(new_cpos);
                 Action::Redraw
             }
-            KeyAction::SelectStartOfLine => {
+            TextAction::SelectStartOfLine => {
                 self.extend_selection(ctx.win);
                 let cpos = ctx.win.cpos();
                 ctx.win
                     .set_cpos(crate::smelt_edit::text::line_start(ctx.buf.source(), cpos));
                 Action::Redraw
             }
-            KeyAction::SelectEndOfLine => {
+            TextAction::SelectEndOfLine => {
                 self.extend_selection(ctx.win);
                 let cpos = ctx.win.cpos();
                 ctx.win
@@ -1213,7 +1190,8 @@ impl PromptState {
         }
     }
 
-    /// Process a terminal event. Priority: vim → paste → keymap → insert.
+    /// Process a terminal event that no keymap scope claimed. Priority:
+    /// vim → paste → insert.
     pub(crate) fn handle_event(
         &mut self,
         ctx: &mut PromptCtx<'_>,
@@ -1259,41 +1237,14 @@ impl PromptState {
         }
 
         if let Event::Key(KeyEvent {
-            code, modifiers, ..
+            code: KeyCode::Char(c),
+            modifiers,
+            ..
         }) = ev
         {
-            // C-x C-e chord → edit in $EDITOR.
-            if self.pending_ctrl_x {
-                self.pending_ctrl_x = false;
-                if code == KeyCode::Char('e') && modifiers.contains(KeyModifiers::CONTROL) {
-                    return Action::EditInEditor;
-                }
-            }
-            if code == KeyCode::Char('x') && modifiers.contains(KeyModifiers::CONTROL) {
-                self.pending_ctrl_x = true;
-                return Action::Noop;
-            }
-
-            let key_ctx = KeyContext {
-                buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachments.is_empty(),
-                vim_non_insert: ctx.win.vim_enabled()
-                    && matches!(
-                        ctx.win.vim_mode(),
-                        VimMode::Normal | VimMode::Visual | VimMode::VisualLine
-                    ),
-                vim_enabled: ctx.win.vim_enabled(),
-                agent_running: false,
-            };
-
-            if let Some(action) = keymap::lookup(code, modifiers, &key_ctx) {
-                return self.execute_key_action(ctx, action, history, clipboard, now);
-            }
-
-            if let KeyCode::Char(c) = code {
-                if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
-                    self.insert_char(ctx, c);
-                    return Action::Redraw;
-                }
+            if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
+                self.insert_char(ctx, c);
+                return Action::Redraw;
             }
         }
 
@@ -1420,20 +1371,15 @@ mod tests {
             Self { state, buf, win }
         }
 
-        fn test_action(&mut self, action: KeyAction, mode: VimMode) -> Action {
+        fn test_action(&mut self, action: TextAction, mode: VimMode) -> Action {
             self.win.set_vim_mode(mode);
             let mut clip = crate::smelt_edit::Clipboard::null();
             let mut ctx = PromptCtx {
                 buf: &mut self.buf,
                 win: &mut self.win,
             };
-            self.state.execute_key_action(
-                &mut ctx,
-                action,
-                None,
-                &mut clip,
-                std::time::Instant::now(),
-            )
+            self.state
+                .run_text_action(&mut ctx, action, None, &mut clip, std::time::Instant::now())
         }
     }
 
@@ -1921,8 +1867,8 @@ mod tests {
         let mut input = Harness::new();
         input.buf.set_source("alpha beta".to_string());
         input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectRight, VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, VimMode::Insert);
+        input.test_action(TextAction::SelectRight, VimMode::Insert);
+        input.test_action(TextAction::SelectRight, VimMode::Insert);
 
         let action = input.state.submit_action(
             &mut PromptCtx {
@@ -1945,12 +1891,12 @@ mod tests {
 
     #[test]
     fn shift_actions_extend_selection_from_the_anchor() {
-        use KeyAction::*;
+        use TextAction::*;
         // (source, cursor, actions, cursor after, selection range)
         type Case = (
             &'static str,
             usize,
-            &'static [KeyAction],
+            &'static [TextAction],
             usize,
             Option<(usize, usize)>,
         );
@@ -2004,7 +1950,7 @@ mod tests {
 
     #[test]
     fn edit_actions_replace_the_selection() {
-        use KeyAction::*;
+        use TextAction::*;
         // (source, cursor, selected chars, action, resulting source)
         let cases = [
             ("hello world", 0, 5, Backspace, " world"),
@@ -2033,8 +1979,8 @@ mod tests {
         let mut input = Harness::new();
         input.buf.set_source("hello".to_string());
         input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
+        input.test_action(TextAction::SelectRight, crate::smelt_edit::VimMode::Insert);
+        input.test_action(TextAction::SelectRight, crate::smelt_edit::VimMode::Insert);
         assert!(input
             .state
             .selection_range(PromptCtxRef {
@@ -2042,7 +1988,7 @@ mod tests {
                 win: &input.win
             })
             .is_some());
-        input.test_action(KeyAction::MoveRight, crate::smelt_edit::VimMode::Insert);
+        input.test_action(TextAction::MoveRight, crate::smelt_edit::VimMode::Insert);
         assert!(input
             .state
             .selection_range(PromptCtxRef {
@@ -2058,7 +2004,7 @@ mod tests {
         input.buf.set_source("hello world".to_string());
         input.win.set_cpos(0);
         for _ in 0..5 {
-            input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
+            input.test_action(TextAction::SelectRight, crate::smelt_edit::VimMode::Insert);
         }
         input.state.insert_char(
             &mut PromptCtx {
@@ -2082,9 +2028,9 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input.state.execute_key_action(
+            input.state.run_text_action(
                 &mut ctx,
-                KeyAction::SelectRight,
+                TextAction::SelectRight,
                 None,
                 &mut clip,
                 std::time::Instant::now(),
@@ -2095,9 +2041,9 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input.state.execute_key_action(
+            input.state.run_text_action(
                 &mut ctx,
-                KeyAction::KillToEndOfLine,
+                TextAction::KillToEndOfLine,
                 None,
                 &mut clip,
                 std::time::Instant::now(),
@@ -2128,7 +2074,7 @@ mod tests {
         let mut input = Harness::new();
         input.buf.set_source("hello".to_string());
         input.win.set_cpos(0);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
+        input.test_action(TextAction::SelectRight, crate::smelt_edit::VimMode::Insert);
         assert!(input
             .state
             .selection_range(PromptCtxRef {
@@ -2164,8 +2110,8 @@ mod tests {
         input.buf.set_source("hello world".to_string());
         input.win.set_cpos(0);
         // Create a shift selection.
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
-        input.test_action(KeyAction::SelectRight, crate::smelt_edit::VimMode::Insert);
+        input.test_action(TextAction::SelectRight, crate::smelt_edit::VimMode::Insert);
+        input.test_action(TextAction::SelectRight, crate::smelt_edit::VimMode::Insert);
         assert!(input
             .state
             .selection_range(PromptCtxRef {
@@ -2234,12 +2180,12 @@ mod tests {
             .win
             .begin_visual(crate::smelt_edit::VimMode::Visual, 1);
 
-        let action = input.state.execute_key_action(
+        let action = input.state.run_text_action(
             &mut PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            KeyAction::ClipboardImage,
+            TextAction::ClipboardImage,
             None,
             &mut clipboard,
             std::time::Instant::now(),
@@ -2262,12 +2208,12 @@ mod tests {
             .win
             .begin_visual(crate::smelt_edit::VimMode::VisualLine, 4);
 
-        let action = input.state.execute_key_action(
+        let action = input.state.run_text_action(
             &mut PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            KeyAction::ClipboardImage,
+            TextAction::ClipboardImage,
             None,
             &mut clipboard,
             std::time::Instant::now(),
@@ -2288,12 +2234,12 @@ mod tests {
             crate::smelt_edit::Clipboard::new(Box::new(ReadClipboard(Some("OUTSIDE".into()))));
         input.buf.set_source("hello world".to_string());
         input.win.set_cpos(6); // after "hello "
-        for action in [KeyAction::KillToEndOfLine, KeyAction::Yank] {
+        for action in [TextAction::KillToEndOfLine, TextAction::Yank] {
             let mut ctx = PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input.state.execute_key_action(
+            input.state.run_text_action(
                 &mut ctx,
                 action,
                 None,
@@ -2314,12 +2260,12 @@ mod tests {
         let mut clipboard = crate::smelt_edit::Clipboard::null();
         input.buf.set_source("hello world".to_string());
         input.win.set_cpos(6); // after "hello "
-        for action in [KeyAction::KillToEndOfLine, KeyAction::Yank] {
+        for action in [TextAction::KillToEndOfLine, TextAction::Yank] {
             let mut ctx = PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input.state.execute_key_action(
+            input.state.run_text_action(
                 &mut ctx,
                 action,
                 None,
@@ -2415,7 +2361,7 @@ mod tests {
         assert_eq!(content.image_count(), 2);
     }
 
-    use crate::keymap::KeyAction;
+    use crate::keymap::TextAction;
 
     // ── Stale-anchor regression suite ──────────────────────────────────
     //
@@ -2486,7 +2432,10 @@ mod tests {
         input.buf.set_source(String::new());
         input.win.set_cpos(0);
         input.win.set_selection_anchor(Some(5808));
-        input.test_action(KeyAction::CopySelection, crate::smelt_edit::VimMode::Insert);
+        input.test_action(
+            TextAction::CopySelection,
+            crate::smelt_edit::VimMode::Insert,
+        );
     }
 
     #[test]

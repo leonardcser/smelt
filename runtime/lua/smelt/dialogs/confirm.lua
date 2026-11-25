@@ -3,6 +3,13 @@
 
 local label_value = smelt.label_value or require("smelt.label_value")
 
+smelt.keymap.scope("confirm", {
+  desc = "Tool approval dialog",
+  extends = "dialog",
+  actions = { cycle_mode = "Switch to the next agent mode and approve if it allows the call" },
+  keys = { { "", "<S-Tab>", "cycle_mode" } },
+})
+
 -- Build option labels and decision strings from the request payload.
 local function build_options(req)
   local labels, decisions = {}, {}
@@ -214,13 +221,14 @@ function smelt.confirm.open(handle_id)
       { leaf = reason_leaf,  height = "fit", collapse_when_empty = true  },
     },
     focus = options_leaf,
-    keymaps = {
-      { key = "s-tab", on_press = function(ctx)
-          if __smelt_internal.confirm.__back_tab(handle_id) then
-            resolved = true
-            ctx.close()
-          end
-        end },
+    scope = "confirm",
+    actions = {
+      cycle_mode = function(ctx)
+        if __smelt_internal.confirm.__back_tab(handle_id) then
+          resolved = true
+          ctx.close()
+        end
+      end,
     },
     on_dismiss = function(ctx)
       close_with(2, nil) -- "no" is always option 2

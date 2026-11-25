@@ -34,6 +34,65 @@
 
 smelt.list = smelt.list or {}
 
+-- Keys that move a list's selection. Every list window carries the `list`
+-- scope, with native actions; an input that drives a list, such as a
+-- picker's filter, carries `list.nav` with actions from `smelt.list.nav`.
+smelt.keymap.scope("list.nav", {
+  desc = "Lists driven from an input",
+  actions = {
+    prev      = "Select the previous item",
+    next      = "Select the next item",
+    page_up   = "Move the selection up a page",
+    page_down = "Move the selection down a page",
+    half_up   = "Move the selection up half a page",
+    half_down = "Move the selection down half a page",
+  },
+  keys = {
+    { "", "<Up>",       "prev"      },
+    { "", "<Down>",     "next"      },
+    { "", "<C-k>",      "prev"      },
+    { "", "<C-j>",      "next"      },
+    { "", "<C-p>",      "prev"      },
+    { "", "<C-n>",      "next"      },
+    { "", "<PageUp>",   "page_up"   },
+    { "", "<PageDown>", "page_down" },
+    { "", "<C-u>",      "half_up"   },
+    { "", "<C-d>",      "half_down" },
+  },
+})
+
+smelt.keymap.scope("list", {
+  desc = "Lists",
+  extends = "list.nav",
+  actions = {
+    first  = "Select the first item",
+    last   = "Select the last item",
+    submit = "Choose the selected item",
+  },
+  keys = {
+    { "n", "k",      "prev"   },
+    { "n", "j",      "next"   },
+    { "",  "<Home>", "first"  },
+    { "",  "<End>",  "last"   },
+    { "",  "<CR>",   "submit" },
+  },
+})
+
+local steps
+
+-- Actions of the `list.nav` scope. Each calls `move(delta)` with the rows it
+-- moves the selection by, the same steps native lists use. Install them on
+-- an input that drives a list: `input:scope("list.nav", smelt.list.nav(move))`.
+---@type fun(move: fun(delta: integer)): table<string, fun()>
+function smelt.list.nav(move)
+  steps = steps or __smelt_internal.win.__list_steps()
+  local actions = {}
+  for name, delta in pairs(steps) do
+    actions[name] = function() move(delta) end
+  end
+  return actions
+end
+
 local NS = smelt.ns("smelt.list.marks")
 
 local List = {}

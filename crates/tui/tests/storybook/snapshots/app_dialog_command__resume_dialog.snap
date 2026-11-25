@@ -15,7 +15,7 @@ expression: frame.text()
      │    4.0K 2h   └─ wire up the diff renderer                 │
      │   12.1K 5m      └─ investigate parser regression          │
      ├───────────────────────────────────────────────────────────┤
-  tip│ filter sessions…                  ⌥d: delete · workspace  │ing…
+  tip│ filter sessions…               alt+d: delete · workspace  │ing…
 ─────└───────────────────────────────────────────────────────────┘──────
 
 ────────────────────────────────────────────────────────────────────────

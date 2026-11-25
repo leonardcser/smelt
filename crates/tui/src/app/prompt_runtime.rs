@@ -94,12 +94,17 @@ impl PromptRuntime {
         self.input.submit_action(ctx, stage)
     }
 
-    pub(crate) fn key_context(
-        &self,
-        ctx: PromptCtxRef<'_>,
-        turn_input_active: bool,
-    ) -> crate::keymap::KeyContext {
-        self.input.key_context(ctx, turn_input_active)
+    /// Run text action `action`, with input history.
+    pub(crate) fn run_text_action(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        action: crate::keymap::TextAction,
+        clipboard: &mut Clipboard,
+        now: std::time::Instant,
+    ) -> Action {
+        ctx.win.commit_pending_caret_click(ctx.buf);
+        self.input
+            .run_text_action(ctx, action, Some(&mut self.history), clipboard, now)
     }
 
     pub(crate) fn apply_cut(&mut self, ctx: &mut PromptCtx<'_>, cut: PromptCut) {

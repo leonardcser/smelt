@@ -1,8 +1,9 @@
 -- Built-in /resume command. Centered Telescope-style overlay: results and
--- search input on the left, rendered transcript preview on the right. Arrows +
--- Ctrl-J/K navigate; typing into the input filters; Enter loads; Alt-D deletes
--- the highlighted session; Ctrl-W toggles the workspace filter between "this
--- workspace" (default) and "all sessions".
+-- search input on the left, rendered transcript preview on the right. Keys
+-- live in the `resume` keymap scope: by default arrows + Ctrl-J/K navigate,
+-- Enter loads, Alt-D deletes the highlighted session and Ctrl-W toggles the
+-- workspace filter between "this workspace" (default) and "all sessions".
+-- Typing into the input filters.
 --
 -- Matching is two-tier:
 --   * Title + first-user-message: fuzzy match (`smelt.fuzzy`) against cheap
@@ -13,6 +14,23 @@
 --     only title matches show, and content matches merge in when it lands.
 
 local NS_STATE = smelt.ns("smelt.resume.state")
+
+smelt.keymap.scope("resume", {
+  desc = "/resume session picker",
+  actions = {
+    open             = "Resume the selected session",
+    close            = "Close the picker",
+    toggle_workspace = "Switch between this workspace and all sessions",
+    delete           = "Delete the selected session",
+  },
+  keys = {
+    { "", "<CR>",  "open"             },
+    { "", "<Esc>", "close"            },
+    { "", "<C-c>", "close"            },
+    { "", "<C-w>", "toggle_workspace" },
+    { "", "<M-d>", "delete"           },
+  },
+})
 
 local function is_junk(s)
   if s == nil then return true end
@@ -102,7 +120,8 @@ end
 local function update_state_label(buf, workspace_only)
   buf:clear_ns(NS_STATE)
   local scope = workspace_only and "workspace" or "all"
-  local label = " ⌥d: delete · " .. scope .. " "
+  local delete = smelt.keymap.label(smelt.keymap.key_for("resume", "delete", "i"))
+  local label = " " .. (delete and (delete .. ": delete · ") or "") .. scope .. " "
   buf:mark(NS_STATE, 1, 0, {
     virt_text     = label,
     virt_text_pos = "right_align",
@@ -347,12 +366,10 @@ smelt.cmd.register("resume", function()
     list_leaf:on("dismiss", function() close(nil) end)
     if show_preview then preview_leaf:on("dismiss", function() close(nil) end) end
 
-    local function nav(delta)
-      return function()
-        list:move_cursor(delta)
-        schedule_preview()
-      end
-    end
+    input_leaf:scope("list.nav", smelt.list.nav(function(delta)
+      list:move_cursor(delta)
+      schedule_preview()
+    end))
 
     local function delete_selected()
       local e = list:selected()
@@ -371,19 +388,6 @@ smelt.cmd.register("resume", function()
       update_state_label(input_buf, workspace_only)
       refilter()
     end
-
-    input_leaf:key("up",     nav(-1))
-    input_leaf:key("down",   nav(1))
-    input_leaf:key("ctrl-k", nav(-1))
-    input_leaf:key("ctrl-j", nav(1))
-    input_leaf:key("ctrl-p", nav(-1))
-    input_leaf:key("ctrl-n", nav(1))
-    input_leaf:key("pgup",   nav(-10))
-    input_leaf:key("pgdn",   nav(10))
-    input_leaf:key("ctrl-u", nav(-5))
-    input_leaf:key("ctrl-d", nav(5))
-    input_leaf:key("ctrl-w", toggle_workspace)
-    input_leaf:key("alt-d",  delete_selected)
 
     -- Results and filter share one frame: the filter's top edge is the
     -- separator. With a preview, the split divider is the shared right edge.
@@ -421,22 +425,12 @@ smelt.cmd.register("resume", function()
       width  = "85%",
       height = "75%",
       layout = root,
-      keymaps = {
-        { key = "up",     on_press = nav(-1) },
-        { key = "down",   on_press = nav(1)  },
-        { key = "ctrl-k", on_press = nav(-1) },
-        { key = "ctrl-j", on_press = nav(1)  },
-        { key = "ctrl-p", on_press = nav(-1) },
-        { key = "ctrl-n", on_press = nav(1)  },
-        { key = "pgup",   on_press = nav(-10) },
-        { key = "pgdn",   on_press = nav(10)  },
-        { key = "ctrl-u", on_press = nav(-5)  },
-        { key = "ctrl-d", on_press = nav(5)   },
-        { key = "enter",  on_press = submit },
-        { key = "esc",    on_press = function() close(nil) end },
-        { key = "c-c",    on_press = function() close(nil) end },
-        { key = "ctrl-w", on_press = toggle_workspace },
-        { key = "alt-d",  hint = "⌥d: delete", on_press = delete_selected },
+      scope  = "resume",
+      actions = {
+        open             = submit,
+        close            = function() close(nil) end,
+        toggle_workspace = toggle_workspace,
+        delete           = delete_selected,
       },
     })
     list:refresh()

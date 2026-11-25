@@ -1,6 +1,26 @@
 -- Built-in /ps command. Lists background shell commands and opens their logs.
 
 local DIALOG_HEIGHT = "60%"
+
+smelt.keymap.scope("ps", {
+  desc = "/ps job list",
+  extends = "dialog.view",
+  actions = {
+    kill    = "Kill the selected job",
+    refresh = "Refresh the job list",
+  },
+  keys = {
+    { "", "<M-d>", "kill"    },
+    { "", "<C-r>", "refresh" },
+  },
+})
+
+smelt.keymap.scope("ps.logs", {
+  desc = "/ps job output",
+  extends = "dialog.view",
+  actions = { refresh = "Refresh the job output" },
+  keys = { { "", "<C-r>", "refresh" } },
+})
 local label_value = smelt.label_value or require("smelt.label_value")
 
 local function format_duration(secs)
@@ -120,10 +140,6 @@ local function show_logs(job)
   log_leaf:scroll("tail")
   local timer = smelt.timer.every(1000, refresh)
 
-  local function close(ctx)
-    ctx.close()
-  end
-
   smelt.dialog.open({
     title  = "ps " .. tostring(job.id or ""),
     height = DIALOG_HEIGHT,
@@ -132,10 +148,9 @@ local function show_logs(job)
       { leaf = log_leaf,  height = "fill" },
     },
     focus      = log_leaf,
-    close_with_q = true,
-    keymaps    = {
-      { key = "<Esc>",  on_press = close },
-      { key = "ctrl-r", hint = "^r: refresh", on_press = function() refresh() end },
+    scope      = "ps.logs",
+    actions    = {
+      refresh = function() refresh() end,
     },
     on_close = function()
       if timer then timer:remove(); timer = nil end
@@ -173,17 +188,6 @@ local function open_ps()
       list:set_cursor(index)
     end
 
-    -- Focused-leaf bindings take precedence over editor actions such as Ctrl-K.
-    for _, binding in ipairs({
-      { "j", 1 }, { "k", -1 },
-      { "down", 1 }, { "up", -1 },
-      { "ctrl-j", 1 }, { "ctrl-k", -1 },
-      { "ctrl-n", 1 }, { "ctrl-p", -1 },
-      { "pgdn", 10 }, { "pgup", -10 },
-      { "ctrl-d", 5 }, { "ctrl-u", -5 },
-    }) do
-      leaf:key(binding[1], function() list:move_cursor(binding[2]) end)
-    end
 
     local timer = smelt.timer.every(1000, refresh_list)
     local picked = smelt.dialog.open({
@@ -191,10 +195,10 @@ local function open_ps()
       height = DIALOG_HEIGHT,
       panels = { { leaf = leaf, height = "fill" } },
       focus = leaf,
-      close_with_q = true,
-      keymaps = {
-        { key = "alt-d", hint = "⌥d: kill", on_press = kill_selected },
-        { key = "ctrl-r", hint = "^r: refresh", on_press = refresh_list },
+      scope = "ps",
+      actions = {
+        kill      = kill_selected,
+        refresh   = refresh_list,
       },
       on_submit = function(ctx)
         local job = list:selected()

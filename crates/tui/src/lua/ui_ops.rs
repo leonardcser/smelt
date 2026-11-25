@@ -13,7 +13,7 @@ use crate::app::TuiApp;
 use crate::smelt_edit::layout::PaintId;
 use crate::smelt_edit::{
     add_signed_row, BodyDrag, Callback, CallbackResult, Constraint, Decoration, DragConfig,
-    KeyBind, LayoutTree, Overlay, Payload, ResizeConfig, RowIndex, WinEvent, WinId,
+    LayoutTree, Overlay, Payload, ResizeConfig, RowIndex, WinEvent, WinId,
 };
 use crate::smelt_edit::{Align, Anchor, Corner};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -521,8 +521,8 @@ fn parse_overlay_anchor(opts: &mlua::Table, term_w: u16, term_h: u16) -> Result<
     }
 }
 
-/// Wire the built-in list keymap: j/k/arrows/Home/End/PgUp/PgDn navigate,
-/// Enter fires `WinEvent::Submit` with the absolute selected row.
+/// Turn `leaf` into a list: a list surface with a highlighted selection at
+/// `initial_cursor`. Its keys come from the `list` keymap scope.
 pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: RowIndex) {
     let buf_id = match app.ui.win(leaf) {
         Some(w) => w.buf,
@@ -546,81 +546,24 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
             win.pending_scroll_to_cursor = true;
         }
     }
+    app.ui.set_base_scope(leaf, Some("list"));
+}
 
-    fn move_cursor(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, delta: isize) -> CallbackResult {
-        let buf_id = match ctx.ui.win(ctx.win) {
-            Some(w) => w.buf,
-            None => return CallbackResult::Consumed,
+/// Fire `Submit` on list `leaf` with its selected row.
+pub(crate) fn submit_list(app: &mut TuiApp, leaf: WinId) {
+    let Some(index) = app.ui.win(leaf).map(|w| w.cursor_abs_row() as usize) else {
+        return;
+    };
+    let lua = &app.lua;
+    let mut lua_invoke =
+        |handle: crate::smelt_edit::LuaHandle, win: WinId, payload: &crate::smelt_edit::Payload| {
+            lua.queue_invocation(handle, win, payload);
         };
-        let line_count = ctx.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
-        if line_count == 0 {
-            return CallbackResult::Consumed;
-        }
-        let viewport = ctx.ui.paint_rect(PaintId::from(ctx.win)).map(|r| r.height);
-        let mut new_abs: Option<usize> = None;
-        let (win, buf) = ctx.ui.win_and_buf_mut(ctx.win, buf_id);
-        if let (Some(win), Some(buf)) = (win, buf) {
-            let abs = win.cursor_abs_row();
-            let max = line_count.saturating_sub(1) as RowIndex;
-            let target = add_signed_row(abs, delta).min(max);
-            if target == abs {
-                return CallbackResult::Consumed;
-            }
-            let scroll_top = scroll_to_show(win.scroll_top(), target, viewport);
-            win.pin_scroll(scroll_top);
-            win.jump_to_row(buf, target, viewport.unwrap_or(0));
-            new_abs = Some(target as usize);
-        }
-        match new_abs {
-            Some(abs) => CallbackResult::Event(
-                WinEvent::SelectionChanged,
-                Payload::Selection { index: abs },
-            ),
-            None => CallbackResult::Consumed,
-        }
-    }
-
-    let bindings: &[(KeyBind, isize)] = &[
-        (KeyBind::new(KeyCode::Char('j'), KeyModifiers::NONE), 1),
-        (KeyBind::new(KeyCode::Down, KeyModifiers::NONE), 1),
-        (KeyBind::new(KeyCode::Char('k'), KeyModifiers::NONE), -1),
-        (KeyBind::new(KeyCode::Up, KeyModifiers::NONE), -1),
-        (KeyBind::new(KeyCode::Char('j'), KeyModifiers::CONTROL), 1),
-        (KeyBind::new(KeyCode::Char('k'), KeyModifiers::CONTROL), -1),
-        (KeyBind::new(KeyCode::Char('n'), KeyModifiers::CONTROL), 1),
-        (KeyBind::new(KeyCode::Char('p'), KeyModifiers::CONTROL), -1),
-        (KeyBind::new(KeyCode::PageDown, KeyModifiers::NONE), 10),
-        (KeyBind::new(KeyCode::PageUp, KeyModifiers::NONE), -10),
-        (KeyBind::new(KeyCode::Char('d'), KeyModifiers::CONTROL), 5),
-        (KeyBind::new(KeyCode::Char('u'), KeyModifiers::CONTROL), -5),
-        (
-            KeyBind::new(KeyCode::Home, KeyModifiers::NONE),
-            isize::MIN / 2,
-        ),
-        (
-            KeyBind::new(KeyCode::End, KeyModifiers::NONE),
-            isize::MAX / 2,
-        ),
-    ];
-    for (key, delta) in bindings {
-        let d = *delta;
-        let cb: Callback = Callback::Rust(Box::new(move |ctx| move_cursor(ctx, d)));
-        let _ = app.ui.win_set_keymap(leaf, *key, cb);
-    }
-
-    // Enter fires Submit with the absolute selected line index.
-    let submit_cb: Callback = Callback::Rust(Box::new(|ctx| {
-        let abs = ctx
-            .ui
-            .win(ctx.win)
-            .map(|w| w.cursor_abs_row() as usize)
-            .unwrap_or(0);
-        CallbackResult::Event(WinEvent::Submit, Payload::Selection { index: abs })
-    }));
-    let _ = app.ui.win_set_keymap(
+    app.ui.fire_win_event(
         leaf,
-        KeyBind::new(KeyCode::Enter, KeyModifiers::NONE),
-        submit_cb,
+        WinEvent::Submit,
+        Payload::Selection { index },
+        &mut lua_invoke,
     );
 }
 
@@ -729,9 +672,11 @@ pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<RowIndex> {
     app.ui.win(leaf).map(|w| w.cursor_abs_row())
 }
 
-/// Wire the built-in input recipe: printable chars insert at cursor, Backspace deletes,
-/// Left/Right/Home/End move the cursor, Enter fires `WinEvent::Submit`.
-/// Every edit also fires `WinEvent::TextChanged`.
+/// Wire the built-in input recipe. The window joins native scope `input`,
+/// whose actions edit the line and submit it (see [`edit_input`] and
+/// [`submit_input`]). A key fallback below the keymap scopes inserts printable
+/// chars and paste, and fires `WinEvent::Dismiss` on Esc or Ctrl-C when the
+/// window listens for it. Every edit also fires `WinEvent::TextChanged`.
 ///
 /// Placeholder: when `placeholder` is non-empty, it is rendered as virtual text
 /// while the buffer remains empty. The first printable keystroke inserts real
@@ -744,147 +689,8 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
     if let Some(win) = app.ui.win_mut(leaf) {
         win.reset_cursor();
     }
+    app.ui.set_base_scope(leaf, Some("input"));
 
-    fn current_line(ctx: &crate::smelt_edit::CallbackCtx<'_>) -> String {
-        let buf_id = match ctx.ui.win(ctx.win) {
-            Some(w) => w.buf,
-            None => return String::new(),
-        };
-        ctx.ui
-            .buf(buf_id)
-            .and_then(|b| b.get_line(0).map(|s| s.to_string()))
-            .unwrap_or_default()
-    }
-
-    fn is_placeholder(ctx: &crate::smelt_edit::CallbackCtx<'_>, placeholder: &str) -> bool {
-        !placeholder.is_empty() && current_line(ctx).is_empty()
-    }
-
-    fn set_placeholder_mark(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, placeholder: &str) {
-        let buf_id = match ctx.ui.win(ctx.win) {
-            Some(w) => w.buf,
-            None => return,
-        };
-        if let Some(buf) = ctx.ui.buf_mut(buf_id) {
-            crate::content::prompt_buf::set_placeholder_extmark(buf, Some(placeholder.to_string()));
-        }
-    }
-
-    fn clear_placeholder_mark(ctx: &mut crate::smelt_edit::CallbackCtx<'_>) {
-        set_placeholder_mark(ctx, "");
-    }
-
-    fn restore_placeholder(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, placeholder: &str) {
-        let buf_id = match ctx.ui.win(ctx.win) {
-            Some(w) => w.buf,
-            None => return,
-        };
-        if let Some(buf) = ctx.ui.buf_mut(buf_id) {
-            buf.set_lines(0, 1, vec![String::new()]);
-        }
-        set_placeholder_mark(ctx, placeholder);
-        if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            win.set_cursor_byte_single_line("", 0);
-            win.clear_selection_anchor();
-        }
-    }
-
-    fn replace_line(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, new: String, cursor: usize) {
-        let buf_id = match ctx.ui.win(ctx.win) {
-            Some(w) => w.buf,
-            None => return,
-        };
-        if let Some(buf) = ctx.ui.buf_mut(buf_id) {
-            buf.set_lines(0, 1, vec![new.clone()]);
-        }
-        if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            win.set_cursor_byte_single_line(&new, cursor);
-        }
-    }
-
-    fn line_edit(
-        ctx: &crate::smelt_edit::CallbackCtx<'_>,
-        placeholder: &str,
-    ) -> crate::line_input::LineEdit {
-        if is_placeholder(ctx, placeholder) {
-            return crate::line_input::LineEdit::new(String::new(), 0);
-        }
-        let text = current_line(ctx);
-        let (cursor, anchor) = ctx
-            .ui
-            .win(ctx.win)
-            .map(|w| (w.cpos(), w.selection_anchor()))
-            .unwrap_or((0, None));
-        crate::line_input::LineEdit::with_selection(text, cursor, anchor)
-    }
-
-    fn apply_edit(
-        ctx: &mut crate::smelt_edit::CallbackCtx<'_>,
-        placeholder: &str,
-        command: crate::line_input::EditCommand,
-    ) -> CallbackResult {
-        let placeholder_mode = is_placeholder(ctx, placeholder);
-        let mut edit = line_edit(ctx, placeholder);
-        let old = edit.text().to_string();
-        let state_changed = edit.apply(command);
-        let text_changed = edit.text() != old;
-        if placeholder_mode && state_changed {
-            clear_placeholder_mark(ctx);
-        }
-        let new = edit.text().to_string();
-        if new.is_empty() && !placeholder.is_empty() {
-            restore_placeholder(ctx, placeholder);
-        } else {
-            let cursor = edit.cursor();
-            let anchor = edit.selection_anchor();
-            replace_line(ctx, new.clone(), cursor);
-            if let Some(win) = ctx.ui.win_mut(ctx.win) {
-                win.set_selection_anchor(anchor);
-            }
-        }
-        if text_changed {
-            CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
-        } else {
-            CallbackResult::Consumed
-        }
-    }
-
-    fn bind_edit_key(
-        app: &mut TuiApp,
-        leaf: WinId,
-        bind: KeyBind,
-        placeholder: String,
-        command: crate::line_input::EditCommand,
-    ) {
-        let _ = app.ui.win_set_keymap(
-            leaf,
-            bind,
-            Callback::Rust(Box::new(move |ctx| {
-                apply_edit(ctx, &placeholder, command.clone())
-            })),
-        );
-    }
-
-    for entry in crate::line_input::default_key_bindings() {
-        bind_edit_key(app, leaf, entry.bind, placeholder.clone(), entry.command);
-    }
-
-    let placeholder_for_submit = placeholder.clone();
-    let submit: Callback = Callback::Rust(Box::new(move |ctx| {
-        let content = if is_placeholder(ctx, &placeholder_for_submit) {
-            String::new()
-        } else {
-            current_line(ctx)
-        };
-        CallbackResult::Event(WinEvent::Submit, Payload::Text { content })
-    }));
-    let _ = app.ui.win_set_keymap(
-        leaf,
-        KeyBind::new(KeyCode::Enter, KeyModifiers::NONE),
-        submit,
-    );
-
-    let placeholder_for_fallback = placeholder.clone();
     let fallback: Callback = Callback::Rust(Box::new(move |ctx| match &ctx.payload {
         Payload::Key {
             code: KeyCode::Esc, ..
@@ -894,31 +700,103 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
             mods: KeyModifiers::CONTROL,
         } => {
             if ctx.ui.has_win_event(ctx.win, WinEvent::Dismiss) {
-                let content = if is_placeholder(ctx, &placeholder_for_fallback) {
-                    String::new()
-                } else {
-                    current_line(ctx)
-                };
+                let content = input_line(ctx.ui, ctx.win);
                 CallbackResult::Event(WinEvent::Dismiss, Payload::Text { content })
             } else {
                 CallbackResult::Pass
             }
         }
-        Payload::Key { code, mods } => {
-            let key = crossterm::event::KeyEvent::new(*code, *mods);
-            match crate::line_input::command_for_key(key) {
-                Some(command) => apply_edit(ctx, &placeholder_for_fallback, command),
-                None => CallbackResult::Pass,
-            }
+        Payload::Key {
+            code: KeyCode::Char(c),
+            mods,
+        } if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => {
+            let command = crate::line_input::EditCommand::InsertChar(*c);
+            edit_result(apply_input_edit(ctx.ui, ctx.win, &placeholder, command))
         }
-        Payload::Paste { content } => apply_edit(
-            ctx,
-            &placeholder_for_fallback,
-            crate::line_input::EditCommand::InsertText(content.clone()),
-        ),
+        Payload::Key { .. } => CallbackResult::Pass,
+        Payload::Paste { content } => {
+            let command = crate::line_input::EditCommand::InsertText(content.clone());
+            edit_result(apply_input_edit(ctx.ui, ctx.win, &placeholder, command))
+        }
         _ => CallbackResult::Consumed,
     }));
     let _ = app.ui.win_set_key_fallback(leaf, fallback);
+}
+
+/// Apply line edit `command` to input `leaf`, firing `TextChanged` when the
+/// text changed.
+pub(crate) fn edit_input(app: &mut TuiApp, leaf: WinId, command: crate::line_input::EditCommand) {
+    let placeholder = app
+        .prompt
+        .placeholder_text(leaf)
+        .unwrap_or_default()
+        .to_string();
+    if let Some(content) = apply_input_edit(&mut app.ui, leaf, &placeholder, command) {
+        fire_input_event(app, leaf, WinEvent::TextChanged, content);
+    }
+}
+
+/// Fire `Submit` on input `leaf` with its text.
+pub(crate) fn submit_input(app: &mut TuiApp, leaf: WinId) {
+    let content = input_line(&app.ui, leaf);
+    fire_input_event(app, leaf, WinEvent::Submit, content);
+}
+
+fn fire_input_event(app: &mut TuiApp, leaf: WinId, event: WinEvent, content: String) {
+    let lua = &app.lua;
+    let mut lua_invoke =
+        |handle: crate::smelt_edit::LuaHandle, win: WinId, payload: &crate::smelt_edit::Payload| {
+            lua.queue_invocation(handle, win, payload);
+        };
+    app.ui
+        .fire_win_event(leaf, event, Payload::Text { content }, &mut lua_invoke);
+}
+
+fn edit_result(changed: Option<String>) -> CallbackResult {
+    match changed {
+        Some(content) => CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content }),
+        None => CallbackResult::Consumed,
+    }
+}
+
+/// The text of input `leaf`. A shown placeholder is not text: the line is empty.
+fn input_line(ui: &crate::smelt_edit::Ui, leaf: WinId) -> String {
+    ui.win(leaf)
+        .and_then(|w| ui.buf(w.buf))
+        .and_then(|b| b.get_line(0).map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+/// Apply `command` to the line of input `leaf`. The placeholder hides while
+/// the line has text and shows again when an edit empties it. Returns the new
+/// text when the edit changed it.
+fn apply_input_edit(
+    ui: &mut crate::smelt_edit::Ui,
+    leaf: WinId,
+    placeholder: &str,
+    command: crate::line_input::EditCommand,
+) -> Option<String> {
+    let old = input_line(ui, leaf);
+    let (cursor, anchor) = ui
+        .win(leaf)
+        .map(|w| (w.cpos(), w.selection_anchor()))
+        .unwrap_or((0, None));
+    let mut edit = crate::line_input::LineEdit::with_selection(old.clone(), cursor, anchor);
+    edit.apply(command);
+    let new = edit.text().to_string();
+    if new == old && new.is_empty() {
+        return None;
+    }
+    if let Some(buf) = ui.win_buf_mut(leaf) {
+        buf.set_lines(0, 1, vec![new.clone()]);
+        let mark = new.is_empty().then(|| placeholder.to_string());
+        crate::content::prompt_buf::set_placeholder_extmark(buf, mark);
+    }
+    if let Some(win) = ui.win_mut(leaf) {
+        win.set_cursor_byte_single_line(&new, edit.cursor());
+        win.set_selection_anchor(edit.selection_anchor().filter(|_| !new.is_empty()));
+    }
+    (new != old).then_some(new)
 }
 
 // ── Picker ───────────────────────────────────────────────────────────

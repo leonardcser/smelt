@@ -113,12 +113,35 @@ pub fn chord_sequence_starts_with(sequence: &str, prefix: &str) -> bool {
     true
 }
 
+/// The tokens of chord sequence `s`: single characters, and bracketed keys
+/// such as `<C-x>`. A `>` right after a modifier is the key, so `<M->>` is
+/// one token.
+pub fn chord_tokens(s: &str) -> impl Iterator<Item = &str> {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let len = next_chord_token_len(s, at)?;
+        let token = &s[at..at + len];
+        at += len;
+        Some(token)
+    })
+}
+
 fn next_chord_token_len(s: &str, at: usize) -> Option<usize> {
     let rest = s.get(at..)?;
     let first = rest.chars().next()?;
     if first == '<' {
-        if let Some(end) = rest.find('>') {
-            return Some(end + 1);
+        let bytes = rest.as_bytes();
+        for i in 1..bytes.len() {
+            if bytes[i] != b'>' {
+                continue;
+            }
+            let key_is_gt = i >= 3
+                && bytes[i - 1] == b'-'
+                && !matches!(bytes[i - 2], b'-' | b'<')
+                && bytes.get(i + 1) == Some(&b'>');
+            if !key_is_gt {
+                return Some(i + 1);
+            }
         }
     }
     Some(first.len_utf8())

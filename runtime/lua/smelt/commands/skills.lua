@@ -61,7 +61,7 @@ smelt.cmd.register("skills", function()
 
     local task_id = smelt.task.alloc()
     local function close() leaf:close(); smelt.task.resume(task_id, nil) end
-    leaf:key("q", close)
+    leaf:scope("dialog.view", { close = close })
     leaf:on("dismiss", close)
     smelt.task.wait(task_id)
   end)

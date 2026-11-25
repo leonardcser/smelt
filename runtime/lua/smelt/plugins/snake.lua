@@ -1,9 +1,35 @@
 -- /snake (or F11) - snake in a floating window. hjkl or the arrows steer,
--- space starts over, q, Esc or Ctrl-C closes.
+-- space starts over, q, Esc or Ctrl-C closes. Rebind them in scope `snake`.
 -- The title shows the score and the best one this session.
 --
 -- Two board rows share one terminal row: `▀` paints the top half in its
 -- foreground and the bottom half in its background.
+
+smelt.keymap.scope("snake", {
+  desc = "/snake game",
+  actions = {
+    left    = "Steer left",
+    down    = "Steer down",
+    up      = "Steer up",
+    right   = "Steer right",
+    restart = "Start a new game",
+    close   = "Close the game",
+  },
+  keys = {
+    { "", "h",       "left"    },
+    { "", "j",       "down"    },
+    { "", "k",       "up"      },
+    { "", "l",       "right"   },
+    { "", "<Left>",  "left"    },
+    { "", "<Down>",  "down"    },
+    { "", "<Up>",    "up"      },
+    { "", "<Right>", "right"   },
+    { "", "<Space>", "restart" },
+    { "", "q",       "close"   },
+    { "", "<Esc>",   "close"   },
+    { "", "<C-c>",   "close"   },
+  },
+})
 
 local W, H = 32, 32
 local TICK_MS = 100
@@ -112,7 +138,7 @@ show = function()
     border = { all = "Comment" },
     anchor = "screen_at", corner = "ne", row = 1, col = 0,
     width = W + 2, height = H // 2 + 2,
-    -- The empty window holds focus so the keymaps fire; the board is a paint.
+    -- The empty window holds focus so the scope's keys fire; the board is a paint.
     layout = layout.vbox({
       { layout.leaf(ui.win), height = 0 },
       { layout.leaf(ui.paint, { measure = { W, H // 2 } }), height = "fit" },
@@ -120,19 +146,10 @@ show = function()
     modal = false,
     draggable = true,
     resizable = false,
-    keymaps = {
-      { key = "h", on_press = turn("left") },
-      { key = "j", on_press = turn("down") },
-      { key = "k", on_press = turn("up") },
-      { key = "l", on_press = turn("right") },
-      { key = "<Left>", on_press = turn("left") },
-      { key = "<Down>", on_press = turn("down") },
-      { key = "<Up>", on_press = turn("up") },
-      { key = "<Right>", on_press = turn("right") },
-      { key = "<Space>", on_press = restart },
-      { key = "q", on_press = close },
-      { key = "<Esc>", on_press = close },
-      { key = "<C-c>", on_press = close },
+    scope = "snake",
+    actions = {
+      left = turn("left"), down = turn("down"), up = turn("up"), right = turn("right"),
+      restart = restart, close = close,
     },
   })
 end

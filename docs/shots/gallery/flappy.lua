@@ -67,16 +67,15 @@ local function open()
   smelt.overlay.new({
     name = "flappy", title = " flappy · space ", anchor = "screen_at", corner = "ne", row = 1, col = 1,
     width = W + 2, height = H + 2, modal = false,
-    -- The empty window holds focus so the keymaps fire; the game is a paint.
+    -- The empty window holds focus so its keys fire; the game is a paint.
     layout = layout.vbox({
       { layout.leaf(ui.win), height = 0 },
       { layout.leaf(ui.paint, { measure = { W, H } }), height = "fit" },
     }),
-    keymaps = {
-      { key = "<Space>", on_press = play }, { key = "k", on_press = play }, { key = "<Up>", on_press = play },
-      { key = "q", on_press = close }, { key = "<Esc>", on_press = close }, { key = "<C-c>", on_press = close },
-    },
   })
+  local keys = { ["<Space>"] = play, k = play, ["<Up>"] = play }
+  for _, key in ipairs({ "q", "<Esc>", "<C-c>" }) do keys[key] = close end
+  for key, action in pairs(keys) do ui.win:key(key, action) end
   ui.win:focus()
   ui.timer = smelt.timer.every(70, tick)
 end

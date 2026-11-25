@@ -1328,15 +1328,16 @@ fn vim_visual_viewer_owned_keys_preempt_dialog_keymaps() {
         r#"
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
+        smelt.keymap.scope("test.viewer", {
+          extends = "dialog",
+          keys = { { "", "l", "close" }, { "", "q", "close" } },
+        })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
         smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
-          keymaps = {
-            { key = "l", on_press = function(ctx) ctx.close() end },
-            { key = "q", on_press = function(ctx) ctx.close() end },
-          },
+          scope = "test.viewer",
         })
         "#
     ));
@@ -1400,6 +1401,7 @@ fn vim_pending_viewer_sequence_preempts_dialog_keymap() {
         smelt.keymap.set("n", "q", function()
           smelt.dialog.current().close()
         end)
+        smelt.keymap.scope("test.viewer", { extends = "dialog", keys = { { "", "q", "close" } } })
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
@@ -1407,9 +1409,7 @@ fn vim_pending_viewer_sequence_preempts_dialog_keymap() {
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
-          keymaps = {
-            { key = "q", on_press = function(ctx) ctx.close() end },
-          },
+          scope = "test.viewer",
         })
         "#
     ));
@@ -1449,6 +1449,7 @@ fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
     let mut app = TestApp::builder().with_vim(true).build();
     assert!(app.run_lua(
         r#"
+        smelt.keymap.scope("test.esc", { extends = "dialog", keys = { { "", "<Esc>", "close" } } })
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
@@ -1456,9 +1457,7 @@ fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
-          keymaps = {
-            { key = "<Esc>", on_press = function(ctx) ctx.close() end },
-          },
+          scope = "test.esc",
         })
         "#
     ));
@@ -2924,6 +2923,7 @@ fn chained_dialog_opens_before_the_frame_that_follows_the_closing_key() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(
         r#"
+        smelt.keymap.scope("test.esc", { extends = "dialog", keys = { { "", "<Esc>", "close" } } })
         local function page(title)
           local buf = smelt.buf.new({ readonly = true })
           buf:lines({ title })
@@ -2933,7 +2933,7 @@ fn chained_dialog_opens_before_the_frame_that_follows_the_closing_key() {
             height = 4,
             panels = { { leaf = leaf, height = "fill" } },
             focus = leaf,
-            keymaps = { { key = "<Esc>", on_press = function(ctx) ctx.close() end } },
+            scope = "test.esc",
           })
         end
         smelt.spawn(function()
@@ -3379,19 +3379,19 @@ fn rejected_dialog_construction_keeps_the_active_dialog() {
 }
 
 #[test]
-fn dialog_with_unknown_keymap_chord_is_rejected_before_opening() {
+fn dialog_with_invalid_actions_is_rejected_before_opening() {
     let mut app = TestApp::builder().build();
     let rejected = app.run_lua_result(
         r#"
         leaf = smelt.dialog.content({ text = "never shown" })
         smelt.dialog.new({
           panels = { { leaf = leaf, height = "fit" } },
-          keymaps = { { key = "not-a-chord", on_press = function() end } },
+          actions = { close = "not a function" },
         })
         "#,
     );
-    let err = rejected.expect_err("unknown chord must raise");
-    assert!(err.contains("unknown chord"), "{err}");
+    let err = rejected.expect_err("a non-function action must raise");
+    assert!(err.contains("actions must map names to functions"), "{err}");
     app.run_lua_result("assert(smelt.dialog.current() == nil)")
         .unwrap();
     assert!(!app.render_to_frame().text().contains("never shown"));

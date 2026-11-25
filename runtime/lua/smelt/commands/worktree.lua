@@ -5,6 +5,13 @@ local label_value = smelt.label_value
 local argv = require("smelt.argv")
 local worktree = require("smelt.worktree")
 
+smelt.keymap.scope("worktree.status", {
+  desc = "/worktree viewer",
+  extends = "dialog.viewer",
+  actions = { copy = "Copy worktree status" },
+  keys = { { "n", "y", "copy" } },
+})
+
 local DIM = { fg = "Comment" }
 local HEAD = { fg = "SmeltAccent", bold = true }
 local VALUE = { fg = "Normal" }
@@ -110,14 +117,12 @@ local function show_status()
     styled = lines,
     wrap = false,
     max_height = "70%",
-    keymaps = {
-      {
-        key = "y",
-        on_press = function()
-          smelt.clipboard.write(table.concat(plain, "\n") .. "\n")
-          smelt.notify.info("worktree status copied")
-        end,
-      },
+    scope = "worktree.status",
+    actions = {
+      copy = function()
+        smelt.clipboard.write(table.concat(plain, "\n") .. "\n")
+        smelt.notify.info("worktree status copied")
+      end,
     },
   })
 end

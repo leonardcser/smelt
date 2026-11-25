@@ -32,15 +32,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
-/// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc).
+/// (`<C-g>`, `<S-Tab>`, `<M-x>`, `<D-z>` for Cmd, printable `j`, etc).
 /// The result is the lookup key for `smelt.keymap.set`. Returns `None` for unrecognized chords.
 pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     use crossterm::event::{KeyCode, KeyModifiers as M};
     let mods = key.modifiers;
     let has_ctrl = mods.contains(M::CONTROL);
     let has_alt = mods.contains(M::ALT);
-    let has_shift = mods.contains(M::SHIFT);
+    let has_super = mods.contains(M::SUPER);
+    // Terminals report Shift-Tab as `BackTab`, with or without the modifier.
+    let has_shift = mods.contains(M::SHIFT) || key.code == KeyCode::BackTab;
     let base = match key.code {
+        // Shift folds into a letter: some terminals report Shift+z as `z`.
+        KeyCode::Char(c) if has_shift => c.to_uppercase().to_string(),
         KeyCode::Char(c) => c.to_string(),
         KeyCode::Tab => "Tab".to_string(),
         KeyCode::BackTab => "Tab".to_string(),
@@ -61,7 +65,7 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
         _ => return None,
     };
     let is_named = !matches!(key.code, KeyCode::Char(_));
-    if !has_ctrl && !has_alt && (!has_shift || matches!(key.code, KeyCode::Char(_))) && !is_named {
+    if !has_ctrl && !has_alt && !has_super && !is_named {
         // Plain printable char - no angle-bracket wrap.
         return Some(base);
     }
@@ -71,6 +75,9 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     }
     if has_alt {
         prefix.push_str("M-");
+    }
+    if has_super {
+        prefix.push_str("D-");
     }
     if has_shift && is_named {
         prefix.push_str("S-");
@@ -83,6 +90,7 @@ fn key_modifier(name: &str) -> Option<crossterm::event::KeyModifiers> {
     match name.to_ascii_lowercase().as_str() {
         "ctrl" | "c" => Some(KeyModifiers::CONTROL),
         "alt" | "a" | "meta" | "m" => Some(KeyModifiers::ALT),
+        "cmd" | "super" | "d" => Some(KeyModifiers::SUPER),
         "shift" | "s" => Some(KeyModifiers::SHIFT),
         _ => None,
     }
@@ -159,16 +167,7 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_edit::KeyBind> {
 /// Accepts long names, short names, `"any"`, and `"*"`. Case-insensitive.
 /// Returns `None` for unknown input.
 pub(crate) fn normalize_mode(mode: &str) -> Option<String> {
-    Some(
-        match mode.trim().to_ascii_lowercase().as_str() {
-            "" | "*" | "any" | "all" => "",
-            "n" | "normal" => "n",
-            "i" | "insert" => "i",
-            "v" | "visual" | "visual_line" | "visualline" => "v",
-            _ => return None,
-        }
-        .to_string(),
-    )
+    smelt_core::lua::keymaps::mode_char(mode).map(str::to_string)
 }
 
 /// Canonicalize a chord string to the nvim angle-bracket form `chord_string` produces.
@@ -217,23 +216,64 @@ pub(crate) fn canonicalize_chord_sequence_with_leader(
 
 /// Format an internal canonical chord sequence for user-facing introspection.
 pub(crate) fn display_chord_sequence(chord: &str) -> String {
+    smelt_core::keymap::chord_tokens(chord)
+        .map(|token| if token == " " { "<space>" } else { token })
+        .collect()
+}
+
+/// Format a canonical chord sequence as a short hint label, the form tips and
+/// footers use: `<C-r>` is `ctrl+r`, `<M-S-Tab>` is `alt+shift+tab` and `<CR>`
+/// is `enter`. Plain characters run together, so `cc` stays `cc`; named keys
+/// are separated by spaces.
+pub(crate) fn label_chord_sequence(chord: &str) -> String {
     let mut out = String::new();
-    let mut chars = chord.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == ' ' {
-            out.push_str("<space>");
-        } else if c == '<' {
-            out.push('<');
-            for cc in chars.by_ref() {
-                out.push(cc);
-                if cc == '>' {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
+    let mut last_plain = false;
+    for token in smelt_core::keymap::chord_tokens(chord) {
+        let bracketed = token
+            .strip_prefix('<')
+            .and_then(|inner| inner.strip_suffix('>'))
+            .filter(|inner| !inner.is_empty());
+        let (label, plain) = match bracketed {
+            Some(inner) => (label_key(inner), false),
+            None if token == " " => ("space".to_string(), false),
+            None => (token.to_string(), true),
+        };
+        let joins_previous = out.is_empty() || plain && last_plain;
+        if !joins_previous {
+            out.push(' ');
         }
+        out.push_str(&label);
+        last_plain = plain;
     }
+    out
+}
+
+/// Label one bracketed key such as `C-M-x` or `PageUp`.
+fn label_key(inner: &str) -> String {
+    let mut rest = inner;
+    let mut out = String::new();
+    while rest.len() > 2 && rest.as_bytes()[1] == b'-' {
+        let modifier = match &rest[..1] {
+            "C" => "ctrl+",
+            "M" => "alt+",
+            "D" => "cmd+",
+            "S" => "shift+",
+            _ => break,
+        };
+        out.push_str(modifier);
+        rest = &rest[2..];
+    }
+    let base = match rest {
+        "CR" => "enter".to_string(),
+        "BS" => "backspace".to_string(),
+        "Del" => "delete".to_string(),
+        "PageUp" => "pgup".to_string(),
+        "PageDown" => "pgdn".to_string(),
+        " " => "space".to_string(),
+        other if other.chars().count() > 1 => other.to_ascii_lowercase(),
+        other => other.to_string(),
+    };
+    out.push_str(&base);
     out
 }
 
@@ -250,28 +290,14 @@ pub(crate) fn canonicalize_leader(input: &str) -> Option<String> {
 /// Whitespace between tokens is allowed. Returns `None` if the input is malformed.
 fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c.is_whitespace() {
+    for token in smelt_core::keymap::chord_tokens(input) {
+        if token.trim().is_empty() {
             continue;
         }
-        if c == '<' {
-            let mut tok = String::from('<');
-            let mut closed = false;
-            for cc in chars.by_ref() {
-                tok.push(cc);
-                if cc == '>' {
-                    closed = true;
-                    break;
-                }
-            }
-            if !closed || tok == "<>" {
-                return None;
-            }
-            tokens.push(tok);
-        } else {
-            tokens.push(c.to_string());
+        if token.starts_with('<') && (token.len() < 3 || !token.ends_with('>')) {
+            return None;
         }
+        tokens.push(token.to_string());
     }
     if tokens.is_empty() {
         None
@@ -1109,7 +1135,42 @@ impl Default for LuaRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chord_labels_use_hint_names() {
+        let label = |chord: &str| super::label_chord_sequence(chord);
+        assert_eq!(label("<C-r>"), "ctrl+r");
+        assert_eq!(label("<M-S-Tab>"), "alt+shift+tab");
+        assert_eq!(
+            super::canonicalize_chord_sequence_with_leader("<S-Tab>", None).as_deref(),
+            Some("<S-Tab>")
+        );
+        assert_eq!(label("<CR>"), "enter");
+        assert_eq!(label("<PageDown>"), "pgdn");
+        assert_eq!(label("cc"), "cc");
+        assert_eq!(label("g<C-x>a"), "g ctrl+x a");
+        assert_eq!(label(" x"), "space x");
+    }
+
     use super::*;
+
+    /// The global scope, as a key in `vim_mode` looks it up.
+    fn global_frames(vim_mode: Option<&str>) -> [smelt_core::lua::keymaps::Frame<'static>; 1] {
+        [smelt_core::lua::keymaps::Frame {
+            scope: "",
+            mode: vim_mode.map_or("", |mode| {
+                smelt_core::lua::keymaps::mode_char(mode).unwrap_or("n")
+            }),
+        }]
+    }
+
+    fn run_global(
+        rt: &LuaRuntime,
+        chord: &str,
+        vim_mode: Option<&str>,
+        ctx: &[(&str, String)],
+    ) -> smelt_core::lua::runtime::KeymapResult {
+        rt.run_keymap(&global_frames(vim_mode), chord, ctx, &mut |_, _| None)
+    }
     use smelt_transcript::content::block_layout::{
         BlockLayout, CapKeep, CapMarker, ContentRenderSpec, LuaLeaf, TextSpec,
     };
@@ -4126,16 +4187,16 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap("<C-g>", Some("Normal"), None),
+            run_global(&rt, "<C-g>", Some("Normal"), &[]),
             KeymapResult::Consumed
         );
         assert_eq!(drain_notifications(&rt), vec!["ctrl-g".to_string()]);
         assert_eq!(
-            rt.run_keymap("<C-g>", Some("Insert"), None),
+            run_global(&rt, "<C-g>", Some("Insert"), &[]),
             KeymapResult::NoBinding
         );
         assert_eq!(
-            rt.run_keymap("<C-x>", Some("Normal"), None),
+            run_global(&rt, "<C-x>", Some("Normal"), &[]),
             KeymapResult::NoBinding
         );
     }
@@ -4167,8 +4228,9 @@ mod tests {
 
         let shared = rt.shared.clone();
         assert!(shared.commands.lock().unwrap().contains_key("plug_cmd"));
-        let has_user_chord =
-            |k: &std::collections::HashMap<(String, String), _>| k.keys().any(|(_, c)| c == "<F9>");
+        let has_user_chord = |k: &smelt_core::lua::keymaps::Keymaps| {
+            k.effective("").iter().any(|row| row.chord == "<F9>")
+        };
         assert!(has_user_chord(&shared.keymaps.lock().unwrap()));
 
         // Reload to an empty body: every user-registered surface disappears.
@@ -4198,15 +4260,15 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap("<C-h>", Some("Normal"), None),
+            run_global(&rt, "<C-h>", Some("Normal"), &[]),
             KeymapResult::Consumed
         );
         assert_eq!(drain_notifications(&rt), vec!["any-mode".to_string()]);
         assert_eq!(
-            rt.run_keymap("<C-h>", Some("Insert"), None),
+            run_global(&rt, "<C-h>", Some("Insert"), &[]),
             KeymapResult::Consumed
         );
-        assert_eq!(rt.run_keymap("<C-h>", None, None), KeymapResult::Consumed);
+        assert_eq!(run_global(&rt, "<C-h>", None, &[]), KeymapResult::Consumed);
     }
 
     #[test]
@@ -4233,6 +4295,23 @@ mod tests {
             chord_string(ev(KeyCode::Char('x'), M::ALT)).as_deref(),
             Some("<M-x>")
         );
+        assert_eq!(
+            chord_string(ev(KeyCode::Char('z'), M::SUPER)).as_deref(),
+            Some("<D-z>")
+        );
+        // Terminals report Cmd+Shift+z as `z` or `Z` with shift.
+        for code in [KeyCode::Char('z'), KeyCode::Char('Z')] {
+            assert_eq!(
+                chord_string(ev(code, M::SUPER | M::SHIFT)).as_deref(),
+                Some("<D-Z>")
+            );
+        }
+        assert_eq!(
+            chord_string(ev(KeyCode::Char('a'), M::SHIFT)).as_deref(),
+            Some("A")
+        );
+        assert_eq!(canonicalize_chord("cmd-z").as_deref(), Some("<D-z>"));
+        assert_eq!(label_chord_sequence("<D-Z>"), "cmd+Z");
     }
 
     #[test]
@@ -4356,7 +4435,7 @@ mod tests {
         assert_eq!(canonicalize_chord("enter").as_deref(), Some("<CR>"));
         assert_eq!(canonicalize_chord("<Enter>").as_deref(), Some("<CR>"));
         assert_eq!(canonicalize_chord("esc").as_deref(), Some("<Esc>"));
-        assert_eq!(canonicalize_chord("s-tab").as_deref(), Some("<Tab>"));
+        assert_eq!(canonicalize_chord("s-tab").as_deref(), Some("<S-Tab>"));
         assert_eq!(canonicalize_chord("j").as_deref(), Some("j"));
         assert_eq!(canonicalize_chord("bogus"), None);
     }
@@ -4395,17 +4474,26 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap(" r", Some("Normal"), None),
+            run_global(&rt, " r", Some("Normal"), &[]),
             KeymapResult::Consumed
         );
-        let rows: mlua::Table = rt.lua.load("return smelt.keymap.list()").eval().unwrap();
-        let first: mlua::Table = rows.get(1).unwrap();
-        let chord: String = first.get("chord").unwrap();
-        assert_eq!(chord, "<space>r");
+        let listed: bool = rt
+            .lua
+            .load(
+                r#"
+                    for _, row in ipairs(smelt.keymap.list({ scope = "" })) do
+                        if row.chord == "<space>r" then return true end
+                    end
+                    return false
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(listed, "the leader expands at registration");
         let leader: String = rt.lua.load("return smelt.keymap.leader()").eval().unwrap();
         assert_eq!(leader, "<space>");
         assert_eq!(
-            rt.run_keymap("\\r", Some("Normal"), None),
+            run_global(&rt, "\\r", Some("Normal"), &[]),
             KeymapResult::NoBinding
         );
     }
@@ -4442,7 +4530,11 @@ mod tests {
             .exec()
             .expect("exec");
 
-        let rows: mlua::Table = rt.lua.load("return smelt.keymap.list()").eval().unwrap();
+        let rows: mlua::Table = rt
+            .lua
+            .load(r#"return smelt.keymap.list({ scope = "" })"#)
+            .eval()
+            .unwrap();
         let mut found_desc = false;
         let mut found_without_desc = false;
         for row in rows.sequence_values::<mlua::Table>() {
@@ -4546,15 +4638,15 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap("<C-r>", Some("Normal"), None),
+            run_global(&rt, "<C-r>", Some("Normal"), &[]),
             KeymapResult::Consumed
         );
         assert_eq!(
-            rt.run_keymap("<C-r>", Some("Insert"), None),
+            run_global(&rt, "<C-r>", Some("Insert"), &[]),
             KeymapResult::Consumed
         );
         assert_eq!(
-            rt.run_keymap("<C-r>", Some("Visual"), None),
+            run_global(&rt, "<C-r>", Some("Visual"), &[]),
             KeymapResult::Consumed
         );
         let msgs = drain_notifications(&rt);
@@ -4577,16 +4669,16 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap("<Esc><Esc>", Some("Normal"), None),
+            run_global(&rt, "<Esc><Esc>", Some("Normal"), &[]),
             KeymapResult::Consumed
         );
         assert_eq!(
-            rt.run_keymap("gd", Some("Normal"), None),
+            run_global(&rt, "gd", Some("Normal"), &[]),
             KeymapResult::Consumed
         );
         // Single-key prefix of a multi-key chord must not fire on its own.
         assert_eq!(
-            rt.run_keymap("g", Some("Normal"), None),
+            run_global(&rt, "g", Some("Normal"), &[]),
             KeymapResult::NoBinding
         );
         let msgs = drain_notifications(&rt);
@@ -4605,19 +4697,19 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        assert!(rt.chord_has_longer("<Esc>", Some("Normal")));
-        assert!(rt.chord_has_longer("g", Some("Normal")));
+        assert!(rt.chord_has_longer(&global_frames(Some("Normal")), "<Esc>"));
+        assert!(rt.chord_has_longer(&global_frames(Some("Normal")), "g"));
         // Exact sequences are not strict prefixes (they fire via `run_keymap`).
-        assert!(!rt.chord_has_longer("<Esc><Esc>", Some("Normal")));
-        assert!(!rt.chord_has_longer("gd", Some("Normal")));
-        assert!(!rt.chord_has_longer("j", Some("Normal")));
+        assert!(!rt.chord_has_longer(&global_frames(Some("Normal")), "<Esc><Esc>"));
+        assert!(!rt.chord_has_longer(&global_frames(Some("Normal")), "gd"));
+        assert!(!rt.chord_has_longer(&global_frames(Some("Normal")), "j"));
         // Mode-specific chord `gd` (Normal only) doesn't surface in Insert.
-        assert!(!rt.chord_has_longer("g", Some("Insert")));
+        assert!(!rt.chord_has_longer(&global_frames(Some("Insert")), "g"));
         // Global-mode chord surfaces in every mode.
-        assert!(rt.chord_has_longer("<Esc>", Some("Insert")));
+        assert!(rt.chord_has_longer(&global_frames(Some("Insert")), "<Esc>"));
         // Without vim only global-mode chords can fire, so only they pend.
-        assert!(!rt.chord_has_longer("g", None));
-        assert!(rt.chord_has_longer("<Esc>", None));
+        assert!(!rt.chord_has_longer(&global_frames(None), "g"));
+        assert!(rt.chord_has_longer(&global_frames(None), "<Esc>"));
     }
 
     #[test]
@@ -4639,7 +4731,7 @@ mod tests {
         let ctx_pairs: Vec<(&str, String)> =
             vec![("vim_mode_at_chord_start", "insert".to_string())];
         assert_eq!(
-            rt.run_keymap("<Esc><Esc>", Some("Normal"), Some(ctx_pairs.as_slice())),
+            run_global(&rt, "<Esc><Esc>", Some("Normal"), &ctx_pairs),
             KeymapResult::Consumed
         );
         let msgs = drain_notifications(&rt);

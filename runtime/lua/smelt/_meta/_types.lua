@@ -210,15 +210,6 @@
 ---@field mode? string Starting agent mode. Must name a registered mode.
 ---@field reasoning_effort? string Starting reasoning effort. Known labels are `"off"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, and `"ultra"`; provider-defined labels are also accepted.
 
---- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
---- context exposing `ctx.close()` and `ctx.resolve(value)` so the
---- handler can dismiss the dialog or resolve the blocking `open` call.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.dialog.Keymap
----@field key string Chord string (e.g. `"q"`, `"<Esc>"`, `"ctrl-j"`).
----@field hint? string Optional one-line hint surfaced in the dialog footer.
----@field on_press fun(ctx: any): any Handler invoked when the key fires.
-
 --- Each item displayed in `smelt.dialog.menu`. Strings are also accepted
 --- and lifted into this shape automatically.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -256,8 +247,8 @@
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
 ---@field border? table Top border style override; defaults to `{ top = "SmeltAccent" }`.
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
----@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
----@field close_with_q? boolean Bind `q` to close for read-only/list dialogs. Leave false for dialogs that accept text input.
+---@field scope? string Keymap scope of the dialog, default `"dialog"`. Use `"dialog.view"` for read-only dialogs that close on `q`, or a scope declared with `smelt.keymap.scope` that extends one of them.
+---@field actions? table<string, fun(ctx: any): any> Actions of the dialog's scope by name. Each receives the dialog ctx (`resolve`, `close`, `panels`, `focused_leaf`, ...); returning `false` passes the key on. `close` and `expand` are built in.
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter. Without a handler, Enter leaves the dialog open.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
 ---@field on_close? fun(ctx: any): nil Handler invoked once whenever the dialog resolves or closes.
@@ -283,7 +274,8 @@
 ---@field on_query? fun(query: string, ctx: any): nil Fires on every keystroke; default re-applies `filter`.
 ---@field on_submit? fun(ctx: any): any Fires on Enter. `ctx.item` is the highlighted row; defaults to resolving with `ctx.item` when non-nil.
 ---@field on_dismiss? fun(): nil Fires when the dialog is dismissed.
----@field keymaps? smelt.dialog.Keymap[] Extra dialog-level keymaps merged on top of navigation bindings.
+---@field scope? string Keymap scope of the picker dialog, default `"dialog"`. Navigation keys come from the `list.nav` scope of its input.
+---@field actions? table<string, fun(ctx: any): any> Extra actions of the picker's scope. Each receives the picker ctx with `list`, `input` and `input_buf`.
 ---@field title? string Forwarded to `smelt.dialog.open`.
 ---@field height? any Forwarded to `smelt.dialog.open`.
 ---@field max_height? any Forwarded to `smelt.dialog.open`.
@@ -567,13 +559,6 @@
 ---@field title? boolean When true, the overlay chrome moves the overlay unless a resize handle owns the cell.
 ---@field body? boolean | "inert" `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves.
 
---- One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... })`.
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
----@class smelt.overlay.Keymap
----@field key string Key chord such as `<Esc>`, `<C-j>`, or `q`.
----@field on_press fun(ctx: table) Handler invoked when the key fires while any overlay leaf has focus.
----@field hint? string Human-readable hint for key-discovery plugins.
-
 --- Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.layout` tree.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.NewOpts
@@ -603,14 +588,15 @@
 ---@field z? integer Z-index. Higher overlays render above lower overlays.
 ---@field draggable? boolean | smelt.overlay.DragConfig Enable or configure mouse dragging.
 ---@field resizable? boolean | smelt.overlay.ResizeConfig Enable or configure mouse resize handles.
----@field keymaps? smelt.overlay.Keymap[] Overlay-scoped key bindings.
+---@field scope? string Keymap scope of the overlay. Its bindings fire while any leaf of the overlay has focus, after the focused window's own scope.
+---@field actions? table<string, fun(ctx: table): boolean?> Implementations of the scope's actions, by action name. Requires `scope`.
 
 --- Overlay handle returned by `smelt.overlay.new(opts)`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.Overlay
 ---@field rect fun(): table? Return the current compositor-resolved rectangle, including chrome, or nil when closed or its anchor is unavailable.
 ---@field close fun(): nil Close the overlay. No-op if already closed.
----@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.
+---@field scope fun(name: string, actions: table?): nil Put the overlay in keymap scope `name`, with `actions` mapping the scope's action names to functions. Replaces its previous scope.
 
 --- Overlay resize configuration table. Use `true` for the floating default: left/right/bottom edges and corners, leaving the top chrome for drag.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
@@ -1325,7 +1311,8 @@
 ---@field move_cursor fun(delta: integer): smelt.win.Win Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field reveal fun(row: integer, opts: table?): smelt.win.Win Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor; `opts.jump = true` first leaves the current cursor in the window's jump list so `win:jump{ older = 1 }` or vim's `Ctrl-O` returns to it. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should resolve a target from a committed `smelt.transcript.View` and pass it to `smelt.transcript.reveal`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field jump fun(opts: table): boolean Walk the window's jump list, the positions its vim jumps (`G`, `}`, `]u`, searches) left from; vim's `Ctrl-O`, `Ctrl-I` and `''`. Pass exactly one of `opts.older = n` (back `n` jumps), `opts.newer = n` (forward again) or `opts.previous = true` (toggle between the last two positions). Returns whether the cursor moved. The built-in prompt window has no jump list and returns false.
----@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.
+---@field scope fun(name: string, actions: table?): nil Put the window in keymap scope `name`, with `actions` mapping the scope's action names to functions. The window's scope comes before its dialog's or overlay's. Replaces its previous scope.
+---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this window, before any keymap scope. Users cannot rebind it: prefer a scope action for keys a user may want to change. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.
 ---@field on fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.
 ---@field placeholder fun(text: string, opts: table?): smelt.win.Win Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.
 ---@field clear_placeholder fun(): nil Clear the window's placeholder text and opts. Idempotent.

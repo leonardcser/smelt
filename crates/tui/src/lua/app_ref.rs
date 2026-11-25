@@ -69,16 +69,6 @@ pub(crate) enum DeferredLuaOperation {
         event: crate::smelt_edit::WinEvent,
         callback_id: u64,
     },
-    ModalKeymap {
-        modal: crate::smelt_edit::ModalId,
-        key: crate::smelt_edit::KeyBind,
-        callback_id: u64,
-    },
-    OverlayKeymap {
-        overlay: crate::smelt_edit::OverlayId,
-        key: crate::smelt_edit::KeyBind,
-        callback_id: u64,
-    },
 }
 
 thread_local! {
@@ -887,20 +877,12 @@ impl AgentLuaHost<'_> {
             && self.app.active_agent_turn_id() == turn_id
     }
 
-    pub(crate) fn focused_vim_mode_label(&self) -> Option<String> {
-        self.app.focused_vim_mode_label()
-    }
-
     pub(crate) fn focused_vim_mode(&self) -> Option<crate::smelt_edit::VimMode> {
         self.app.focused_vim_mode()
     }
 
     pub(crate) fn set_focused_vim_mode(&mut self, mode: crate::smelt_edit::VimMode) {
         self.app.set_focused_vim_mode(mode);
-    }
-
-    pub(crate) fn prompt_vim_enabled(&self) -> bool {
-        self.app.prompt.vim_enabled(self.app.prompt_win())
     }
 
     pub(crate) fn set_mode(&mut self, mode: protocol::AgentMode) {
@@ -1143,6 +1125,11 @@ impl UiLuaHost<'_> {
         crate::lua::ui_ops::configure_list_leaf(self.app, window, initial_cursor);
     }
 
+    /// Run native keymap action `call` as if its key was pressed.
+    pub(crate) fn run_native_action(&mut self, call: crate::app::lua_bridge::NativeCall) {
+        self.app.run_native_action_now(call);
+    }
+
     pub(crate) fn set_cursor_row(&mut self, window: crate::smelt_edit::WinId, row: u64) {
         crate::lua::ui_ops::set_cursor_row(self.app, window, row);
     }
@@ -1335,28 +1322,6 @@ impl UiLuaHost<'_> {
         self.app.toggle_docked_dialog_expanded(dialog);
     }
 
-    pub(crate) fn set_modal_keymap(
-        &mut self,
-        modal: crate::smelt_edit::ModalId,
-        key: crate::smelt_edit::KeyBind,
-        callback: crate::smelt_edit::Callback,
-    ) {
-        let previous = self.app.ui.modal_set_keymap(modal, key, callback);
-        crate::lua::drop_displaced_lua_handle(self.app, previous);
-    }
-
-    pub(crate) fn clear_modal_keymap(
-        &mut self,
-        modal: crate::smelt_edit::ModalId,
-        key: crate::smelt_edit::KeyBind,
-        callback_id: u64,
-    ) -> bool {
-        let previous = self.app.ui.modal_clear_keymap(modal, key, callback_id);
-        let removed = previous.is_some();
-        crate::lua::drop_displaced_lua_handle(self.app, previous);
-        removed
-    }
-
     pub(crate) fn open_docked_dialog(
         &mut self,
         layout: crate::lua::api::overlay_layout::LayoutNode,
@@ -1380,34 +1345,26 @@ impl UiLuaHost<'_> {
         self.app.close_overlay(overlay);
     }
 
-    pub(crate) fn set_overlay_keymap(
-        &mut self,
-        overlay: crate::smelt_edit::OverlayId,
-        key: crate::smelt_edit::KeyBind,
-        callback: crate::smelt_edit::Callback,
-    ) {
-        let previous = self.app.ui.overlay_set_keymap(overlay, key, callback);
-        crate::lua::drop_displaced_lua_handle(self.app, previous);
-    }
-
-    pub(crate) fn clear_overlay_keymap(
-        &mut self,
-        overlay: crate::smelt_edit::OverlayId,
-        key: crate::smelt_edit::KeyBind,
-        callback_id: u64,
-    ) -> bool {
-        let previous = self.app.ui.overlay_clear_keymap(overlay, key, callback_id);
-        let removed = previous.is_some();
-        crate::lua::drop_displaced_lua_handle(self.app, previous);
-        removed
-    }
-
     pub(crate) fn open_overlay(&mut self, options: mlua::Table) -> Result<u64, String> {
         crate::lua::ui_ops::open_overlay(self.app, options)
     }
 
-    pub(crate) fn clear_overlay_callbacks(&mut self, overlay: crate::smelt_edit::OverlayId) {
-        for callback_id in self.app.ui.overlay_clear_callbacks(overlay) {
+    pub(crate) fn keymap_chain(&self) -> crate::app::lua_bridge::KeymapChain {
+        self.app.keymap_chain()
+    }
+
+    /// Put `owner` in keymap scope `name`, whose actions are Lua callbacks.
+    pub(crate) fn set_scope(
+        &mut self,
+        owner: crate::smelt_edit::ScopeOwner,
+        name: String,
+        actions: std::collections::HashMap<String, u64>,
+    ) {
+        let actions = actions
+            .into_iter()
+            .map(|(action, id)| (action, crate::smelt_edit::LuaHandle(id)))
+            .collect();
+        for callback_id in self.app.ui.set_scope(owner, name, actions) {
             self.app.lua.remove_callback(callback_id);
         }
     }
@@ -1977,20 +1934,6 @@ fn drain_deferred_lua_operations(app: &mut TuiApp) {
                 callback_id,
             } => {
                 host.clear_paint_event(paint, event, callback_id);
-            }
-            DeferredLuaOperation::ModalKeymap {
-                modal,
-                key,
-                callback_id,
-            } => {
-                host.clear_modal_keymap(modal, key, callback_id);
-            }
-            DeferredLuaOperation::OverlayKeymap {
-                overlay,
-                key,
-                callback_id,
-            } => {
-                host.clear_overlay_keymap(overlay, key, callback_id);
             }
         }
     }

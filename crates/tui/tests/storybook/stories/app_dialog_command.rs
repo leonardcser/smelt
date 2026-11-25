@@ -118,8 +118,8 @@ app_story!(context_grid, |ctx| {
 });
 
 app_story!(help_overlay, |ctx| {
-    // `/help` opens a centered overlay (not a dialog) built from
-    // `smelt.keymap.help()`. The overlay snapshot captures the
+    // `/help` opens a centered overlay (not a dialog) built from the
+    // keymap scopes around focus. The overlay snapshot captures the
     // production layout (accented labels, section gaps, centered
     // skills-sized overlay).
     ctx.set_viewport(60, 18);

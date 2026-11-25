@@ -10,9 +10,11 @@ local function lower_title(title)
   return tostring(title or "keybindings"):lower()
 end
 
+-- The leaf's text width before its first layout: 85% of the terminal, less
+-- the border and the scrollbar column.
 local function overlay_content_width(term_w)
   local term = math.max(math.floor(term_w or 80), MIN_WIDTH)
-  return math.max(MIN_WIDTH, math.floor(term * 0.85) - 2)
+  return math.max(MIN_WIDTH, math.floor(term * 0.85) - 3)
 end
 
 local function column_count(width)
@@ -198,6 +200,95 @@ local function close()
   if view.task_id then smelt.task.resume(view.task_id, nil) end
 end
 
+-- What the prompt does with typed text, beyond its keys.
+local PROMPT_INPUT = {
+  title = "prompt input",
+  entries = {
+    { label = "/command", detail = "Run a command (try /resume, /compact, /fork, /ps, /color\u{2026})" },
+    { label = "@<path>",  detail = "Attach a file or URL" },
+    { label = "!<cmd>",   detail = "Run a shell command" },
+    { label = "tab",      detail = "Autocomplete, or accept the ghost text" },
+    { label = "esc",      detail = "Dismiss, or unqueue messages" },
+  },
+}
+
+local MODE_NAMES = { n = "normal", i = "insert", v = "visual" }
+
+-- One entry per action of `scope`, or per described global binding, with all
+-- its keys. With Vim, keys of one mode note it; without, only the keys of the
+-- focused surface's mode show.
+-- `ranks` orders entries by action; without it they keep the list order.
+local function binding_entries(scope, mode, ranks)
+  local vim = smelt.settings.vim
+  local entries, by_target = {}, {}
+  for _, row in ipairs(smelt.keymap.list({ scope = scope })) do
+    if row.desc and (vim or row.mode == "" or row.mode == mode) then
+      local target = row.action or row.chord
+      local entry = by_target[target]
+      if not entry then
+        -- Plugin descriptions are often lowercase; show them as the rest.
+        local detail = row.desc:gsub("^%l", string.upper)
+        entry = { detail = detail, keys = {}, modes = {}, rank = ranks and ranks[row.action] or math.huge, seq = #entries + 1 }
+        by_target[target] = entry
+        entries[#entries + 1] = entry
+      end
+      local label = smelt.keymap.label(row.chord)
+      if not entry.modes[label] then
+        entry.keys[#entry.keys + 1] = label
+        entry.modes[label] = {}
+      end
+      if row.mode ~= "" then table.insert(entry.modes[label], MODE_NAMES[row.mode]) end
+    end
+  end
+  for _, entry in ipairs(entries) do
+    local keys = {}
+    for i, label in ipairs(entry.keys) do
+      local modes = entry.modes[label]
+      keys[i] = (vim and #modes > 0) and (label .. " (" .. table.concat(modes, ", ") .. ")") or label
+    end
+    entry.label = table.concat(keys, " / ")
+    entry.keys, entry.modes = nil, nil
+  end
+  table.sort(entries, function(a, b)
+    if a.rank ~= b.rank then return a.rank < b.rank end
+    return a.seq < b.seq
+  end)
+  return entries
+end
+
+-- The rank of each action `name` can run, in the order the scope and then
+-- the scopes it extends declare them.
+local function action_ranks(by_name, name)
+  local ranks, n = {}, 0
+  local scope = by_name[name]
+  while scope do
+    for _, action in ipairs(scope.actions) do
+      if not ranks[action.name] then
+        n = n + 1
+        ranks[action.name] = n
+      end
+    end
+    scope = scope.extends and by_name[scope.extends]
+  end
+  return ranks
+end
+
+-- Sections for the keymap scopes around focus, innermost first.
+local function scope_sections()
+  local by_name = {}
+  for _, scope in ipairs(smelt.keymap.scopes()) do by_name[scope.name] = scope end
+  local sections = {}
+  local mode = smelt.keymap.mode()
+  for _, scope in ipairs(smelt.keymap.active()) do
+    local entries = binding_entries(scope, mode, action_ranks(by_name, scope))
+    if #entries > 0 then
+      local title = by_name[scope] and by_name[scope].desc or scope
+      sections[#sections + 1] = { title = title, entries = entries }
+    end
+  end
+  return sections, mode
+end
+
 local function toggle()
   if active then
     close()
@@ -209,7 +300,11 @@ local function toggle()
   smelt.spawn(function()
     if active ~= view then return end
 
-    local sections = smelt.keymap.help()
+    local sections, mode = scope_sections()
+    if smelt.prompt.win:focused() then table.insert(sections, 1, PROMPT_INPUT) end
+    -- Global Lua bindings that describe themselves, from plugins and config.
+    local global = binding_entries("", mode)
+    if #global > 0 then sections[#sections + 1] = { title = "more keys", entries = global } end
     local size = smelt.ui.size()
     local width = overlay_content_width(size.width)
 
@@ -251,8 +346,7 @@ local function toggle()
       }),
     })
 
-    leaf:key("q", close)
-    leaf:key("?", close)
+    leaf:scope("dialog.viewer", { close = close })
     leaf:on("dismiss", close)
     smelt.task.wait(view.task_id)
   end)
