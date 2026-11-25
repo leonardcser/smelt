@@ -417,21 +417,21 @@ const DIACRITICS: [char; 297] = [
 
 pub const IMAGE_ROWS: usize = DIACRITICS.len();
 
-/// One placeholder row: the row diacritic, the zero-column diacritic, then
-/// bare placeholders whose columns the terminal infers left to right.
+/// One placeholder row. Every placeholder carries its row and column
+/// diacritics, so each cell names its own image tile even when an overlay
+/// splits the run or a viewport clips its left side. Columns past the last
+/// diacritic stay bare, and the terminal infers them from the cell to the left.
 pub fn placeholder_row(row: usize, cols: u16) -> String {
-    let Some(mark) = DIACRITICS.get(row) else {
+    let Some(&row_mark) = DIACRITICS.get(row) else {
         return String::new();
     };
-    if cols == 0 {
-        return String::new();
-    }
-    let mut text = String::with_capacity(cols as usize * 4 + 8);
-    text.push('\u{10eeee}');
-    text.push(*mark);
-    text.push(DIACRITICS[0]);
-    for _ in 1..cols {
+    let mut text = String::with_capacity(cols as usize * 12);
+    for col in 0..usize::from(cols) {
         text.push('\u{10eeee}');
+        if let Some(&col_mark) = DIACRITICS.get(col) {
+            text.push(row_mark);
+            text.push(col_mark);
+        }
     }
     text
 }
@@ -516,6 +516,22 @@ mod tests {
         assert!(registry.images.get(&257).and_then(Weak::upgrade).is_some());
         drop(replacement);
         assert!(registry.images.get(&257).and_then(Weak::upgrade).is_none());
+    }
+
+    #[test]
+    fn every_placeholder_cell_names_its_row_and_column() {
+        use smelt_style::cell_width;
+        let row = placeholder_row(2, 4);
+        assert_eq!(cell_width::text_width(&row), 4);
+        let cells: Vec<&str> = cell_width::graphemes(&row).collect();
+        let expected: Vec<String> = (0..4)
+            .map(|col| {
+                ['\u{10eeee}', DIACRITICS[2], DIACRITICS[col]]
+                    .iter()
+                    .collect()
+            })
+            .collect();
+        assert_eq!(cells, expected);
     }
 
     #[test]
