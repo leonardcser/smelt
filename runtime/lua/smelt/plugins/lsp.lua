@@ -454,7 +454,6 @@ local function configure_transcript_defaults()
   local defaults = require("smelt.transcript.defaults")
   for _, name in ipairs(COLLAPSED_TOOLS) do
     add_reg(smelt.transcript.register_tool(name, {
-      cache_key = "smelt.plugin.lsp." .. name .. ":v1",
       compact = function(block)
         local metadata = block.output and block.output.metadata
         if type(metadata) ~= "table" or type(metadata.display_count) ~= "table" then return nil end

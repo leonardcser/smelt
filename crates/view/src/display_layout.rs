@@ -155,46 +155,32 @@ pub fn remember_kitty_detection(state_root: &std::path::Path) {
     }
 }
 
-pub const DISPLAY_RENDERER_VERSION: u64 = 17;
-
-pub fn transcript_renderer_cache_key(
-    lua: &LuaRuntime,
-    inline_options: &InlineOptions,
-) -> Option<u64> {
-    let mut key = lua.transcript_renderer_cache_key();
-    let icon_hash = inline_options
+/// Render inputs that change without a renderer generation bump: file icons,
+/// `smelt.settings.transcript` and Kitty cell geometry.
+pub fn transcript_render_env_key(lua: &LuaRuntime, inline_options: &InlineOptions) -> u64 {
+    let icons = inline_options
         .file_icons
         .enabled
         .then(|| inline_options.file_icons.cache_hash());
-    for hash in [icon_hash, lua.transcript_settings_cache_key()]
-        .into_iter()
-        .flatten()
-    {
-        key = Some(match key {
-            Some(base) => base ^ hash.rotate_left(17),
-            None => hash,
-        });
-    }
     // Images and math draw as Kitty graphics sized to the cell when it is known.
     // Math also retries graphics admission once the live image budget frees up.
     let geometry = kitty_cell_pixels_packed();
-    if geometry != 0 {
-        let mut graphics = geometry.rotate_left(31);
-        if inline_options.math_graphics {
-            graphics ^= smelt_term::kitty::image_generation().rotate_left(7);
-        }
-        key = Some(key.unwrap_or_default() ^ graphics);
-    }
-    key
+    let math_generation =
+        (geometry != 0 && inline_options.math_graphics).then(smelt_term::kitty::image_generation);
+    smelt_transcript::hash::hash_serializable(&(
+        icons,
+        lua.transcript_settings_cache_key(),
+        geometry,
+        math_generation,
+    ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayCacheKey {
     pub content_hash: u64,
     pub sidecar_hash: u64,
-    pub renderer_version: u64,
     pub renderer_generation: u64,
-    pub renderer_cache_key: Option<u64>,
+    pub render_env_key: u64,
     pub render_context_hash: u64,
 }
 
@@ -203,38 +189,32 @@ impl DisplayCacheKey {
         content_hash: u64,
         sidecar_hash: u64,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
         render_context_hash: u64,
     ) -> Self {
         Self {
             content_hash,
             sidecar_hash,
-            renderer_version: DISPLAY_RENDERER_VERSION,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             render_context_hash,
         }
     }
 
-    fn from_node_key(
-        key: NodeLayoutKey,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-    ) -> Self {
+    fn from_node_key(key: NodeLayoutKey, renderer_generation: u64, render_env_key: u64) -> Self {
         Self::new(
             key.content_hash,
             key.sidecar_hash,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             smelt_transcript::hash::hash_serializable(&key.view_state),
         )
     }
 
     fn same_render_inputs_except_content(self, other: Self) -> bool {
         self.sidecar_hash == other.sidecar_hash
-            && self.renderer_version == other.renderer_version
             && self.renderer_generation == other.renderer_generation
-            && self.renderer_cache_key == other.renderer_cache_key
+            && self.render_env_key == other.render_env_key
             && self.render_context_hash == other.render_context_hash
     }
 }
@@ -243,7 +223,7 @@ impl DisplayCacheKey {
 pub struct TranscriptRenderEnv<'a> {
     pub lua: &'a LuaRuntime,
     pub renderer_generation: u64,
-    pub renderer_cache_key: Option<u64>,
+    pub render_env_key: u64,
     pub now_ms: u64,
     pub refresh_now: std::time::Instant,
 }
@@ -258,7 +238,7 @@ impl<'a> TranscriptRenderEnv<'a> {
         Self {
             lua,
             renderer_generation: lua.transcript_renderer_generation(),
-            renderer_cache_key: transcript_renderer_cache_key(lua, &inline_options),
+            render_env_key: transcript_render_env_key(lua, &inline_options),
             now_ms: lua.transcript_now_ms(),
             refresh_now: lua.transcript_instant_now(),
         }
@@ -267,12 +247,12 @@ impl<'a> TranscriptRenderEnv<'a> {
     pub fn with_renderer(
         lua: &'a LuaRuntime,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
     ) -> Self {
         Self {
             lua,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             now_ms: lua.transcript_now_ms(),
             refresh_now: lua.transcript_instant_now(),
         }
@@ -910,7 +890,7 @@ impl LayoutCache {
         keys: &[NodeLayoutKey],
     ) -> usize {
         let renderer_generation = env.renderer_generation;
-        let renderer_cache_key = env.renderer_cache_key;
+        let render_env_key = env.render_env_key;
         let blocks = ids
             .iter()
             .copied()
@@ -935,7 +915,7 @@ impl LayoutCache {
             history,
             &TranscriptDefaultViewPolicy::default(),
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             blocks,
         );
         let compiled = jobs.len();
@@ -951,7 +931,7 @@ impl LayoutCache {
         history: &BlockHistory,
         policy: &TranscriptDefaultViewPolicy,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
         nodes: impl IntoIterator<Item = (usize, RenderNode, NodeLayoutKey)>,
     ) -> Vec<CompileJob> {
         let _perf = smelt_perf::perf::begin("transcript:layout_cache:ensure_many");
@@ -963,7 +943,7 @@ impl LayoutCache {
             requested += 1;
             let id = node.id();
             let display_key =
-                DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+                DisplayCacheKey::from_node_key(key, renderer_generation, render_env_key);
             let cached_key = self.blocks.get(&id).map(|cached| cached.key);
             if cached_key == Some(display_key) {
                 self.touch(id);
@@ -1198,10 +1178,9 @@ impl LayoutCache {
         id: RenderNodeId,
         key: NodeLayoutKey,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
     ) -> bool {
-        let display_key =
-            DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+        let display_key = DisplayCacheKey::from_node_key(key, renderer_generation, render_env_key);
         self.blocks
             .get(&id)
             .is_some_and(|cached| cached.key == display_key)
@@ -1213,14 +1192,13 @@ impl LayoutCache {
         id: RenderNodeId,
         key: NodeLayoutKey,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
         ctx: RenderCtx<'_>,
         row_start: usize,
         row_count: usize,
         visit: impl FnOnce(&Buffer, usize) -> T,
     ) -> Option<T> {
-        let display_key =
-            DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+        let display_key = DisplayCacheKey::from_node_key(key, renderer_generation, render_env_key);
         let range_key = RenderRangeKey {
             width: ctx.width,
             view_state: ctx.view_state,
@@ -1326,11 +1304,10 @@ impl LayoutCache {
         id: RenderNodeId,
         key: NodeLayoutKey,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
         ctx: MeasureCtx,
     ) -> Option<u64> {
-        let display_key =
-            DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+        let display_key = DisplayCacheKey::from_node_key(key, renderer_generation, render_env_key);
         let (rows, retained_delta) = {
             let entry = self
                 .blocks
@@ -1368,10 +1345,9 @@ impl LayoutCache {
         id: RenderNodeId,
         key: NodeLayoutKey,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
     ) -> Option<&LayoutIr> {
-        let display_key =
-            DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+        let display_key = DisplayCacheKey::from_node_key(key, renderer_generation, render_env_key);
         let layout = self
             .blocks
             .get(&id)
@@ -2552,7 +2528,7 @@ mod tests {
         model.set_budget(usize::MAX);
         let first = RenderNodeId::Block(BlockId::new(1));
         let second = RenderNodeId::Block(BlockId::new(2));
-        let key = DisplayCacheKey::new(1, 0, 0, None, 0);
+        let key = DisplayCacheKey::new(1, 0, 0, 0, 0);
         let small = compile_block(&Block::Text {
             content: "small layout".into(),
         });
@@ -2668,7 +2644,7 @@ mod tests {
         cache.set_budget(usize::MAX);
         cache.insert_compiled_blocks(vec![(
             id,
-            DisplayCacheKey::from_node_key(key, 0, None),
+            DisplayCacheKey::from_node_key(key, 0, 0),
             layout,
             None,
         )]);
@@ -2681,7 +2657,7 @@ mod tests {
             inline_options: Default::default(),
         };
         cache
-            .with_rendered_range(id, key, 0, None, ctx, 0, 200, |_, _| ())
+            .with_rendered_range(id, key, 0, 0, ctx, 0, 200, |_, _| ())
             .expect("rendered range");
         let range = cache
             .blocks
@@ -2720,7 +2696,7 @@ mod tests {
         cache.set_budget(usize::MAX);
         cache.insert_compiled_blocks(vec![(
             id,
-            DisplayCacheKey::from_node_key(key, 0, None),
+            DisplayCacheKey::from_node_key(key, 0, 0),
             layout,
             None,
         )]);
@@ -2734,13 +2710,13 @@ mod tests {
         };
 
         let first_ptr = cache
-            .with_rendered_range(id, key, 0, None, render_ctx(), 0, 1, |buf, _| {
+            .with_rendered_range(id, key, 0, 0, render_ctx(), 0, 1, |buf, _| {
                 buf.lines()[0].as_ptr()
             })
             .expect("first rendered range");
         cache.blocks.get_mut(&id).unwrap().rendered_ranges[0].dirty = true;
         let shifted_ptr = cache
-            .with_rendered_range(id, key, 0, None, render_ctx(), 1, 1, |buf, _| {
+            .with_rendered_range(id, key, 0, 0, render_ctx(), 1, 1, |buf, _| {
                 buf.lines()[0].as_ptr()
             })
             .expect("shifted rendered range");
@@ -2801,7 +2777,7 @@ mod tests {
     #[test]
     fn refresh_deadlines_are_replaced_removed_retained_and_evicted_with_nodes() {
         let start = std::time::Instant::now();
-        let key = DisplayCacheKey::new(1, 0, 0, None, 0);
+        let key = DisplayCacheKey::new(1, 0, 0, 0, 0);
         let layout = compile_block(&Block::Text {
             content: "cached".into(),
         });
@@ -2899,12 +2875,11 @@ mod tests {
             .exec()
             .unwrap();
         let renderer_generation = lua.transcript_renderer_generation();
-        let renderer_cache_key = lua.transcript_renderer_cache_key();
         let start = std::time::Instant::now();
         let env = TranscriptRenderEnv {
             lua: &lua,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key: 0,
             now_ms: 1_700_000_000_000,
             refresh_now: start,
         };

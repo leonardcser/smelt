@@ -1619,7 +1619,6 @@ transcript renderer owns presentation for the resulting semantic group node.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | `string` | yes | Unique group name. Registering the same name replaces it. |
-| `cache_key` | `string` |  | Persisted layout cache key; omit to opt out while active. |
 | `priority` | `integer` |  | Higher priority plans first. Defaults to 0. |
 | `min` | `integer` |  | Minimum adjacent matching blocks required. Defaults to 2. |
 | `default_view` | `"collapsed"\|"peek"\|"expanded"` |  | Initial presentation when the group first appears. |
@@ -1656,7 +1655,6 @@ Options shared by renderer replacements and middleware.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `part` | [smelt.transcript.RendererPart](types.md#smelttranscriptrendererpart) |  | Named renderer part; defaults to `root`. |
-| `cache_key` | `string` |  | Stable persisted-layout key. Omit for dynamic state; bump when output changes across restarts. |
 
 ### `smelt.transcript.RevealOpts`
 
@@ -1777,7 +1775,6 @@ Registrations are copied and immutable.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `cache_key` | `string` |  | Stable persisted-layout key. Omit for dynamic presentation state. |
 | `background_hl` | `string` |  | Highlight group of the `background` tag on a call whose work continues in the background. Default `SmeltProcess`. |
 | `render` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node` |  | Complete replacement renderer. |
 | `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker. Return nil to use the tool summary. |

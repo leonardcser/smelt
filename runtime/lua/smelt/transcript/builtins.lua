@@ -266,7 +266,6 @@ end
 function M.register()
   smelt.transcript.groups.register({
     name = "background_process_completed",
-    cache_key = "smelt.transcript.group.background_process_completed:v2",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",
@@ -275,7 +274,6 @@ function M.register()
 
   smelt.transcript.groups.register({
     name = "agent_messages",
-    cache_key = "smelt.transcript.group.agent_messages:v1",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",
@@ -284,7 +282,6 @@ function M.register()
 
   smelt.transcript.groups.register({
     name = "explore",
-    cache_key = "smelt.transcript.group.explore:v2",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",
@@ -302,7 +299,6 @@ function M.register()
 
   smelt.transcript.groups.register({
     name = "lsp",
-    cache_key = "smelt.transcript.group.lsp:v1",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",
@@ -320,7 +316,6 @@ function M.register()
 
   smelt.transcript.groups.register({
     name = "web",
-    cache_key = "smelt.transcript.group.web:v1",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",

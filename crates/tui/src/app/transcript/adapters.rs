@@ -115,13 +115,9 @@ impl ResumePreviewCache {
         }
     }
 
-    pub(crate) fn invalidate_renderer_if_changed(
-        &mut self,
-        generation: u64,
-        cache_key: Option<u64>,
-    ) {
+    pub(crate) fn invalidate_renderer_if_changed(&mut self, generation: u64, render_env_key: u64) {
         for view in self.views.values_mut() {
-            view.invalidate_renderer_if_changed(generation, cache_key);
+            view.invalidate_renderer_if_changed(generation, render_env_key);
         }
     }
 }

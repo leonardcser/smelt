@@ -255,7 +255,6 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
         r#"
           smelt.transcript.groups.register({
             name = "fuzz_tool_batch",
-            cache_key = "v1",
             selector = { kind = "tool" },
             bucket = { "name" },
             min = 2,
@@ -269,12 +268,11 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
               return smelt.layout.group_children()
             end
             return smelt.layout.text("fuzz tools " .. tostring(node.child_count))
-          end, { cache_key = "v1" })
+          end)
         "#,
         r#"
           smelt.transcript.groups.register({
             name = "fuzz_process_batch",
-            cache_key = "v1",
             selector = { kind = "process_status", fields = { event = "background_process_completed" } },
             bucket = { "process_id", "exit_code" },
             min = 2,
@@ -285,7 +283,7 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
               return smelt.layout.text("fuzz process " .. tostring(node.bucket) .. " x" .. tostring(node.child_count))
             end
             return next(node, ctx)
-          end, { cache_key = "v1" })
+          end)
         "#,
         r#"
           smelt.transcript.extend_renderer("fuzz_wrapper", function(next, block, ctx)
@@ -294,7 +292,7 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
               return smelt.layout.text("fuzz thinking")
             end
             return layout
-          end, { cache_key = "v1" })
+          end)
         "#,
         r#"
           smelt.settings.transcript = {

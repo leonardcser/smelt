@@ -2541,14 +2541,6 @@ impl LuaRuntime {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub fn transcript_renderer_cache_key(&self) -> Option<u64> {
-        let key = self
-            .shared
-            .transcript_renderer_cache_key
-            .load(std::sync::atomic::Ordering::Acquire);
-        (key != 0).then_some(key)
-    }
-
     pub fn transcript_settings_cache_key(&self) -> Option<u64> {
         let transcript = self
             .lua
@@ -2572,14 +2564,6 @@ impl LuaRuntime {
         self.shared
             .transcript_groups_generation
             .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    pub fn transcript_group_cache_key(&self) -> Option<u64> {
-        let key = self
-            .shared
-            .transcript_groups_cache_key
-            .load(std::sync::atomic::Ordering::Acquire);
-        (key != 0).then_some(key)
     }
 
     /// Transcript block roles bound to the block-motion key `kind`.
@@ -4940,9 +4924,6 @@ mod tests {
             registry.next_order = 0;
         }
         rt.shared
-            .transcript_groups_cache_key
-            .store(0, std::sync::atomic::Ordering::Release);
-        rt.shared
             .transcript_groups_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         rt
@@ -5320,7 +5301,6 @@ mod tests {
                 r#"
                 smelt.transcript.groups.register({
                   name = "tool_batch",
-                  cache_key = "v1",
                   priority = 5,
                   min = 3,
                   default_view = "collapsed",
@@ -5329,12 +5309,10 @@ mod tests {
                 })
                 smelt.transcript.groups.register({
                   name = "low",
-                  cache_key = "v1",
                   selector = { kind = "tool" },
                 })
                 smelt.transcript.groups.register({
                   name = "tool_batch",
-                  cache_key = "v2",
                   priority = 10,
                   selector = { kind = "tool", names = { "read_file", "grep", "glob" }, terminal = true },
                 })
@@ -5346,7 +5324,6 @@ mod tests {
         let specs = rt.transcript_group_specs();
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].name, "tool_batch");
-        assert_eq!(specs[0].cache_key.as_deref(), Some("v2"));
         assert_eq!(specs[0].priority, 10);
         assert_eq!(specs[0].min, 2);
         assert_eq!(specs[0].selector.kind.as_deref(), Some("tool"));
@@ -5362,7 +5339,6 @@ mod tests {
         assert_eq!(specs[0].selector.terminal, Some(true));
         assert_eq!(specs[1].name, "low");
         assert!(rt.transcript_group_generation() >= 3);
-        assert!(rt.transcript_group_cache_key().is_some());
     }
 
     #[test]
@@ -5396,12 +5372,12 @@ mod tests {
                 r#"
                 local first = smelt.transcript.groups.register({
                   name = "batch",
-                  cache_key = "v1",
+                  priority = 1,
                   selector = { kind = "tool" },
                 })
                 smelt.transcript.groups.register({
                   name = "batch",
-                  cache_key = "v2",
+                  priority = 2,
                   selector = { kind = "tool" },
                 })
                 first:remove()
@@ -5411,24 +5387,7 @@ mod tests {
             .unwrap();
         let specs = rt.transcript_group_specs();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].cache_key.as_deref(), Some("v2"));
-    }
-
-    #[test]
-    fn transcript_group_without_cache_key_opts_out_of_cache() {
-        let rt = runtime_without_builtin_groups();
-        rt.lua
-            .load(
-                r#"
-                smelt.transcript.groups.register({
-                  name = "uncached",
-                  selector = { kind = "tool" },
-                })
-                "#,
-            )
-            .exec()
-            .unwrap();
-        assert_eq!(rt.transcript_group_cache_key(), None);
+        assert_eq!(specs[0].priority, 2);
     }
 
     #[test]
@@ -5439,7 +5398,7 @@ mod tests {
                 r#"
                 smelt.transcript.set_renderer(function(node, ctx)
                   return smelt.layout.text(node.name .. ":" .. tostring(node.child_count) .. ":" .. tostring(ctx.view_state))
-                end, { cache_key = "group-root:v1" })
+                end)
                 "#,
             )
             .exec()

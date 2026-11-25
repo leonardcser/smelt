@@ -112,10 +112,9 @@ pub struct ToolHandles {
     pub preview_output: Option<LuaHandle>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscriptGroupSpec {
     pub name: String,
-    pub cache_key: Option<String>,
     pub priority: i64,
     pub registration_order: u64,
     pub min: usize,
@@ -124,7 +123,7 @@ pub struct TranscriptGroupSpec {
     pub bucket: Option<TranscriptGroupBucket>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscriptGroupSelector {
     pub kind: Option<String>,
     pub name: Option<String>,
@@ -133,13 +132,13 @@ pub struct TranscriptGroupSelector {
     pub fields: Vec<TranscriptGroupFieldMatch>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscriptGroupFieldMatch {
     pub field: String,
     pub value: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscriptGroupBucket {
     pub fields: Vec<String>,
 }
@@ -226,7 +225,6 @@ pub struct LuaShared {
         Mutex<HashMap<protocol::InvocationId, (super::task::TaskScope, mlua::Table)>>,
     pub transcript_renderer: Mutex<Option<LuaHandle>>,
     pub transcript_renderer_generation: AtomicU64,
-    pub transcript_renderer_cache_key: AtomicU64,
     pub transcript_groups: Mutex<TranscriptGroupRegistry>,
     /// Transcript block roles bound to each vim block-motion key (`[u`, `]u`).
     pub transcript_block_kinds: Mutex<HashMap<char, Vec<&'static str>>>,
@@ -234,7 +232,6 @@ pub struct LuaShared {
     /// jumps and reveals keep their target below them.
     pub transcript_top_inset: AtomicU64,
     pub transcript_groups_generation: AtomicU64,
-    pub transcript_groups_cache_key: AtomicU64,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     /// Callbacks registered for `smelt.engine.ask`. Separate from
     /// `callbacks` so auxiliary dispatch cannot accidentally fire a
@@ -449,12 +446,10 @@ impl Default for LuaShared {
             tool_preparations: Mutex::new(HashMap::new()),
             transcript_renderer: Mutex::new(None),
             transcript_renderer_generation: AtomicU64::new(0),
-            transcript_renderer_cache_key: AtomicU64::new(0),
             transcript_groups: Mutex::new(TranscriptGroupRegistry::default()),
             transcript_block_kinds: Mutex::new(HashMap::new()),
             transcript_top_inset: AtomicU64::new(0),
             transcript_groups_generation: AtomicU64::new(0),
-            transcript_groups_cache_key: AtomicU64::new(0),
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
             scheduled_continuation: Mutex::new(None),
@@ -815,15 +810,12 @@ impl LuaShared {
         }
         self.transcript_renderer_generation
             .fetch_add(1, Ordering::AcqRel);
-        self.transcript_renderer_cache_key
-            .store(0, Ordering::Release);
         if let Ok(mut groups) = self.transcript_groups.lock() {
             groups.entries.clear();
             groups.next_order = 0;
         }
         self.transcript_groups_generation
             .fetch_add(1, Ordering::AcqRel);
-        self.transcript_groups_cache_key.store(0, Ordering::Release);
         if let Ok(mut m) = self.transcript_block_kinds.lock() {
             m.clear();
         }

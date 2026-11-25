@@ -1,7 +1,6 @@
 -- Built-in load_skill tool. Fetches a skill body via `smelt.skills.content`.
 
 smelt.transcript.register_tool("load_skill", {
-  cache_key = "smelt.tool-presentation.load_skill:v1",
   compact = function(block)
     return tostring((block.output and block.output.content_lines) or 0) .. " lines"
   end,

@@ -139,7 +139,6 @@ smelt.transcript = smelt.transcript or {}
 --- transcript renderer owns presentation for the resulting semantic group node.
 ---@class smelt.transcript.GroupSpec
 ---@field name string Unique group name. Registering the same name replaces it.
----@field cache_key? string Persisted layout cache key; omit to opt out while active.
 ---@field priority? integer Higher priority plans first. Defaults to 0.
 ---@field min? integer Minimum adjacent matching blocks required. Defaults to 2.
 ---@field default_view? "collapsed"|"peek"|"expanded" Initial presentation when the group first appears.
@@ -177,7 +176,6 @@ smelt.transcript = smelt.transcript or {}
 --- takes precedence; otherwise the default renderer composes the focused pieces.
 --- Registrations are copied and immutable.
 ---@class smelt.transcript.ToolPresentation
----@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
 ---@field background_hl? string Highlight group of the `background` tag on a call whose work continues in the background. Default `SmeltProcess`.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
 ---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
@@ -186,7 +184,6 @@ smelt.transcript = smelt.transcript or {}
 ---@field draft_error? fun(draft: smelt.transcript.Block): string|nil Reason smelt's tool preflight will reject the streamed call. When it returns a string the draft shows that error instead of the `draft` body. Not consulted for `native` drafts.
 ---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
-local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v7"
 local internal_transcript = __smelt_internal.transcript
 local parts = {}
 local part_order = {
@@ -195,13 +192,11 @@ local part_order = {
   "unknown",
 }
 local tool_presentations = {}
-local tool_order = {}
 local next_token = 0
 local tool_presentation_callbacks = { "render", "title", "body", "draft", "draft_error", "compact" }
 
 local function copy_tool_presentation(presentation)
   local copy = {}
-  copy.cache_key = presentation.cache_key
   copy.background_hl = presentation.background_hl
   for _, field in ipairs(tool_presentation_callbacks) do
     copy[field] = presentation[field]
@@ -215,17 +210,10 @@ local function require_function(name, value)
   end
 end
 
-local function parse_cache_key(name, opts)
-  if opts == nil then return nil end
-  if type(opts) ~= "table" then
+local function check_opts(name, opts)
+  if opts ~= nil and type(opts) ~= "table" then
     error("smelt.transcript." .. name .. ": opts must be a table", 3)
   end
-  local key = opts.cache_key
-  if key == nil or key == false then return nil end
-  if type(key) ~= "string" or key == "" then
-    error("smelt.transcript." .. name .. ": opts.cache_key must be a non-empty string", 3)
-  end
-  return key
 end
 
 local function renderer_part(api, name)
@@ -234,29 +222,6 @@ local function renderer_part(api, name)
     error("smelt.transcript." .. api .. ": unknown renderer part `" .. tostring(name) .. "`", 3)
   end
   return parts[name]
-end
-
-local function effective_cache_key()
-  local keys = {}
-  for _, name in ipairs(part_order) do
-    local part = parts[name]
-    if not part.cache_key then return nil end
-    keys[#keys + 1] = name
-    keys[#keys + 1] = part.cache_key
-    for _, extension_name in ipairs(part.order) do
-      local entry = part.extensions[extension_name]
-      if not entry.cache_key then return nil end
-      keys[#keys + 1] = extension_name
-      keys[#keys + 1] = entry.cache_key
-    end
-  end
-  for _, name in ipairs(tool_order) do
-    local entry = tool_presentations[name]
-    if not entry.presentation.cache_key then return nil end
-    keys[#keys + 1] = "tool:" .. name
-    keys[#keys + 1] = entry.presentation.cache_key
-  end
-  return table.concat(keys, "\n")
 end
 
 local function rebuild_renderer()
@@ -272,7 +237,7 @@ local function rebuild_renderer()
     end
     part.renderer = renderer
   end
-  internal_transcript.__set_renderer(parts.root.renderer, effective_cache_key())
+  internal_transcript.__set_renderer(parts.root.renderer)
 end
 
 --- Semantic stages in the bundled transcript composition pipeline.
@@ -281,18 +246,15 @@ end
 --- Options shared by renderer replacements and middleware.
 ---@class smelt.transcript.RendererOptions
 ---@field part? smelt.transcript.RendererPart Named renderer part; defaults to `root`.
----@field cache_key? string Stable persisted-layout key. Omit for dynamic state; bump when output changes across restarts.
 
 --- Replace a part's base renderer, keeping its middleware. The default part is
 --- `root`, the whole block renderer. Return `smelt.layout.empty()` to hide content.
---- Omit `opts.cache_key` to disable persisted layouts while this renderer is active.
 ---@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, opts?: smelt.transcript.RendererOptions): nil
 function smelt.transcript.set_renderer(renderer, opts)
   require_function("set_renderer", renderer)
-  local cache_key = parse_cache_key("set_renderer", opts)
+  check_opts("set_renderer", opts)
   local part = renderer_part("set_renderer", opts and opts.part)
   part.base = renderer
-  part.cache_key = cache_key
   rebuild_renderer()
 end
 
@@ -315,7 +277,6 @@ end
 --- Add or replace named middleware around a renderer part (default `root`).
 --- Later extensions run first and delegate with `next(block, ctx)`. Names are
 --- scoped to the part. The returned `Reg` removes only this registration instance.
---- Omit `opts.cache_key` to disable persisted layouts while the middleware is active.
 ---@type fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, opts?: smelt.transcript.RendererOptions): smelt.Reg
 function smelt.transcript.extend_renderer(name, renderer, opts)
   if type(name) ~= "string" or name == "" then
@@ -323,12 +284,12 @@ function smelt.transcript.extend_renderer(name, renderer, opts)
   end
   require_function("extend_renderer", renderer)
 
-  local cache_key = parse_cache_key("extend_renderer", opts)
+  check_opts("extend_renderer", opts)
   local part = renderer_part("extend_renderer", opts and opts.part)
   next_token = next_token + 1
   local token = next_token
   if not part.extensions[name] then part.order[#part.order + 1] = name end
-  part.extensions[name] = { fn = renderer, token = token, cache_key = cache_key }
+  part.extensions[name] = { fn = renderer, token = token }
   rebuild_renderer()
 
   return smelt.reg.new(function()
@@ -347,16 +308,15 @@ end
 
 --- Bump the renderer generation after changing closed-over state that affects
 --- renderer output without calling `set_renderer`, `extend_renderer`, or a
---- registration's `:remove()`. This also opts out of persisted DisplayIR until
---- the renderer is installed again with a cache key.
+--- registration's `:remove()`.
 ---@type fun(): integer
 function smelt.transcript.invalidate_renderer()
   return internal_transcript.__invalidate_renderer()
 end
 
 --- Register or replace presentation policy for a tool. The supported fields are
---- copied, so later table mutation has no effect; re-register to change behavior
---- or cache keys. The returned registration removes only this exact replacement.
+--- copied, so later table mutation has no effect; re-register to change behavior.
+--- The returned registration removes only this exact replacement.
 --- Registering presentation changes rebuilds the composed root renderer so all
 --- cached standalone and grouped nodes invalidate.
 ---@type fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg
@@ -372,11 +332,6 @@ function smelt.transcript.register_tool(name, presentation)
       error("smelt.transcript.register_tool: presentation." .. field .. " must be a function", 2)
     end
   end
-  if presentation.cache_key ~= nil
-    and (type(presentation.cache_key) ~= "string" or presentation.cache_key == "")
-  then
-    error("smelt.transcript.register_tool: presentation.cache_key must be a non-empty string", 2)
-  end
   if presentation.background_hl ~= nil and type(presentation.background_hl) ~= "string" then
     error("smelt.transcript.register_tool: presentation.background_hl must be a string", 2)
   end
@@ -384,7 +339,6 @@ function smelt.transcript.register_tool(name, presentation)
   local retained = copy_tool_presentation(presentation)
   next_token = next_token + 1
   local token = next_token
-  if not tool_presentations[name] then tool_order[#tool_order + 1] = name end
   tool_presentations[name] = { presentation = retained, token = token }
   rebuild_renderer()
 
@@ -392,12 +346,6 @@ function smelt.transcript.register_tool(name, presentation)
     local entry = tool_presentations[name]
     if not entry or entry.token ~= token then return end
     tool_presentations[name] = nil
-    for i = #tool_order, 1, -1 do
-      if tool_order[i] == name then
-        table.remove(tool_order, i)
-        break
-      end
-    end
     rebuild_renderer()
   end)
 end
@@ -444,18 +392,11 @@ function smelt.transcript.groups.list()
   return internal_transcript.__groups()
 end
 
---- Current group-registry generation. Rust render planning uses this to invalidate
---- plan/cache state once group planning is enabled.
+--- Current group-registry generation. Each registration or removal bumps it, and
+--- grouped plans and layouts rebuild when it changes.
 ---@type fun(): integer
 function smelt.transcript.groups.generation()
   return internal_transcript.__groups_generation()
-end
-
---- Current group-registry cache key, or nil when any active group opted out of
---- persisted planning/layout caches.
----@type fun(): integer?
-function smelt.transcript.groups.cache_key()
-  return internal_transcript.__groups_cache_key()
 end
 
 local defaults = require("smelt.transcript.defaults")
@@ -463,7 +404,6 @@ local defaults = require("smelt.transcript.defaults")
 for _, name in ipairs(part_order) do
   parts[name] = {
     base = name == "root" and defaults.render or defaults["render_" .. name],
-    cache_key = DEFAULT_RENDERER_CACHE_KEY,
     extensions = {},
     order = {},
   }

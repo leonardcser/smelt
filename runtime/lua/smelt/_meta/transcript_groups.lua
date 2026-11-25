@@ -8,13 +8,8 @@
 ---@class smelt.transcript.groups
 local transcript_groups = {}
 
---- Current group-registry cache key, or nil when any active group opted out of
---- persisted planning/layout caches.
----@type fun(): integer?
-transcript_groups.cache_key = nil
-
---- Current group-registry generation. Rust render planning uses this to invalidate
---- plan/cache state once group planning is enabled.
+--- Current group-registry generation. Each registration or removal bumps it, and
+--- grouped plans and layouts rebuild when it changes.
 ---@type fun(): integer
 transcript_groups.generation = nil
 

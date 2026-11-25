@@ -3319,7 +3319,7 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
                         return smelt.layout.text("{marker} " .. (block.name or "tool"))
                       end
                       return next(block, ctx)
-                    end, {{ cache_key = "reload-tool-marker:{marker}" }})
+                    end)
                     "#,
                 )
             },

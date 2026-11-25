@@ -48,7 +48,6 @@ local function retained_plan_file_view(output)
 end
 
 smelt.transcript.register_tool("present_plan", {
-  cache_key = "smelt.plugin.plan-mode.present-plan:v2",
   body = function(block)
     if block.status == "pending" or block.status == "confirm" or not block.output then return nil end
     return retained_plan_file_view(block.output)

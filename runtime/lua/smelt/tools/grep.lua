@@ -175,7 +175,6 @@ local function grep_collapsed_detail(block)
 end
 
 smelt.transcript.register_tool("grep", {
-  cache_key = "smelt.tool-presentation.grep:v1",
   body = function(block, ctx)
     if not block.output then return nil end
     return transcript_defaults.render_tool_output_tail(block.output, ctx)

@@ -2384,16 +2384,12 @@ impl ConversationRuntime {
         self.resume_preview_cache.set_inline_options(options);
     }
 
-    pub(crate) fn invalidate_transcript_renderer(
-        &mut self,
-        generation: u64,
-        cache_key: Option<u64>,
-    ) {
+    pub(crate) fn invalidate_transcript_renderer(&mut self, generation: u64, render_env_key: u64) {
         self.document
             .transcript
-            .invalidate_renderer_if_changed(generation, cache_key);
+            .invalidate_renderer_if_changed(generation, render_env_key);
         self.resume_preview_cache
-            .invalidate_renderer_if_changed(generation, cache_key);
+            .invalidate_renderer_if_changed(generation, render_env_key);
     }
 
     pub(crate) fn is_ephemeral(&self) -> bool {

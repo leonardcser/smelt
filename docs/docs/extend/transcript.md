@@ -26,7 +26,6 @@ Register focused callbacks to keep the default marker, timings and body layout:
 
 ```lua
 smelt.transcript.register_tool("present_plan", {
-  cache_key = "my.present-plan:v1",
   title = function(tool, ctx)
     return tool.args.title or "plan"
   end,
@@ -44,7 +43,6 @@ view, including status and timings:
 
 ```lua
 smelt.transcript.register_tool("present_plan", {
-  cache_key = "my.present-plan-complete:v1",
   render = function(tool, ctx)
     return smelt.layout.vbox({
       smelt.layout.text("plan: " .. (tool.args.title or "untitled")),
@@ -78,7 +76,7 @@ local chrome = transcript.extend_renderer("my.tool-marker", function(_, tool, ct
     first = { { text = "◆ ", hl = "SmeltAccent", selectable = false } },
     rest = { { text = "  ", selectable = false } },
   })
-end, { part = "tool_header", cache_key = "my.tool-marker:v1" })
+end, { part = "tool_header" })
 
 -- chrome:remove() removes this override.
 ```
@@ -89,7 +87,7 @@ To omit the marker, set the header renderer to its content renderer:
 local transcript = smelt.transcript
 transcript.set_renderer(function(block, ctx)
   return transcript.render_part("tool_header_content", block, ctx)
-end, { part = "tool_header", cache_key = "my.unprefixed-header:v1" })
+end, { part = "tool_header" })
 ```
 
 Likewise, `user_content` provides styled user text without the default panel or
@@ -100,7 +98,7 @@ local transcript, layout = smelt.transcript, smelt.layout
 transcript.set_renderer(function(block, ctx)
   local content = transcript.render_part("user_content", block, ctx)
   return layout.panel(content, { hl = "SmeltUserBg", padding = 1 })
-end, { part = "user", cache_key = "my.bubble:v1" })
+end, { part = "user" })
 ```
 
 Middleware delegates with `next(block, ctx)`; later registrations run first.
@@ -109,12 +107,12 @@ removes only its own registration, not a newer replacement with the same name.
 To wrap a base with `set_renderer`, capture `get_renderer` first so the new
 renderer does not call itself.
 
-### Caching and invalidation
+### Invalidation
 
-For both tool presentations and renderer parts, `cache_key` permits persisted
-layouts. Bump it when output changes across restarts. Omit it for dynamic plugin
-state and call `smelt.transcript.invalidate_renderer()` when that state changes.
-Part changes invalidate standalone and grouped layouts.
+Registering, replacing or removing a tool presentation, renderer part or
+middleware invalidates standalone and grouped layouts. When a renderer reads
+plugin state that changes later, call `smelt.transcript.invalidate_renderer()`
+after the change.
 
 ## Transcript groups
 
@@ -133,7 +131,6 @@ selector and a renderer for the `group` part:
 local transcript, layout = smelt.transcript, smelt.layout
 transcript.groups.register({
   name = "cargo-test-batch",
-  cache_key = "my.cargo-test-batch-plan:v1",
   min = 2,
   default_view = "collapsed",
   selector = {
@@ -149,7 +146,7 @@ transcript.extend_renderer("my.cargo-test-batch", function(next, node, ctx)
   local summary = layout.text("ran " .. tostring(node.child_count) .. " test commands")
   if ctx.view_state ~= "expanded" then return summary end
   return layout.vbox({ summary, layout.group_children() })
-end, { part = "group", cache_key = "my.cargo-test-batch-renderer:v1" })
+end, { part = "group" })
 ```
 
 Selectors let smelt plan groups without calling Lua for every block. Add

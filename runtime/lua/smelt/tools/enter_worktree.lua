@@ -5,7 +5,6 @@ local function trim(s)
 end
 
 smelt.transcript.register_tool("enter_worktree", {
-  cache_key = "smelt.tool-presentation.enter_worktree:v1",
   body = function(block)
     local info = block.output and block.output.metadata
     if not info then return nil end

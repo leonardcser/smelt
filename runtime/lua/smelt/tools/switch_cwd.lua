@@ -3,7 +3,6 @@ local function trim(s)
 end
 
 smelt.transcript.register_tool("switch_cwd", {
-  cache_key = "smelt.tool-presentation.switch_cwd:v1",
   body = function() return nil end,
 })
 

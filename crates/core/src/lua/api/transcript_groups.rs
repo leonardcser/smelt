@@ -1,21 +1,8 @@
 use crate::lua::shared::{
     RegisteredTranscriptGroup, TranscriptGroupBucket, TranscriptGroupFieldMatch,
-    TranscriptGroupRegistry, TranscriptGroupSelector, TranscriptGroupSpec,
+    TranscriptGroupSelector, TranscriptGroupSpec,
 };
 use mlua::prelude::*;
-
-pub(crate) fn cache_key_hash(registry: &TranscriptGroupRegistry) -> u64 {
-    let specs = registry.specs();
-    if specs.is_empty() || specs.iter().any(|spec| spec.cache_key.is_none()) {
-        return 0;
-    }
-    let hash = smelt_transcript::hash::hash_serializable(&specs);
-    if hash == 0 {
-        1
-    } else {
-        hash
-    }
-}
 
 fn non_empty_string(value: Option<String>, label: &str) -> LuaResult<String> {
     let Some(value) = value else {
@@ -213,7 +200,6 @@ pub(crate) fn parse_registration(
     order: u64,
 ) -> LuaResult<RegisteredTranscriptGroup> {
     let name = non_empty_string(spec.get("name")?, "name")?;
-    let cache_key = optional_non_empty_string(&spec, "cache_key", "cache_key")?;
     let priority = spec.get::<Option<i64>>("priority")?.unwrap_or(0);
     let min = spec.get::<Option<usize>>("min")?.unwrap_or(2);
     if min < 2 {
@@ -226,7 +212,6 @@ pub(crate) fn parse_registration(
     Ok(RegisteredTranscriptGroup {
         spec: TranscriptGroupSpec {
             name,
-            cache_key,
             priority,
             registration_order: order,
             min,
@@ -241,7 +226,6 @@ pub(crate) fn parse_registration(
 fn spec_to_lua(lua: &Lua, spec: &TranscriptGroupSpec) -> LuaResult<mlua::Table> {
     let out = lua.create_table()?;
     out.set("name", spec.name.clone())?;
-    out.set("cache_key", spec.cache_key.clone())?;
     out.set("priority", spec.priority)?;
     out.set("registration_order", spec.registration_order)?;
     out.set("min", spec.min)?;

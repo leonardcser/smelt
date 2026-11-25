@@ -36,7 +36,6 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 Add or replace named middleware around a renderer part (default `root`).
 Later extensions run first and delegate with `next(block, ctx)`. Names are
 scoped to the part. The returned `Reg` removes only this registration instance.
-Omit `opts.cache_key` to disable persisted layouts while the middleware is active.
 
 ## `smelt.transcript.fold_all`
 
@@ -125,8 +124,7 @@ fun(): integer
 
 Bump the renderer generation after changing closed-over state that affects
 renderer output without calling `set_renderer`, `extend_renderer`, or a
-registration's `:remove()`. This also opts out of persisted DisplayIR until
-the renderer is installed again with a cache key.
+registration's `:remove()`.
 
 ## `smelt.transcript.is_empty`
 
@@ -238,8 +236,8 @@ Types: [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresent
 **Availability:** Everywhere, including headless mode.
 
 Register or replace presentation policy for a tool. The supported fields are
-copied, so later table mutation has no effect; re-register to change behavior
-or cache keys. The returned registration removes only this exact replacement.
+copied, so later table mutation has no effect; re-register to change behavior.
+The returned registration removes only this exact replacement.
 Registering presentation changes rebuilds the composed root renderer so all
 cached standalone and grouped nodes invalidate.
 
@@ -291,7 +289,6 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 
 Replace a part's base renderer, keeping its middleware. The default part is
 `root`, the whole block renderer. Return `smelt.layout.empty()` to hide content.
-Omit `opts.cache_key` to disable persisted layouts while this renderer is active.
 
 ## `smelt.transcript.stream`
 

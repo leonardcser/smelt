@@ -63,7 +63,6 @@ local function retained_layout(block)
 end
 
 smelt.transcript.register_tool("edit_notebook", {
-  cache_key = "smelt.tool-presentation.edit_notebook:v5",
   draft_error = function(block)
     return transcript_defaults.unread_file_error(block, "notebook_path", "notebook")
   end,

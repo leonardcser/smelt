@@ -27,7 +27,6 @@ local function argument_file_view(args)
 end
 
 smelt.transcript.register_tool("write_file", {
-  cache_key = "smelt.tool-presentation.write_file:v3",
   body = function(block, ctx, opts)
     if block.output and block.output.is_error then
       return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)

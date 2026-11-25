@@ -518,7 +518,6 @@ pub struct TranscriptScene {
     history_patch_revision: u64,
     history_order_len: usize,
     pub group_generation: u64,
-    pub group_cache_key: Option<u64>,
     pub nodes: Vec<RenderNode>,
     node_index: RenderNodeIndex,
     grouped_block_index_by_id: HashMap<BlockId, usize>,
@@ -535,7 +534,6 @@ impl TranscriptScene {
             history_patch_revision: 0,
             history_order_len: 0,
             group_generation: 0,
-            group_cache_key: None,
             nodes: Vec::new(),
             node_index: RenderNodeIndex::default(),
             grouped_block_index_by_id: HashMap::new(),
@@ -549,10 +547,9 @@ impl TranscriptScene {
         history: &BlockHistory,
         groups: &[TranscriptGroupSpec],
         group_generation: u64,
-        group_cache_key: Option<u64>,
     ) -> Self {
         let _perf = smelt_perf::perf::begin("transcript:transcript_scene");
-        Self::build_for_history_with_groups(history, groups, group_generation, group_cache_key)
+        Self::build_for_history_with_groups(history, groups, group_generation)
     }
 
     pub fn refresh_for_history_with_groups(
@@ -560,10 +557,9 @@ impl TranscriptScene {
         history: &BlockHistory,
         groups: &[TranscriptGroupSpec],
         group_generation: u64,
-        group_cache_key: Option<u64>,
     ) -> TranscriptSceneRefresh {
         let _perf = smelt_perf::perf::begin("transcript:transcript_scene");
-        if self.group_generation == group_generation && self.group_cache_key == group_cache_key {
+        if self.group_generation == group_generation {
             if let Some(content) = self.try_apply_content_patches(history) {
                 smelt_perf::perf::record_value("transcript:transcript_scene:reused", 1);
                 return TranscriptSceneRefresh {
@@ -575,7 +571,7 @@ impl TranscriptScene {
             }
         }
         if let Some(prune_required) =
-            self.try_refresh_incremental(history, groups, group_generation, group_cache_key)
+            self.try_refresh_incremental(history, groups, group_generation)
         {
             self.history_patch_revision = history.patch_revision();
             smelt_perf::perf::record_value("transcript:transcript_scene:reused", 1);
@@ -588,8 +584,7 @@ impl TranscriptScene {
         }
         smelt_perf::perf::record_value("transcript:transcript_scene:reused", 0);
         let next_revision = self.revision.wrapping_add(1);
-        *self =
-            Self::build_for_history_with_groups(history, groups, group_generation, group_cache_key);
+        *self = Self::build_for_history_with_groups(history, groups, group_generation);
         self.revision = next_revision;
         TranscriptSceneRefresh {
             changed_blocks: HashSet::new(),
@@ -696,7 +691,6 @@ impl TranscriptScene {
         history: &BlockHistory,
         groups: &[TranscriptGroupSpec],
         group_generation: u64,
-        group_cache_key: Option<u64>,
     ) -> Self {
         let nodes = {
             let _perf = smelt_perf::perf::begin("transcript:transcript_scene:build_nodes");
@@ -724,7 +718,6 @@ impl TranscriptScene {
             history_patch_revision: history.patch_revision(),
             history_order_len: history.order.len(),
             group_generation,
-            group_cache_key,
             nodes,
             node_index,
             grouped_block_index_by_id,
@@ -738,15 +731,11 @@ impl TranscriptScene {
         history: &BlockHistory,
         groups: &[TranscriptGroupSpec],
         group_generation: u64,
-        group_cache_key: Option<u64>,
     ) -> Option<bool> {
         if groups.is_empty() && !self.grouped_block_index_by_id.is_empty() {
             return None;
         }
-        if !groups.is_empty()
-            && (self.group_generation != group_generation
-                || self.group_cache_key != group_cache_key)
-        {
+        if !groups.is_empty() && self.group_generation != group_generation {
             return None;
         }
         let old_order_len = self.history_order_len;
@@ -773,7 +762,6 @@ impl TranscriptScene {
         self.history_record_generation = history.record_dirty_generation();
         self.history_order_len = history.order.len();
         self.group_generation = group_generation;
-        self.group_cache_key = group_cache_key;
         self.revision = self.revision.wrapping_add(1);
         self.stable_prefix = Some(TranscriptScenePrefix {
             len: truncate_from_node,
@@ -954,7 +942,6 @@ impl TranscriptScene {
                 sidecar_hash: smelt_transcript::hash::hash_serializable(&(
                     group.presentation_revision,
                     self.group_generation,
-                    self.group_cache_key,
                     view_state,
                 )),
             }),
@@ -1370,7 +1357,6 @@ mod tests {
         });
         let spec = TranscriptGroupSpec {
             name: "background-processes".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 0,
             min: 2,
@@ -1390,7 +1376,7 @@ mod tests {
             }),
         };
 
-        let plan = TranscriptScene::for_history_with_groups(&transcript.history, &[spec], 1, None);
+        let plan = TranscriptScene::for_history_with_groups(&transcript.history, &[spec], 1);
 
         assert_eq!(plan.nodes.len(), 2);
         assert!(matches!(
@@ -1416,7 +1402,6 @@ mod tests {
         }
         let spec = TranscriptGroupSpec {
             name: "explore".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 0,
             min: 2,
@@ -1431,7 +1416,7 @@ mod tests {
             bucket: None,
         };
 
-        let plan = TranscriptScene::for_history_with_groups(&transcript.history, &[spec], 1, None);
+        let plan = TranscriptScene::for_history_with_groups(&transcript.history, &[spec], 1);
 
         assert!(matches!(
             plan.nodes.as_slice(),
@@ -1478,7 +1463,6 @@ mod tests {
         ]);
         let spec = TranscriptGroupSpec {
             name: "explore".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 0,
             min: 2,
@@ -1494,7 +1478,7 @@ mod tests {
         };
 
         assert!(history.order.iter().all(|id| history.block(*id).is_none()));
-        let scene = TranscriptScene::for_history_with_groups(&history, &[spec], 1, None);
+        let scene = TranscriptScene::for_history_with_groups(&history, &[spec], 1);
         let RenderNode::Group(group) = &scene.nodes[0] else {
             panic!("stored tools did not form a group");
         };
@@ -1535,7 +1519,6 @@ mod tests {
 
         let high_min = TranscriptGroupSpec {
             name: "high-min".into(),
-            cache_key: None,
             priority: 10,
             registration_order: 0,
             min: 3,
@@ -1551,7 +1534,6 @@ mod tests {
         };
         let low_min = TranscriptGroupSpec {
             name: "low-min".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 1,
             min: 2,
@@ -1566,12 +1548,8 @@ mod tests {
             bucket: None,
         };
 
-        let plan = TranscriptScene::for_history_with_groups(
-            &transcript.history,
-            &[high_min, low_min],
-            1,
-            None,
-        );
+        let plan =
+            TranscriptScene::for_history_with_groups(&transcript.history, &[high_min, low_min], 1);
 
         assert!(matches!(
             plan.nodes.as_slice(),
@@ -1589,7 +1567,7 @@ mod tests {
             content: "second".into(),
         });
         transcript.history.clear_record_dirty();
-        let mut plan = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let mut plan = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0);
         let initial_order_generation = plan.history_order_generation;
 
         transcript.push(Block::Text {
@@ -1597,7 +1575,7 @@ mod tests {
         });
         let appended = *transcript.history.order.last().unwrap();
         transcript.history.clear_record_dirty();
-        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 0);
 
         assert!(!refresh.prune_required);
         assert_ne!(plan.history_order_generation, initial_order_generation);
@@ -1628,14 +1606,14 @@ mod tests {
             Block::Text { content } => content.len(),
             block => panic!("expected streaming text, got {block:?}"),
         };
-        let mut plan = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let mut plan = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0);
 
         parser.append_streaming_text(&mut transcript.history, "second line\n");
         let final_len = match transcript.history.block(id).unwrap() {
             Block::Text { content } => content.len(),
             block => panic!("expected streaming text, got {block:?}"),
         };
-        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 0);
 
         assert!(!refresh.structure_changed);
         assert_eq!(refresh.changed_blocks, HashSet::from([id]));
@@ -1671,7 +1649,7 @@ mod tests {
             std::time::Instant::now(),
         );
         let id = transcript.history.order[0];
-        let mut scene = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let mut scene = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0);
         let scene_revision = scene.revision;
         let patch_revision = scene.history_patch_revision;
 
@@ -1679,7 +1657,7 @@ mod tests {
             id,
             ToolStateMutation::SyncElapsed(std::time::Duration::from_millis(250)),
         ));
-        let refresh = scene.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+        let refresh = scene.refresh_for_history_with_groups(&transcript.history, &[], 0);
 
         assert!(scene.history_patch_revision > patch_revision);
         assert_eq!(
@@ -1704,7 +1682,7 @@ mod tests {
         transcript.push(Block::Text {
             content: "second".into(),
         });
-        let mut plan = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let mut plan = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0);
         let initial_order_generation = plan.history_order_generation;
         let initial_revision = plan.revision;
 
@@ -1714,7 +1692,7 @@ mod tests {
                 content: "changed".into(),
             },
         );
-        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 0);
 
         assert!(!refresh.prune_required);
         assert_eq!(plan.history_order_generation, initial_order_generation);
@@ -1753,7 +1731,6 @@ mod tests {
         }
         let spec = TranscriptGroupSpec {
             name: "terminal-tools".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 0,
             min: 2,
@@ -1771,7 +1748,6 @@ mod tests {
             &transcript.history,
             std::slice::from_ref(&spec),
             1,
-            None,
         );
         let initial_group = match &scene.nodes[0] {
             RenderNode::Group(group) => group.as_ref().clone(),
@@ -1787,7 +1763,6 @@ mod tests {
             &transcript.history,
             std::slice::from_ref(&spec),
             1,
-            None,
         );
         let appended_group = match &scene.nodes[0] {
             RenderNode::Group(group) => group.as_ref(),
@@ -1823,7 +1798,6 @@ mod tests {
             &transcript.history,
             std::slice::from_ref(&spec),
             1,
-            None,
         );
         let finished_group = match &scene.nodes[0] {
             RenderNode::Group(group) => group.as_ref(),
@@ -1854,7 +1828,6 @@ mod tests {
         });
         let spec = TranscriptGroupSpec {
             name: "assistant-blocks".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 0,
             min: 2,
@@ -1872,13 +1845,12 @@ mod tests {
             &transcript.history,
             std::slice::from_ref(&spec),
             1,
-            None,
         );
 
         transcript.push(Block::Text {
             content: "third".into(),
         });
-        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[spec], 1, None);
+        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[spec], 1);
 
         assert!(refresh.prune_required);
         assert!(
@@ -1889,7 +1861,6 @@ mod tests {
     fn assistant_blocks_spec() -> TranscriptGroupSpec {
         TranscriptGroupSpec {
             name: "assistant-blocks".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 0,
             min: 2,
@@ -1921,16 +1892,16 @@ mod tests {
             transcript.push(user_block(&format!("prompt {index}")));
         }
         let last = *transcript.history.order.last().unwrap();
-        let mut scene = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let mut scene = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0);
         let revision = scene.revision;
 
         transcript.history.rewrite(last, user_block("committed"));
         transcript.push(user_block("next"));
-        let refresh = scene.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+        let refresh = scene.refresh_for_history_with_groups(&transcript.history, &[], 0);
 
         assert!(refresh.structure_changed);
         assert_eq!(scene.stable_prefix(), Some((3, revision)));
-        let full = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let full = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0);
         assert_eq!(scene.nodes, full.nodes);
     }
 
@@ -1947,8 +1918,7 @@ mod tests {
         let second = *transcript.history.order.last().unwrap();
         let spec = assistant_blocks_spec();
         let groups = std::slice::from_ref(&spec);
-        let mut scene =
-            TranscriptScene::for_history_with_groups(&transcript.history, groups, 1, None);
+        let mut scene = TranscriptScene::for_history_with_groups(&transcript.history, groups, 1);
         assert!(matches!(
             scene.nodes.as_slice(),
             [RenderNode::Block { .. }, RenderNode::Group(_)]
@@ -1959,10 +1929,10 @@ mod tests {
         transcript.push(Block::Text {
             content: "third".into(),
         });
-        scene.refresh_for_history_with_groups(&transcript.history, groups, 1, None);
+        scene.refresh_for_history_with_groups(&transcript.history, groups, 1);
 
         assert_eq!(scene.stable_prefix(), Some((1, revision)));
-        let full = TranscriptScene::for_history_with_groups(&transcript.history, groups, 1, None);
+        let full = TranscriptScene::for_history_with_groups(&transcript.history, groups, 1);
         assert_eq!(scene.nodes, full.nodes);
         assert_eq!(scene.len(), 4);
     }
@@ -1978,7 +1948,6 @@ mod tests {
         });
         let spec = TranscriptGroupSpec {
             name: "assistant-blocks".into(),
-            cache_key: None,
             priority: 0,
             registration_order: 0,
             min: 2,
@@ -1996,10 +1965,9 @@ mod tests {
             &transcript.history,
             std::slice::from_ref(&spec),
             1,
-            None,
         );
 
-        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 2, None);
+        let refresh = plan.refresh_for_history_with_groups(&transcript.history, &[], 2);
 
         assert!(refresh.prune_required);
         assert!(matches!(

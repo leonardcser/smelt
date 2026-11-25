@@ -3100,11 +3100,11 @@ impl TranscriptDocument {
         spans: impl IntoIterator<Item = (Range<usize>, RowIndex)>,
         keep_near: usize,
     ) {
-        let (renderer_generation, renderer_cache_key) = self.content.projection.measured_renderer();
+        let (renderer_generation, render_env_key) = self.content.projection.measured_renderer();
         let layout = ExtentLayoutKey {
             width,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
         };
         let estimates = self.records.extent_estimates(&self.store_cache, width);
         self.extent.observe(&estimates, layout, spans, keep_near);
@@ -6842,12 +6842,12 @@ impl TranscriptDocument {
     pub(crate) fn invalidate_renderer_if_changed(
         &mut self,
         generation: u64,
-        cache_key: Option<u64>,
+        render_env_key: u64,
     ) -> bool {
         let changed = self
             .content
             .projection
-            .invalidate_renderer_if_changed(generation, cache_key);
+            .invalidate_renderer_if_changed(generation, render_env_key);
         if changed {
             self.extent.forget_layout();
         }
@@ -9367,7 +9367,7 @@ mod document_tests {
             None,
         ));
         let width = 80;
-        assert!(!document.invalidate_renderer_if_changed(7, Some(11)));
+        assert!(!document.invalidate_renderer_if_changed(7, 11));
         document.observe_record_rows(width, 0, 19);
         assert_eq!(document.rows_before_record(width, 1), 19);
         assert_eq!(document.rows_before_record(width - 1, 1), 2);
@@ -9379,7 +9379,7 @@ mod document_tests {
             "theme invalidation should keep observed record rows"
         );
 
-        assert!(document.invalidate_renderer_if_changed(8, Some(11)));
+        assert!(document.invalidate_renderer_if_changed(8, 11));
         assert_eq!(document.rows_before_record(width, 1), 2);
 
         document.observe_record_rows(width, 0, 19);
@@ -10589,7 +10589,6 @@ mod document_tests {
                 r#"
                 smelt.transcript.groups.register({
                   name = "replacement_explore",
-                  cache_key = "replacement:v1",
                   priority = 1000,
                   min = 2,
                   default_view = "collapsed",
@@ -10607,7 +10606,7 @@ mod document_tests {
                     smelt.layout.text("replacement"),
                     smelt.layout.text("details"),
                   })
-                end, { cache_key = "test.replacement_explore:v1" })
+                end)
                 "#,
             )
             .exec()
@@ -11490,10 +11489,10 @@ impl TuiApp {
     pub(crate) fn sync_transcript_renderer_generation(&mut self) {
         let generation = self.lua.transcript_renderer_generation();
         let inline_options = self.inline_options();
-        let cache_key =
-            smelt_view::display_layout::transcript_renderer_cache_key(&self.lua, &inline_options);
+        let render_env_key =
+            smelt_view::display_layout::transcript_render_env_key(&self.lua, &inline_options);
         self.conversation
-            .invalidate_transcript_renderer(generation, cache_key);
+            .invalidate_transcript_renderer(generation, render_env_key);
     }
 
     /// Install a complete theme and invalidate themed rendering.

@@ -16,7 +16,6 @@ transcript.block_kind = nil
 --- Add or replace named middleware around a renderer part (default `root`).
 --- Later extensions run first and delegate with `next(block, ctx)`. Names are
 --- scoped to the part. The returned `Reg` removes only this registration instance.
---- Omit `opts.cache_key` to disable persisted layouts while the middleware is active.
 ---@type fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, opts?: smelt.transcript.RendererOptions): smelt.Reg
 transcript.extend_renderer = nil
 
@@ -58,8 +57,7 @@ transcript.get_tool_presentation = nil
 
 --- Bump the renderer generation after changing closed-over state that affects
 --- renderer output without calling `set_renderer`, `extend_renderer`, or a
---- registration's `:remove()`. This also opts out of persisted DisplayIR until
---- the renderer is installed again with a cache key.
+--- registration's `:remove()`.
 ---@type fun(): integer
 transcript.invalidate_renderer = nil
 
@@ -112,8 +110,8 @@ transcript.pending_blocks = nil
 transcript.pills = nil
 
 --- Register or replace presentation policy for a tool. The supported fields are
---- copied, so later table mutation has no effect; re-register to change behavior
---- or cache keys. The returned registration removes only this exact replacement.
+--- copied, so later table mutation has no effect; re-register to change behavior.
+--- The returned registration removes only this exact replacement.
 --- Registering presentation changes rebuilds the composed root renderer so all
 --- cached standalone and grouped nodes invalidate.
 ---@type fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg
@@ -137,7 +135,6 @@ transcript.rows = nil
 
 --- Replace a part's base renderer, keeping its middleware. The default part is
 --- `root`, the whole block renderer. Return `smelt.layout.empty()` to hide content.
---- Omit `opts.cache_key` to disable persisted layouts while this renderer is active.
 ---@see smelt.layout.empty
 ---@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, opts?: smelt.transcript.RendererOptions): nil
 transcript.set_renderer = nil

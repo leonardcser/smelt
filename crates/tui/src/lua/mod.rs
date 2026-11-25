@@ -2271,12 +2271,6 @@ mod tests {
             .load("require('smelt.tools.write_file')")
             .exec()
             .expect("load write_file tool");
-        let cache_key: String = rt
-            .lua
-            .load("return smelt.transcript.get_tool_presentation('write_file').cache_key")
-            .eval()
-            .expect("write_file presentation");
-        assert_eq!(cache_key, "smelt.tool-presentation.write_file:v3");
         let block = Block::ToolCall {
             call_id: "write-call".into(),
             name: "write_file".into(),
@@ -2363,7 +2357,6 @@ mod tests {
             .load(
                 r#"
                 smelt.transcript.register_tool("no_cap_probe", {
-                  cache_key = "test.no-cap-probe:v1",
                   body = function() return smelt.layout.text("structured body") end,
                 })
                 "#,
@@ -2390,7 +2383,6 @@ mod tests {
             .load(
                 r#"
                 smelt.transcript.register_tool("presentation_probe", {
-                  cache_key = "test.presentation-probe:v1",
                   render = function(tool, ctx)
                     return smelt.layout.vbox({
                       smelt.layout.text("CUSTOM HEADER " .. tool.name),
@@ -2430,7 +2422,6 @@ mod tests {
             .load(
                 r#"
                 presentation_probe = {
-                  cache_key = "test.immutable-presentation:v1",
                   render = function() return smelt.layout.text("original") end,
                 }
                 smelt.transcript.register_tool("immutable_probe", presentation_probe)
@@ -2439,16 +2430,12 @@ mod tests {
             .exec()
             .unwrap();
         let generation = rt.transcript_renderer_generation();
-        let cache_key = rt.transcript_renderer_cache_key();
-        assert!(cache_key.is_some());
 
         rt.lua
             .load(
                 r#"
-                presentation_probe.cache_key = "mutated-original"
                 presentation_probe.render = function() return smelt.layout.text("mutated original") end
                 local exposed = assert(smelt.transcript.get_tool_presentation("immutable_probe"))
-                exposed.cache_key = "mutated-getter"
                 exposed.render = function() return smelt.layout.text("mutated getter") end
                 "#,
             )
@@ -2456,17 +2443,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(rt.transcript_renderer_generation(), generation);
-        assert_eq!(rt.transcript_renderer_cache_key(), cache_key);
-        let exposed_cache_key: String = rt
-            .lua
-            .load(
-                r#"
-                return assert(smelt.transcript.get_tool_presentation("immutable_probe")).cache_key
-                "#,
-            )
-            .eval()
-            .unwrap();
-        assert_eq!(exposed_cache_key, "test.immutable-presentation:v1");
 
         let (block, state) = tool_block("immutable_probe", "ignored");
         let layout = render_transcript_block(&rt, &block, Some(&state));
@@ -2902,35 +2878,36 @@ mod tests {
     }
 
     #[test]
-    fn transcript_renderer_parts_share_composition_and_cache_lifecycle() {
+    fn transcript_renderer_parts_share_composition_and_generation() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let initial_key = rt.transcript_renderer_cache_key();
-        assert!(initial_key.is_some());
         let generation = rt.transcript_renderer_generation();
-        rt.lua.load(r#"
+        rt.lua
+            .load(
+                r#"
             local t, l = smelt.transcript, smelt.layout
             local function wrap(label)
                 return function(next, block, ctx)
                     return l.gutter(next(block, ctx), { text = label })
                 end
             end
-            stale = t.extend_renderer("same", wrap("old"), { part = "user", cache_key = "old" })
-            current = t.extend_renderer("same", wrap("new"), { part = "user", cache_key = "new" })
+            stale = t.extend_renderer("same", wrap("old"), { part = "user" })
+            current = t.extend_renderer("same", wrap("new"), { part = "user" })
             stale:remove()
-            root = t.extend_renderer("same", wrap("root"), { cache_key = "root" })
-            outer = t.extend_renderer("outer", wrap("outer"), { part = "user", cache_key = "outer" })
-            t.set_renderer(function() return l.text("base") end, { part = "user", cache_key = "base" })
-            for _, opts in ipairs({ { part = "typo" }, { part = false }, { part = "user", cache_key = 1 } }) do
+            root = t.extend_renderer("same", wrap("root"))
+            outer = t.extend_renderer("outer", wrap("outer"), { part = "user" })
+            t.set_renderer(function() return l.text("base") end, { part = "user" })
+            for _, opts in ipairs({ { part = "typo" }, { part = false }, "user" }) do
                 assert(not pcall(t.set_renderer, function() return l.empty() end, opts))
                 assert(not pcall(t.extend_renderer, "same", wrap("bad"), opts))
             end
             assert(not pcall(t.get_renderer, "typo"))
-        "#).exec().unwrap();
-        assert!(rt.transcript_renderer_generation() > generation);
-        let stable_key = rt.transcript_renderer_cache_key();
-        assert!(stable_key.is_some());
-        assert_ne!(stable_key, initial_key);
+        "#,
+            )
+            .exec()
+            .unwrap();
+        let composed = rt.transcript_renderer_generation();
+        assert!(composed > generation);
         let block = Block::User {
             text: "hello".into(),
             image_labels: Vec::new(),
@@ -2956,9 +2933,10 @@ mod tests {
             )
             .exec()
             .unwrap();
-        assert!(rt.transcript_renderer_cache_key().is_none());
+        let extended = rt.transcript_renderer_generation();
+        assert!(extended > composed);
         rt.lua.load("dynamic:remove()").exec().unwrap();
-        assert_eq!(rt.transcript_renderer_cache_key(), stable_key);
+        assert!(rt.transcript_renderer_generation() > extended);
         rt.lua
             .load("root:remove(); outer:remove(); current:remove()")
             .exec()

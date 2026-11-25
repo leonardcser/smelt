@@ -332,7 +332,6 @@ local function ask_extract(content, prompt)
 end
 
 smelt.transcript.register_tool("web_fetch", {
-  cache_key = "smelt.tool-presentation.web_fetch:v1",
   body = function(block, ctx)
     local items = {}
     local args = block.args or {}

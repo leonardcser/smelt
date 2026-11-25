@@ -6,7 +6,6 @@
 local transcript_defaults = require("smelt.transcript.defaults")
 
 smelt.transcript.register_tool("show_image", {
-  cache_key = "smelt.tool-presentation.show_image:v1",
   body = function(block, ctx)
     local output = block.output
     if not output then return nil end

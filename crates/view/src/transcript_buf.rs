@@ -34,7 +34,7 @@ pub struct TranscriptProjection {
     measurements: MeasurementIndexStore,
     projection_generation: u64,
     renderer_generation: Option<u64>,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     inline_options: InlineOptions,
     display_layout_budget: usize,
     full_rows_budget: usize,
@@ -178,7 +178,7 @@ struct CachedRows {
     rows: Arc<Vec<String>>,
     generation: u64,
     renderer_generation: u64,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     presentation_generation: u64,
     width: u16,
 }
@@ -193,7 +193,7 @@ fn cached_rows_retained_bytes(rows: &Arc<Vec<String>>) -> usize {
 struct RowIndexKey {
     width: u16,
     renderer_generation: u64,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     presentation_generation: u64,
     base_key: LayoutKey,
 }
@@ -202,7 +202,7 @@ struct RowIndexKey {
 struct DisplayRowIndexEntry {
     width: u16,
     renderer_generation: u64,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     nodes: Vec<DisplayRowIndexNode>,
 }
 
@@ -227,13 +227,13 @@ impl RowIndexKey {
     fn new(
         width: u16,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
         presentation_generation: u64,
     ) -> Self {
         Self {
             width,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             presentation_generation,
             base_key: base_layout_key(width),
         }
@@ -247,7 +247,7 @@ struct TranscriptHeightIndex {
     prefix_dirty_from: Option<usize>,
     generation: u64,
     renderer_generation: u64,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     presentation_generation: u64,
     width: u16,
 }
@@ -269,7 +269,7 @@ impl TranscriptHeightIndex {
     fn is_current(&self, plan: &TranscriptScene, key: RowIndexKey) -> bool {
         self.generation == plan.revision
             && self.renderer_generation == key.renderer_generation
-            && self.renderer_cache_key == key.renderer_cache_key
+            && self.render_env_key == key.render_env_key
             && self.presentation_generation == key.presentation_generation
             && self.width == key.width
             && self.nodes.len() == plan.len()
@@ -287,7 +287,7 @@ impl TranscriptHeightIndex {
         let gen = plan.revision;
         if self.generation == gen
             && self.renderer_generation == key.renderer_generation
-            && self.renderer_cache_key == key.renderer_cache_key
+            && self.render_env_key == key.render_env_key
             && self.presentation_generation == key.presentation_generation
             && self.width == key.width
         {
@@ -295,7 +295,7 @@ impl TranscriptHeightIndex {
         }
 
         let keep_measurements = self.renderer_generation == key.renderer_generation
-            && self.renderer_cache_key == key.renderer_cache_key
+            && self.render_env_key == key.render_env_key
             && self.width == key.width;
         let old_nodes = if keep_measurements {
             std::mem::take(&mut self.nodes)
@@ -340,7 +340,7 @@ impl TranscriptHeightIndex {
         }
         self.generation = gen;
         self.renderer_generation = key.renderer_generation;
-        self.renderer_cache_key = key.renderer_cache_key;
+        self.render_env_key = key.render_env_key;
         self.presentation_generation = key.presentation_generation;
         self.width = key.width;
         self.rebuild_prefix_rows();
@@ -388,14 +388,14 @@ impl TranscriptHeightIndex {
     ) -> bool {
         let old_len = self.nodes.len();
         if self.renderer_generation != key.renderer_generation
-            || self.renderer_cache_key != key.renderer_cache_key
+            || self.render_env_key != key.render_env_key
         {
             return false;
         }
         if old_len == plan.len()
             && self.generation == plan.revision
             && self.renderer_generation == key.renderer_generation
-            && self.renderer_cache_key == key.renderer_cache_key
+            && self.render_env_key == key.render_env_key
             && self.presentation_generation == key.presentation_generation
             && self.width == key.width
         {
@@ -404,7 +404,7 @@ impl TranscriptHeightIndex {
         if old_len == plan.len()
             && self.generation == plan.revision
             && self.renderer_generation == key.renderer_generation
-            && self.renderer_cache_key == key.renderer_cache_key
+            && self.render_env_key == key.render_env_key
             && self.presentation_generation == key.presentation_generation
         {
             self.invalidate_for_width(key.width);
@@ -434,7 +434,7 @@ impl TranscriptHeightIndex {
                     }
                     self.generation = plan.revision;
                     self.renderer_generation = key.renderer_generation;
-                    self.renderer_cache_key = key.renderer_cache_key;
+                    self.render_env_key = key.render_env_key;
                     self.presentation_generation = key.presentation_generation;
                     self.mark_prefix_dirty_from(prefix_len);
                     return true;
@@ -456,7 +456,7 @@ impl TranscriptHeightIndex {
         block_ids: &HashSet<BlockId>,
     ) -> bool {
         if self.renderer_generation != key.renderer_generation
-            || self.renderer_cache_key != key.renderer_cache_key
+            || self.render_env_key != key.render_env_key
             || self.presentation_generation != key.presentation_generation
             || self.width != key.width
             || self.nodes.len() != plan.len()
@@ -502,7 +502,7 @@ impl TranscriptHeightIndex {
         }
         if self.generation != plan.revision
             || self.renderer_generation != key.renderer_generation
-            || self.renderer_cache_key != key.renderer_cache_key
+            || self.render_env_key != key.render_env_key
             || self.width != key.width
             || self.nodes.len() != plan.len()
         {
@@ -623,7 +623,7 @@ impl TranscriptHeightIndex {
             projection_generation,
             self.generation,
             self.renderer_generation,
-            self.renderer_cache_key,
+            self.render_env_key,
             self.presentation_generation,
             self.width,
             self.nodes.len(),
@@ -691,7 +691,7 @@ impl TranscriptHeightIndex {
         key: RowIndexKey,
     ) -> bool {
         if entry.renderer_generation != key.renderer_generation
-            || entry.renderer_cache_key != key.renderer_cache_key
+            || entry.render_env_key != key.render_env_key
             || entry.width != key.width
         {
             return false;
@@ -724,7 +724,7 @@ impl TranscriptHeightIndex {
         self.nodes = nodes;
         self.generation = plan.revision;
         self.renderer_generation = key.renderer_generation;
-        self.renderer_cache_key = key.renderer_cache_key;
+        self.render_env_key = key.render_env_key;
         self.presentation_generation = key.presentation_generation;
         self.width = key.width;
         self.rebuild_prefix_rows();
@@ -756,7 +756,7 @@ impl TranscriptHeightIndex {
         Some(DisplayRowIndexEntry {
             width: self.width,
             renderer_generation: self.renderer_generation,
-            renderer_cache_key: self.renderer_cache_key,
+            render_env_key: self.render_env_key,
             nodes: self
                 .nodes
                 .iter()
@@ -964,7 +964,7 @@ struct ProjectKey {
     generation: u64,
     width: u16,
     renderer_generation: u64,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     presentation_generation: u64,
     row_generation: u64,
     mode: ProjectionMode,
@@ -1428,7 +1428,7 @@ fn upsert_row_index_entry(
     if let Some(existing) = entries.iter_mut().find(|existing| {
         existing.width == entry.width
             && existing.renderer_generation == entry.renderer_generation
-            && existing.renderer_cache_key == entry.renderer_cache_key
+            && existing.render_env_key == entry.render_env_key
     }) {
         let old_bytes = existing.retained_bytes();
         *existing = entry;
@@ -1447,12 +1447,12 @@ fn render_cached_layout_to_buffer(
     id: RenderNodeId,
     key: NodeLayoutKey,
     renderer_generation: u64,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     theme: &Theme,
     history: &BlockHistory,
     inline_options: &InlineOptions,
 ) -> Option<(Buffer, usize)> {
-    let layout = layout_cache.get(id, key, renderer_generation, renderer_cache_key)?;
+    let layout = layout_cache.get(id, key, renderer_generation, render_env_key)?;
     #[cfg(any(test, feature = "harness"))]
     record_full_layout_buffer_render();
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
@@ -1493,7 +1493,7 @@ impl TranscriptProjection {
             measurements: MeasurementIndexStore::default(),
             projection_generation: 0,
             renderer_generation: None,
-            renderer_cache_key: None,
+            render_env_key: 0,
             inline_options: InlineOptions::default(),
             display_layout_budget: 12 * 1024 * 1024,
             full_rows_budget: 2 * 1024 * 1024,
@@ -1518,11 +1518,9 @@ impl TranscriptProjection {
             self.projection_generation = self.projection_generation.wrapping_add(1);
         }
         let group_generation = lua.transcript_group_generation();
-        let group_cache_key = lua.transcript_group_cache_key();
         if policy_changed
             || self.transcript_scene.history_generation != history.generation()
             || self.transcript_scene.group_generation != group_generation
-            || self.transcript_scene.group_cache_key != group_cache_key
         {
             let groups: Vec<_> = lua
                 .transcript_group_specs()
@@ -1533,7 +1531,6 @@ impl TranscriptProjection {
                 history,
                 &groups,
                 group_generation,
-                group_cache_key,
             );
             if refresh.structure_changed {
                 self.pending_changed_blocks.clear();
@@ -1699,10 +1696,10 @@ impl TranscriptProjection {
         }
     }
 
-    /// Renderer generation and cache key the active heights were measured with.
-    pub fn measured_renderer(&self) -> (u64, Option<u64>) {
+    /// Renderer generation and render environment key the active heights were measured with.
+    pub fn measured_renderer(&self) -> (u64, u64) {
         let active = &self.measurements.active;
-        (active.renderer_generation, active.renderer_cache_key)
+        (active.renderer_generation, active.render_env_key)
     }
 
     pub fn height_suffix_is_exact(&self, anchor: TranscriptRowAnchor) -> bool {
@@ -1716,17 +1713,13 @@ impl TranscriptProjection {
             })
     }
 
-    pub fn invalidate_renderer_if_changed(
-        &mut self,
-        generation: u64,
-        cache_key: Option<u64>,
-    ) -> bool {
-        if self.renderer_generation == Some(generation) && self.renderer_cache_key == cache_key {
+    pub fn invalidate_renderer_if_changed(&mut self, generation: u64, render_env_key: u64) -> bool {
+        if self.renderer_generation == Some(generation) && self.render_env_key == render_env_key {
             return false;
         }
         let initialized = self.renderer_generation.is_some();
         self.renderer_generation = Some(generation);
-        self.renderer_cache_key = cache_key;
+        self.render_env_key = render_env_key;
         if !initialized {
             return false;
         }
@@ -1806,7 +1799,7 @@ impl TranscriptProjection {
         let (id, key) = (row.id, row.key);
         if self
             .layout_cache
-            .has_layout(id, key, env.renderer_generation, env.renderer_cache_key)
+            .has_layout(id, key, env.renderer_generation, env.render_env_key)
         {
             return None;
         }
@@ -1818,7 +1811,7 @@ impl TranscriptProjection {
             history,
             &self.default_view_policy,
             env.renderer_generation,
-            env.renderer_cache_key,
+            env.render_env_key,
             [(index, node, key)],
         );
         self.finish_compile_jobs(env, jobs);
@@ -1884,7 +1877,7 @@ impl TranscriptProjection {
                 history,
                 &self.default_view_policy,
                 env.renderer_generation,
-                env.renderer_cache_key,
+                env.render_env_key,
                 nodes,
             )
         };
@@ -1974,7 +1967,7 @@ impl TranscriptProjection {
         let Some(entry) = entries.iter().find(|entry| {
             entry.width == key.width
                 && entry.renderer_generation == key.renderer_generation
-                && entry.renderer_cache_key == key.renderer_cache_key
+                && entry.render_env_key == key.render_env_key
         }) else {
             smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
             return false;
@@ -2029,14 +2022,14 @@ impl TranscriptProjection {
             history.generation(),
         );
         let renderer_generation = env.renderer_generation;
-        let renderer_cache_key = env.renderer_cache_key;
-        self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
+        let render_env_key = env.render_env_key;
+        self.invalidate_renderer_if_changed(renderer_generation, render_env_key);
         self.gc_if_stale(env.lua, history, width);
         self.expire_due_refreshes(env.refresh_now);
         let row_key = RowIndexKey::new(
             width,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             self.presentation.generation(),
         );
         if self.update_active_index(history, row_key) {
@@ -2130,7 +2123,7 @@ impl TranscriptProjection {
         &mut self,
         history: &BlockHistory,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
         indices: Vec<usize>,
     ) -> bool {
         if indices.is_empty() {
@@ -2146,7 +2139,7 @@ impl TranscriptProjection {
                 history,
                 index,
                 renderer_generation,
-                renderer_cache_key,
+                render_env_key,
             );
         }
         if changed {
@@ -2162,13 +2155,13 @@ impl TranscriptProjection {
         indices: impl IntoIterator<Item = usize>,
     ) -> bool {
         let renderer_generation = env.renderer_generation;
-        let renderer_cache_key = env.renderer_cache_key;
+        let render_env_key = env.render_env_key;
         let missing = self.collect_missing_node_indices(indices);
         if missing.is_empty() {
             return false;
         }
         self.ensure_node_indices(env, history, missing.iter().copied());
-        self.measure_node_indices(history, renderer_generation, renderer_cache_key, missing)
+        self.measure_node_indices(history, renderer_generation, render_env_key, missing)
     }
 
     fn exactify_node_range(
@@ -2196,10 +2189,10 @@ impl TranscriptProjection {
         }
         let indices = range.start..end;
         let renderer_generation = env.renderer_generation;
-        let renderer_cache_key = env.renderer_cache_key;
+        let render_env_key = env.render_env_key;
         self.ensure_node_indices(env, history, indices.clone());
         let missing = self.collect_missing_node_indices(indices);
-        self.measure_node_indices(history, renderer_generation, renderer_cache_key, missing)
+        self.measure_node_indices(history, renderer_generation, render_env_key, missing)
     }
 
     fn stable_row_delta_hydration_range(
@@ -2361,7 +2354,7 @@ impl TranscriptProjection {
         history: &BlockHistory,
         index: usize,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
     ) -> bool {
         let Some(node) = self.measurements.active.nodes.get(index) else {
             return false;
@@ -2375,7 +2368,7 @@ impl TranscriptProjection {
             id,
             key,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             MeasureCtx {
                 width: key.width,
                 view_state: layout_view_state(id, key.view_state, history),
@@ -2986,7 +2979,7 @@ impl TranscriptProjection {
             node.id,
             node.key,
             self.measurements.active.renderer_generation,
-            self.measurements.active.renderer_cache_key,
+            self.measurements.active.render_env_key,
             &Theme::default(),
             history,
             &self.inline_options,
@@ -3028,7 +3021,7 @@ impl TranscriptProjection {
             key: self.project_key(
                 width,
                 env.renderer_generation,
-                env.renderer_cache_key,
+                env.render_env_key,
                 scroll_target,
                 viewport_rows,
             ),
@@ -3084,10 +3077,9 @@ impl TranscriptProjection {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         if self.transcript_scene.history_generation != history.generation()
             || self.transcript_scene.group_generation != lua.transcript_group_generation()
-            || self.transcript_scene.group_cache_key != lua.transcript_group_cache_key()
             || self.transcript_scene.revision != plan.key.generation
             || env.renderer_generation != plan.key.renderer_generation
-            || env.renderer_cache_key != plan.key.renderer_cache_key
+            || env.render_env_key != plan.key.render_env_key
             || self.presentation.generation() != plan.key.presentation_generation
             || self.projection_generation != plan.key.row_generation
         {
@@ -3097,7 +3089,7 @@ impl TranscriptProjection {
             key: self.project_key(
                 plan.key.width,
                 env.renderer_generation,
-                env.renderer_cache_key,
+                env.render_env_key,
                 plan.target.requested,
                 plan.viewport_rows,
             ),
@@ -3126,7 +3118,7 @@ impl TranscriptProjection {
         let key = self.project_key(
             width,
             env.renderer_generation,
-            env.renderer_cache_key,
+            env.render_env_key,
             scroll_target,
             viewport_rows,
         );
@@ -3149,7 +3141,7 @@ impl TranscriptProjection {
         &self,
         width: u16,
         renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
+        render_env_key: u64,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
     ) -> ProjectKey {
@@ -3157,7 +3149,7 @@ impl TranscriptProjection {
             generation: self.transcript_scene.revision,
             width,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             presentation_generation: self.presentation.generation(),
             row_generation: self.projection_generation,
             mode: scroll_target.mode(viewport_rows),
@@ -3200,7 +3192,7 @@ impl TranscriptProjection {
             request.key = self.project_key(
                 request.key.width,
                 env.renderer_generation,
-                env.renderer_cache_key,
+                env.render_env_key,
                 request.target.requested,
                 request.viewport_rows,
             );
@@ -3267,7 +3259,7 @@ impl TranscriptProjection {
                         node.id,
                         node.key,
                         self.measurements.active.renderer_generation,
-                        self.measurements.active.renderer_cache_key,
+                        self.measurements.active.render_env_key,
                         theme,
                         history,
                         &self.inline_options,
@@ -3368,13 +3360,12 @@ impl TranscriptProjection {
             || key.generation != self.transcript_scene.revision
             || key.width != width
             || key.renderer_generation != env.renderer_generation
-            || key.renderer_cache_key != env.renderer_cache_key
+            || key.render_env_key != env.render_env_key
             || key.presentation_generation != self.presentation.generation()
             || key.row_generation != self.projection_generation
             || key.mode != (ProjectionMode::Visible { viewport_rows })
             || self.transcript_scene.history_generation != history.generation()
             || self.transcript_scene.group_generation != lua.transcript_group_generation()
-            || self.transcript_scene.group_cache_key != lua.transcript_group_cache_key()
             || handle.rows.row_base != self.visible.row_base
             || handle.rows.total_rows != self.visible.total_rows
             || handle.rows.materialized_rows != materialized_rows
@@ -3513,10 +3504,9 @@ impl TranscriptProjection {
             TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         if self.transcript_scene.history_generation != history.generation()
             || self.transcript_scene.group_generation != lua.transcript_group_generation()
-            || self.transcript_scene.group_cache_key != lua.transcript_group_cache_key()
             || self.transcript_scene.revision != plan.key.generation
             || current_env.renderer_generation != plan.key.renderer_generation
-            || current_env.renderer_cache_key != plan.key.renderer_cache_key
+            || current_env.render_env_key != plan.key.render_env_key
             || self.presentation.generation() != plan.key.presentation_generation
             || self.projection_generation != plan.key.row_generation
         {
@@ -3524,7 +3514,7 @@ impl TranscriptProjection {
             let key = self.project_key(
                 plan.key.width,
                 current_env.renderer_generation,
-                current_env.renderer_cache_key,
+                current_env.render_env_key,
                 plan.target.requested,
                 plan.viewport_rows,
             );
@@ -3572,7 +3562,7 @@ impl TranscriptProjection {
         if prev.generation != key.generation
             || prev.width != key.width
             || prev.renderer_generation != key.renderer_generation
-            || prev.renderer_cache_key != key.renderer_cache_key
+            || prev.render_env_key != key.render_env_key
             || prev.presentation_generation != key.presentation_generation
             || prev.row_generation != key.row_generation
             || prev.mode != key.mode
@@ -3627,7 +3617,7 @@ impl TranscriptProjection {
             TranscriptRenderEnv::with_renderer(
                 lua,
                 plan.key.renderer_generation,
-                plan.key.renderer_cache_key,
+                plan.key.render_env_key,
             ),
             history,
             theme,
@@ -3758,7 +3748,7 @@ impl TranscriptProjection {
         rows: &mut ProjectRows<'_>,
     ) {
         let renderer_generation = self.measurements.active.renderer_generation;
-        let renderer_cache_key = self.measurements.active.renderer_cache_key;
+        let render_env_key = self.measurements.active.render_env_key;
         let node_start = self.measurements.active.prefix_row(block_index);
         let exact_rows = self
             .measurements
@@ -3819,7 +3809,7 @@ impl TranscriptProjection {
                 id,
                 key,
                 renderer_generation,
-                renderer_cache_key,
+                render_env_key,
                 RenderCtx {
                     width: key.width,
                     view_state: layout_view_state(id, key.view_state, history),
@@ -3970,7 +3960,7 @@ impl TranscriptProjection {
             TranscriptRenderEnv::with_renderer(
                 lua,
                 self.measurements.active.renderer_generation,
-                self.measurements.active.renderer_cache_key,
+                self.measurements.active.render_env_key,
             ),
             history,
             theme,
@@ -3995,15 +3985,15 @@ impl TranscriptProjection {
         let _perf = smelt_perf::perf::begin("transcript:build_rows");
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         let renderer_generation = env.renderer_generation;
-        let renderer_cache_key = env.renderer_cache_key;
-        self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
+        let render_env_key = env.render_env_key;
+        self.invalidate_renderer_if_changed(renderer_generation, render_env_key);
         self.gc_if_stale(env.lua, history, width);
         self.expire_due_refreshes(env.refresh_now);
         let gen = self.transcript_scene.revision;
         if let Some(c) = &self.visible.full_rows {
             if c.generation == gen
                 && c.renderer_generation == renderer_generation
-                && c.renderer_cache_key == renderer_cache_key
+                && c.render_env_key == render_env_key
                 && c.presentation_generation == self.presentation.generation()
                 && c.width == width
             {
@@ -4018,7 +4008,7 @@ impl TranscriptProjection {
         let row_key = RowIndexKey::new(
             width,
             renderer_generation,
-            renderer_cache_key,
+            render_env_key,
             self.presentation.generation(),
         );
         self.update_active_index(history, row_key);
@@ -4036,7 +4026,7 @@ impl TranscriptProjection {
                 id,
                 bkey,
                 renderer_generation,
-                renderer_cache_key,
+                render_env_key,
                 theme,
                 history,
                 &self.inline_options,
@@ -4063,7 +4053,7 @@ impl TranscriptProjection {
                 rows: Arc::clone(&rows),
                 generation: gen,
                 renderer_generation,
-                renderer_cache_key,
+                render_env_key,
                 presentation_generation: self.presentation.generation(),
                 width,
             });
@@ -4128,7 +4118,7 @@ impl TranscriptProjection {
             TranscriptRenderEnv::with_renderer(
                 lua,
                 self.measurements.active.renderer_generation,
-                self.measurements.active.renderer_cache_key,
+                self.measurements.active.render_env_key,
             ),
             history,
             theme,
@@ -4213,7 +4203,7 @@ impl TranscriptProjection {
         let renderer_env = TranscriptRenderEnv::with_renderer(
             lua,
             self.measurements.active.renderer_generation,
-            self.measurements.active.renderer_cache_key,
+            self.measurements.active.render_env_key,
         );
         let mut start = node_range.start;
         while start < node_range.end {
@@ -4451,7 +4441,7 @@ pub mod tests {
             DisplayRowIndexEntry {
                 width,
                 renderer_generation: 1,
-                renderer_cache_key: None,
+                render_env_key: 0,
                 nodes: vec![DisplayRowIndexNode {
                     id: RenderNodeId::Block(BlockId::new(block_id)),
                     key: LayoutKey {
@@ -4547,7 +4537,6 @@ pub mod tests {
               selector = { kind = "tool", terminal = true },
               min = __MIN__,
               default_view = "expanded",
-              cache_key = "test.terminal-tools:v1",
             })
             smelt.transcript.extend_renderer("test.terminal-tools", function(next, node, ctx)
               if node.kind ~= "group" or node.name ~= "terminal-tools" then
@@ -4558,7 +4547,7 @@ pub mod tests {
               }
               items[#items + 1] = smelt.layout.group_children()
               return smelt.layout.vbox(items)
-            end, { cache_key = "test.terminal-tools-renderer:v1" })
+            end)
         "#
         .replace("__MIN__", &min.to_string());
         lua.lua.load(chunk.as_str()).exec().expect("register group");
@@ -5042,7 +5031,6 @@ pub mod tests {
                   selector = { kind = "tool", name = "read_file", terminal = true },
                   min = 2,
                   default_view = "collapsed",
-                  cache_key = "test.custom-read-group:v1",
                 })
                 smelt.transcript.extend_renderer("test.custom-read-group", function(next, node, ctx)
                   if node.kind ~= "group" or node.name ~= "custom-read-group" then
@@ -5052,7 +5040,7 @@ pub mod tests {
                     smelt.layout.text("custom summary " .. node.view_state),
                     smelt.layout.text("custom detail")
                   })
-                end, { cache_key = "test.custom-read-group-renderer:v1" })
+                end)
                 "#,
             )
             .exec()
@@ -5322,7 +5310,7 @@ pub mod tests {
                   local _ = block
                   local _ = ctx
                   return smelt.layout.text("after")
-                end, { cache_key = "test.planned_projection.after:v1" })
+                end)
                 "#,
             )
             .exec()
@@ -5745,14 +5733,13 @@ pub mod tests {
                   selector = { kind = "assistant" },
                   min = 2,
                   default_view = "expanded",
-                  cache_key = "test.assistant-pair:v1",
                 })
                 smelt.transcript.extend_renderer("test.assistant-pair", function(next, node, ctx)
                   if node.kind == "group" and node.name == "assistant-pair" then
                     return smelt.layout.text("assistant group")
                   end
                   return next(node, ctx)
-                end, { cache_key = "test.assistant-pair-renderer:v1" })
+                end)
                 "#,
             )
             .exec()
@@ -6281,7 +6268,7 @@ pub mod tests {
                 generation: 0,
                 width: 80,
                 renderer_generation: 0,
-                renderer_cache_key: None,
+                render_env_key: 0,
                 presentation_generation: 0,
                 row_generation: 0,
                 mode: ProjectionMode::Visible { viewport_rows: 3 },
@@ -6313,7 +6300,7 @@ pub mod tests {
                     return smelt.layout.content(block.output.content_id, { format = "text" })
                   end
                   return next(block, ctx)
-                end, { cache_key = "semantic-anchor-test:v1" })
+                end)
                 "#,
             )
             .exec()
@@ -6418,7 +6405,7 @@ pub mod tests {
                     return smelt.layout.text("exact row " .. block.call_id)
                   end
                   return next(block, ctx)
-                end, { cache_key = "many-estimate-corrections:v1" })
+                end)
                 "#,
             )
             .exec()
@@ -6886,7 +6873,7 @@ pub mod tests {
                     )
                   end
                   return smelt.transcript.defaults.render(block, ctx)
-                end, { cache_key = "test.finalized-stream:v1" })
+                end)
                 "#,
             )
             .exec()

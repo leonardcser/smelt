@@ -184,7 +184,6 @@ function smelt.tools.read_file_summary(args, content, ctx)
 end
 
 smelt.transcript.register_tool("read_file", {
-  cache_key = "smelt.tool-presentation.read_file:v1",
   body = function(block, ctx)
     if not block.output then return nil end
     return transcript_defaults.render_tool_output_tail(block.output, ctx)

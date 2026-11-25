@@ -108,7 +108,6 @@ function M.register(provider)
   -- Claude Code names the tool `Agent`; older versions call it `Task`.
   for _, name in ipairs({ "Agent", "Task" }) do
     smelt.transcript.register_tool(provider .. "/" .. name, {
-      cache_key = "smelt.transcript.agents.agent:v4",
       background_hl = "SmeltAgent",
       title = agent_title,
       body = agent_body,
@@ -116,7 +115,6 @@ function M.register(provider)
     })
   end
   smelt.transcript.register_tool(provider .. "/SendMessage", {
-    cache_key = "smelt.transcript.agents.send_message:v1",
     title = message_title,
     body = message_body,
   })

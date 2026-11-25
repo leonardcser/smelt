@@ -80,7 +80,6 @@ local function replacement_line_detail(block)
 end
 
 smelt.transcript.register_tool("edit_file", {
-  cache_key = "smelt.tool-presentation.edit_file:v6",
   draft_error = function(block)
     return transcript_defaults.unread_file_error(block, "file_path", "file")
   end,

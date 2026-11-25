@@ -1114,7 +1114,6 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.GroupSpec
 ---@field name string Unique group name. Registering the same name replaces it.
----@field cache_key? string Persisted layout cache key; omit to opt out while active.
 ---@field priority? integer Higher priority plans first. Defaults to 0.
 ---@field min? integer Minimum adjacent matching blocks required. Defaults to 2.
 ---@field default_view? "collapsed"|"peek"|"expanded" Initial presentation when the group first appears.
@@ -1136,7 +1135,6 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.RendererOptions
 ---@field part? smelt.transcript.RendererPart Named renderer part; defaults to `root`.
----@field cache_key? string Stable persisted-layout key. Omit for dynamic state; bump when output changes across restarts.
 
 --- Viewport placement used when revealing a semantic transcript target.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1212,7 +1210,6 @@
 --- Registrations are copied and immutable.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ToolPresentation
----@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
 ---@field background_hl? string Highlight group of the `background` tag on a call whose work continues in the background. Default `SmeltProcess`.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
 ---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.

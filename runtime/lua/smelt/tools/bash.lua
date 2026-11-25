@@ -133,7 +133,6 @@ function M.execute(args, ctx)
 end
 
 smelt.transcript.register_tool("bash", {
-  cache_key = "smelt.tool-presentation.bash:v2",
   compact = function(block)
     return detach.waiting_hint(block)
   end,

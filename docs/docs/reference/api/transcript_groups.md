@@ -11,23 +11,14 @@ description: "Declarative transcript display grouping. Lua API reference for sme
 
 Declarative transcript display grouping. Register adjacent-run group rules while the host owns deterministic planning and the composed root renderer presents resulting group nodes.
 
-## `smelt.transcript.groups.cache_key`
-
-```lua
-fun(): integer?
-```
-
-Current group-registry cache key, or nil when any active group opted out of
-persisted planning/layout caches.
-
 ## `smelt.transcript.groups.generation`
 
 ```lua
 fun(): integer
 ```
 
-Current group-registry generation. Rust render planning uses this to invalidate
-plan/cache state once group planning is enabled.
+Current group-registry generation. Each registration or removal bumps it, and
+grouped plans and layouts rebuild when it changes.
 
 ## `smelt.transcript.groups.list`
 

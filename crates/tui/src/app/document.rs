@@ -47,7 +47,7 @@ struct DocumentRenderCacheKey {
     width: u16,
     theme: u64,
     renderer_generation: u64,
-    renderer_cache_key: Option<u64>,
+    render_env_key: u64,
     start: RowIndex,
     count: RowIndex,
 }
@@ -172,7 +172,7 @@ impl TuiApp {
             Some(RegisteredDocument::Transcript) => {
                 self.sync_transcript_renderer_generation();
                 let inline_options = self.inline_options();
-                let renderer_cache_key = smelt_view::display_layout::transcript_renderer_cache_key(
+                let render_env_key = smelt_view::display_layout::transcript_render_env_key(
                     &self.lua,
                     &inline_options,
                 );
@@ -182,7 +182,7 @@ impl TuiApp {
                     width: self.transcript_width() as u16,
                     theme,
                     renderer_generation: self.lua.transcript_renderer_generation(),
-                    renderer_cache_key,
+                    render_env_key,
                     start,
                     count,
                 })
@@ -200,7 +200,7 @@ impl TuiApp {
                         .unwrap_or(0),
                     theme,
                     renderer_generation: 0,
-                    renderer_cache_key: None,
+                    render_env_key: 0,
                     start,
                     count,
                 })

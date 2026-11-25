@@ -8,18 +8,6 @@ use std::sync::Arc;
 use crate::lua::doc::{record_module_doc, ApiClassification, Tier};
 use crate::lua::module::LuaMod;
 
-fn renderer_cache_key_hash(cache_key: Option<String>) -> u64 {
-    let Some(cache_key) = cache_key else {
-        return 0;
-    };
-    let hash = smelt_transcript::hash::hash_serializable(&cache_key);
-    if hash == 0 {
-        1
-    } else {
-        hash
-    }
-}
-
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::supported(
         lua,
@@ -42,17 +30,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let shared_set = Arc::clone(shared);
     m.private_fn(
         "__set_renderer",
-        &["renderer", "cache_key"],
-        move |lua, (renderer, cache_key): (mlua::Function, Option<String>)| -> LuaResult<u64> {
+        &["renderer"],
+        move |lua, renderer: mlua::Function| -> LuaResult<u64> {
             let handle = LuaHandle::from_func(lua, renderer)?;
             let mut slot = shared_set
                 .transcript_renderer
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *slot = Some(handle);
-            shared_set
-                .transcript_renderer_cache_key
-                .store(renderer_cache_key_hash(cache_key), Ordering::Release);
             Ok(shared_set
                 .transcript_renderer_generation
                 .fetch_add(1, Ordering::AcqRel)
@@ -81,9 +66,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "__invalidate_renderer",
         &[],
         move |_, ()| -> LuaResult<u64> {
-            shared_invalidate
-                .transcript_renderer_cache_key
-                .store(0, Ordering::Release);
             Ok(shared_invalidate
                 .transcript_renderer_generation
                 .fetch_add(1, Ordering::AcqRel)
@@ -116,10 +98,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             let group = super::transcript_groups::parse_registration(spec, order)?;
             let token = group.token;
             registry.entries.insert(group.spec.name.clone(), group);
-            let cache_key = super::transcript_groups::cache_key_hash(&registry);
-            shared_register_group
-                .transcript_groups_cache_key
-                .store(cache_key, Ordering::Release);
             shared_register_group
                 .transcript_groups_generation
                 .fetch_add(1, Ordering::AcqRel);
@@ -143,10 +121,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 return Ok(false);
             }
             registry.entries.remove(&name);
-            let cache_key = super::transcript_groups::cache_key_hash(&registry);
-            shared_unregister_group
-                .transcript_groups_cache_key
-                .store(cache_key, Ordering::Release);
             shared_unregister_group
                 .transcript_groups_generation
                 .fetch_add(1, Ordering::AcqRel);
@@ -169,18 +143,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             .transcript_groups_generation
             .load(Ordering::Acquire))
     })?;
-
-    let shared_groups_cache_key = Arc::clone(shared);
-    m.private_fn(
-        "__groups_cache_key",
-        &[],
-        move |_, ()| -> LuaResult<Option<u64>> {
-            let key = shared_groups_cache_key
-                .transcript_groups_cache_key
-                .load(Ordering::Acquire);
-            Ok((key != 0).then_some(key))
-        },
-    )?;
 
     Ok(())
 }

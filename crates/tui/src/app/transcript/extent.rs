@@ -34,7 +34,7 @@ pub(super) struct TranscriptExtent {
 pub(super) struct ExtentLayoutKey {
     pub(super) width: u16,
     pub(super) renderer_generation: u64,
-    pub(super) renderer_cache_key: Option<u64>,
+    pub(super) render_env_key: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -342,7 +342,7 @@ mod tests {
         ExtentLayoutKey {
             width: 80,
             renderer_generation: 0,
-            renderer_cache_key: None,
+            render_env_key: 0,
         }
     }
 
