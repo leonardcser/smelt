@@ -1929,6 +1929,11 @@ impl TuiApp {
                 }
                 self.set_active_status(invocation_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
+                if matches!(choice, ConfirmChoice::Session | ConfirmChoice::SessionPath) {
+                    for handle_id in self.core.confirms.handles() {
+                        self.resolve_open_confirm_for_current_mode(handle_id);
+                    }
+                }
                 false
             }
             ConfirmChoice::No => {

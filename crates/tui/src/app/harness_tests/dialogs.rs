@@ -2376,6 +2376,38 @@ fn open_confirm_recheck_auto_denies_without_stopping_turn() {
 }
 
 #[test]
+fn session_approval_resolves_covered_parallel_calls_but_keeps_higher_access_prompt() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    let mut pending = Vec::new();
+    let mut higher_access = confirm_req(15);
+    higher_access.access = protocol::Access::Full;
+    for req in [higher_access, confirm_req(16), confirm_req(17)] {
+        dispatch_confirm_request(&mut app, req, &mut pending);
+    }
+    assert_eq!(app.pending_confirm_count(), 3);
+
+    app.render_silent();
+    app.press(KeyCode::Down);
+    app.press(KeyCode::Down);
+    app.press(KeyCode::Enter); // Allow this tool for the session at write access.
+    assert_eq!(app.pending_confirm_count(), 1);
+    let mut decisions = permission_decisions(app.drain_engine_sends());
+    decisions.sort_unstable();
+    assert_eq!(decisions, vec![(16, true), (17, true)]);
+
+    app.press(KeyCode::Enter); // Allow the remaining full-access call once.
+    assert_eq!(
+        permission_decisions(app.drain_engine_sends()),
+        vec![(15, true)]
+    );
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert!(app.state().active_modal.is_none());
+}
+
+#[test]
 fn present_plan_save_draft_writes_artifact_and_manifest() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);

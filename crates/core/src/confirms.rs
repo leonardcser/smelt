@@ -87,6 +87,13 @@ impl Confirms {
     pub fn first_handle(&self) -> Option<u64> {
         self.pending.keys().min().copied()
     }
+
+    /// Every pending handle, oldest registration first.
+    pub fn handles(&self) -> Vec<u64> {
+        let mut handles: Vec<u64> = self.pending.keys().copied().collect();
+        handles.sort_unstable();
+        handles
+    }
 }
 
 #[cfg(test)]
