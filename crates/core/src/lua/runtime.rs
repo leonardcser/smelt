@@ -3286,6 +3286,7 @@ fn render_fields_to_lua_table(
                     agent_id,
                     title,
                     status,
+                    ..
                 } => {
                     table.set("agent_id", agent_id.as_str())?;
                     table.set("title", title.as_str())?;
@@ -3369,8 +3370,12 @@ fn render_fields_to_lua_table(
             user_message,
             preview_output,
             background,
+            background_state,
         } => {
             table.set("call_id", call_id.as_str())?;
+            if let Some(state) = background_state {
+                table.set("background_state", *state)?;
+            }
             table.set("name", name.as_str())?;
             table.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
             table.set("summary_text", summary_text.as_str())?;
@@ -3635,6 +3640,7 @@ enum TranscriptRenderFields {
         user_message: Option<String>,
         preview_output: Option<Box<TranscriptToolOutputMetadata>>,
         background: bool,
+        background_state: Option<&'static str>,
     },
     Exec {
         command: String,
@@ -3813,6 +3819,9 @@ fn transcript_block_render_fields(
                             .is_some_and(|metadata| metadata["background"] == true)
                 });
             let elapsed_ms = state
+                .filter(|state| {
+                    state.background_state().is_none() || state.background_id().is_some()
+                })
                 .and_then(|state| state.elapsed)
                 .map(|elapsed| elapsed.as_millis() as u64);
             TranscriptRenderFields::ToolCall {
@@ -3831,6 +3840,13 @@ fn transcript_block_render_fields(
                     .map(transcript_tool_output_metadata)
                     .map(Box::new),
                 background,
+                background_state: if running_in_background {
+                    Some("running")
+                } else {
+                    state
+                        .and_then(ToolState::background_state)
+                        .map(|s| s.label())
+                },
             }
         }
         Block::Exec { command, output } => TranscriptRenderFields::Exec {
@@ -5107,6 +5123,7 @@ mod tests {
             user_message: None,
             preview_output: None,
             in_background: false,
+            background_outcome: None,
         };
         let tool_node =
             transcript_block_render_node(BlockId::new(4), 3, &tool_block, Some(&tool_state));
@@ -5197,6 +5214,7 @@ mod tests {
             user_message: None,
             preview_output: None,
             in_background: false,
+            background_outcome: None,
         };
 
         let active_node = transcript_block_render_node(BlockId::new(1), 0, &block, Some(&state));

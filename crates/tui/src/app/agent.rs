@@ -1882,7 +1882,8 @@ impl TuiApp {
             id,
             completion.exit_code,
             completion.termination,
-        );
+        )
+        .ended_at(engine::clock::unix_time_ms(self.core.clock.as_ref()));
         let note = protocol::HistoryNote::process_status_with_output(event, completion.output);
         if self.agent_is_running() || self.conversation.turn_pause().is_some() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
@@ -1892,6 +1893,38 @@ impl TuiApp {
         } else {
             let turn = self.begin_process_status_turn(note);
             self.conversation.set_active(turn);
+        }
+    }
+
+    /// Ends the calls whose background work no longer runs. A call launched
+    /// before this runtime started gets no end time: its work ended unseen.
+    pub(crate) fn sync_background_calls(&mut self) {
+        let jobs = self.conversation.running_background_jobs();
+        if jobs.is_empty() {
+            return;
+        }
+        let session = self.conversation.session().id.clone();
+        for job in jobs {
+            // Supervisor IDs start at proc_1 again after a restart.
+            let state = if job
+                .called_at_ms
+                .is_some_and(|at| !self.core.started_since_launch(at))
+            {
+                processes::BackgroundJobState::Gone
+            } else {
+                self.core.background_job_state(&session, &job.job_id)
+            };
+            let (outcome, elapsed) = match state {
+                processes::BackgroundJobState::Running => continue,
+                processes::BackgroundJobState::Ended(outcome, elapsed) => (outcome, elapsed),
+                processes::BackgroundJobState::Gone => (protocol::BackgroundOutcome::Stopped, None),
+            };
+            let ended_at_ms = job
+                .called_at_ms
+                .zip(elapsed)
+                .map(|(start, duration)| start.saturating_add(duration.as_millis() as u64));
+            self.conversation
+                .end_background_job(job.block_id, outcome, ended_at_ms);
         }
     }
 
@@ -3739,7 +3772,8 @@ mod tests {
                 "4242",
                 Some(9),
                 protocol::JobTermination::Exited,
-            ),
+            )
+            .ended_at(engine::clock::unix_time_ms(app.tui.core.clock.as_ref())),
         ));
         let after = app
             .tui
@@ -3816,7 +3850,8 @@ mod tests {
                 "751225",
                 Some(1),
                 protocol::JobTermination::Exited,
-            ),
+            )
+            .ended_at(engine::clock::unix_time_ms(app.tui.core.clock.as_ref())),
         );
         assert_eq!(current_note, expected_note);
         assert_eq!(

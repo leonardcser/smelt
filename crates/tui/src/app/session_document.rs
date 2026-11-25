@@ -828,6 +828,11 @@ pub(crate) enum TranscriptMutation {
         id: BlockId,
         block: Block,
     },
+    EndBackgroundJob {
+        id: BlockId,
+        outcome: protocol::BackgroundOutcome,
+        ended_at_ms: Option<u64>,
+    },
 }
 
 pub(crate) enum StreamMutation {
@@ -1702,6 +1707,13 @@ impl SessionDocument {
                 transcript.history_mut().rewrite(id, block);
                 true
             }
+            TranscriptMutation::EndBackgroundJob {
+                id,
+                outcome,
+                ended_at_ms,
+            } => transcript
+                .history_mut()
+                .end_background_job(id, outcome, ended_at_ms),
         };
         let history = transcript.history();
         DocumentChange {

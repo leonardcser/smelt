@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-* bash npm run dev  background  10s                            14:37:03
+* bash npm run dev  12s                                        14:37:03
 
 
 

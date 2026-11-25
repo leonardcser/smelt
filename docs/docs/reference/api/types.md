@@ -1486,6 +1486,7 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `called_at_ms` | `integer` |  | Invocation start as Unix epoch milliseconds. |
 | `elapsed_ms` | `integer` |  | Best-known execution duration in milliseconds. |
 | `elapsed_active` | `boolean` |  | True only while elapsed time can continue advancing. |
+| `background_state` | `"running"\|"completed"\|"failed"\|"stopped"` |  | Where the work a finished call left running in the background stands. `"stopped"` when it was killed or its session ended. `elapsed_ms` then measures from the call's start to the work's end, when that is known. |
 | `thinking_summary` | `string` |  | Folded thinking summary text. |
 | `user_message` | `string` |  | Tool user-facing status message. |
 | `preview_output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Immutable pending output metadata for a promoted finished draft. |
@@ -1776,7 +1777,7 @@ Registrations are copied and immutable.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `background_hl` | `string` |  | Highlight group of the `background` tag on a call whose work continues in the background. Default `SmeltProcess`. |
+| `background_hl` | `string` |  | Highlight group of the status marker while the work a call left in the background runs. Default `SmeltProcess`. |
 | `render` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node` |  | Complete replacement renderer. |
 | `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker. Return nil to use the tool summary. |
 | `body` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Expanded body renderer. Return nil to suppress the body. |

@@ -104,7 +104,7 @@ impl Agents {
                     return Ok(true);
                 }
                 Some("task_progress" | "task_notification" | "task_updated") => {
-                    self.update(frame);
+                    self.update(frame, now_ms);
                     return Ok(true);
                 }
                 _ => return Ok(false),
@@ -353,7 +353,7 @@ impl Agents {
         }
     }
 
-    fn update(&mut self, frame: &Value) {
+    fn update(&mut self, frame: &Value, now_ms: u64) {
         let Some(task) = frame["task_id"].as_str() else {
             return;
         };
@@ -441,6 +441,7 @@ impl Agents {
                     agent_id: child.info.id.clone(),
                     title: child.info.title.clone(),
                     status: child.info.status,
+                    ended_at_ms: Some(now_ms),
                 },
                 child
                     .info

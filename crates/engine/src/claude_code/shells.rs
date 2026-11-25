@@ -99,7 +99,7 @@ impl Shells {
                 self.changed = true;
                 // An agent's own background shell reports to that agent.
                 if shell.process.background && shell.process.agent_id.is_none() {
-                    self.finished.push(finished(frame, shell.process));
+                    self.finished.push(finished(frame, shell.process, now_ms));
                 }
                 true
             }
@@ -288,7 +288,7 @@ fn stop(task: &str) -> Value {
 
 /// The note on a background shell Claude Code reports finished. It reports
 /// how it ended but not its exit code, and keeps the output in a file.
-fn finished(frame: &Value, process: NativeProcess) -> HistoryNote {
+fn finished(frame: &Value, process: NativeProcess, now_ms: u64) -> HistoryNote {
     let (exit_code, termination) = match frame["status"].as_str() {
         Some("completed") => (Some(0), JobTermination::Exited),
         Some("failed") => (None, JobTermination::Failed),
@@ -301,7 +301,8 @@ fn finished(frame: &Value, process: NativeProcess) -> HistoryNote {
         .and_then(|path| tail(path, FINISHED_OUTPUT_BYTES))
         .unwrap_or(process.output);
     HistoryNote::process_status_with_output(
-        ProcessStatusEvent::background_process_completed(process.id, exit_code, termination),
+        ProcessStatusEvent::background_process_completed(process.id, exit_code, termination)
+            .ended_at(now_ms),
         output.trim_end(),
     )
 }
@@ -518,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn finished_background_shells_get_a_note_by_how_they_ended() {
+    fn finished_background_shells_get_a_note_by_how_and_when_they_ended() {
         for (status, exit_code, termination) in [
             ("completed", Some(0), JobTermination::Exited),
             ("failed", None, JobTermination::Failed),
@@ -527,12 +528,13 @@ mod tests {
         ] {
             let mut shells = Shells::new("claude-code");
             shells.frame(&started("task", "call", true), 0);
-            shells.frame(&ended("task", status), 0);
+            shells.frame(&ended("task", status), 5_000);
             let event = ProcessStatusEvent::background_process_completed(
                 "claude-code:task",
                 exit_code,
                 termination,
-            );
+            )
+            .ended_at(5_000);
             assert_eq!(
                 shells.finished(),
                 [HistoryNote::process_status_event(event)],

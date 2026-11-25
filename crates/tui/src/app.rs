@@ -3806,6 +3806,7 @@ impl TuiApp {
             for completion in self.platform.drain_job_completions() {
                 self.handle_job_completed(completion);
             }
+            self.sync_background_calls();
 
             let drained_more_idle_work = self.drain_idle_work();
             if drained_more_idle_work {

@@ -169,6 +169,28 @@ impl ConversationRuntime {
         &self.document.transcript
     }
 
+    pub(crate) fn running_background_jobs(
+        &self,
+    ) -> Vec<smelt_transcript::transcript_model::RunningBackgroundJob> {
+        self.document.transcript.history().running_background_jobs()
+    }
+
+    /// Records that the background work of call `id` ended.
+    pub(crate) fn end_background_job(
+        &mut self,
+        id: smelt_transcript::transcript_model::BlockId,
+        outcome: protocol::BackgroundOutcome,
+        ended_at_ms: Option<u64>,
+    ) {
+        self.apply_transcript_mutation(
+            super::session_document::TranscriptMutation::EndBackgroundJob {
+                id,
+                outcome,
+                ended_at_ms,
+            },
+        );
+    }
+
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn active_tool_block_id(
         &self,

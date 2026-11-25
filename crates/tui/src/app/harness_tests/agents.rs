@@ -803,6 +803,7 @@ fn agent_messages_that_arrive_together_group_by_sender() {
                 agent_id: "claude-code:a1".into(),
                 title: "Review".into(),
                 status: protocol::AgentStatus::Completed,
+                ended_at_ms: None,
             },
             "No issues found",
         ),

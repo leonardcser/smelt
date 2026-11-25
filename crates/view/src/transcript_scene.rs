@@ -1455,6 +1455,7 @@ mod tests {
                     user_message: None,
                     preview_output: None,
                     in_background: false,
+                    background_outcome: None,
                 }),
                 tool_render_revision: 7,
             };

@@ -125,6 +125,7 @@ fn push_large_mixed_transcript_fixture(transcript: &mut Transcript, target_bytes
                     user_message: None,
                     preview_output: None,
                     in_background: false,
+                    background_outcome: None,
                 },
             );
         }
@@ -233,6 +234,7 @@ fn push_tool_output_heavy_transcript_fixture(
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
         i += 1;

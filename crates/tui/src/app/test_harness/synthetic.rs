@@ -403,6 +403,32 @@ impl TestApp {
         self.tui.push_block(block);
     }
 
+    /// Push the note on a background agent that ended at the harness clock's
+    /// current time.
+    pub fn push_background_agent_ended(
+        &mut self,
+        agent_id: &str,
+        title: &str,
+        status: protocol::AgentStatus,
+    ) {
+        let event = protocol::AgentMessageEvent::BackgroundAgentEnded {
+            agent_id: agent_id.into(),
+            title: title.into(),
+            status,
+            ended_at_ms: Some(self.tool_called_at_ms()),
+        };
+        let note = protocol::HistoryNote::agent_message(event, "");
+        let block = self
+            .history_note_to_block(&note)
+            .expect("agent-message note has a transcript block");
+        self.tui.push_block(block);
+    }
+
+    /// The harness clock's current time, in Unix milliseconds.
+    pub fn unix_now_ms(&self) -> u64 {
+        self.tool_called_at_ms()
+    }
+
     /// Push a `Block::Mode` into the transcript without restoring a fixture.
     pub fn push_mode_block(&mut self, text: &str, icon: &str, hl_group: &str) {
         self.tui

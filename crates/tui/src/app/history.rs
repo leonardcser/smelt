@@ -995,6 +995,7 @@ fn push_assistant_blocks(
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
             smelt_core::BlockOrigin::History(history_index),
         );

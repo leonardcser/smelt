@@ -1,5 +1,91 @@
 use super::*;
 
+#[test]
+fn restored_background_calls_keep_known_results_and_stop_unmatched_work() {
+    use protocol::{BackgroundOutcome, JobTermination, ProcessStatusEvent, ToolOutcome};
+    use smelt_transcript::content::transcript::Transcript;
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    for job in ["native:done", "native:missing"] {
+        let invocation = app.tool_started(job, "bash", Default::default());
+        app.tool_finished(
+            invocation,
+            job,
+            ToolOutcome::new(
+                String::new(),
+                false,
+                Some(serde_json::json!({"background": true, "background_id": job})),
+            ),
+            None,
+        );
+    }
+    let end = ProcessStatusEvent::background_process_completed(
+        "native:done",
+        Some(0),
+        JobTermination::Exited,
+    )
+    .ended_at(app.unix_now_ms() + 2500);
+    app.push_process_status(end, "");
+    let records = app
+        .tui
+        .conversation
+        .transcript()
+        .history()
+        .block_records_with_ids();
+    let mut restored = Transcript::from_block_records_with_ids(records.clone());
+    for row in records {
+        let id = row.block_id;
+        let reference = restored.history.stored_ref(id).unwrap().clone();
+        assert!(restored
+            .history
+            .install_hydrated_record(id, reference, row.record));
+    }
+    let mut resumed = TestApp::builder().build();
+    resumed
+        .tui
+        .conversation
+        .replace_transcript_from_history(restored);
+    resumed.tui.core.native_session = Some(resumed.session_id());
+    resumed.tui.sync_background_calls();
+    let history = resumed.tui.conversation.transcript().history();
+    let mut calls = history
+        .order
+        .iter()
+        .filter_map(|id| history.tool_state(*id))
+        .map(|s| (s.background_outcome, s.elapsed));
+    assert_eq!(
+        calls.next(),
+        Some((
+            Some(BackgroundOutcome::Completed),
+            Some(std::time::Duration::from_millis(2500))
+        ))
+    );
+    assert_eq!(calls.next(), Some((Some(BackgroundOutcome::Stopped), None)));
+    // Native completion notes can arrive after the process list changes.
+    resumed.push_process_status(
+        ProcessStatusEvent::background_process_completed(
+            "native:missing",
+            Some(1),
+            JobTermination::Exited,
+        )
+        .ended_at(app.unix_now_ms() + 3500),
+        "",
+    );
+    let history = resumed.tui.conversation.transcript().history();
+    let state = history
+        .tool_states()
+        .find(|(_, state)| state.background_id() == Some("native:missing"))
+        .unwrap()
+        .1;
+    assert_eq!(
+        (state.background_outcome, state.elapsed),
+        (
+            Some(BackgroundOutcome::Failed),
+            Some(std::time::Duration::from_millis(3500))
+        )
+    );
+}
+
 #[cfg(unix)]
 pub(super) async fn request_session_completion(app: &TestApp, turn: u64) {
     use protocol::event::CONTROL_SOCKET_ENV;

@@ -2416,6 +2416,13 @@ async fn background_shell_keeps_claude_code_until_it_wakes_smelt() {
         .iter()
         .position(|item| matches!(item, HistoryItem::Note(_)))
         .expect("the finished shell has a note");
+    let HistoryItem::Note(note) = &history[finished] else {
+        unreachable!("the position matched a note");
+    };
+    let ended_at = note
+        .process_status_event_ref()
+        .and_then(protocol::ProcessStatusEvent::ended_at_ms)
+        .expect("the note says when the shell ended");
     assert_eq!(
         history[finished],
         HistoryItem::note(protocol::HistoryNote::process_status_with_output(
@@ -2423,7 +2430,8 @@ async fn background_shell_keeps_claude_code_until_it_wakes_smelt() {
                 "claude-code:shell-task",
                 None,
                 protocol::JobTermination::Failed,
-            ),
+            )
+            .ended_at(ended_at),
             "tick 1\ntick 2",
         ))
     );

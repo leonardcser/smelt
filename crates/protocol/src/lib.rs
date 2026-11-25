@@ -36,10 +36,10 @@ pub use history::{
     displayed_tool_name, effective_mode_at, format_tokens, history_from_messages,
     history_item_from_user_content, history_item_message_count, history_to_messages,
     plan_history_append, replace_last_note_kind, transcript_block_kind_matches_history_item,
-    AgentMessageEvent, AssistantStep, HistoryAppend, HistoryAppendPlan, HistoryAppendPolicy,
-    HistoryAppendResult, HistoryAppendView, HistoryItem, HistoryNote, HistoryNoteKind,
-    HistoryNoteProjection, HistoryTailBudget, JobTermination, ProcessStatusEvent, ToolInvocation,
-    UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
+    AgentMessageEvent, AssistantStep, BackgroundOutcome, HistoryAppend, HistoryAppendPlan,
+    HistoryAppendPolicy, HistoryAppendResult, HistoryAppendView, HistoryItem, HistoryNote,
+    HistoryNoteKind, HistoryNoteProjection, HistoryTailBudget, JobTermination, ProcessStatusEvent,
+    ToolInvocation, UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
 pub use history_identity::{CheckpointIdentity, HistoryChain, HistoryIdentity, TurnHistory};
 pub use message::{

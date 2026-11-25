@@ -172,6 +172,12 @@ pub enum ToolStateMutation {
         output: Option<ToolOutputRef>,
         elapsed: Option<Duration>,
     },
+    /// The work the call left running in the background ended, `elapsed`
+    /// after the call started when that is known.
+    EndBackground {
+        outcome: protocol::BackgroundOutcome,
+        elapsed: Option<Duration>,
+    },
 }
 
 impl ToolStateMutation {
@@ -223,6 +229,10 @@ impl ToolStateMutation {
                 state.preview_output = None;
                 state.in_background = false;
             }
+            Self::EndBackground { outcome, elapsed } => {
+                state.background_outcome = Some(outcome);
+                state.elapsed = elapsed;
+            }
         }
     }
 }
@@ -244,9 +254,62 @@ pub struct ToolState {
     /// nothing waits for its result.
     #[serde(skip)]
     pub in_background: bool,
+    /// How the work the call left running in the background ended. `None`
+    /// while it runs, and for calls without background work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_outcome: Option<protocol::BackgroundOutcome>,
+}
+
+/// A call whose background work still runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningBackgroundJob {
+    pub block_id: BlockId,
+    pub job_id: String,
+    pub called_at_ms: Option<u64>,
+}
+
+/// Where the work a tool call left running in the background stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundState {
+    Running,
+    Ended(protocol::BackgroundOutcome),
+}
+
+impl BackgroundState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Ended(outcome) => outcome.as_str(),
+        }
+    }
 }
 
 impl ToolState {
+    /// The job a successful call left running in the background, named by
+    /// its result's `metadata.background_id`.
+    pub fn background_id(&self) -> Option<&str> {
+        let output = self.output.as_deref().filter(|output| !output.is_error)?;
+        output
+            .metadata
+            .as_ref()?
+            .get("background_id")?
+            .as_str()
+            .filter(|id| !id.is_empty())
+    }
+
+    pub fn background_state(&self) -> Option<BackgroundState> {
+        let output = self.output.as_deref().filter(|output| !output.is_error)?;
+        let metadata = output.metadata.as_ref()?;
+        if metadata.get("background")?.as_bool() != Some(true) {
+            return None;
+        }
+        Some(match self.background_outcome {
+            Some(outcome) => BackgroundState::Ended(outcome),
+            None if self.background_id().is_some() => BackgroundState::Running,
+            None => BackgroundState::Ended(protocol::BackgroundOutcome::Stopped),
+        })
+    }
+
     pub fn content(&self, channel: ContentChannel) -> Option<&TranscriptContent> {
         match channel {
             ContentChannel::ToolOutput => self.output.as_deref().map(|output| &output.content),
@@ -591,6 +654,26 @@ impl Block {
         match self {
             Self::ToolDraft(draft) => Some(&draft.name),
             Self::ToolCall { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The background job this note reports ended: its ID, how it ended,
+    /// and when.
+    pub fn ended_background_job(
+        &self,
+    ) -> Option<(String, protocol::BackgroundOutcome, Option<u64>)> {
+        match self {
+            Block::ProcessStatus {
+                event: Some(event), ..
+            } => Some((
+                event.process_id()?.to_owned(),
+                event.outcome(),
+                event.ended_at_ms(),
+            )),
+            Block::AgentMessage { event, .. } => event
+                .ended_agent()
+                .map(|(id, outcome, at)| (id.to_owned(), outcome, at)),
             _ => None,
         }
     }
@@ -2632,6 +2715,9 @@ pub struct BlockHistory {
     patch_revision: u64,
     patch_retained_bytes: usize,
     patches: VecDeque<TranscriptPatch>,
+    /// Calls whose background work still runs. They stay materialized, so
+    /// their state can change when the work ends.
+    running_background: HashSet<BlockId>,
 }
 
 impl BlockHistory {
@@ -2661,6 +2747,7 @@ impl BlockHistory {
             patch_revision: 0,
             patch_retained_bytes: 0,
             patches: VecDeque::new(),
+            running_background: HashSet::new(),
         }
     }
 
@@ -3079,9 +3166,76 @@ impl BlockHistory {
         }
     }
 
+    fn index_background(&mut self, id: BlockId, state: Option<&ToolState>) {
+        if state.and_then(ToolState::background_state) == Some(BackgroundState::Running) {
+            self.running_background.insert(id);
+        } else {
+            self.running_background.remove(&id);
+        }
+    }
+
+    /// Calls whose background work still runs.
+    pub fn running_background_jobs(&self) -> Vec<RunningBackgroundJob> {
+        let mut jobs: Vec<_> = self
+            .running_background
+            .iter()
+            .filter_map(|id| {
+                let state = self.tool_state(*id)?;
+                Some(RunningBackgroundJob {
+                    block_id: *id,
+                    job_id: state.background_id()?.to_owned(),
+                    called_at_ms: state.called_at_ms,
+                })
+            })
+            .collect();
+        jobs.sort_unstable_by_key(|job| job.block_id);
+        jobs
+    }
+
+    /// Records that the background work of call `id` ended with `outcome` at
+    /// `ended_at_ms`. Returns whether the call still waited for it.
+    pub fn end_background_job(
+        &mut self,
+        id: BlockId,
+        outcome: protocol::BackgroundOutcome,
+        ended_at_ms: Option<u64>,
+    ) -> bool {
+        let Some(state) = self
+            .tool_state(id)
+            .filter(|state| state.background_id().is_some())
+        else {
+            return false;
+        };
+        let called_at_ms = state.called_at_ms;
+        let elapsed = ended_at_ms
+            .zip(called_at_ms)
+            .map(|(ended, called)| Duration::from_millis(ended.saturating_sub(called)));
+        self.apply_tool_state_mutation(id, ToolStateMutation::EndBackground { outcome, elapsed })
+    }
+
+    /// Ends the call that runs job `job` in the background, if one waits for it.
+    fn end_background_job_named(
+        &mut self,
+        job: &str,
+        outcome: protocol::BackgroundOutcome,
+        ended_at_ms: Option<u64>,
+    ) {
+        // Native jobs can leave the live list before their end note arrives.
+        // Prefer the newest matching launch, even if reconciliation stopped it.
+        let call = self
+            .tool_states()
+            .filter(|(_, state)| state.background_id() == Some(job))
+            .max_by_key(|(id, _)| *id)
+            .map(|(id, _)| id);
+        if let Some(call) = call {
+            self.end_background_job(call, outcome, ended_at_ms);
+        }
+    }
+
     fn set_tool_state_entry(&mut self, id: BlockId, entry: ToolStateEntry) {
         self.tool_render_revision_clock =
             self.tool_render_revision_clock.max(entry.render_revision());
+        self.index_background(id, entry.state());
         let new_contents = entry
             .state()
             .map(|state| state.registered_contents().cloned().collect::<Vec<_>>());
@@ -3099,6 +3253,7 @@ impl BlockHistory {
 
     fn remove_tool_state_entry(&mut self, id: BlockId) -> Option<ToolStateEntry> {
         let entry = self.tool_states.remove(&id)?;
+        self.running_background.remove(&id);
         if let Some(state) = entry.state() {
             self.unregister_tool_state_content(state);
         }
@@ -3653,8 +3808,14 @@ impl BlockHistory {
         weight
     }
 
+    /// Whether block `id` must stay materialized: its call's background work
+    /// still runs and can end.
+    pub fn is_pinned(&self, id: BlockId) -> bool {
+        self.running_background.contains(&id)
+    }
+
     pub fn dematerialize_live(&mut self, id: BlockId, stored: Arc<StoredBlockRef>) -> usize {
-        if !matches!(self.entries.get(&id), Some(BlockEntry::Live(_))) {
+        if !matches!(self.entries.get(&id), Some(BlockEntry::Live(_))) || self.is_pinned(id) {
             return 0;
         }
         let Some(BlockEntry::Live(live)) = self.remove_entry(id) else {
@@ -3863,6 +4024,7 @@ impl BlockHistory {
         origin: Option<BlockOrigin>,
     ) -> BlockId {
         let block = block.normalize_content();
+        let ended_job = block.ended_background_job();
         let hash = block.content_hash();
         let navigation_open = append_navigation_open(&block);
         let id = BlockId(self.next_id);
@@ -3890,6 +4052,9 @@ impl BlockHistory {
             true,
             true,
         );
+        if let Some((job, outcome, ended_at_ms)) = ended_job {
+            self.end_background_job_named(&job, outcome, ended_at_ms);
+        }
         id
     }
 
@@ -4082,6 +4247,13 @@ impl BlockHistory {
             let new_contents = state.registered_contents().cloned().collect::<Vec<_>>();
             (old_content_ids, new_contents)
         };
+        if let Some(ToolStateEntry::Live { state, .. }) = self.tool_states.get(&id) {
+            if state.background_state() == Some(BackgroundState::Running) {
+                self.running_background.insert(id);
+            } else {
+                self.running_background.remove(&id);
+            }
+        }
         for content_id in old_content_ids {
             self.content_store.remove(content_id);
         }
@@ -4546,6 +4718,7 @@ impl BlockHistory {
             self.hydrated_tool_state_bytes = 0;
             self.next_id = 0;
             self.tool_states.clear();
+            self.running_background.clear();
             self.tool_render_revision_clock = 0;
             return;
         }
@@ -4560,6 +4733,7 @@ impl BlockHistory {
         self.hydrated_tool_state_bytes = 0;
         self.next_id = 0;
         self.tool_states.clear();
+        self.running_background.clear();
         self.tool_render_revision_clock = 0;
         self.bump_order_generation();
         self.mark_record_dirty_from(0);
@@ -4644,6 +4818,7 @@ impl BlockHistory {
             .filter(|id| self.tool_call_id(*id).is_some())
             .collect();
         self.tool_states.retain(|id, _| live.contains(id));
+        self.running_background.retain(|id| live.contains(id));
         self.rebuild_content_store();
     }
 }
@@ -4786,6 +4961,7 @@ mod tests {
             user_message: None,
             preview_output: None,
             in_background: false,
+            background_outcome: None,
         }
     }
 
@@ -4854,6 +5030,7 @@ mod tests {
                     content_fields: Vec::new(),
                 })),
                 in_background: false,
+                background_outcome: None,
             },
         );
         assert!(history.content_by_id(output_id).is_some());
@@ -4939,6 +5116,7 @@ mod tests {
             user_message: None,
             preview_output: None,
             in_background: false,
+            background_outcome: None,
         };
         assert!(
             tool_state_retained_bytes(&state)
@@ -5001,6 +5179,7 @@ mod tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
 
@@ -5534,6 +5713,7 @@ mod tests {
                     user_message: Some("captured message".into()),
                     preview_output: Some(output()),
                     in_background: false,
+                    background_outcome: None,
                 }),
                 tool_render_revision: 3,
             },
@@ -5687,6 +5867,7 @@ mod tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
         let before_attach = history.sidecar_hash(id);
@@ -5759,6 +5940,7 @@ mod tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
         for index in 0..3_000 {
@@ -6270,6 +6452,7 @@ mod tests {
             user_message: None,
             preview_output: None,
             in_background: false,
+            background_outcome: None,
         };
         let record = TranscriptBlockRecord {
             block: Block::ToolCall {
@@ -6422,6 +6605,7 @@ mod tests {
             user_message: None,
             preview_output: None,
             in_background: false,
+            background_outcome: None,
         };
         let record = TranscriptBlockRecord {
             block: Block::ToolCall {
@@ -6656,6 +6840,7 @@ mod tests {
             user_message: None,
             preview_output: None,
             in_background: false,
+            background_outcome: None,
         }
     }
 
@@ -6737,6 +6922,73 @@ mod tests {
             ToolStateMutation::SetUserMessage("still running".into()),
         ));
         assert!(restored.sidecar_hash(id) > updated_revision);
+    }
+
+    #[test]
+    fn background_call_runs_until_a_note_reports_how_its_job_ended() {
+        let mut history = BlockHistory::new();
+        let id = history.push_with_state(
+            Block::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::default(),
+                args: HashMap::new().into(),
+            },
+            ToolState {
+                called_at_ms: Some(1_000),
+                ..pending_state()
+            },
+        );
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::Finish {
+                status: ToolStatus::Ok,
+                output: Some(Box::new(ToolOutput::new(
+                    "started proc_1",
+                    false,
+                    Some(serde_json::json!({"background": true, "background_id": "proc_1"})),
+                ))),
+                elapsed: Some(Duration::from_millis(40)),
+            },
+        ));
+        let state = |history: &BlockHistory| history.tool_state(id).unwrap().background_state();
+        assert_eq!(state(&history), Some(BackgroundState::Running));
+        assert!(history.is_pinned(id));
+        assert_eq!(
+            history.running_background_jobs(),
+            [RunningBackgroundJob {
+                block_id: id,
+                job_id: "proc_1".into(),
+                called_at_ms: Some(1_000),
+            }]
+        );
+
+        let note = |job: &str, exit_code| Block::ProcessStatus {
+            text: format!("background process {job} exited"),
+            event: Some(
+                protocol::ProcessStatusEvent::background_process_completed(
+                    job,
+                    Some(exit_code),
+                    protocol::JobTermination::Exited,
+                )
+                .ended_at(4_000),
+            ),
+            output: None,
+        };
+        history.push(note("proc_2", 0));
+        assert_eq!(state(&history), Some(BackgroundState::Running));
+
+        history.push(note("proc_1", 1));
+        assert_eq!(
+            state(&history),
+            Some(BackgroundState::Ended(protocol::BackgroundOutcome::Failed))
+        );
+        assert_eq!(
+            history.tool_state(id).unwrap().elapsed,
+            Some(Duration::from_secs(3))
+        );
+        assert!(!history.is_pinned(id));
+        assert!(history.running_background_jobs().is_empty());
     }
 
     #[test]

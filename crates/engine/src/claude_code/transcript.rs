@@ -476,7 +476,13 @@ impl Transcript {
                 );
             let result = self.retained_results.remove(id).unwrap_or_else(|| {
                 if backgrounded {
-                    return ToolOutcome::new(content, false, Some(json!({"background": true})));
+                    let mut metadata = json!({"background": true});
+                    if let Some(task) = structured
+                        .and_then(|result| super::catalog::background_task(native, result))
+                    {
+                        metadata["background_id"] = super::native_id(&self.provider, task).into();
+                    }
+                    return ToolOutcome::new(content, false, Some(metadata));
                 }
                 let structured = structured.filter(|_| !is_error);
                 structured
@@ -821,10 +827,23 @@ mod tests {
             .iter()
             .map(|tool| (tool.call_id.as_str(), tool.result.metadata.clone()))
             .collect();
-        let marked = Some(serde_json::json!({"background": true}));
         assert_eq!(
             background,
-            [("bg", marked.clone()), ("fg", None), ("watch", marked)]
+            [
+                (
+                    "bg",
+                    Some(
+                        serde_json::json!({"background": true, "background_id": "claude-code:b1"})
+                    )
+                ),
+                ("fg", None),
+                (
+                    "watch",
+                    Some(
+                        serde_json::json!({"background": true, "background_id": "claude-code:m1"})
+                    )
+                ),
+            ]
         );
     }
 

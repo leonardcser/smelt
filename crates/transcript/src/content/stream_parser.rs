@@ -361,6 +361,7 @@ impl StreamParser {
             user_message: None,
             preview_output,
             in_background: false,
+            background_outcome: None,
         };
         history.rewrite_with_tool_state(block_id, block, state);
         history.set_status(block_id, Status::Streaming);
@@ -402,6 +403,7 @@ impl StreamParser {
             user_message: None,
             preview_output,
             in_background: false,
+            background_outcome: None,
         };
         let block_id = history.push_with_state(block, state);
         history.set_status(block_id, Status::Streaming);

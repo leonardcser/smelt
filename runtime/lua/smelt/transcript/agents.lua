@@ -26,10 +26,6 @@ local function agent_title(block)
   if kind and kind ~= "general-purpose" then
     spans[#spans + 1] = { text = "  " .. kind, dim = true }
   end
-  if (block.args or {}).run_in_background == true then
-    -- The same tag the transcript shows on any call that went to the background.
-    spans[#spans + 1] = { text = "background", fg = "SmeltAgent", title_suffix = true }
-  end
   return { spans }
 end
 

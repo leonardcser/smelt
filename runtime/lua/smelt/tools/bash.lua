@@ -181,7 +181,7 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
     for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
       local spans = { { text = line, syntax = "bash" } }
       if #lines == 0 then
-        -- The same tag the transcript shows on any call that went to the background.
+        -- The permission dialog says the command will run in the background.
         spans[#spans + 1] = bool_arg(args.background, false)
             and { text = "background", fg = "SmeltProcess", selectable = false, title_suffix = true }
           or {

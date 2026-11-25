@@ -4,11 +4,46 @@
 use crate::actions::{Effect, Target};
 use crate::process::{JobInfo, JobOutput};
 use crate::runtime::Core;
-use protocol::{NativeProcess, UiCommand};
+use protocol::{BackgroundOutcome, NativeProcess, UiCommand};
+
+/// Where work a tool call left running in the background stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundJobState {
+    Running,
+    Ended(BackgroundOutcome, Option<std::time::Duration>),
+    /// Nothing runs it anymore and nothing reported how it ended, such as a
+    /// job of a session that ended.
+    Gone,
+}
 
 impl Core {
     /// Running jobs, then the native session's shell commands, without
     /// those the user stopped.
+    /// Where background job `id` of session `session` stands: a job of
+    /// smelt's supervisor, or an agent or shell command of the native
+    /// session, whose IDs are namespaced `provider:task`.
+    pub fn background_job_state(&self, session: &str, id: &str) -> BackgroundJobState {
+        if let Some(state) = self.jobs.job_state(id) {
+            return state;
+        }
+        let native_live = self.native_session.as_deref() == Some(session);
+        if let Some(agent) = self.agents.runs(session).find(|agent| agent.info.id == id) {
+            if let Some(outcome) = BackgroundOutcome::of_agent(agent.info.status) {
+                return BackgroundJobState::Ended(outcome, None);
+            }
+            return if native_live {
+                BackgroundJobState::Running
+            } else {
+                BackgroundJobState::Gone
+            };
+        }
+        if native_live && self.native_process(id).is_some() {
+            return BackgroundJobState::Running;
+        }
+        BackgroundJobState::Gone
+    }
+
+    /// Running jobs, then the native session's shell commands.
     pub fn processes(&self) -> Vec<JobInfo> {
         let mut processes = self.jobs.list();
         processes.retain(|job| self.lists_process(&job.id));

@@ -210,8 +210,19 @@ impl AppStoryCtx {
         output: &str,
     ) {
         let event =
-            protocol::ProcessStatusEvent::background_process_completed(id, exit_code, termination);
+            protocol::ProcessStatusEvent::background_process_completed(id, exit_code, termination)
+                .ended_at(self.app.unix_now_ms());
         self.app.push_process_status(event, output);
+    }
+
+    pub fn push_background_agent_ended(
+        &mut self,
+        agent_id: &str,
+        title: &str,
+        status: protocol::AgentStatus,
+    ) {
+        self.app
+            .push_background_agent_ended(agent_id, title, status);
     }
 
     pub fn push_mode_block(&mut self, text: &str, icon: &str, hl_group: &str) {

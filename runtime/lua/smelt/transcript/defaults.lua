@@ -20,6 +20,13 @@ local status_hl = {
   confirm = "SmeltAccent",
 }
 
+-- A call that left work in the background shows that work's state.
+local background_hl = {
+  completed = status_hl.ok,
+  failed = status_hl.err,
+  stopped = status_hl.err,
+}
+
 local NO_PRESENTATION = {}
 
 local function tool_presentation(block, presentation)
@@ -275,14 +282,10 @@ function M.render_tool_header_content(block, ctx)
   ctx = ctx or {}
   local status = block.status or "pending"
   local lines, tail, has_summary = tool_header_lines(block, status)
-  if M.in_background(block) then
-    local first = lines[1] or {}
-    first[#first + 1] = { text = "  ", selectable = false, dim = true }
-    local hl = tool_presentation(block).background_hl or "SmeltProcess"
-    first[#first + 1] = { text = "background", fg = hl, dim = true, selectable = false }
-    lines[1] = first
-  end
-  local duration = status ~= "confirm" and elapsed_text(block.elapsed_ms) or nil
+  -- Background work that still runs counts from the call's start.
+  local running = block.background_state == "running" and block.called_at_ms ~= nil and ctx.now_ms ~= nil
+  local elapsed_ms = running and math.max(0, ctx.now_ms - block.called_at_ms) or block.elapsed_ms
+  local duration = status ~= "confirm" and elapsed_text(elapsed_ms) or nil
   if duration then
     local first = lines[1] or {}
     first[#first + 1] = { text = "  " .. duration, selectable = false, dim = true }
@@ -311,9 +314,14 @@ function M.render_tool_header_content(block, ctx)
     rest = tool_header_rest_prefix(block),
   })
   local refresh_after = called_at_refresh
+  local tick
   if block.elapsed_active and status ~= "confirm" then
-    refresh_after = refresh_after and math.min(refresh_after, 100) or 100
+    tick = 100
+  elseif running then
+    -- Tenths show under ten seconds, then whole seconds.
+    tick = elapsed_ms < 10000 and 100 or 1000 - elapsed_ms % 1000
   end
+  if tick then refresh_after = refresh_after and math.min(refresh_after, tick) or tick end
   if refresh_after then header = layout.refresh(header, { after_ms = refresh_after }) end
   return header
 end
@@ -321,8 +329,13 @@ end
 --- Compose status chrome around the semantic tool label, summary and timings.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render_tool_header(block, ctx)
+  local hl = background_hl[block.background_state] or status_hl[block.status or "pending"]
+  if block.background_state == "running" then
+    hl = tool_presentation(block).background_hl or "SmeltProcess"
+  end
+  local marker = { text = "*", hl = hl }
   return layout.row_prefix(smelt.transcript.render_part("tool_header_content", block, ctx), {
-    first = { { text = "*", hl = status_hl[block.status or "pending"] }, { text = " ", dim = true } },
+    first = { marker, { text = " ", dim = true } },
     rest = { { text = "  ", selectable = false, dim = true } },
   })
 end

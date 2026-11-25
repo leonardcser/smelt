@@ -66,6 +66,8 @@ pub struct Core {
     pub clock: Arc<dyn engine::clock::Clock>,
     /// When this runtime started, on `clock`. [`Core::monotonic_ms`] counts from here.
     started_at: std::time::Instant,
+    /// When this runtime started, in Unix milliseconds.
+    started_at_ms: u64,
     /// Recent user choices rooted in this runtime's application state path.
     pub recent: crate::state::RecentStore,
     /// Canonical session storage and its derived catalog, rooted in the runtime state path.
@@ -125,11 +127,18 @@ impl Core {
             permissions: crate::permissions::Permissions::with_credentials(smelt_paths::auth_dir()),
             mcp: None,
             started_at: clock.instant_now(),
+            started_at_ms: engine::clock::unix_time_ms(clock.as_ref()),
             clock,
             recent,
             sessions,
             env,
         }
+    }
+
+    /// Whether something that started at `at_ms`, in Unix milliseconds, started
+    /// while this runtime ran.
+    pub fn started_since_launch(&self, at_ms: u64) -> bool {
+        at_ms >= self.started_at_ms
     }
 
     /// Milliseconds since this runtime started, on the monotonic `clock`. The

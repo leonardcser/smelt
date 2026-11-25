@@ -4607,6 +4607,7 @@ pub mod tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
     }
@@ -4665,6 +4666,7 @@ pub mod tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
         let tool_block_id = transcript
@@ -6334,6 +6336,7 @@ pub mod tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
         let target_output = (0..60)
@@ -6361,6 +6364,7 @@ pub mod tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
         let target = transcript.history.order[1];
@@ -6439,6 +6443,7 @@ pub mod tests {
                     user_message: None,
                     preview_output: None,
                     in_background: false,
+                    background_outcome: None,
                 },
             );
         }

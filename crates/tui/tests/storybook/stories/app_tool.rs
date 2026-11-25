@@ -132,7 +132,7 @@ app_story!(native_call_moves_to_background_at_once, |ctx| {
 
     ctx.press_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
     ctx.assert_snapshot_named("moved");
-    // Nothing waits for it now, so its time holds.
+    // The job's elapsed time keeps advancing after detaching.
     ctx.advance_time(2000);
     ctx.assert_snapshot_named("held");
 
@@ -154,7 +154,7 @@ app_story!(native_call_moves_to_background_at_once, |ctx| {
         protocol::ToolOutcome::new(
             "Command running in background with ID: task".into(),
             false,
-            Some(json!({"background": true})),
+            Some(json!({"background": true, "background_id": "claude-code:task"})),
         ),
         Some(12_000),
     );
@@ -781,8 +781,8 @@ app_story!(lsp_tool_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
-app_story!(background_calls_share_one_marker, |ctx| {
-    ctx.set_viewport(82, 14);
+app_story!(background_calls_show_their_work_state, |ctx| {
+    ctx.set_viewport(82, 24);
     ctx.tool_call_with_metadata(
         "bash",
         &[
@@ -794,6 +794,16 @@ app_story!(background_calls_share_one_marker, |ctx| {
         Some(20),
     );
     ctx.tool_call_with_metadata(
+        "bash",
+        &[
+            ("command", json!("cargo test")),
+            ("background", json!(true)),
+        ],
+        "started background process proc_2, you'll be notified when it completes",
+        json!({"background": true, "background_id": "proc_2"}),
+        Some(20),
+    );
+    ctx.tool_call_with_metadata(
         "claude-code/Agent",
         &[
             ("description", json!("Review diff")),
@@ -801,7 +811,18 @@ app_story!(background_calls_share_one_marker, |ctx| {
             ("run_in_background", json!(true)),
         ],
         "Async agent launched successfully.",
-        json!({"background": true}),
+        json!({"background": true, "background_id": "claude-code:a1"}),
+        Some(30),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/Agent",
+        &[
+            ("description", json!("Fix bug")),
+            ("prompt", json!("Fix")),
+            ("run_in_background", json!(true)),
+        ],
+        "Async agent launched successfully.",
+        json!({"background": true, "background_id": "claude-code:a2"}),
         Some(30),
     );
     ctx.tool_call_with_metadata(
@@ -810,8 +831,8 @@ app_story!(background_calls_share_one_marker, |ctx| {
             ("command", json!("tail -f log")),
             ("description", json!("watch log")),
         ],
-        "Monitor started (task b1). You will be notified on each event.",
-        json!({"background": true}),
+        "Monitor started (task m1). You will be notified on each event.",
+        json!({"background": true, "background_id": "claude-code:m1"}),
         Some(30),
     );
     ctx.tool_started(
@@ -821,13 +842,21 @@ app_story!(background_calls_share_one_marker, |ctx| {
             ("background", json!(true)),
         ],
     );
-    ctx.tool_started(
-        "claude-code/Agent",
-        &[
-            ("description", json!("Fix bug")),
-            ("prompt", json!("Fix")),
-            ("run_in_background", json!(true)),
-        ],
+    ctx.advance_time(4_200);
+    ctx.push_background_process_completed("proc_2", Some(1), "1 test failed");
+    ctx.advance_time(30_000);
+    ctx.push_background_agent_ended(
+        "claude-code:a1",
+        "Review diff",
+        protocol::AgentStatus::Completed,
     );
+    ctx.advance_time(38_000);
+    ctx.push_background_process_ended(
+        "claude-code:m1",
+        None,
+        protocol::JobTermination::Stopped,
+        "",
+    );
+    ctx.advance_time(61_000);
     ctx.assert_snapshot();
 });

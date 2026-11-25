@@ -145,6 +145,19 @@ pub(super) fn continues_in_background(native: &str, result: &Value) -> bool {
     }
 }
 
+/// The task a call of `native` left running in the background, read from
+/// Claude Code's structured result. Its shells and agents report their end
+/// under this task.
+pub(super) fn background_task<'a>(native: &str, result: &'a Value) -> Option<&'a str> {
+    let key = match native {
+        "Bash" => "backgroundTaskId",
+        "Monitor" => "taskId",
+        "Agent" | "Task" => "agentId",
+        _ => return None,
+    };
+    result[key].as_str().filter(|task| !task.is_empty())
+}
+
 /// The access a call of `native` asks for; see [`NATIVE`].
 pub fn native_access(native: &str) -> Option<Access> {
     NATIVE

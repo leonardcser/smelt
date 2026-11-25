@@ -138,6 +138,7 @@ fn diff_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
                         user_message: None,
                         preview_output: None,
                         in_background: false,
+                        background_outcome: None,
                     },
                 );
             }

@@ -78,6 +78,48 @@ impl JobTermination {
     }
 }
 
+/// How work a tool call left running in the background ended.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundOutcome {
+    Completed,
+    Failed,
+    /// Stopped before it finished: killed by the user, or lost when its
+    /// session ended.
+    Stopped,
+}
+
+impl BackgroundOutcome {
+    /// The outcome of a process that ended with `termination`.
+    pub fn of_process(termination: JobTermination, exit_code: Option<i32>) -> Self {
+        match termination {
+            JobTermination::Exited if exit_code.is_none_or(|code| code == 0) => Self::Completed,
+            JobTermination::Exited | JobTermination::Failed | JobTermination::OutOfMemory => {
+                Self::Failed
+            }
+            JobTermination::Signaled | JobTermination::Stopped => Self::Stopped,
+        }
+    }
+
+    /// The outcome of an agent with `status`, once it ended.
+    pub fn of_agent(status: crate::AgentStatus) -> Option<Self> {
+        match status {
+            crate::AgentStatus::Completed => Some(Self::Completed),
+            crate::AgentStatus::Failed => Some(Self::Failed),
+            crate::AgentStatus::Cancelled | crate::AgentStatus::Blocked => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ProcessStatusEvent {
@@ -86,6 +128,9 @@ pub enum ProcessStatusEvent {
         termination: JobTermination,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         exit_code: Option<i32>,
+        /// When the process ended, in Unix milliseconds.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        ended_at_ms: Option<u64>,
     },
 }
 
@@ -99,6 +144,21 @@ impl ProcessStatusEvent {
             process_id: process_id.into(),
             termination,
             exit_code,
+            ended_at_ms: None,
+        }
+    }
+
+    /// The event, recording that the process ended at `ended_at_ms`.
+    pub fn ended_at(mut self, at_ms: u64) -> Self {
+        match &mut self {
+            Self::BackgroundProcessCompleted { ended_at_ms, .. } => *ended_at_ms = Some(at_ms),
+        }
+        self
+    }
+
+    pub fn ended_at_ms(&self) -> Option<u64> {
+        match self {
+            Self::BackgroundProcessCompleted { ended_at_ms, .. } => *ended_at_ms,
         }
     }
 
@@ -124,6 +184,11 @@ impl ProcessStatusEvent {
         }
     }
 
+    /// How the background job ended.
+    pub fn outcome(&self) -> BackgroundOutcome {
+        BackgroundOutcome::of_process(self.termination(), self.exit_code())
+    }
+
     pub fn field_value(&self, field: &str) -> Option<String> {
         match field {
             "event" | "event_type" => Some(self.event_type().to_string()),
@@ -140,6 +205,7 @@ impl ProcessStatusEvent {
                 process_id,
                 termination,
                 exit_code,
+                ..
             } => {
                 let status = match termination {
                     JobTermination::Exited => match exit_code {
@@ -172,6 +238,9 @@ pub enum AgentMessageEvent {
         agent_id: String,
         title: String,
         status: crate::AgentStatus,
+        /// When the agent ended, in Unix milliseconds.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        ended_at_ms: Option<u64>,
     },
 }
 
@@ -180,6 +249,23 @@ impl AgentMessageEvent {
         match self {
             Self::MessageReceived { .. } => "message_received",
             Self::BackgroundAgentEnded { .. } => "background_agent_ended",
+        }
+    }
+
+    /// The background agent that ended, how, and when.
+    pub fn ended_agent(&self) -> Option<(&str, BackgroundOutcome, Option<u64>)> {
+        match self {
+            Self::MessageReceived { .. } => None,
+            Self::BackgroundAgentEnded {
+                agent_id,
+                status,
+                ended_at_ms,
+                ..
+            } => Some((
+                agent_id,
+                BackgroundOutcome::of_agent(*status)?,
+                *ended_at_ms,
+            )),
         }
     }
 

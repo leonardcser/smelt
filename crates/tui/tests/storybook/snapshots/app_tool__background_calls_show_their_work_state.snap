@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash cargo build  2m13s                                                14:37:03
+
+* bash cargo test  4.2s                                                  14:37:03
+
+* claude-code/Agent Review diff  34s                                     14:37:03
+
+* claude-code/Agent Fix bug  2m13s                                       14:37:03
+
+* claude-code/Monitor tail -f log  1m12s                                 14:37:03
+
+* bash npm run dev  background  2m13s                                    14:37:03
+  ctrl+g to run in background
+
+background process proc_2 exited with code 1
+  1 line
+
+background agent Review diff finished
+
+background process claude-code:m1 was stopped
+
+─ ● … 2m 13s ─────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────
+ ○ read                                                                   1:1 100%

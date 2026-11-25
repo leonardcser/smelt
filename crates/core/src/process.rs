@@ -1573,6 +1573,23 @@ impl JobSupervisor {
         self.0.jobs.lock().unwrap().remove(id);
     }
 
+    pub(crate) fn job_state(&self, id: &str) -> Option<crate::processes::BackgroundJobState> {
+        use crate::processes::BackgroundJobState;
+        let jobs = self.0.jobs.lock().unwrap();
+        let job = jobs.get(id)?;
+        Some(match job.lifecycle {
+            JobLifecycle::Running { .. } => BackgroundJobState::Running,
+            JobLifecycle::Finished {
+                exit_code,
+                termination,
+                finished_at,
+            } => BackgroundJobState::Ended(
+                protocol::BackgroundOutcome::of_process(termination, exit_code),
+                Some(finished_at.saturating_duration_since(job.started_at)),
+            ),
+        })
+    }
+
     pub fn running_count(&self) -> usize {
         self.0
             .jobs

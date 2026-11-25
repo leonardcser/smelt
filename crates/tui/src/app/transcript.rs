@@ -1943,6 +1943,14 @@ impl TranscriptDocument {
                 progressed = true;
                 continue;
             };
+            // A call whose background work runs stays live to record its end.
+            if history.is_pinned(id) {
+                pending.next_record_index = stored.record_index.saturating_add(1);
+                pending.next_order_index = pending.next_order_index.saturating_add(1);
+                visited += 1;
+                progressed = true;
+                continue;
+            }
             let released = self
                 .content
                 .transcript
@@ -7953,6 +7961,7 @@ mod document_tests {
                 user_message: None,
                 preview_output: None,
                 in_background: false,
+                background_outcome: None,
             },
         );
         source.history.clear_record_dirty();
@@ -9245,6 +9254,7 @@ mod document_tests {
                         user_message: None,
                         preview_output: None,
                         in_background: false,
+                        background_outcome: None,
                     },
                 ),
             }
@@ -10560,6 +10570,7 @@ mod document_tests {
                     user_message: None,
                     preview_output: None,
                     in_background: false,
+                    background_outcome: None,
                 },
             );
         }
