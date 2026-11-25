@@ -42,6 +42,13 @@ flaky test is fixed, repeat it under load with `--stress-count <n>`.
 - Protocol tests: `smelt-provider`; engine tests cover orchestration/persistence.
 - Fuzz seeds: `fuzz/seeds/<target>/regression/`; see the [fuzz guide](fuzz/README.md).
 
+## Async tests
+
+Wait for the specific completion or state the test needs. Do not sleep to give
+another thread a head start. To test cancellation or ordering, hold the worker
+with a gate and assert what happens before releasing it. Use the app clock for
+app deadlines; use real time only as a watchdog for work that never completes.
+
 ## Performance
 
 Keep deterministic resource bounds in normal tests. Keep distinct timing workloads

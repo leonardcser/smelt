@@ -28,9 +28,28 @@ struct SessionOperationInbox {
 pub(super) struct SessionOperationRuntime {
     latest: Arc<AtomicU64>,
     inbox: Option<Arc<(Mutex<SessionOperationInbox>, Condvar)>>,
+    #[cfg(test)]
+    hold: Option<OperationHold>,
+}
+
+#[cfg(test)]
+struct OperationHold {
+    started: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 impl SessionOperationRuntime {
+    /// Hold the next operation after it takes a worker slot. Dropping the sender releases it.
+    #[cfg(test)]
+    pub(super) fn hold_next(
+        &mut self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        self.hold = Some(OperationHold { started, release });
+        (started_rx, release_tx)
+    }
+
     pub(super) fn request(
         &mut self,
         operation: impl FnOnce(SessionOperationToken) + Send + 'static,
@@ -73,6 +92,19 @@ impl SessionOperationRuntime {
         let token = SessionOperationToken {
             latest: Arc::clone(&self.latest),
             generation,
+        };
+        #[cfg(test)]
+        let operation = {
+            let hold = self.hold.take();
+            move |token: SessionOperationToken| {
+                if let Some(hold) = hold {
+                    let _ = hold.started.send(());
+                    let _ = hold.release.recv();
+                }
+                if !token.cancelled() {
+                    operation(token);
+                }
+            }
         };
         let (lock, ready) = &**self.inbox.as_ref().expect("session worker started");
         lock.lock()
@@ -230,8 +262,6 @@ pub(super) struct SessionLoadRuntime {
     adoption: Option<SessionAdoption>,
     ready: Option<SessionLoadWorkerResult>,
     continuation: Option<(u64, String, String)>,
-    #[cfg(test)]
-    delay: std::time::Duration,
 }
 
 impl Default for SessionLoadRuntime {
@@ -242,8 +272,6 @@ impl Default for SessionLoadRuntime {
             adoption: None,
             ready: None,
             continuation: None,
-            #[cfg(test)]
-            delay: std::time::Duration::ZERO,
         }
     }
 }
@@ -265,12 +293,8 @@ impl SessionLoadRuntime {
         event_tx: tokio::sync::mpsc::UnboundedSender<super::AppEvent>,
         request: SessionLoadRequest,
     ) -> Result<u64, String> {
-        #[cfg(test)]
-        let delay = self.delay;
         self.operations
             .request(move |token| {
-                #[cfg(test)]
-                thread::sleep(delay);
                 let generation = token.generation;
                 let cancelled = || token.cancelled();
                 if cancelled() {
@@ -344,8 +368,10 @@ impl SessionLoadRuntime {
     }
 
     #[cfg(test)]
-    pub(super) fn set_delay(&mut self, delay: std::time::Duration) {
-        self.delay = delay;
+    pub(super) fn hold_next(
+        &mut self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        self.operations.hold_next()
     }
 }
 

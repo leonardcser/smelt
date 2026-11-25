@@ -162,8 +162,6 @@ pub(crate) struct SearchState {
     live: Option<LiveSearchState>,
     worker: Option<TranscriptSearchWorker>,
     next_generation: u64,
-    #[cfg(test)]
-    worker_delay: std::time::Duration,
 }
 
 impl Default for SearchState {
@@ -176,8 +174,6 @@ impl Default for SearchState {
             live: None,
             worker: None,
             next_generation: 1,
-            #[cfg(test)]
-            worker_delay: std::time::Duration::ZERO,
         }
     }
 }
@@ -213,8 +209,6 @@ impl SearchState {
         let worker = self
             .worker
             .get_or_insert_with(|| TranscriptSearchWorker::spawn(event_tx));
-        #[cfg(test)]
-        worker.set_delay(self.worker_delay);
         worker.request(request);
     }
 }
@@ -594,14 +588,6 @@ impl TuiApp {
                 self.restore_search_preview_anchor(live.original);
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_transcript_search_worker_delay_for_harness(
-        &mut self,
-        delay: std::time::Duration,
-    ) {
-        self.overlays.search_state_mut().worker_delay = delay;
     }
 
     pub(crate) fn handle_search_key_for_target(&mut self, target: WinId, k: KeyEvent) -> bool {

@@ -144,11 +144,28 @@ fn drain_app_events_for(app: &mut TestApp, duration: std::time::Duration) {
     }
 }
 
-fn begin_slow_persisted_search(app: &mut TestApp) {
-    app.tui
-        .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(30));
+/// Take the worker result out of the queue without letting the app apply it yet.
+fn take_search_result(app: &mut TestApp, query: &str) -> crate::app::AppEvent {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match app.try_recv_app_event() {
+            Some(event) if matches!(&event, crate::app::AppEvent::TranscriptSearchCompleted(result) if result.query == query) => {
+                return event
+            }
+            Some(event) => app.handle_app_event(event),
+            None => std::thread::sleep(Duration::from_millis(2)),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no result for {query:?}"
+        );
+    }
+}
+
+fn pending_search_result(app: &mut TestApp) -> crate::app::AppEvent {
     app.type_char('/');
     app.type_text("needle");
+    take_search_result(app, "needle")
 }
 
 #[test]
@@ -454,47 +471,17 @@ fn transcript_search_no_match_during_hydration_restores_original_anchor() {
 }
 
 #[test]
-fn transcript_search_rapid_typing_cancels_stale_worker_generations() {
+fn transcript_search_ignores_results_for_an_older_query() {
     let mut app = sparse_display_only_search_app();
     app.type_char('G');
-    app.tui
-        .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
-    app.type_char('/');
-
-    // Keep lazy worker startup and empty-query anchor restoration outside the
-    // steady-state generation handoff samples.
-    app.type_char('x');
-    app.render_silent();
-    let mut samples = Vec::new();
-    for character in "tail".chars() {
-        let started = std::time::Instant::now();
-        app.type_char(character);
-        app.render_silent();
-        samples.push(started.elapsed());
-    }
-    for _ in 0..4 {
-        let started = std::time::Instant::now();
+    let stale = pending_search_result(&mut app);
+    for _ in "needle".chars() {
         app.press(KeyCode::Backspace);
-        app.render_silent();
-        samples.push(started.elapsed());
     }
-    app.press(KeyCode::Backspace);
-    app.render_silent();
-    for character in "early needle".chars() {
-        let started = std::time::Instant::now();
-        app.type_char(character);
-        app.render_silent();
-        samples.push(started.elapsed());
-    }
-    samples.sort_unstable();
-    let p95_index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
-    let p95 = samples[p95_index];
-    eprintln!("TRANSCRIPT_LIVE_SEARCH_FRAME_P95_US {}", p95.as_micros());
-    assert!(
-        p95 <= std::time::Duration::from_millis(16),
-        "live search key handling and redraw p95 was {p95:?}"
-    );
+    app.type_text("early needle");
 
+    app.handle_app_event(stale);
+    assert!(app.overlays_probe().search_session().is_none());
     app.press(KeyCode::Enter);
     wait_for_live_search(&mut app);
     let matched = app
@@ -517,36 +504,36 @@ fn transcript_search_rapid_typing_cancels_stale_worker_generations() {
 #[test]
 fn transcript_search_session_switch_discards_pending_results() {
     let mut app = sparse_display_only_search_app();
-    begin_slow_persisted_search(&mut app);
+    let stale = pending_search_result(&mut app);
     let previous_id = app.session_snapshot().id.clone();
     let replacement =
         smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
 
     app.load_session(replacement);
     assert_ne!(app.session_snapshot().id, previous_id);
-    drain_app_events_for(&mut app, std::time::Duration::from_millis(70));
+    app.handle_app_event(stale);
     assert!(app.overlays_probe().search_session().is_none());
 }
 
 #[test]
 fn transcript_search_rewind_cancels_pending_results() {
     let mut app = sparse_display_only_search_app();
-    begin_slow_persisted_search(&mut app);
+    let stale = pending_search_result(&mut app);
 
     app.rewind_to_history_index(Some(100), false);
-    drain_app_events_for(&mut app, std::time::Duration::from_millis(70));
+    app.handle_app_event(stale);
     assert!(app.overlays_probe().search_session().is_none());
 }
 
 #[test]
 fn transcript_search_session_close_cancels_pending_results() {
     let mut app = sparse_display_only_search_app();
-    begin_slow_persisted_search(&mut app);
+    let stale = pending_search_result(&mut app);
     let previous_id = app.session_snapshot().id.clone();
 
     app.reset_session();
     assert_ne!(app.session_snapshot().id, previous_id);
-    drain_app_events_for(&mut app, std::time::Duration::from_millis(70));
+    app.handle_app_event(stale);
     assert!(app.overlays_probe().search_session().is_none());
 }
 

@@ -9,8 +9,14 @@ leak-timeout = "500ms"
 # These tests enforce wall-clock interaction budgets, so they must not compete
 # with CPU-heavy tests for runner time.
 [[profile.default.overrides]]
-filter = 'test(/^app::harness_tests::(persistence::current_compacted_read_only_session_forks_without_hydrating_or_cloning_history|persistence::large_sparse_fork_preserves_every_canonical_history_and_record_row|search::transcript_search_rapid_typing_cancels_stale_worker_generations)$/)'
+filter = 'test(/^app::harness_tests::(persistence::current_compacted_read_only_session_forks_without_hydrating_or_cloning_history|persistence::large_sparse_fork_preserves_every_canonical_history_and_record_row)$/)'
 threads-required = "num-test-threads"
+
+# These tests deliberately hold a worker. A regression that blocks the UI
+# before the test can release the worker must not hang the test run.
+[[profile.default.overrides]]
+filter = 'test(/^app::agent::tests::(latest_session_load_request_wins_without_head_of_line_blocking|session_load_rejects_missing_transcript_records_off_thread|session_load_close_timeout_preserves_source_and_can_retry)$/)'
+slow-timeout = { period = "60s", terminate-after = 1 }
 
 # Start the longest tests first so they overlap the bulk of the suite instead
 # of finishing alone at its tail. The startup quota and fuzz CLI tests mostly

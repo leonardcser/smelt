@@ -451,8 +451,6 @@ impl std::fmt::Debug for TurnInputPrepared {
 
 #[derive(Default)]
 pub(super) struct TurnSubmissions {
-    #[cfg(test)]
-    input_pause: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     next_operation_id: u64,
     input_operations: super::session_load::SessionOperationRuntime,
     pub(super) accepted: Option<PendingTurnDispatch>,
@@ -463,10 +461,7 @@ impl TurnSubmissions {
     pub(super) fn pause_input(
         &mut self,
     ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        let (started, waiting) = std::sync::mpsc::channel();
-        let (release, pause) = std::sync::mpsc::channel();
-        self.input_pause = Some((started, pause));
-        (waiting, release)
+        self.input_operations.hold_next()
     }
 }
 
@@ -664,18 +659,11 @@ impl TuiApp {
         }
         let cwd = self.workspace.cwd().to_owned();
         let events = self.platform.app_event_sender();
-        #[cfg(test)]
-        let pause = self.conversation.submissions.input_pause.take();
         let request = self
             .conversation
             .submissions
             .input_operations
             .request(move |token| {
-                #[cfg(test)]
-                if let Some((started, pause)) = pause {
-                    let _ = started.send(());
-                    let _ = pause.recv();
-                }
                 if token.cancelled() {
                     return;
                 }
@@ -2950,40 +2938,26 @@ mod tests {
             .save(&target)
             .expect("save recordless resume target");
         let current_id = app.session_id();
-        app.tui
-            .session_load
-            .set_delay(std::time::Duration::from_millis(500));
+        let (started, release) = app.tui.session_load.hold_next();
         app.set_lua_string_global("TARGET_SESSION_ID", target_id)
             .expect("install target session id");
 
-        let started = std::time::Instant::now();
         app.run_lua_result("smelt.session.load(TARGET_SESSION_ID)")
             .expect("request session load through the user-facing API");
-        let elapsed = started.elapsed();
+        started
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("session load did not start on a worker");
+        assert_eq!(app.tui.conversation.session().id, current_id);
 
+        drop(release);
+        wait_for_session_load_result(&mut app);
+        assert_eq!(app.tui.conversation.session().id, current_id);
+        let notice = app.overlays_probe().notification().expect("load error");
         assert!(
-            elapsed < std::time::Duration::from_millis(100),
-            "session load blocked the UI for {elapsed:?}"
+            notice.summary.contains("has no stored transcript records"),
+            "{}",
+            notice.summary
         );
-        assert_eq!(app.tui.conversation.session().id, current_id);
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if let Some(event) = app.try_recv_app_event() {
-                let completed = matches!(&event, crate::app::AppEvent::SessionLoadCompleted(_));
-                app.handle_app_event(event);
-                if completed {
-                    break;
-                }
-            } else {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "background session load did not complete"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
-        assert_eq!(app.tui.conversation.session().id, current_id);
     }
 
     #[test]
@@ -3245,16 +3219,14 @@ mod tests {
         let resume = app.pause_persistence();
         app.tui.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
-        // The paused writer never settles, so the flush deadline expires on the
-        // app clock while each poll stays non-blocking.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while app.tui.session_load.is_pending() {
-            let started = std::time::Instant::now();
-            app.tui.drain_persist_reports();
-            assert!(started.elapsed() < std::time::Duration::from_millis(100));
-            assert!(std::time::Instant::now() < deadline);
-            app.feed_one(crate::app::test_harness::SourceEvent::Tick(100));
-        }
+        wait_for_source_close(&mut app);
+        let deadline_ms = crate::persist::DEFAULT_PERSISTENCE_DEADLINE.as_millis() as u64;
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(deadline_ms - 1));
+        app.tui.drain_persist_reports();
+        assert!(app.tui.session_load.is_pending());
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(1));
+        app.tui.drain_persist_reports();
+        assert!(!app.tui.session_load.is_pending());
         assert_eq!(app.session_snapshot().id, source_id);
         assert!(app.tui.conversation.has_persistence());
         assert!(!app.tui.busy_stack.is_busy());
@@ -3335,9 +3307,7 @@ mod tests {
         let latest_id = latest.id.clone();
         save_record_backed_session(&app, &latest, "latest resume transcript");
         let current_id = app.session_id();
-        app.tui
-            .session_load
-            .set_delay(std::time::Duration::from_millis(500));
+        let (started, release) = app.tui.session_load.hold_next();
         app.set_lua_string_global("FIRST_SESSION_ID", first_id.clone())
             .expect("install first session id");
         app.set_lua_string_global("LATEST_SESSION_ID", latest_id.clone())
@@ -3345,27 +3315,17 @@ mod tests {
 
         app.run_lua_result("smelt.session.load(FIRST_SESSION_ID)")
             .expect("request first session load");
-        std::thread::sleep(std::time::Duration::from_millis(25));
-        app.tui.session_load.set_delay(std::time::Duration::ZERO);
-        let latest_requested_at = std::time::Instant::now();
+        started
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("first session load did not take a worker slot");
         app.run_lua_result("smelt.session.load(LATEST_SESSION_ID)")
             .expect("request latest session load");
         assert_eq!(app.tui.conversation.session().id, current_id);
 
-        let deadline = latest_requested_at + std::time::Duration::from_millis(250);
-        while app.tui.conversation.session().id != latest_id {
-            app.tui.drain_persist_reports();
-            if let Some(event) = app.try_recv_app_event() {
-                app.handle_app_event(event);
-            } else {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "latest background session load did not complete"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
-        assert_ne!(app.tui.conversation.session().id, first_id);
+        // The first worker slot stays occupied until the second load has been adopted.
+        app.wait_for_session_lifecycle();
+        assert_eq!(app.tui.conversation.session().id, latest_id);
+        drop(release);
         assert_eq!(app.session_message_count(), 1);
     }
 
