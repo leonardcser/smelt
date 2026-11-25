@@ -6,7 +6,7 @@ dim: 50 14
   2   1   8 fg=AnsiValue(208)
   2  14  28 attrs=dim
   3   1   6 fg=AnsiValue(208)
-  3  14  17 attrs=dim
+  3  14  26 attrs=dim
   4   1   6 fg=AnsiValue(208)
   4  14  22 attrs=dim
   5   1  10 fg=AnsiValue(208)
