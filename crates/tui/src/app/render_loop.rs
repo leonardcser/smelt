@@ -808,11 +808,16 @@ impl TuiApp {
         out: &mut W,
         mut on_transient_frame: F,
     ) -> EngineOutputDrainOutcome {
-        let drain_started_at = std::time::Instant::now();
+        let drain_started_at = self.core.clock.instant_now();
         let mut drained_outputs = 0;
         while drained_outputs < crate::app::READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME
             && (drained_outputs == 0
-                || drain_started_at.elapsed() < crate::app::READY_QUEUE_DRAIN_MAX_DURATION)
+                || self
+                    .core
+                    .clock
+                    .instant_now()
+                    .saturating_duration_since(drain_started_at)
+                    < crate::app::READY_QUEUE_DRAIN_MAX_DURATION)
         {
             let output = match self.core.engine.try_recv_output() {
                 Ok(output) => output,

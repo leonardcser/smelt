@@ -1278,6 +1278,17 @@ impl PendingHistoryAppend {
 }
 
 impl TuiApp {
+    /// Whether a key was pressed within `CONFIRM_DEFER_MS`, by the app clock.
+    pub(crate) fn typed_within_confirm_defer(&self) -> bool {
+        self.timers.last_keypress.is_some_and(|pressed| {
+            self.core
+                .clock
+                .instant_now()
+                .saturating_duration_since(pressed)
+                < Duration::from_millis(CONFIRM_DEFER_MS)
+        })
+    }
+
     #[cfg(all(test, feature = "transcript-bench"))]
     pub(crate) fn transcript_reader_metrics_for_harness(&self) -> TranscriptReaderMetrics {
         let transcript = self.conversation.transcript();
@@ -3794,11 +3805,7 @@ impl TuiApp {
                 && !self.modal_blocks_agent()
                 && self.conversation.is_active()
             {
-                let idle = self
-                    .timers
-                    .last_keypress
-                    .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
-                    .unwrap_or(true);
+                let idle = !self.typed_within_confirm_defer();
                 while idle
                     && self.overlays.has_deferred_dialog()
                     && !self.modal_blocks_agent()
@@ -3927,7 +3934,7 @@ impl TuiApp {
                     };
 
                     let mut needs_frame = self.event_needs_frame(&ev);
-                    let drain_started_at = Instant::now();
+                    let drain_started_at = self.core.clock.instant_now();
                     let mut drained_events = 1usize;
                     if let Some(ev) = absorb(
                         ev,
@@ -3941,7 +3948,12 @@ impl TuiApp {
                     }
 
                     while drained_events < READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME
-                        && drain_started_at.elapsed() < READY_QUEUE_DRAIN_MAX_DURATION
+                        && self
+                            .core
+                            .clock
+                            .instant_now()
+                            .saturating_duration_since(drain_started_at)
+                            < READY_QUEUE_DRAIN_MAX_DURATION
                     {
                         let Ok(ev) = term_events.try_recv() else {
                             break;

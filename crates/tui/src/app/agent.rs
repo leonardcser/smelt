@@ -1,12 +1,11 @@
 use crate::app::{
     history::HistoryDeltaKind, CommandTurnStart, NotificationOperation, PendingHistoryAppend,
     PendingHistoryDelivery, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp,
-    TurnState, CONFIRM_DEFER_MS,
+    TurnState,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::*;
-use std::time::Duration;
 
 /// Owns the state machine data that exists only for an agent turn lifecycle.
 ///
@@ -2070,11 +2069,8 @@ impl TuiApp {
         ctrl: SessionControl,
         pending: &mut Vec<PendingTool>,
     ) -> SessionControl {
-        let should_queue = self
-            .timers
-            .last_keypress
-            .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
-            && !self.prompt_buf().source().is_empty();
+        let should_queue =
+            self.typed_within_confirm_defer() && !self.prompt_buf().source().is_empty();
 
         match ctrl {
             SessionControl::Continue => SessionControl::Continue,
