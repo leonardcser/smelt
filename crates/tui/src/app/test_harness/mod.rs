@@ -312,7 +312,7 @@ impl TestAppBuilder {
         self
     }
 
-    pub(crate) fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+    pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
         self
     }

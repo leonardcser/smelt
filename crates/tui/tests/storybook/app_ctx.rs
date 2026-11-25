@@ -35,19 +35,25 @@ pub struct AppStoryCtx {
 
 impl AppStoryCtx {
     pub fn new(name: &str) -> Self {
-        let mut app = TestApp::builder()
-            .without_model()
-            .with_wall_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_742_567_823))
-            .build();
-        app.run_lua_result("smelt.time.format = smelt.time.format_utc; smelt.theme.use('default')")
-            .expect("pin storybook time formatting and theme");
         Self {
-            app,
+            app: launch(None),
             name: name.to_string(),
             snapshot_index: 0,
             turn_id: 0,
             call_counter: 0,
         }
+    }
+
+    /// Relaunch the story app with `cwd` as its working directory, as when
+    /// the user starts smelt there. The viewport resets to the default size.
+    pub fn relaunch_in(&mut self, cwd: &std::path::Path) {
+        self.app = launch(Some(cwd));
+        self.turn_id = 0;
+        self.call_counter = 0;
+    }
+
+    pub fn session_id(&self) -> String {
+        self.app.session_id()
     }
 
     pub fn set_viewport(&mut self, w: u16, h: u16) {
@@ -61,17 +67,23 @@ impl AppStoryCtx {
 
     /// Pump background work until `text` appears in the rendered frame.
     pub fn wait_for_text(&mut self, text: &str) {
+        self.wait_for_frame(text, |frame| frame.contains(text));
+    }
+
+    /// Pump background work until the rendered frame satisfies `ready`.
+    /// `what` names the awaited state in the timeout message.
+    pub fn wait_for_frame(&mut self, what: &str, ready: impl Fn(&str) -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             self.app.feed_one(SourceEvent::LuaWakeup);
             self.app.advance_animation(100);
             let frame = self.app.render_to_frame().text();
-            if frame.contains(text) {
+            if ready(&frame) {
                 return;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "missing {text}:\n{frame}"
+                "missing {what}:\n{frame}"
             );
             std::thread::yield_now();
         }
@@ -711,6 +723,19 @@ impl AppStoryCtx {
             assert_snapshot!(style_name, frame.styles_text());
         });
     }
+}
+
+fn launch(cwd: Option<&std::path::Path>) -> TestApp {
+    let mut builder = TestApp::builder()
+        .without_model()
+        .with_wall_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_742_567_823));
+    if let Some(cwd) = cwd {
+        builder = builder.with_cwd(cwd);
+    }
+    let mut app = builder.build();
+    app.run_lua_result("smelt.time.format = smelt.time.format_utc; smelt.theme.use('default')")
+        .expect("pin storybook time formatting and theme");
+    app
 }
 
 #[macro_export]

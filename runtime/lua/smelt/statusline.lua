@@ -1,11 +1,11 @@
 -- The statusline: a strip bar at the bottom of the screen.
 --
--- The built-in sources (`slug`, `vim_mode`, `agent_mode`, `tps`,
--- `permission`, `keymap`, `agents`, `procs`, `worktree`, `vim_pending`,
--- `cursor`) read engine state from signals plus `smelt.session.status()` for
--- values that carry pending/stale markers. Plugins add sources with
--- `smelt.statusline:add(name, fn)`, and replace or remove a built-in one by
--- its name.
+-- The built-in sources, in display order (`slug`, `vim_mode`, `agent_mode`,
+-- `tps`, `worktree`, `procs`, `agents`, `permission`, `keymap`,
+-- `vim_pending`, `cursor`), read engine state from signals plus
+-- `smelt.session.status()` for values that carry pending/stale markers.
+-- Plugins add sources with `smelt.statusline:add(name, fn)`, and replace or
+-- remove a built-in one by its name.
 
 local bar = require("smelt._bar")
 
@@ -82,6 +82,40 @@ define("tps", { "tps" }, function()
   }
 end)
 
+define("worktree", { "cwd_managed_worktree", "cwd_worktree" }, function()
+  local worktree = signal("cwd_worktree")
+  if not signal("cwd_managed_worktree") or not worktree or worktree == "" then return nil end
+  return {
+    text = "⎇ " .. worktree,
+    style = { fg = "Comment" },
+    priority = 7,
+    separated = true,
+    truncatable = true,
+  }
+end)
+
+define("procs", { "running_procs" }, function()
+  local procs = signal("running_procs") or 0
+  if procs <= 0 then return nil end
+  return {
+    text = procs == 1 and "1 proc" or (procs .. " procs"),
+    style = { fg = "SmeltProcess", italic = false },
+    priority = 2,
+    separated = true,
+  }
+end)
+
+define("agents", { "running_agents" }, function()
+  local agents = signal("running_agents") or 0
+  if agents <= 0 then return nil end
+  return {
+    text = agents == 1 and "1 agent" or (agents .. " agents"),
+    style = { fg = "SmeltAgent", italic = false },
+    priority = 2,
+    separated = true,
+  }
+end)
+
 define("permission", { "permission_pending" }, function()
   if not signal("permission_pending") then return nil end
   return {
@@ -103,49 +137,13 @@ define("keymap", { "keymap_pending" }, function()
   }
 end)
 
-define("agents", { "running_agents" }, function()
-  local agents = signal("running_agents") or 0
-  if agents <= 0 then return nil end
-  return {
-    text = agents == 1 and "1 agent" or (agents .. " agents"),
-    style = { fg = "SmeltAgent", italic = false },
-    priority = 2,
-    separated = true,
-  }
-end)
-
-define("procs", { "running_procs" }, function()
-  local procs = signal("running_procs") or 0
-  if procs <= 0 then return nil end
-  return {
-    text = procs == 1 and "1 proc" or (procs .. " procs"),
-    style = { fg = "SmeltProcess", italic = false },
-    priority = 2,
-    separated = true,
-  }
-end)
-
-define("worktree", { "cwd_managed_worktree", "cwd_worktree_path" }, function()
-  local cwd_worktree_path = signal("cwd_worktree_path")
-  if not signal("cwd_managed_worktree") or not cwd_worktree_path or cwd_worktree_path == "" then
-    return nil
-  end
-  return {
-    text = cwd_worktree_path,
-    style = { fg = "Comment" },
-    priority = 7,
-    separated = true,
-    truncatable = true,
-    truncate = "middle",
-  }
-end)
-
 define("vim_pending", { "vim_pending_input" }, function()
   local vim_pending = signal("vim_pending_input")
   if not vim_pending or vim_pending == "" then return nil end
   return {
     text = vim_pending,
     priority = 2,
+    separated = true,
     align_right = true,
   }
 end)
@@ -162,21 +160,22 @@ define("cursor", { "cursor_pos", "viewport_pos", "input_epoch" }, function()
     text = string.format("%d:%d %d%%", pos.line, pos.col or 1, scroll_pct),
     style = { fg = "Comment" },
     priority = 3,
+    separated = true,
     align_right = true,
   }
 end)
 
 --- The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
---- sources: `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`,
---- `agents`, `procs`, `worktree`, `vim_pending` and `cursor`. Items with
---- `row = 2` or more make it taller.
+--- sources, in display order: `slug`, `vim_mode`, `agent_mode`, `tps`,
+--- `worktree`, `procs`, `agents`, `permission`, `keymap`, `vim_pending` and
+--- `cursor`. Items with `row = 2` or more make it taller.
 ---@tier ui_host
 ---@type smelt.bar.Bar
 smelt.statusline = bar.new({
   name = "smelt.statusline",
   layout = "strip",
   bg = "SmeltStatusBg",
-  separator_style = { fg = "SmeltSeparator", dim = true },
+  separator = "  ",
   sources = sources,
 })
 

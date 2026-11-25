@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+─ ● done ─────────────────────────────────────────────────────────────────────────
+ fix the parser
+──────────────────────────────────────────────────────────────────────────────────
+ fix-parser  NORMAL  ○ read  42.0 tok/s  ⎇ statu…  2 procs  2 agents  d  1:14 100%

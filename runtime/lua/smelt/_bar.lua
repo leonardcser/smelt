@@ -353,9 +353,10 @@ local function join_side(entries, right, out, style_of, gap_style, sep, sep_styl
   end
 end
 
--- Cells kept between the two sides of a strip: none when the facing items
--- both carry a background, like neighbours on one side.
-local function side_gap(entries)
+-- Cells kept between the two sides of a strip: the separator width when the
+-- facing items are both separated, none when both carry a background, like
+-- neighbours on one side.
+local function side_gap(entries, sep_w)
   local last_left, first_right
   for _, e in ipairs(entries) do
     if e.right then
@@ -364,8 +365,9 @@ local function side_gap(entries)
       last_left = e
     end
   end
-  if last_left and first_right then return gap_between(last_left, first_right) end
-  return 1
+  if not (last_left and first_right) then return 1 end
+  if last_left.item.separated and first_right.item.separated then return sep_w end
+  return gap_between(last_left, first_right)
 end
 
 -- Keep explicit backgrounds, including false. Foreground-only groups still
@@ -406,7 +408,7 @@ function M.layout_strip(items, width, opts)
   local entries = fit(entries_of(items), width, function(es)
     local left = side_size(es, false, sep_w)
     local right, right_count = side_size(es, true, sep_w)
-    return left + right + (right_count > 0 and side_gap(es) or 0)
+    return left + right + (right_count > 0 and side_gap(es, sep_w) or 0)
   end)
 
   local function with_default_bg(style) return on_bg(style, bg_group) end
@@ -1052,7 +1054,7 @@ function Bar:_natural_width()
     local entries = entries_of(items)
     local left = side_size(entries, false, separator)
     local right, count = side_size(entries, true, separator)
-    width = math.max(width, left + right + (count > 0 and side_gap(entries) or 0))
+    width = math.max(width, left + right + (count > 0 and side_gap(entries, separator) or 0))
   end
   return math.min(self.context.width, width)
 end

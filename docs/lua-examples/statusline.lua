@@ -7,7 +7,7 @@
 --   style       (optional) - { fg, bg, hl_group, bold, italic, dim, ... }
 --   priority    (optional) - higher = more droppable when line is tight
 --   truncatable (optional) - if true, the item shrinks before being dropped
---   separated   (optional) - prefix " · " when not first in its strip
+--   separated   (optional) - prefix the separator when not first in its strip
 --   align_right (optional) - push to the right strip
 
 local branch_cache = { at = 0, value = nil }
