@@ -95,7 +95,7 @@ if smelt.theme then
   -- colorschemes can extend this list. Each entry is
   -- `{ name = string, detail = string, ansi = integer }`.
   smelt.theme.presets = smelt.theme.presets or {
-    { name = "ember",    detail = "default",         ansi = 208 },
+    { name = "ember",    detail = "warm orange",     ansi = 208 },
     { name = "coral",    detail = "salmon pink",     ansi = 210 },
     { name = "rose",     detail = "soft pink",       ansi = 211 },
     { name = "gold",     detail = "warm yellow",     ansi = 220 },

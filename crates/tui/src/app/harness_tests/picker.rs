@@ -416,6 +416,114 @@ fn theme_picker_confirms_selection_without_callback_error() {
 }
 
 #[test]
+fn color_default_previews_cancels_and_restores_custom_colors() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        smelt.theme.set("SmeltSlug", { fg = 210, reverse = true })
+        smelt.theme.set("SmeltSeparator", { fg = 211, bg = 212, bold = true })
+        function assert_color(bg, fg)
+            local slug = smelt.theme.get("SmeltSlug")
+            local separator = smelt.theme.get("SmeltSeparator")
+            assert(slug.bg == bg and slug.fg == 210 and slug.reverse)
+            assert(separator.fg == fg and separator.bg == 212 and separator.bold)
+        end
+        tint = smelt.theme.presets[1].ansi
+        "#,
+    )
+    .unwrap();
+
+    let open = |app: &mut TestApp| {
+        app.type_text("/color");
+        app.press(KeyCode::Enter);
+        drive_lua_tasks(app);
+        assert!(app.overlays_probe().has_pickers());
+    };
+    open(&mut app);
+    app.press(KeyCode::Up);
+    drive_lua_tasks(&mut app);
+    app.run_lua_result("assert_color(tint, tint)").unwrap();
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+    app.run_lua_result("assert_color(tint, tint)").unwrap();
+
+    let assert_marker_matches_label = |app: &mut TestApp| {
+        app.render_silent();
+        let (x, y) = app.screen_position("○ default").expect("default marker");
+        let frame = app.tui.ui.flushed_snapshot();
+        assert_eq!(
+            frame.style_at(x, y).unwrap().fg,
+            frame.style_at(x + 2, y).unwrap().fg,
+            "the default marker should use the same foreground as its label"
+        );
+    };
+    open(&mut app);
+    assert_marker_matches_label(&mut app);
+    app.press(KeyCode::Up);
+    drive_lua_tasks(&mut app);
+    assert_marker_matches_label(&mut app);
+    app.press(KeyCode::Down);
+    drive_lua_tasks(&mut app);
+    app.run_lua_result("assert_color(nil, 211)").unwrap();
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+    app.run_lua_result("assert_color(tint, tint)").unwrap();
+
+    open(&mut app);
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+    app.run_lua_result("assert_color(nil, 211)").unwrap();
+}
+
+#[test]
+fn color_default_command_clears_only_the_session_tint() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        smelt.theme.set("SmeltSlug", { bg = 210 })
+        smelt.theme.set("SmeltSeparator", { fg = 211 })
+        "#,
+    )
+    .unwrap();
+    let run = |app: &mut TestApp, command: &str| {
+        app.type_text(command);
+        app.press(KeyCode::Enter);
+        drive_lua_tasks(app);
+    };
+    run(&mut app, "/color ember");
+    run(&mut app, "/color mint");
+    app.reload_lua();
+    app.run_lua_result("assert(smelt.theme.get('SmeltSlug').bg == 115)")
+        .unwrap();
+    run(&mut app, "/color default");
+    app.run_lua_result(
+        r#"
+        assert(smelt.theme.get("SmeltSlug").bg == 210)
+        assert(smelt.theme.get("SmeltSeparator").fg == 211)
+        "#,
+    )
+    .unwrap();
+
+    run(&mut app, "/color ember");
+    app.run_lua_result(
+        r#"
+        smelt.theme.use("catppuccin-mocha")
+        function session_colors()
+            return smelt.json.encode({
+                bg = smelt.theme.get("SmeltSlug").bg,
+                fg = smelt.theme.get("SmeltSeparator").fg,
+            })
+        end
+        original = session_colors()
+        "#,
+    )
+    .unwrap();
+    run(&mut app, "/color default");
+    app.run_lua_result("assert(session_colors() == original)")
+        .unwrap();
+}
+
+#[test]
 fn prompt_picker_custom_rank_uses_returned_indices() {
     for key in [KeyCode::Enter, KeyCode::Tab] {
         let mut app = TestApp::builder().build();

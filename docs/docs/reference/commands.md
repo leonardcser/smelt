@@ -26,7 +26,7 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/model [provider/model]`                | Switch model (opens picker if no name given) |
 | `/fast [on|off|toggle]`                  | Toggle accelerated inference when the active model supports it |
 | `/theme [name]`                          | Preview a bundled UI and syntax theme for this session |
-| `/color [name]`                          | Set session color |
+| `/color [name]`                          | Pick or set a session color. Use `/color default` to clear the override. |
 | `/stats`                                 | Show token usage statistics |
 | `/context`                               | Show context usage as a colored grid |
 | `/usage`, `/cost`                        | Show session cost and active-provider usage limits |
