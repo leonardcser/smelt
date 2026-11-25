@@ -221,10 +221,10 @@ settings! {
     show_slug:             Bool   = true;
     /// Keep the terminal window/tab title in sync with the current session title.
     terminal_title:        Bool   = true;
-    /// Watch Lua config inputs (init.lua, plugins/, commands/,
-    /// completers/, tools/, dialogs/, runtime overrides) and dispatch
-    /// `/reload` when any of them changes. Prompt inputs such as
-    /// AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`.
+    /// Watch the `.lua` files under the config folders (`~/.config/smelt/`,
+    /// `.smelt/`, runtime overrides) and dispatch `/reload` when any of
+    /// them changes. Prompt inputs such as AGENTS.md, SKILL.md, and
+    /// `--system-prompt` stay manual via `/reload`.
     auto_reload:           Bool   = true;
     /// Fraction of the configured context window (0, 1] at which the
     /// bundled compact plugin auto-triggers before oversized requests.

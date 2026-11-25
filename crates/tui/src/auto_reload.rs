@@ -1,5 +1,5 @@
-//! Filesystem-driven `/reload` trigger. Watches Lua config inputs
-//! (init.lua, plugins, commands, tools, completers, dialogs, runtime
+//! Filesystem-driven `/reload` trigger. Watches the `.lua` files under
+//! the config folders (user config, project `.smelt/`, runtime
 //! overrides) and pushes a debounced wake-up signal into the TUI run loop,
 //! which then re-enters [`crate::app::TuiApp::reload_lua_config`].
 //!

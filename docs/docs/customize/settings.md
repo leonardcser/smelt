@@ -44,7 +44,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `file_icon_colors` | `boolean` | `true` | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled. |
 | `show_slug` | `boolean` | `true` | Task-slug label in status bar. |
 | `terminal_title` | `boolean` | `true` | Keep the terminal window/tab title in sync with the current session title. |
-| `auto_reload` | `boolean` | `true` | Watch Lua config inputs (init.lua, plugins/, commands/, completers/, tools/, dialogs/, runtime overrides) and dispatch `/reload` when any of them changes. Prompt inputs such as AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
+| `auto_reload` | `boolean` | `true` | Watch the `.lua` files under the config folders (`~/.config/smelt/`, `.smelt/`, runtime overrides) and dispatch `/reload` when any of them changes. Prompt inputs such as AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after compaction. A group is a user message, a plain assistant message, or an assistant tool-use step together with its tool outputs. |
 | `request_audit` | `"off"` \| `"summary"` \| `"full"` | `"summary"` | Request audit storage mode. `summary` keeps timing, token, cost, and size metadata only; `full` stores reconstructable provider payloads; `off` disables request audit writes. |
