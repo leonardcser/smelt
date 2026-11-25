@@ -18,6 +18,12 @@ Use it for conventions, coding standards and anything the agent should always
 know. Because it lives in the repo, a new teammate's agent picks up the same
 rules. Disable it with `--no-system-prompt`.
 
+For instructions only for your machine, put an `AGENTS.local.md` next to the
+project's `AGENTS.md` and add it to `.gitignore` or `.git/info/exclude`. smelt
+reads it after `AGENTS.md`. Git does not copy ignored files into new
+worktrees, so in a linked worktree without its own `AGENTS.local.md`, smelt
+reads the one from the same folder of the main worktree.
+
 ## Skills
 
 Skills are on-demand knowledge packs the agent loads with the `load_skill` tool.

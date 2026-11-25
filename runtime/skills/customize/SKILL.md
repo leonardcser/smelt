@@ -86,6 +86,11 @@ Use `~/.config/smelt/` for changes that should apply everywhere. Use `./.smelt/`
 for changes that should only apply in the current project (run `/trust` once
 after creating it).
 
+Project instructions live outside `.smelt/`: the nearest `AGENTS.md`, plus an
+`AGENTS.local.md` next to it for instructions only for this machine (keep it out
+of git). Linked worktrees without their own `AGENTS.local.md` read the main
+worktree's.
+
 ### Read-only built-in source (for reference)
 
 On every launch, smelt mirrors its embedded `runtime/lua/smelt/` tree to:

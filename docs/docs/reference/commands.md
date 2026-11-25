@@ -70,7 +70,7 @@ If the window size is unknown, the grid shows the composition of used context.
 | --- | --- |
 | System | smelt's built-in agent rules, or your `--system-prompt` override. |
 | Skills | Available skill names and short descriptions, not their full guides. |
-| Instructions | Global `~/.config/smelt/AGENTS.md` and the nearest project `AGENTS.md`. |
+| Instructions | Global `~/.config/smelt/AGENTS.md` and the nearest project `AGENTS.md` and `AGENTS.local.md`. |
 | Plugins | Extra agent instructions added by enabled Lua plugins. |
 | Tools | Names, descriptions, and input schemas for tools the agent can call. |
 | History | Messages, tool results, loaded guides, and any compaction summary. |

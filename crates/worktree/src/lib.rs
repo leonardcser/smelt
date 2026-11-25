@@ -341,6 +341,22 @@ pub fn repository_root(cwd: &Path) -> Option<PathBuf> {
     cached_git_facts(cwd).toplevel
 }
 
+/// The roots of the linked worktree around `cwd` and of its repository's
+/// main worktree, as `(linked, main)`. `None` in the main worktree, in a
+/// bare or submodule repository, and outside Git.
+pub fn linked_worktree_roots(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
+    let facts = cached_git_facts(cwd);
+    let main = facts
+        .repository_key
+        .as_deref()
+        .filter(|common| common.file_name().and_then(|name| name.to_str()) == Some(".git"))
+        .and_then(Path::parent)?
+        .to_path_buf();
+    let linked = facts.toplevel?;
+    let linked = std::fs::canonicalize(&linked).unwrap_or(linked);
+    (linked != main).then_some((linked, main))
+}
+
 /// The directory that holds the managed worktrees `enter_or_create` makes
 /// from `cwd` with `root`, or `None` outside a Git work tree or for an
 /// invalid `root`.
@@ -827,6 +843,33 @@ mod tests {
         assert!(fs::read_to_string(repo.path().join(".git/info/exclude"))
             .unwrap()
             .contains(".worktrees/"));
+    }
+
+    #[test]
+    fn linked_worktree_roots_pairs_linked_and_main_roots() {
+        let repo = repo();
+        let main = fs::canonicalize(repo.path()).unwrap();
+        let linked = main.join(".worktrees/feature");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                ".worktrees/feature",
+            ],
+        );
+        let nested = linked.join("src");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            linked_worktree_roots(&nested),
+            Some((linked.clone(), main.clone()))
+        );
+        assert_eq!(linked_worktree_roots(&main), None);
+        assert_eq!(linked_worktree_roots(main.parent().unwrap()), None);
     }
 
     #[test]

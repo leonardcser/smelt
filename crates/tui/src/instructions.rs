@@ -2,8 +2,39 @@ use smelt_buffer::text;
 use std::path::{Path, PathBuf};
 
 const FILENAME: &str = "AGENTS.md";
+/// Machine-local instructions kept out of version control. Read from the same
+/// project folder as `AGENTS.md` and placed after it.
+const LOCAL_FILENAME: &str = "AGENTS.local.md";
 
-fn paths(config_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
+/// A linked Git worktree and its repository's main worktree. Git does not
+/// copy ignored files into new worktrees, so a folder without its own
+/// `AGENTS.local.md` reads the one in the same folder of the main worktree.
+struct MainWorktree {
+    linked_root: PathBuf,
+    main_root: PathBuf,
+}
+
+impl MainWorktree {
+    fn for_cwd(cwd: &Path) -> Option<Self> {
+        let (linked_root, main_root) = smelt_worktree::linked_worktree_roots(cwd)?;
+        Some(Self {
+            linked_root,
+            main_root,
+        })
+    }
+
+    /// `dir` in the main worktree, or `None` outside the linked worktree.
+    fn mirror(&self, dir: &Path) -> Option<PathBuf> {
+        let dir = std::fs::canonicalize(dir).ok()?;
+        let relative = dir.strip_prefix(&self.linked_root).ok()?;
+        Some(self.main_root.join(relative))
+    }
+}
+
+/// Global `AGENTS.md`, then `AGENTS.md` and `AGENTS.local.md` from the nearest
+/// folder at or above `cwd` that has either file. In a linked worktree,
+/// `AGENTS.local.md` may come from the same folder of the main worktree.
+fn paths(config_dir: &Path, cwd: &Path, main: Option<&MainWorktree>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     let root = config_dir.join(FILENAME);
@@ -11,24 +42,27 @@ fn paths(config_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
         paths.push(root);
     }
 
-    let mut dir = Some(cwd);
-    while let Some(d) = dir {
-        let candidate = d.join(FILENAME);
-        if candidate.exists() {
-            if paths.first().is_none_or(|r| *r != candidate) {
-                paths.push(candidate);
-            }
-            break;
+    let project = cwd.ancestors().find_map(|dir| {
+        let shared = Some(dir.join(FILENAME)).filter(|path| path.exists());
+        let local = std::iter::once(dir.to_path_buf())
+            .chain(main.and_then(|main| main.mirror(dir)))
+            .map(|dir| dir.join(LOCAL_FILENAME))
+            .find(|path| path.exists());
+        let found: Vec<PathBuf> = shared.into_iter().chain(local).collect();
+        (!found.is_empty()).then_some(found)
+    });
+    for path in project.into_iter().flatten() {
+        if !paths.contains(&path) {
+            paths.push(path);
         }
-        dir = d.parent();
     }
 
     paths
 }
 
-/// Returns all AGENTS.md files joined for the system prompt, or `None` if none found.
+/// Returns all instruction files joined for the system prompt, or `None` if none found.
 pub fn load(config_dir: &Path, cwd: &Path) -> Option<String> {
-    let files = paths(config_dir, cwd);
+    let files = paths(config_dir, cwd, MainWorktree::for_cwd(cwd).as_ref());
     let pairs: Vec<(PathBuf, String)> = files
         .into_iter()
         .filter_map(|p| std::fs::read_to_string(&p).ok().map(|c| (p, c)))
@@ -70,6 +104,115 @@ mod tests {
 
     fn pair(p: &str, c: &str) -> (PathBuf, String) {
         (PathBuf::from(p), c.to_string())
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+
+    #[test]
+    fn paths_reads_local_file_after_project_file_in_same_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let project = tmp.path().join("project");
+        let cwd = project.join("src/deep");
+        std::fs::create_dir_all(&cwd).unwrap();
+        touch(&config.join(FILENAME));
+        touch(&project.join(LOCAL_FILENAME));
+        touch(&project.join(FILENAME));
+
+        assert_eq!(
+            paths(&config, &cwd, None),
+            vec![
+                config.join(FILENAME),
+                project.join(FILENAME),
+                project.join(LOCAL_FILENAME),
+            ]
+        );
+    }
+
+    #[test]
+    fn paths_stops_at_nearest_folder_with_only_a_local_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let outer = tmp.path().join("outer");
+        let inner = outer.join("inner");
+        touch(&outer.join(FILENAME));
+        touch(&inner.join(LOCAL_FILENAME));
+
+        assert_eq!(
+            paths(&config, &inner, None),
+            vec![inner.join(LOCAL_FILENAME)]
+        );
+    }
+
+    fn worktrees() -> (tempfile::TempDir, PathBuf, MainWorktree) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let main = MainWorktree {
+            linked_root: root.join("linked"),
+            main_root: root.join("main"),
+        };
+        std::fs::create_dir_all(main.linked_root.join("crates/x")).unwrap();
+        (tmp, root.join("config"), main)
+    }
+
+    #[test]
+    fn paths_in_linked_worktree_reads_local_file_from_main_worktree() {
+        let (_tmp, config, main) = worktrees();
+        touch(&main.linked_root.join(FILENAME));
+        touch(&main.main_root.join(FILENAME));
+        touch(&main.main_root.join(LOCAL_FILENAME));
+
+        assert_eq!(
+            paths(&config, &main.linked_root.join("crates/x"), Some(&main)),
+            vec![
+                main.linked_root.join(FILENAME),
+                main.main_root.join(LOCAL_FILENAME),
+            ]
+        );
+    }
+
+    #[test]
+    fn paths_in_linked_worktree_prefers_its_own_local_file() {
+        let (_tmp, config, main) = worktrees();
+        touch(&main.linked_root.join(FILENAME));
+        touch(&main.linked_root.join(LOCAL_FILENAME));
+        touch(&main.main_root.join(LOCAL_FILENAME));
+
+        assert_eq!(
+            paths(&config, &main.linked_root, Some(&main)),
+            vec![
+                main.linked_root.join(FILENAME),
+                main.linked_root.join(LOCAL_FILENAME),
+            ]
+        );
+    }
+
+    #[test]
+    fn paths_in_linked_worktree_mirrors_the_nearest_project_folder() {
+        let (_tmp, config, main) = worktrees();
+        touch(&main.linked_root.join(FILENAME));
+        touch(&main.main_root.join("crates/x").join(LOCAL_FILENAME));
+
+        assert_eq!(
+            paths(&config, &main.linked_root.join("crates/x"), Some(&main)),
+            vec![main.main_root.join("crates/x").join(LOCAL_FILENAME)]
+        );
+    }
+
+    #[test]
+    fn paths_lists_config_dir_files_once_when_cwd_is_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().to_path_buf();
+        touch(&config.join(FILENAME));
+        touch(&config.join(LOCAL_FILENAME));
+
+        assert_eq!(
+            paths(&config, &config, None),
+            vec![config.join(FILENAME), config.join(LOCAL_FILENAME)]
+        );
     }
 
     #[test]
