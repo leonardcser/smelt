@@ -8,6 +8,11 @@ description = "Transcript model, shared content storage, markdown parsing, and h
 license = "MIT"
 repository = "https://github.com/leonardcser/smelt"
 
+[features]
+# Gives deadline-bound work a budget scheduler load cannot exhaust, so the
+# `smelt-tui` harness renders the same result on a busy machine.
+harness = []
+
 [dependencies]
 smelt-protocol = { workspace = true }
 smelt-buffer = { workspace = true }

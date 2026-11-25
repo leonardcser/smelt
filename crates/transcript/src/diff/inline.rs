@@ -16,7 +16,7 @@ const ALIGN_BYTES: usize = 8192;
 const PAIR_BYTES: usize = 8192;
 // Tests compare highlights across views, so scheduler load must not decide
 // whether a row gets word-level or whole-line ranges.
-const WORK_BUDGET: Duration = if cfg!(test) {
+const WORK_BUDGET: Duration = if cfg!(any(test, feature = "harness")) {
     Duration::from_secs(5)
 } else {
     Duration::from_millis(5)
