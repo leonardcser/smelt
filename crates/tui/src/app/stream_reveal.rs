@@ -245,15 +245,22 @@ impl<K: Hash + Eq> StreamReveal<K> {
             let mut last_row = None;
             // Rows past what each segment had, in all and on screen.
             let (mut new_rows, mut new_rows_shown) = (0, 0);
+            // A fold or rewrap can remove the text that was still typing. Finish
+            // that reveal rather than applying its count to earlier rows.
+            let mut interrupted = rewrapped;
+            let mut fresh_tail = 0usize;
             stream.tail_rows.clear();
             for segment in &mut stream.segments {
-                if rewrapped || arrived.is_none() {
+                if rewrapped {
                     segment.rows = None;
                     segment.glyphs.clear();
                 }
                 let Some((start, rows)) = layout(segment.id) else {
+                    interrupted |= !segment.glyphs.is_empty();
+                    segment.glyphs.clear();
                     continue;
                 };
+                interrupted |= segment.rows.is_some_and(|old| rows < old);
                 if rows > 0 {
                     last_row = last_row.max(Some(start + rows - 1));
                 }
@@ -271,10 +278,18 @@ impl<K: Hash + Eq> StreamReveal<K> {
                     let row = row - start;
                     let is_new = known.is_some_and(|known| row >= known);
                     new_rows_shown += RowIndex::from(is_new);
-                    let before = segment.glyphs.get(&row).copied().or(is_new.then_some(0));
-                    if let Some(before) = before {
-                        gained += i64::from(count) - i64::from(before);
+                    let before =
+                        segment
+                            .glyphs
+                            .get(&row)
+                            .copied()
+                            .unwrap_or(if is_new { 0 } else { count });
+                    gained += i64::from(count) - i64::from(before);
+                    interrupted |= count < before;
+                    if before > 0 {
+                        fresh_tail = 0;
                     }
+                    fresh_tail += count.saturating_sub(before) as usize;
                     glyphs.insert(row, count);
                     shown += count as usize;
                     stream.tail_rows.push(y);
@@ -282,6 +297,11 @@ impl<K: Hash + Eq> StreamReveal<K> {
                 segment.rows = Some(rows);
                 segment.glyphs = glyphs;
             }
+            if interrupted || gained > fresh_tail as i64 || (arrived.is_none() && gained != 0) {
+                stream.pace.cap(0);
+            }
+            // Offscreen growth estimates set the pace, not which glyphs may hide.
+            shown = shown.min(stream.pace.hidden + fresh_tail);
             if let Some(arrived) = arrived {
                 let mut gained = usize::try_from(gained).unwrap_or(0);
                 // New rows off screen grew too: estimate them from those that
@@ -351,7 +371,7 @@ fn row_glyphs(grid: &Grid, composed: &ComposedFrame, painted: PaintedWindow, y: 
         .count() as u32
 }
 
-/// Blank the last `count` glyphs on `rows`, scanning each from the right.
+/// Blank each row's hidden suffix, scanning from the right.
 /// A blanked cell takes the style of the row's trailing blank, so underlines,
 /// inline backgrounds and selections do not show ahead of the text.
 fn hide_tail(
@@ -359,9 +379,8 @@ fn hide_tail(
     composed: &ComposedFrame,
     painted: PaintedWindow,
     rows: &[u16],
-    count: usize,
+    mut left: usize,
 ) {
-    let mut left = count;
     let text = painted.text;
     for &y in rows {
         if left == 0 {
@@ -376,9 +395,9 @@ fn hide_tail(
             .map(|cell| cell.style);
         for x in (text.x..text.right()).rev() {
             if left == 0 {
-                return;
+                break;
             }
-            if !is_glyph(grid, composed, painted, x, y) {
+            if !is_glyph(composed.grid(), composed, painted, x, y) {
                 continue;
             }
             let wide = grid.cell(x, y).symbol.width() > 1;
@@ -558,6 +577,44 @@ mod tests {
             spent < MAX_SPREAD * 6 / 10,
             "half the burst shows, so it types in about half the time: {spent:?}"
         );
+    }
+
+    #[test]
+    fn shrinking_stream_tail_keeps_revealed_text_visible() {
+        let now = Instant::now();
+        let mut reveal = StreamReveal::default();
+        let layout = |id| Some((if id == 1 { 0 } else { 3 }, 1));
+        reveal.track((), 1, Baseline::Current);
+        let (base, window) = screen(&["OLD TEXT"], 0);
+        reveal.measure(&base, Some(window), layout, now);
+
+        reveal.track((), 2, Baseline::Empty);
+        reveal.arrive(&(), now);
+        let (full, _) = screen(&["OLD TEXT", "", "", "abcdefgh"], 0);
+        reveal.measure(&full, Some(window), layout, now);
+        let mut frame = full.grid().clone();
+        assert!(reveal.present(&mut frame, &full, now));
+        assert_eq!(frame.cell(0, 3).symbol, 'a');
+        assert_eq!(frame.cell(1, 3).symbol, ' ');
+
+        let (short, _) = screen(&["OLD TEXT", "", "", "ab"], 0);
+        reveal.measure(&short, Some(window), layout, now);
+        let mut frame = short.grid().clone();
+        reveal.present(&mut frame, &short, now);
+        assert_eq!(frame.row(0), short.grid().row(0));
+        assert_eq!(frame.row(3), short.grid().row(3));
+
+        // The next append still types in, even as the viewport moves.
+        let (next, window) = screen(&["", "", "abcdef"], 1);
+        reveal.arrive(&(), now);
+        reveal.measure(&next, Some(window), layout, now);
+        let mut frame = next.grid().clone();
+        assert!(reveal.present(&mut frame, &next, now));
+        assert_eq!(frame.cell(1, 2).symbol, 'b');
+        assert_eq!(frame.cell(5, 2).symbol, ' ');
+        let mut frame = next.grid().clone();
+        assert!(!reveal.present(&mut frame, &next, now + MAX_SPREAD));
+        assert_eq!(frame.row(2), next.grid().row(2));
     }
 
     #[test]
