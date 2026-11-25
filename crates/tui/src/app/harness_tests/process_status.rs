@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn restored_background_calls_keep_known_results_and_stop_unmatched_work() {
-    use protocol::{BackgroundOutcome, JobTermination, ProcessStatusEvent, ToolOutcome};
+    use protocol::{BackgroundOutcome, DeliveryEvent, JobTermination, ToolOutcome};
     use smelt_transcript::content::transcript::Transcript;
     let mut app = TestApp::builder().build();
     app.start_turn(1);
@@ -19,13 +19,9 @@ fn restored_background_calls_keep_known_results_and_stop_unmatched_work() {
             None,
         );
     }
-    let end = ProcessStatusEvent::background_process_completed(
-        "native:done",
-        Some(0),
-        JobTermination::Exited,
-    )
-    .ended_at(app.unix_now_ms() + 2500);
-    app.push_process_status(end, "");
+    let end = DeliveryEvent::process_ended("native:done", Some(0), JobTermination::Exited)
+        .ended_at(app.unix_now_ms() + 2500);
+    app.push_delivery(end, "");
     let records = app
         .tui
         .conversation
@@ -62,13 +58,9 @@ fn restored_background_calls_keep_known_results_and_stop_unmatched_work() {
     );
     assert_eq!(calls.next(), Some((Some(BackgroundOutcome::Stopped), None)));
     // Native completion notes can arrive after the process list changes.
-    resumed.push_process_status(
-        ProcessStatusEvent::background_process_completed(
-            "native:missing",
-            Some(1),
-            JobTermination::Exited,
-        )
-        .ended_at(app.unix_now_ms() + 3500),
+    resumed.push_delivery(
+        DeliveryEvent::process_ended("native:missing", Some(1), JobTermination::Exited)
+            .ended_at(app.unix_now_ms() + 3500),
         "",
     );
     let history = resumed.tui.conversation.transcript().history();
@@ -766,12 +758,12 @@ fn grouped_background_process_output_expands_with_keyboard() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(90, 24);
     for (id, code, output) in [("proc_1", 0, "tests passed"), ("proc_2", 7, "build failed")] {
-        let event = protocol::ProcessStatusEvent::background_process_completed(
+        let event = protocol::DeliveryEvent::process_ended(
             id,
             Some(code),
             protocol::JobTermination::Exited,
         );
-        app.push_process_status(event, output);
+        app.push_delivery(event, output);
     }
     let collapsed = app.render_to_frame().text();
     assert!(
@@ -797,15 +789,12 @@ fn background_process_output_mouse_focus_and_enter_expand_beyond_preview_limit()
     let mut app = TestApp::builder().build();
     app.set_terminal_size(90, 24);
     assert!(app.run_lua("smelt.settings.transcript = { limits = { tool_output_rows = 3 } }"));
-    let event = protocol::ProcessStatusEvent::background_process_completed(
-        "proc_1",
-        Some(0),
-        protocol::JobTermination::Exited,
-    );
+    let event =
+        protocol::DeliveryEvent::process_ended("proc_1", Some(0), protocol::JobTermination::Exited);
     let output = (0..30)
         .map(|n| format!("line {n:02}: café\n"))
         .collect::<String>();
-    app.push_process_status(event, &output);
+    app.push_delivery(event, &output);
     let collapsed = app.render_to_frame().text();
     let row = collapsed
         .lines()
@@ -829,7 +818,7 @@ fn background_process_output_mouse_focus_and_enter_expand_beyond_preview_limit()
         "expanded output must not be capped"
     );
 
-    assert!(app.run_lua("smelt.transcript.fold_kind('process_status', 'peek')"));
+    assert!(app.run_lua("smelt.transcript.fold_kind('delivery', 'peek')"));
     let peek = app.render_to_frame().text();
     assert!(peek.contains("line 29: café"), "{peek}");
     assert!(!peek.contains("line 00: café"), "{peek}");
@@ -868,7 +857,7 @@ fn job_completion_after_final_request_starts_follow_up_turn() {
                 protocol::UiCommand::StartTurn(payload)
                     if payload.input.note_ref().is_some_and(|note|
                         note.text() == "background process 4242 exited with code 1"
-                            && note.process_output() == Some("queued output"))
+                            && note.delivery_body() == Some("queued output"))
             )
     )));
 }
@@ -908,7 +897,7 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
         protocol::UiCommand::StartTurn(payload)
             if payload.input.note_ref().is_some_and(|note|
                 note.text() == "background process 4242 exited with code 1"
-                    && note.process_output() == Some("queued output"))
+                    && note.delivery_body() == Some("queued output"))
     )));
 }
 
@@ -916,12 +905,9 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
 fn job_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
     let mut app = TestApp::builder().build();
     app.start_turn(7);
-    let note = protocol::HistoryNote::process_status_event(
-        protocol::ProcessStatusEvent::background_process_completed(
-            "4242",
-            Some(0),
-            protocol::JobTermination::Exited,
-        ),
+    let note = protocol::HistoryNote::delivery(
+        protocol::DeliveryEvent::process_ended("4242", Some(0), protocol::JobTermination::Exited),
+        "",
     );
 
     app.tui
@@ -964,12 +950,13 @@ fn mid_turn_job_completions_wait_dimmed_under_the_transcript() {
                 },
             ));
         notes.push(protocol::HistoryItem::note(
-            protocol::HistoryNote::process_status_event(
-                protocol::ProcessStatusEvent::background_process_completed(
+            protocol::HistoryNote::delivery(
+                protocol::DeliveryEvent::process_ended(
                     id,
                     Some(code),
                     protocol::JobTermination::Exited,
                 ),
+                "",
             ),
         ));
         let frame = app.render_to_frame();

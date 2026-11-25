@@ -199,8 +199,8 @@ Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
 **Availability:** Terminal UI only; raises in headless mode.
 
 The strip of blocks that wait to join the transcript. It takes no rows
-while nothing is pending. Its built-in sources are `process_status`,
-`monitor_event`, and `agent_message`, one row each when nonempty.
+while nothing is pending. Its built-in `deliveries` source shows one row
+per run of pending deliveries, in the order each run first arrived.
 
 ## `smelt.transcript.pending_blocks`
 
@@ -210,7 +210,7 @@ fun(): table
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Return the blocks that wait to join the transcript. A note that arrives during a turn, such as a finished background process or another agent's message, joins the transcript at the next request boundary, or once the native session finishes the steps before it. Notes the app stages come first, then notes the native session holds; each part is in the order it joins, where agent messages follow every other kind. Each entry has the shape block renderers get, without `id` and `index`; `kind` is the block kind, such as `process_status`. The `transcript_pending_revision` signal changes whenever this list changes.
+Return the blocks that wait to join the transcript. A note that arrives during a turn, such as a finished background process or another agent's message, joins the transcript at the next request boundary, or once the native session finishes the steps before it. Notes the app stages come first, then notes the native session holds; in each part, deliveries join in runs of one kind (`run`), each run where its first delivery arrived. Each entry has the shape block renderers get, without `id` and `index`; `kind` is the block kind, such as `delivery`. The `transcript_pending_revision` signal changes whenever this list changes.
 
 ## `smelt.transcript.pills`
 

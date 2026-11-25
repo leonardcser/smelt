@@ -4376,7 +4376,7 @@ fn heterogeneous_hot_path_history_item(idx: usize, target_bytes: usize) -> proto
                 provider: None,
             }],
         )),
-        _ => protocol::HistoryItem::note(protocol::HistoryNote::process_status(format!(
+        _ => protocol::HistoryItem::note(protocol::HistoryNote::notice(format!(
             "background process {} finished successfully",
             idx / 4
         ))),

@@ -3617,8 +3617,10 @@ mod tests {
         };
 
         turn.push_turn_content(
-            Content::text(protocol::process_status_note(
+            Content::text(protocol::delivery_note(
+                protocol::DeliveryChannel::Process,
                 "Background process 751225 exited with code 1.",
+                "",
             )),
             None,
             false,
@@ -3635,7 +3637,7 @@ mod tests {
 
         assert!(matches!(
             &turn.history[1],
-            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, .. })
+            HistoryItem::Note(protocol::HistoryNote::Delivery { text, .. })
                 if text == "Background process 751225 exited with code 1."
         ));
         assert!(matches!(
@@ -3643,12 +3645,13 @@ mod tests {
             HistoryItem::Note(protocol::HistoryNote::ModeChange { text, .. })
                 if text == "now in write mode."
         ));
-        let typed_note = protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed(
+        let typed_note = protocol::HistoryNote::delivery(
+            protocol::DeliveryEvent::process_ended(
                 "751225",
                 Some(1),
                 protocol::JobTermination::Exited,
             ),
+            "",
         );
         turn.push_current_turn_input(protocol::StartTurnInput::note(typed_note.clone()));
 
@@ -3912,12 +3915,13 @@ mod tests {
 
     #[tokio::test]
     async fn checkpointed_start_turn_emits_canonical_typed_note_update() {
-        let note = protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed(
+        let note = protocol::HistoryNote::delivery(
+            protocol::DeliveryEvent::process_ended(
                 "751225",
                 Some(1),
                 protocol::JobTermination::Exited,
             ),
+            "",
         );
         let mut config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
         config.host_callbacks = crate::HostCallbacks::Disabled;

@@ -57,7 +57,7 @@ app_story!(mode_block_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
-app_story!(process_status_block_states, |ctx| {
+app_story!(process_delivery_block_states, |ctx| {
     ctx.set_viewport(64, 10);
     ctx.push_background_process_completed(
         "4210",
@@ -66,7 +66,7 @@ app_story!(process_status_block_states, |ctx| {
     );
     ctx.assert_snapshot_named("collapsed");
 
-    ctx.run_lua("smelt.transcript.fold_kind('process_status', 'open')");
+    ctx.run_lua("smelt.transcript.fold_kind('delivery', 'open')");
     ctx.assert_snapshot_named("expanded");
 });
 
@@ -78,7 +78,7 @@ app_story!(native_agent_process_failed, |ctx| {
         protocol::JobTermination::Failed,
         "error: address already in use",
     );
-    ctx.run_lua("smelt.transcript.fold_kind('process_status', 'open')");
+    ctx.run_lua("smelt.transcript.fold_kind('delivery', 'open')");
     ctx.assert_snapshot_named("expanded");
 });
 

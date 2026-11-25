@@ -35,11 +35,12 @@ pub use history::{
     apply_history_append, classify_user_history_content, compaction_summary_content,
     displayed_tool_name, effective_mode_at, format_tokens, history_from_messages,
     history_item_from_user_content, history_item_message_count, history_to_messages,
-    plan_history_append, replace_last_note_kind, transcript_block_kind_matches_history_item,
-    AgentMessageEvent, AssistantStep, BackgroundOutcome, HistoryAppend, HistoryAppendPlan,
-    HistoryAppendPolicy, HistoryAppendResult, HistoryAppendView, HistoryItem, HistoryNote,
-    HistoryNoteKind, HistoryNoteProjection, HistoryTailBudget, JobTermination, ProcessStatusEvent,
-    ToolInvocation, UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
+    in_arrival_runs, plan_history_append, replace_last_note_kind,
+    transcript_block_kind_matches_history_item, AssistantStep, BackgroundOutcome, DeliveryChannel,
+    DeliveryEvent, HistoryAppend, HistoryAppendPlan, HistoryAppendPolicy, HistoryAppendResult,
+    HistoryAppendView, HistoryItem, HistoryNote, HistoryNoteKind, HistoryNoteProjection,
+    HistoryTailBudget, JobTermination, ToolInvocation, UserHistoryContent,
+    COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
 pub use history_identity::{CheckpointIdentity, HistoryChain, HistoryIdentity, TurnHistory};
 pub use message::{
@@ -58,8 +59,8 @@ pub use model::{
     RequestRuntimeConfig,
 };
 pub use note::{
-    agent_message_note, context_note, mode_change_note, process_status_note,
-    AGENT_MESSAGE_NOTE_PREFIX, CONTEXT_NOTE_PREFIX, MODE_NOTE_PREFIX, PROCESS_STATUS_NOTE_PREFIX,
+    context_note, delivery_note, mode_change_note, AGENT_NOTE_PREFIX, CONTEXT_NOTE_PREFIX,
+    DELIVERY_NOTE_PREFIXES, MODE_NOTE_PREFIX, PROCESS_NOTE_PREFIX,
 };
 pub use style::{StyledLines, StyledSpan};
 pub use usage::{ModelConfigOverrides, ThinkingBudgets, TokenUsage, TurnMeta};

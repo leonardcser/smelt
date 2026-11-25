@@ -394,12 +394,12 @@ impl TestApp {
         self.tui.update_compaction_preview(summary.to_string());
     }
 
-    /// Push a process-status block without spawning a subprocess.
-    pub fn push_process_status(&mut self, event: protocol::ProcessStatusEvent, output: &str) {
-        let note = protocol::HistoryNote::process_status_with_output(event, output);
+    /// Push a delivery block without spawning the work that delivers it.
+    pub fn push_delivery(&mut self, event: protocol::DeliveryEvent, body: &str) {
+        let note = protocol::HistoryNote::delivery(event, body);
         let block = self
             .history_note_to_block(&note)
-            .expect("process-status note has a transcript block");
+            .expect("a delivery has a transcript block");
         self.tui.push_block(block);
     }
 
@@ -411,17 +411,15 @@ impl TestApp {
         title: &str,
         status: protocol::AgentStatus,
     ) {
-        let event = protocol::AgentMessageEvent::BackgroundAgentEnded {
-            agent_id: agent_id.into(),
-            title: title.into(),
-            status,
-            ended_at_ms: Some(self.tool_called_at_ms()),
-        };
-        let note = protocol::HistoryNote::agent_message(event, "");
-        let block = self
-            .history_note_to_block(&note)
-            .expect("agent-message note has a transcript block");
-        self.tui.push_block(block);
+        self.push_delivery(
+            protocol::DeliveryEvent::AgentEnded {
+                agent_id: agent_id.into(),
+                title: title.into(),
+                status,
+                ended_at_ms: Some(self.tool_called_at_ms()),
+            },
+            "",
+        );
     }
 
     /// The harness clock's current time, in Unix milliseconds.

@@ -36,3 +36,18 @@ once, for about a second at 10k rows.
 
 Remove the NULL fallback in `chain_before` together with a migration that
 backfills every chain, once support for 0.8 databases ends.
+
+## `delivery-notes`
+
+Background processes, monitors and other agents once joined the conversation
+as two note kinds: `process_status` and `agent_message`, with events
+`background_process_completed`, `message_received` and `background_agent_ended`.
+One `delivery` note now carries all of them. Sessions saved before keep the old
+names in their history rows and transcript records. Serde aliases on
+`HistoryNote`, `DeliveryEvent`, `Block` and `StoredBlockKind`, and kind
+mappings in the store, read them as deliveries. Stored block summaries kept a
+`group_process` object instead of the event: `lenient_group_delivery` reads a
+finished process from it, and drops it for other blocks.
+
+Remove the aliases and mappings once sessions written before deliveries no
+longer need to load.

@@ -53,34 +53,32 @@ pub fn cleared_context_note(name: &str) -> String {
     )
 }
 
-/// Marker prefix on synthetic user messages that announce a background process
-/// completion. The transcript renderer keys on this so persisted/resumed notes
-/// remain process-status rows instead of being rebuilt as chat blocks.
-pub const PROCESS_STATUS_NOTE_PREFIX: &str = "[smelt:process] ";
-
-/// Build a synthetic user-note text appended to history when a background
-/// process exits. The visible body is kept separate from its stable marker so
-/// session restore can recover the original transcript block kind.
-pub fn process_status_note(note: &str) -> String {
-    format!(
-        "{PROCESS_STATUS_NOTE_PREFIX}{}",
-        text::trim_whitespace(note)
-    )
-}
+/// Marker prefix on synthetic user messages that carry a delivery from the
+/// session's own background work, such as a finished process.
+pub const PROCESS_NOTE_PREFIX: &str = "[smelt:process] ";
 
 /// Marker prefix on synthetic user messages that carry what another agent
 /// added to the conversation.
-pub const AGENT_MESSAGE_NOTE_PREFIX: &str = "[smelt:agent] ";
+pub const AGENT_NOTE_PREFIX: &str = "[smelt:agent] ";
 
-/// Build the model-visible form of another agent's message or report: what
-/// it is, then its body.
-pub fn agent_message_note(note: &str, body: &str) -> String {
+/// The marker prefixes of deliveries, which session restore reads back as
+/// deliveries instead of user turns.
+pub const DELIVERY_NOTE_PREFIXES: [&str; 2] = [PROCESS_NOTE_PREFIX, AGENT_NOTE_PREFIX];
+
+/// Build the model-visible form of a delivery: its channel's marker, what it
+/// is, then its body. The marker bytes stay stable so they do not bust the
+/// prompt cache.
+pub fn delivery_note(channel: crate::DeliveryChannel, note: &str, body: &str) -> String {
+    let prefix = match channel {
+        crate::DeliveryChannel::Process => PROCESS_NOTE_PREFIX,
+        crate::DeliveryChannel::Agent => AGENT_NOTE_PREFIX,
+    };
     let note = text::trim_whitespace(note);
     let body = text::trim_whitespace(body);
     if body.is_empty() {
-        format!("{AGENT_MESSAGE_NOTE_PREFIX}{note}")
+        format!("{prefix}{note}")
     } else {
-        format!("{AGENT_MESSAGE_NOTE_PREFIX}{note}:\n{body}")
+        format!("{prefix}{note}:\n{body}")
     }
 }
 
@@ -103,8 +101,8 @@ mod tests {
         let body = " \u{301}status\u{600} ";
         assert_eq!(mode_change_note(body), format!("{MODE_NOTE_PREFIX}{body}"));
         assert_eq!(
-            process_status_note(body),
-            format!("{PROCESS_STATUS_NOTE_PREFIX}{body}")
+            delivery_note(crate::DeliveryChannel::Process, body, ""),
+            format!("{PROCESS_NOTE_PREFIX}{body}")
         );
     }
 }

@@ -11379,8 +11379,10 @@ impl TuiApp {
         if self.block_read_only_mutation("update read-only session history") {
             return;
         }
-        let mut appends = self.conversation.take_pending_history_appends();
-        appends.sort_by_key(super::PendingHistoryAppend::join_rank);
+        let appends = protocol::in_arrival_runs(
+            self.conversation.take_pending_history_appends(),
+            super::PendingHistoryAppend::item,
+        );
         for append in appends {
             let mode_base = match append.mode() {
                 Some(_) => match self.mode_append_base() {

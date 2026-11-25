@@ -480,8 +480,8 @@ async fn background_child_outlives_parent_result_and_reports_only_its_summary_to
     assert!(
         matches!(
             reports.as_slice(),
-            [HistoryItem::Note(protocol::HistoryNote::AgentMessage {
-                event: protocol::AgentMessageEvent::BackgroundAgentEnded {
+            [HistoryItem::Note(protocol::HistoryNote::Delivery {
+                event: protocol::DeliveryEvent::AgentEnded {
                     status: protocol::AgentStatus::Completed,
                     ..
                 },
@@ -763,8 +763,8 @@ async fn another_agents_message_joins_the_conversation_before_the_answer_to_it()
     let message = history
         .iter()
         .position(|item| {
-            matches!(item, HistoryItem::Note(protocol::HistoryNote::AgentMessage {
-                event: protocol::AgentMessageEvent::MessageReceived { from },
+            matches!(item, HistoryItem::Note(protocol::HistoryNote::Delivery {
+                event: protocol::DeliveryEvent::AgentMessage { from },
                 body,
                 ..
             }) if from == "worker" && body == "PEER_BODY")
@@ -2449,13 +2449,14 @@ async fn background_shell_keeps_claude_code_until_it_wakes_smelt() {
         unreachable!("the position matched a note");
     };
     let ended_at = note
-        .process_status_event_ref()
-        .and_then(protocol::ProcessStatusEvent::ended_at_ms)
+        .delivery_event()
+        .and_then(protocol::DeliveryEvent::ended_job)
+        .and_then(|(_, _, at)| at)
         .expect("the note says when the shell ended");
     assert_eq!(
         history[finished],
-        HistoryItem::note(protocol::HistoryNote::process_status_with_output(
-            protocol::ProcessStatusEvent::background_process_completed(
+        HistoryItem::note(protocol::HistoryNote::delivery(
+            protocol::DeliveryEvent::process_ended(
                 "claude-code:shell-task",
                 None,
                 protocol::JobTermination::Failed,
@@ -2481,7 +2482,7 @@ async fn background_shell_keeps_claude_code_until_it_wakes_smelt() {
 /// limit. Returns the notes the host heard before the error, and the error.
 async fn limit_hit_between_turns(
     scenario: &str,
-) -> (Vec<protocol::HistoryNoteKind>, Option<EngineEvent>) {
+) -> (Vec<protocol::DeliveryChannel>, Option<EngineEvent>) {
     let fixture = Fixture::new(scenario);
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, Vec::new()));
@@ -2498,7 +2499,14 @@ async fn limit_hit_between_turns(
                 assert_eq!(session_id, "test-session");
                 match *event {
                     EngineEvent::HistoryAppended { delta, .. } if error.is_none() => {
-                        notes.extend(delta.items.iter().filter_map(HistoryItem::note_kind));
+                        notes.extend(
+                            delta
+                                .items
+                                .iter()
+                                .filter_map(HistoryItem::as_note)
+                                .filter_map(protocol::HistoryNote::delivery_event)
+                                .map(protocol::DeliveryEvent::channel),
+                        );
                     }
                     event @ EngineEvent::TurnError { .. } => error = Some(event),
                     _ => {}
@@ -2519,12 +2527,9 @@ async fn limit_hit_between_turns_reaches_the_host_before_the_session_ends() {
     for (scenario, trigger) in [
         (
             "shell-background-limited",
-            protocol::HistoryNoteKind::ProcessStatus,
+            protocol::DeliveryChannel::Process,
         ),
-        (
-            "peer-message-limited",
-            protocol::HistoryNoteKind::AgentMessage,
-        ),
+        ("peer-message-limited", protocol::DeliveryChannel::Agent),
     ] {
         let (notes, error) = limit_hit_between_turns(scenario).await;
         assert!(notes.contains(&trigger), "{scenario}: {notes:?}");

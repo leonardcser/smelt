@@ -163,13 +163,11 @@ app_story!(successful_background_process_group, |ctx| {
 });
 
 app_story!(monitor_event_pending, |ctx| {
-    use protocol::{
-        AgentMessageEvent, EngineEvent, HistoryNote, JobTermination, ProcessStatusEvent,
-    };
+    use protocol::{DeliveryEvent, EngineEvent, HistoryNote, JobTermination};
     ctx.set_viewport(76, 14);
     let monitor = |body| {
-        HistoryNote::process_status_with_output(
-            ProcessStatusEvent::MonitorEvent {
+        HistoryNote::delivery(
+            DeliveryEvent::MonitorEvent {
                 process_id: "b1".into(),
                 name: "watch log".into(),
             },
@@ -179,14 +177,13 @@ app_story!(monitor_event_pending, |ctx| {
     ctx.engine(EngineEvent::NativeHeldNotes {
         notes: vec![
             monitor("first"),
-            HistoryNote::process_status_event(ProcessStatusEvent::background_process_completed(
-                "4210",
-                Some(0),
-                JobTermination::Exited,
-            )),
+            HistoryNote::delivery(
+                DeliveryEvent::process_ended("4210", Some(0), JobTermination::Exited),
+                "",
+            ),
             monitor("second"),
-            HistoryNote::agent_message(
-                AgentMessageEvent::MessageReceived {
+            HistoryNote::delivery(
+                DeliveryEvent::AgentMessage {
                     from: "worker".into(),
                 },
                 "Done.",

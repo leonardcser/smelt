@@ -1158,7 +1158,7 @@ impl TuiApp {
         true
     }
 
-    pub(crate) fn begin_process_status_turn(
+    pub(crate) fn begin_delivery_turn(
         &mut self,
         history_note: protocol::HistoryNote,
     ) -> Option<TurnState> {
@@ -1628,7 +1628,7 @@ impl TuiApp {
             if let Some(note) = self.conversation.take_pending_follow_up_note() {
                 self.prompt.queue_front(
                     crate::app::QueueStage::Turn,
-                    crate::app::QueuedInput::ProcessStatus(note),
+                    crate::app::QueuedInput::Delivery(note),
                 );
             }
         }
@@ -1870,20 +1870,20 @@ impl TuiApp {
     pub(crate) fn handle_job_completed(&mut self, completion: smelt_core::process::JobCompletion) {
         self.core.jobs.acknowledge_completion(&completion.id);
         let id = display_safe_process_id(&completion.id);
-        let event = protocol::ProcessStatusEvent::background_process_completed(
+        let event = protocol::DeliveryEvent::process_ended(
             id,
             completion.exit_code,
             completion.termination,
         )
         .ended_at(engine::clock::unix_time_ms(self.core.clock.as_ref()));
-        let note = protocol::HistoryNote::process_status_with_output(event, completion.output);
+        let note = protocol::HistoryNote::delivery(event, completion.output);
         if self.agent_is_running() || self.conversation.turn_pause().is_some() {
-            self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
+            self.queue_history_append(crate::app::PendingHistoryAppend::delivered(note));
         } else if self.prompt_input_is_busy() || !self.prompt.queue_is_empty() {
             self.prompt
-                .try_queue_turn(crate::app::QueuedInput::ProcessStatus(note));
+                .try_queue_turn(crate::app::QueuedInput::Delivery(note));
         } else {
-            let turn = self.begin_process_status_turn(note);
+            let turn = self.begin_delivery_turn(note);
             self.conversation.set_active(turn);
         }
     }
@@ -2448,14 +2448,14 @@ mod tests {
         );
     }
 
-    fn process_status_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
+    fn delivery_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
         let history = app.tui.conversation.transcript().history();
         history
             .order
             .iter()
             .filter_map(|id| history.block(*id))
             .filter_map(|block| match block {
-                Block::ProcessStatus { text, .. } => Some(text.clone()),
+                Block::Delivery { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -3643,7 +3643,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_job_completion_starts_turn_with_process_status_block() {
+    fn idle_job_completion_starts_turn_with_delivery_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
         app.tui
@@ -3658,13 +3658,13 @@ mod tests {
         assert!(app.tui.agent_is_running());
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
-            process_status_blocks(&app),
+            delivery_blocks(&app),
             vec!["background process 1234 finished successfully"]
         );
     }
 
     #[test]
-    fn idle_oom_completion_starts_turn_with_distinct_process_status() {
+    fn idle_oom_completion_starts_turn_with_distinct_delivery() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
         app.tui
@@ -3678,13 +3678,13 @@ mod tests {
         app.wait_for_turn_dispatch();
         assert!(app.tui.agent_is_running());
         assert_eq!(
-            process_status_blocks(&app),
+            delivery_blocks(&app),
             vec!["background process proc_123 was terminated after an out-of-memory event"]
         );
     }
 
     #[test]
-    fn process_status_resize_keeps_transcript_cursor_in_bounds() {
+    fn delivery_resize_keeps_transcript_cursor_in_bounds() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
         app.tui
@@ -3710,7 +3710,7 @@ mod tests {
     }
 
     #[test]
-    fn running_agent_job_completion_queues_process_status_append() {
+    fn running_agent_job_completion_queues_delivery_append() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(7);
 
@@ -3730,14 +3730,15 @@ mod tests {
                 output: String::new(),
             });
 
-        assert!(process_status_blocks(&app).is_empty());
-        let expected = protocol::HistoryItem::note(protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed(
+        assert!(delivery_blocks(&app).is_empty());
+        let expected = protocol::HistoryItem::note(protocol::HistoryNote::delivery(
+            protocol::DeliveryEvent::process_ended(
                 "4242",
                 Some(9),
                 protocol::JobTermination::Exited,
             )
             .ended_at(engine::clock::unix_time_ms(app.tui.core.clock.as_ref())),
+            "",
         ));
         let after = app
             .tui
@@ -3749,35 +3750,35 @@ mod tests {
         assert_eq!(&after[..before.len()], before.as_slice());
         assert_eq!(&after[before.len()..], std::slice::from_ref(&expected));
 
-        let process_status_appends: Vec<_> = app
+        let delivery_appends: Vec<_> = app
             .tui
             .conversation
             .pending_history_appends()
             .iter()
             .filter(|append| {
-                append.history_item().note_kind() == Some(protocol::HistoryNoteKind::ProcessStatus)
+                append.history_item().note_kind() == Some(protocol::HistoryNoteKind::Delivery)
             })
             .collect();
-        assert_eq!(process_status_appends.len(), 1);
-        assert_eq!(process_status_appends[0].history_item(), expected);
+        assert_eq!(delivery_appends.len(), 1);
+        assert_eq!(delivery_appends[0].history_item(), expected);
     }
 
     #[test]
-    fn queued_process_status_starts_process_status_turn() {
+    fn queued_delivery_starts_delivery_turn() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = protocol::HistoryNote::process_status("background process 77 exited");
+        let note = protocol::HistoryNote::notice("background process 77 exited");
         let text = note.text().to_string();
 
         assert!(
             app.tui
-                .start_queued_input(crate::app::QueuedInput::ProcessStatus(note))
+                .start_queued_input(crate::app::QueuedInput::Delivery(note))
                 .is_ok(),
             "test app has a usable model"
         );
 
         app.wait_for_turn_dispatch();
         assert!(app.tui.agent_is_running());
-        assert_eq!(process_status_blocks(&app), vec![text]);
+        assert_eq!(delivery_blocks(&app), vec![text]);
         assert!(user_blocks(&app).is_empty());
     }
 
@@ -3809,18 +3810,23 @@ mod tests {
             })
             .expect("process turn dispatched to engine");
         let current_note = current_note.expect("process turn carries typed note");
-        let expected_note = protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed(
+        let expected_note = protocol::HistoryNote::delivery(
+            protocol::DeliveryEvent::process_ended(
                 "751225",
                 Some(1),
                 protocol::JobTermination::Exited,
             )
             .ended_at(engine::clock::unix_time_ms(app.tui.core.clock.as_ref())),
+            "",
         );
         assert_eq!(current_note, expected_note);
         assert_eq!(
             start_content.text_content(),
-            protocol::process_status_note("background process 751225 exited with code 1")
+            protocol::delivery_note(
+                protocol::DeliveryChannel::Process,
+                "background process 751225 exited with code 1",
+                ""
+            )
         );
 
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
@@ -3838,10 +3844,10 @@ mod tests {
 
         assert!(matches!(
             &app.session_history()[1],
-            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event, .. })
+            HistoryItem::Note(protocol::HistoryNote::Delivery { text, event, .. })
                 if text == "background process 751225 exited with code 1"
-                    && event.as_ref().and_then(protocol::ProcessStatusEvent::process_id) == Some("751225")
-                    && event.as_ref().and_then(|event| event.exit_code()) == Some(1)
+                    && event.job_id() == Some("751225")
+                    && event.exit_code() == Some(1)
         ));
 
         app.run_lua_result(

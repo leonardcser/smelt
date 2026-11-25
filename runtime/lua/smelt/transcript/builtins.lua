@@ -38,14 +38,6 @@ local function aggregate_status(group)
   return "ok"
 end
 
-local function process_summary_line(text, has_failure)
-  return layout.runs({ { {
-    text = text,
-    fg = has_failure and "ErrorMsg" or "SmeltProcess",
-    italic = true,
-  } } })
-end
-
 local function latest_group_call_time(group)
   local latest
   for _, child in ipairs(defaults.group_children(group)) do
@@ -150,122 +142,73 @@ local function render_terminal_tool_group(group, ctx)
   })
 end
 
-local function process_exit_code(child)
-  local code = child.exit_code
-  if code == nil and type(child.event_data) == "table" then code = child.event_data.exit_code end
-  return code
+--- Up to `max` of `names`, then how many more there are.
+local function name_list(names, max)
+  local shown = {}
+  for i = 1, math.min(#names, max) do shown[i] = names[i] end
+  if #names > max then shown[#shown + 1] = "+" .. tostring(#names - max) .. " more" end
+  return table.concat(shown, ", ")
 end
 
-local function process_id(child)
-  local id = child.process_id
-  if id == nil and type(child.event_data) == "table" then id = child.event_data.process_id end
-  return id
-end
+local SUMMARY_LABELS = {
+  process = "background processes finished",
+  monitor = "monitor events",
+  agent = "agent messages",
+}
 
-local function process_failed(child)
-  local code = tonumber(process_exit_code(child))
-  return code ~= nil and code ~= 0
-end
-
-local function process_status_fragment(child)
-  local id = process_id(child)
-  local subject = id and tostring(id) or "process"
-  local code = tonumber(process_exit_code(child))
-  if code == 0 then return subject .. " finished successfully" end
-  if code ~= nil then return subject .. " exited with code " .. tostring(code) end
-  return subject .. " exited"
-end
-
-local function failed_process_summary(failed)
-  if #failed == 0 then return "" end
-  if #failed == 1 then return ": " .. process_status_fragment(failed[1]) end
-
-  local max = math.min(#failed, 2)
-  local parts = {}
-  for i = 1, max do
-    parts[#parts + 1] = tostring(process_id(failed[i]) or process_status_fragment(failed[i]))
-  end
-  if #failed > max then parts[#parts + 1] = "+" .. tostring(#failed - max) .. " more" end
-  return ": " .. table.concat(parts, ", ")
-end
-
---- One-line summary of finished background processes. `processes` carry
---- `process_id` and `exit_code`, directly or in `event_data`; `count` defaults
---- to their number. Returns the text and whether any process failed.
----@param processes table[]
----@param count? integer
+--- One-line summary of several deliveries of `run`: their count, then the
+--- processes that failed or where the others came from. Returns the text and
+--- its highlight group, `ErrorMsg` when one of them failed.
+---@param run "process"|"monitor"|"agent"
+---@param items table[] Delivery blocks or grouped children.
+---@param count? integer Defaults to the number of `items`.
 ---@return string text
----@return boolean failed
-function M.background_process_summary(processes, count)
-  local failed = {}
-  for _, process in ipairs(processes) do
-    if process_failed(process) then failed[#failed + 1] = process end
-  end
-
-  local text = "background processes finished: " .. tostring(count or #processes)
-  if #failed > 0 then
-    text = text .. ", " .. tostring(#failed) .. " failed" .. failed_process_summary(failed)
-  end
-  return text, #failed > 0
-end
-
-local function render_background_process_completed_group(group, ctx)
-  if group.view_state == "expanded" then return defaults.render_group_children(group, ctx) end
-
-  local children = defaults.group_children(group)
-  return process_summary_line(M.background_process_summary(children, group.child_count))
-end
-
---- One-line summary of agent messages: their count and up to three senders.
---- `messages` carry `sender`, or `summary_text` as grouped children do; `count`
---- defaults to their number.
----@param messages table[]
----@param count? integer
----@return string text
-local function delivery_summary(label, messages, count)
-  local senders, seen = {}, {}
-  for _, message in ipairs(messages) do
-    local sender = message.sender or message.monitor_name or message.summary_text
-    if sender and sender ~= "" and not seen[sender] then
-      seen[sender] = true
-      senders[#senders + 1] = sender
+---@return string hl
+function M.delivery_summary(run, items, count)
+  local failed, sources, seen = {}, {}, {}
+  for _, item in ipairs(items) do
+    if item.failed then failed[#failed + 1] = item end
+    local source = item.source
+    if source and source ~= "" and not seen[source] then
+      seen[source] = true
+      sources[#sources + 1] = source
     end
   end
-  local names = {}
-  for i = 1, math.min(#senders, 3) do names[i] = senders[i] end
-  if #senders > #names then names[#names + 1] = "+" .. tostring(#senders - #names) .. " more" end
-  local text = label .. ": " .. tostring(count or #messages)
-  if #names > 0 then text = text .. " from " .. table.concat(names, ", ") end
-  return text
+  local text = (SUMMARY_LABELS[run] or SUMMARY_LABELS.process) .. ": " .. tostring(count or #items)
+  if run == "process" then
+    if #failed == 1 then
+      text = text .. ", 1 failed: " .. failed[1].source .. failed[1].source_after
+    elseif #failed > 1 then
+      local ids = {}
+      for i, item in ipairs(failed) do ids[i] = item.source end
+      text = text .. ", " .. tostring(#failed) .. " failed: " .. name_list(ids, 2)
+    end
+  elseif #sources > 0 then
+    text = text .. " from " .. name_list(sources, 3)
+  end
+  return text, defaults.delivery_hl(run, #failed > 0)
 end
 
-function M.agent_message_summary(messages, count)
-  return delivery_summary("agent messages", messages, count)
-end
+-- Each group of deliveries, its run, and what it selects. A notice without
+-- its structure does not join the processes it may name.
+local DELIVERY_GROUPS = {
+  { name = "processes", run = "process", fields = { event = "process_ended" } },
+  { name = "monitors", run = "monitor", fields = { run = "monitor" } },
+  { name = "agents", run = "agent", fields = { run = "agent" } },
+}
+local DELIVERY_GROUP_RUNS = {}
+for _, entry in ipairs(DELIVERY_GROUPS) do DELIVERY_GROUP_RUNS[entry.name] = entry.run end
 
-function M.monitor_event_summary(messages, count)
-  return delivery_summary("monitor events", messages, count)
-end
-
-local function render_agent_message_group(group, ctx)
+local function render_delivery_group(run, group, ctx)
   if group.view_state == "expanded" then return defaults.render_group_children(group, ctx) end
-
-  local text = M.agent_message_summary(defaults.group_children(group), group.child_count)
-  return layout.runs({ { { text = text, fg = "SmeltAgent", italic = true } } })
+  local text, hl = M.delivery_summary(run, defaults.group_children(group), group.child_count)
+  return layout.runs({ { { text = text, fg = hl, italic = true } } })
 end
 
 function M.render(group, ctx)
   local kind = group.group_kind or group.name
-  if kind == "background_process_completed" then
-    return render_background_process_completed_group(group, ctx)
-  end
-  if kind == "monitor_events" then
-    if group.view_state == "expanded" then return defaults.render_group_children(group, ctx) end
-    return process_summary_line(M.monitor_event_summary(defaults.group_children(group), group.child_count), false)
-  end
-  if kind == "agent_messages" then
-    return render_agent_message_group(group, ctx)
-  end
+  local run = DELIVERY_GROUP_RUNS[kind]
+  if run then return render_delivery_group(run, group, ctx) end
   if kind == "explore" or kind == "lsp" or kind == "web" then
     return render_terminal_tool_group(group, ctx)
   end
@@ -276,29 +219,15 @@ function M.render(group, ctx)
 end
 
 function M.register()
-  smelt.transcript.groups.register({
-    name = "monitor_events",
-    priority = BUILTIN_GROUP_PRIORITY,
-    min = 2,
-    default_view = "collapsed",
-    selector = { kind = "process_status", event = "monitor_event" },
-  })
-
-  smelt.transcript.groups.register({
-    name = "background_process_completed",
-    priority = BUILTIN_GROUP_PRIORITY,
-    min = 2,
-    default_view = "collapsed",
-    selector = { kind = "process_status", event = "background_process_completed" },
-  })
-
-  smelt.transcript.groups.register({
-    name = "agent_messages",
-    priority = BUILTIN_GROUP_PRIORITY,
-    min = 2,
-    default_view = "collapsed",
-    selector = { kind = "agent_message" },
-  })
+  for _, entry in ipairs(DELIVERY_GROUPS) do
+    smelt.transcript.groups.register({
+      name = entry.name,
+      priority = BUILTIN_GROUP_PRIORITY,
+      min = 2,
+      default_view = "collapsed",
+      selector = { kind = "delivery", fields = entry.fields },
+    })
+  end
 
   smelt.transcript.groups.register({
     name = "explore",

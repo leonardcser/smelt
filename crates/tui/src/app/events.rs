@@ -2840,7 +2840,7 @@ mod tests {
         let _ = app.flush_persist();
 
         let release_persistence = app.pause_persistence();
-        let queued = crate::app::QueuedInput::ProcessStatus(protocol::HistoryNote::process_status(
+        let queued = crate::app::QueuedInput::Delivery(protocol::HistoryNote::notice(
             "background process finished",
         ));
         assert!(app.tui.start_queued_input(queued).is_ok());
@@ -3206,10 +3206,10 @@ mod tests {
     fn empty_enter_does_not_interrupt_for_turn_only_status_item() {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
-        let note = protocol::HistoryNote::process_status("Background process 42 exited.");
+        let note = protocol::HistoryNote::notice("Background process 42 exited.");
         app.tui
             .prompt
-            .try_queue_turn(crate::app::QueuedInput::ProcessStatus(note));
+            .try_queue_turn(crate::app::QueuedInput::Delivery(note));
 
         app.clear_actions();
         app.press(KeyCode::Enter);

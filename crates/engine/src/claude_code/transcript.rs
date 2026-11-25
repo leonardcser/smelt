@@ -163,9 +163,7 @@ impl Transcript {
     /// The notes that wait for the steps before them, in the order they
     /// will join.
     pub(super) fn held_notes(&self) -> Vec<protocol::HistoryNote> {
-        let mut notes: Vec<_> = self.notes.iter().collect();
-        notes.sort_by_key(|item| item.join_rank());
-        notes
+        protocol::in_arrival_runs(self.notes.iter().collect(), |item| *item)
             .into_iter()
             .filter_map(HistoryItem::as_note)
             .cloned()
@@ -173,9 +171,7 @@ impl Transcript {
     }
 
     fn take_notes(&mut self) -> Vec<HistoryItem> {
-        let mut notes = std::mem::take(&mut self.notes);
-        notes.sort_by_key(HistoryItem::join_rank);
-        notes
+        protocol::in_arrival_runs(std::mem::take(&mut self.notes), |item| item)
     }
 
     /// Whether every tool call has its result.
@@ -212,7 +208,7 @@ impl Transcript {
 
     /// Records the messages other agents sent, once each.
     fn received(&mut self, frame: &Value) {
-        let notes = super::messages::received(frame);
+        let notes = super::deliveries::messages(frame);
         if notes.is_empty() {
             return;
         }
@@ -861,7 +857,7 @@ mod tests {
             ]}}),
             0,
         );
-        let note = HistoryItem::note(protocol::HistoryNote::process_status("done"));
+        let note = HistoryItem::note(protocol::HistoryNote::notice("done"));
         transcript.note(note.clone());
         assert!(
             transcript.committed.is_empty(),
@@ -872,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn held_notes_join_by_kind_after_the_running_step() {
+    fn held_notes_join_in_runs_after_the_running_step() {
         let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel();
         let tx = crate::EngineEventSender {
             output_tx,
@@ -885,18 +881,18 @@ mod tests {
             ]}}),
             0,
         );
-        let first = protocol::HistoryNote::process_status("first done");
-        let message = protocol::HistoryNote::agent_message(
-            protocol::AgentMessageEvent::MessageReceived {
+        let first = protocol::HistoryNote::notice("first done");
+        let message = protocol::HistoryNote::delivery(
+            protocol::DeliveryEvent::AgentMessage {
                 from: "worker".into(),
             },
             "hello",
         );
-        let second = protocol::HistoryNote::process_status("second done");
-        for note in [&first, &message, &second] {
+        let second = protocol::HistoryNote::notice("second done");
+        for note in [&message, &first, &second] {
             transcript.note(HistoryItem::note(note.clone()));
         }
-        let joining = [first, second, message];
+        let joining = [message, first, second];
         assert_eq!(transcript.held_notes(), joining);
         transcript.abandon();
         assert_eq!(transcript.committed, joining.map(HistoryItem::note));
@@ -927,7 +923,7 @@ mod tests {
                 "delta":{"type":"thinking_delta", "thinking":"hmm"}})),
             0,
         );
-        let note = protocol::HistoryNote::process_status("done");
+        let note = protocol::HistoryNote::notice("done");
         transcript.note(HistoryItem::note(note.clone()));
         assert!(transcript.committed.is_empty(), "it waits for the message");
         assert_eq!(transcript.held_notes(), std::slice::from_ref(&note));

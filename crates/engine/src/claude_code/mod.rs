@@ -8,11 +8,10 @@ mod account;
 mod agents;
 mod catalog;
 mod context;
+mod deliveries;
 mod interaction;
 mod limit;
-mod messages;
 mod models;
-mod monitors;
 mod plans;
 pub use account::usage_scope;
 pub use catalog::{checked_as, native_access};
@@ -1577,7 +1576,7 @@ impl Runtime<'_> {
                     && frame["parent_tool_use_id"].is_null()
                 {
                     self.native.monitor_notes =
-                        monitors::follow(input, self.payload.model_target.provider.clone()).await;
+                        deliveries::follow(input, self.payload.model_target.provider.clone()).await;
                 }
                 if name.starts_with(SMELT_MCP_PREFIX) || self.answers_natively(name) {
                     // Defer interactive tools to can_use_tool so the native agent

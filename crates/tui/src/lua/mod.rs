@@ -2715,11 +2715,7 @@ mod tests {
             called_at_ms: None,
             args: None,
             output: Default::default(),
-            event: None,
-            process_id: None,
-            exit_code: None,
-            termination: None,
-            event_data: Default::default(),
+            delivery: None,
         };
         let group_node = smelt_core::lua::runtime::TranscriptRenderNode::group(
             2,

@@ -156,6 +156,8 @@ impl RenderNodeIndex {
 pub struct TranscriptDefaultViewPolicy {
     block_kinds: HashMap<String, ViewState>,
     tools: HashMap<String, ViewState>,
+    /// Delivery events, which take precedence over the `delivery` kind.
+    events: HashMap<String, ViewState>,
     groups: HashMap<String, ViewState>,
     disabled_groups: HashSet<String>,
 }
@@ -165,6 +167,7 @@ impl Default for TranscriptDefaultViewPolicy {
         let mut policy = Self {
             block_kinds: HashMap::new(),
             tools: HashMap::new(),
+            events: HashMap::new(),
             groups: HashMap::new(),
             disabled_groups: HashSet::new(),
         };
@@ -176,10 +179,12 @@ impl Default for TranscriptDefaultViewPolicy {
             .insert("compacted".to_string(), ViewState::Collapsed);
         policy
             .block_kinds
-            .insert("process_status".to_string(), ViewState::Collapsed);
-        policy
-            .block_kinds
-            .insert("agent_message".to_string(), ViewState::Peek);
+            .insert("delivery".to_string(), ViewState::Peek);
+        for event in ["notice", "process_ended"] {
+            policy
+                .events
+                .insert(event.to_string(), ViewState::Collapsed);
+        }
         policy
             .block_kinds
             .insert("compaction_preview".to_string(), ViewState::Peek);
@@ -223,6 +228,7 @@ impl TranscriptDefaultViewPolicy {
 
         apply_view_section(&config, "blocks", &mut self.block_kinds)?;
         apply_view_section(&config, "tools", &mut self.tools)?;
+        apply_view_section(&config, "events", &mut self.events)?;
         apply_group_view_section(&config, &mut self.groups, &mut self.disabled_groups)?;
         Ok(())
     }
@@ -233,24 +239,11 @@ impl TranscriptDefaultViewPolicy {
 
     pub fn node_default_view_state(&self, history: &BlockHistory, node: &RenderNode) -> ViewState {
         match node {
-            RenderNode::Block { id, .. } => history
-                .tool_name(*id)
-                .and_then(|name| self.tools.get(name).copied())
-                .or_else(|| {
-                    let kind = history.block_kind(*id)?;
-                    if kind == "process_status"
-                        && history.process_field(*id, "event").as_deref() == Some("monitor_event")
-                    {
-                        return Some(
-                            self.block_kinds
-                                .get("monitor_event")
-                                .copied()
-                                .unwrap_or(ViewState::Peek),
-                        );
-                    }
-                    self.block_kinds.get(kind).copied()
-                })
-                .unwrap_or(ViewState::Expanded),
+            RenderNode::Block { id, .. } => self.block_view_state(
+                history.tool_name(*id),
+                history.delivery_event(*id),
+                history.block_kind(*id),
+            ),
             RenderNode::Group(group) => self
                 .groups
                 .get(&group.name)
@@ -259,15 +252,31 @@ impl TranscriptDefaultViewPolicy {
         }
     }
 
+    /// The view state of a block with tool `tool`, delivery `delivery`, and
+    /// kind `kind`: the most specific setting wins.
+    fn block_view_state(
+        &self,
+        tool: Option<&str>,
+        delivery: Option<&protocol::DeliveryEvent>,
+        kind: Option<&str>,
+    ) -> ViewState {
+        tool.and_then(|name| self.tools.get(name))
+            .or_else(|| delivery.and_then(|event| self.events.get(event.event_type())))
+            .or_else(|| kind.and_then(|kind| self.block_kinds.get(kind)))
+            .copied()
+            .unwrap_or(ViewState::Expanded)
+    }
+
     #[cfg(test)]
     fn block_default_view_state(
         &self,
         block: &smelt_transcript::transcript_model::Block,
     ) -> ViewState {
-        tool_name(block)
-            .and_then(|name| self.tools.get(name).copied())
-            .or_else(|| self.block_kinds.get(block_kind(block)).copied())
-            .unwrap_or(ViewState::Expanded)
+        self.block_view_state(
+            tool_name(block),
+            block.delivery_event(),
+            Some(block_kind(block)),
+        )
     }
 }
 
@@ -1208,10 +1217,10 @@ fn block_field(history: &BlockHistory, block_index: usize, field: &str) -> Optio
         "status" => history
             .tool_status(id)
             .map(|status| status.label().to_string()),
-        "event" | "event_type" | "process_id" | "exit_code" => history.process_field(id, field),
-        field => field
-            .strip_prefix("args.")
-            .and_then(|arg| history.arg_field(id, arg).map(json_bucket_value)),
+        field => match field.strip_prefix("args.") {
+            Some(arg) => history.arg_field(id, arg).map(json_bucket_value),
+            None => history.delivery_event(id)?.field_value(field),
+        },
     }
 }
 
@@ -1254,6 +1263,40 @@ mod tests {
         Block, BlockHistory, ToolOutput, ToolState, ToolStateMutation, ToolStatus,
         TranscriptBlockRecord,
     };
+
+    #[test]
+    fn a_delivery_takes_the_view_state_of_its_event_then_of_its_kind() {
+        let lua = Lua::new();
+        lua.load(
+            r#"smelt = { settings = { transcript = { view = {
+                blocks = { delivery = "expanded" },
+                events = { agent_message = "collapsed" },
+            } } } }"#,
+        )
+        .exec()
+        .unwrap();
+        let mut policy = TranscriptDefaultViewPolicy::default();
+        policy.apply_lua_config(&lua).unwrap();
+        let delivery = |event| Block::Delivery {
+            text: String::new(),
+            event,
+            body: None,
+        };
+        let message = protocol::DeliveryEvent::AgentMessage { from: "w".into() };
+        let monitor = protocol::DeliveryEvent::MonitorEvent {
+            process_id: "b1".into(),
+            name: "log".into(),
+        };
+        let process =
+            protocol::DeliveryEvent::process_ended("1", Some(0), protocol::JobTermination::Exited);
+        for (event, state) in [
+            (message, ViewState::Collapsed),
+            (monitor, ViewState::Expanded),
+            (process, ViewState::Collapsed),
+        ] {
+            assert_eq!(policy.block_default_view_state(&delivery(event)), state);
+        }
+    }
 
     #[test]
     fn default_view_policy_peeks_thinking_blocks() {
@@ -1339,30 +1382,30 @@ mod tests {
     }
 
     #[test]
-    fn process_status_typed_fields_match_selectors_and_buckets() {
+    fn delivery_typed_fields_match_selectors_and_buckets() {
         let mut transcript = smelt_transcript::content::transcript::Transcript::new();
-        transcript.push(Block::ProcessStatus {
+        transcript.push(Block::Delivery {
             text: "Background process 1 finished successfully.".into(),
-            output: None,
-            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+            body: None,
+            event: protocol::DeliveryEvent::process_ended(
                 "1",
                 Some(0),
                 protocol::JobTermination::Exited,
-            )),
+            ),
         });
-        transcript.push(Block::ProcessStatus {
+        transcript.push(Block::Delivery {
             text: "Background process 2 finished successfully.".into(),
-            output: None,
-            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+            body: None,
+            event: protocol::DeliveryEvent::process_ended(
                 "2",
                 Some(0),
                 protocol::JobTermination::Exited,
-            )),
+            ),
         });
-        transcript.push(Block::ProcessStatus {
+        transcript.push(Block::Delivery {
             text: "untyped process status".into(),
-            event: None,
-            output: None,
+            event: protocol::DeliveryEvent::Notice,
+            body: None,
         });
         let spec = TranscriptGroupSpec {
             name: "background-processes".into(),
@@ -1371,13 +1414,13 @@ mod tests {
             min: 2,
             default_view: None,
             selector: smelt_core::lua::TranscriptGroupSelector {
-                kind: Some("process_status".into()),
+                kind: Some("delivery".into()),
                 name: None,
                 names: Vec::new(),
                 terminal: None,
                 fields: vec![smelt_core::lua::TranscriptGroupFieldMatch {
                     field: "event".into(),
-                    value: "background_process_completed".into(),
+                    value: "process_ended".into(),
                 }],
             },
             bucket: Some(smelt_core::lua::TranscriptGroupBucket {

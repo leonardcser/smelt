@@ -1560,10 +1560,10 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
                 )])
                 .into(),
             }),
-            _ => source.push(Block::ProcessStatus {
+            _ => source.push(Block::Delivery {
                 text: format!("{marker} background process finished"),
-                event: None,
-                output: None,
+                event: protocol::DeliveryEvent::Notice,
+                body: None,
             }),
         };
     }

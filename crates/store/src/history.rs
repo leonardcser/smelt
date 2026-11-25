@@ -46,8 +46,7 @@ fn note_kind_name(kind: HistoryNoteKind) -> &'static str {
     match kind {
         HistoryNoteKind::ModeChange => "mode_change",
         HistoryNoteKind::Context => "context",
-        HistoryNoteKind::ProcessStatus => "process_status",
-        HistoryNoteKind::AgentMessage => "agent_message",
+        HistoryNoteKind::Delivery => "delivery",
         HistoryNoteKind::Compaction => "compaction",
     }
 }
@@ -59,8 +58,9 @@ pub(crate) fn note_projection(
     let kind = match kind.as_deref()? {
         "mode_change" => HistoryNoteKind::ModeChange,
         "context" => HistoryNoteKind::Context,
-        "process_status" => HistoryNoteKind::ProcessStatus,
-        "agent_message" => HistoryNoteKind::AgentMessage,
+        // COMPAT(delivery-notes): rows written before deliveries name the
+        // kinds they replaced.
+        "delivery" | "process_status" | "agent_message" => HistoryNoteKind::Delivery,
         "compaction" => HistoryNoteKind::Compaction,
         _ => return None,
     };
@@ -68,7 +68,7 @@ pub(crate) fn note_projection(
 }
 
 /// Conversation text of a history item: user input, assistant replies and
-/// compaction summaries. Mode and process status notices are not conversation.
+/// compaction summaries. Mode notices and deliveries are not conversation.
 pub(crate) fn conversation_text(item: &HistoryItem) -> Option<std::borrow::Cow<'_, str>> {
     match item {
         HistoryItem::User { content, .. } => match protocol::classify_user_history_content(content)
@@ -76,7 +76,7 @@ pub(crate) fn conversation_text(item: &HistoryItem) -> Option<std::borrow::Cow<'
             protocol::UserHistoryContent::Plain => Some(content.text_content()),
             protocol::UserHistoryContent::CompactionSummary { summary } => Some(summary.into()),
             protocol::UserHistoryContent::ModeChange { .. }
-            | protocol::UserHistoryContent::ProcessStatus { .. } => None,
+            | protocol::UserHistoryContent::Delivery { .. } => None,
         },
         HistoryItem::Assistant(step) => step.content.as_ref().map(|content| content.text_content()),
         HistoryItem::Note(HistoryNote::Compaction { text }) => Some(text.as_str().into()),

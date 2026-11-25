@@ -194,8 +194,8 @@ impl AppStoryCtx {
     /// same transcript block shape produced by the live job supervisor without
     /// spawning a subprocess in the story.
     pub fn monitor_event(&mut self, name: &str, output: &str) {
-        self.app.push_process_status(
-            protocol::ProcessStatusEvent::MonitorEvent {
+        self.app.push_delivery(
+            protocol::DeliveryEvent::MonitorEvent {
                 process_id: "b1".into(),
                 name: name.into(),
             },
@@ -219,10 +219,9 @@ impl AppStoryCtx {
         termination: protocol::JobTermination,
         output: &str,
     ) {
-        let event =
-            protocol::ProcessStatusEvent::background_process_completed(id, exit_code, termination)
-                .ended_at(self.app.unix_now_ms());
-        self.app.push_process_status(event, output);
+        let event = protocol::DeliveryEvent::process_ended(id, exit_code, termination)
+            .ended_at(self.app.unix_now_ms());
+        self.app.push_delivery(event, output);
     }
 
     pub fn push_background_agent_ended(

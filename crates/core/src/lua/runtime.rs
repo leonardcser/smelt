@@ -3249,68 +3249,15 @@ fn render_fields_to_lua_table(
             table.set("icon", icon.as_str())?;
             table.set("hl_group", hl_group.as_str())?;
         }
-        TranscriptRenderFields::ProcessStatus {
-            text,
-            event,
-            output,
-        } => {
-            table.set("text", text.as_str())?;
-            if let Some(output) = output {
-                set_output_metadata(&table, output)?;
-            }
-            if let Some(event) = event {
-                table.set("event", event.event_type)?;
-                table.set("event_type", event.event_type)?;
-                table.set("monitor_name", event.monitor_name.as_deref())?;
-                if let Some(process_id) = event.process_id.as_deref() {
-                    table.set("process_id", process_id)?;
-                }
-                if let Some(exit_code) = event.exit_code {
-                    table.set("exit_code", exit_code)?;
-                }
-                table.set(
-                    "termination",
-                    event.termination.map(protocol::JobTermination::as_str),
-                )?;
-                let event_data = lua.create_table_with_capacity(0, 4)?;
-                event_data.set("event", event.event_type)?;
-                if let Some(process_id) = event.process_id.as_deref() {
-                    event_data.set("process_id", process_id)?;
-                }
-                if let Some(exit_code) = event.exit_code {
-                    event_data.set("exit_code", exit_code)?;
-                }
-                event_data.set(
-                    "termination",
-                    event.termination.map(protocol::JobTermination::as_str),
-                )?;
-                table.set("event_data", event_data)?;
-            }
-        }
-        TranscriptRenderFields::AgentMessage { text, event, body } => {
+        TranscriptRenderFields::Delivery { text, event, body } => {
             table.set("text", text.as_str())?;
             if let Some(body) = body {
                 set_output_metadata(&table, body)?;
             }
-            table.set("event", event.event_type())?;
-            table.set("event_type", event.event_type())?;
-            let (before, sender, after) = event.display_parts();
-            table.set("sender", sender)?;
-            table.set("sender_before", before)?;
-            table.set("sender_after", after)?;
-            match event {
-                protocol::AgentMessageEvent::MessageReceived { from } => {
-                    table.set("from", from.as_str())?;
-                }
-                protocol::AgentMessageEvent::BackgroundAgentEnded {
-                    agent_id,
-                    title,
-                    status,
-                    ..
-                } => {
-                    table.set("agent_id", agent_id.as_str())?;
-                    table.set("title", title.as_str())?;
-                    table.set("agent_status", status.as_str())?;
+            if let mlua::Value::Table(fields) = crate::lua::serde_to_lua(lua, &event.fields())? {
+                for pair in fields.pairs::<mlua::Value, mlua::Value>() {
+                    let (key, value) = pair?;
+                    table.raw_set(key, value)?;
                 }
             }
         }
@@ -3577,15 +3524,6 @@ pub struct TranscriptRenderNode {
     fields: TranscriptRenderFields,
 }
 
-#[derive(Clone, Debug)]
-struct TranscriptProcessStatusMetadata {
-    event_type: &'static str,
-    process_id: Option<String>,
-    monitor_name: Option<String>,
-    exit_code: Option<i32>,
-    termination: Option<protocol::JobTermination>,
-}
-
 fn kept_history_to_lua(lua: &Lua, kept: &[KeptHistoryItem]) -> LuaResult<mlua::Table> {
     let out = lua.create_table()?;
     for (i, item) in kept.iter().enumerate() {
@@ -3632,14 +3570,9 @@ enum TranscriptRenderFields {
         icon: String,
         hl_group: String,
     },
-    ProcessStatus {
+    Delivery {
         text: String,
-        event: Option<TranscriptProcessStatusMetadata>,
-        output: Option<TranscriptContentMetadata>,
-    },
-    AgentMessage {
-        text: String,
-        event: protocol::AgentMessageEvent,
+        event: protocol::DeliveryEvent,
         body: Option<TranscriptContentMetadata>,
     },
     Thinking {
@@ -3776,25 +3709,7 @@ fn transcript_block_render_fields(
             icon: icon.clone(),
             hl_group: hl_group.clone(),
         },
-        Block::ProcessStatus {
-            text,
-            event,
-            output,
-        } => TranscriptRenderFields::ProcessStatus {
-            text: text.clone(),
-            output: output.as_ref().map(transcript_content_metadata),
-            event: event.as_ref().map(|event| TranscriptProcessStatusMetadata {
-                event_type: event.event_type(),
-                process_id: event.process_id().map(str::to_owned),
-                monitor_name: match event {
-                    protocol::ProcessStatusEvent::MonitorEvent { name, .. } => Some(name.clone()),
-                    _ => None,
-                },
-                exit_code: event.exit_code(),
-                termination: event.termination(),
-            }),
-        },
-        Block::AgentMessage { text, event, body } => TranscriptRenderFields::AgentMessage {
+        Block::Delivery { text, event, body } => TranscriptRenderFields::Delivery {
             text: text.clone(),
             event: event.clone(),
             body: body.as_ref().map(transcript_content_metadata),
@@ -4093,8 +4008,7 @@ fn fallback_transcript_node_layout(node: &TranscriptRenderNode) -> BlockLayout {
     let text = match &node.fields {
         TranscriptRenderFields::User { text, .. }
         | TranscriptRenderFields::Mode { text, .. }
-        | TranscriptRenderFields::ProcessStatus { text, .. }
-        | TranscriptRenderFields::AgentMessage { text, .. }
+        | TranscriptRenderFields::Delivery { text, .. }
         | TranscriptRenderFields::Code { content: text, .. }
         | TranscriptRenderFields::Summary { summary: text, .. } => text.as_str(),
         TranscriptRenderFields::ToolDraft {
@@ -5008,30 +4922,25 @@ mod tests {
     }
 
     #[test]
-    fn process_status_block_table_exposes_typed_event_fields() {
+    fn delivery_block_table_exposes_typed_event_fields() {
         let lua = Lua::new();
-        let block = Block::ProcessStatus {
+        let block = Block::Delivery {
             text: "background process 42 exited with code 7".into(),
-            output: Some("captured output\n".repeat(2_000).into()),
-            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+            body: Some("captured output\n".repeat(2_000).into()),
+            event: protocol::DeliveryEvent::process_ended(
                 "42",
                 Some(7),
                 protocol::JobTermination::Exited,
-            )),
+            ),
         };
 
         let node = transcript_block_render_node(BlockId::new(9), 3, &block, None);
         let table = transcript_render_node_to_lua_table(&lua, &node).unwrap();
 
-        assert_eq!(table.get::<String>("kind").unwrap(), "process_status");
-        assert_eq!(
-            table.get::<String>("event").unwrap(),
-            "background_process_completed"
-        );
-        assert_eq!(
-            table.get::<String>("event_type").unwrap(),
-            "background_process_completed"
-        );
+        assert_eq!(table.get::<String>("kind").unwrap(), "delivery");
+        assert_eq!(table.get::<String>("event").unwrap(), "process_ended");
+        assert_eq!(table.get::<String>("run").unwrap(), "process");
+        assert!(table.get::<bool>("failed").unwrap());
         let output = block
             .content(smelt_transcript::transcript_model::ContentChannel::Primary)
             .unwrap();
@@ -5040,13 +4949,9 @@ mod tests {
         assert!(!table.contains_key("output").unwrap());
         assert!(table.get::<String>("output_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES);
         assert_eq!(table.get::<String>("process_id").unwrap(), "42");
+        assert_eq!(table.get::<String>("source").unwrap(), "42");
         assert_eq!(table.get::<i32>("exit_code").unwrap(), 7);
         assert_eq!(table.get::<String>("termination").unwrap(), "exited");
-        let event_data: mlua::Table = table.get("event_data").unwrap();
-        assert_eq!(
-            event_data.get::<String>("event").unwrap(),
-            "background_process_completed"
-        );
     }
     #[test]
     fn transcript_payload_metadata_is_opaque_and_strictly_bounded() {
@@ -5424,29 +5329,6 @@ mod tests {
     }
 
     #[test]
-    fn transcript_group_selector_rejects_conflicting_field_aliases() {
-        let rt = LuaRuntime::new();
-        let err = rt
-            .lua
-            .load(
-                r#"
-                smelt.transcript.groups.register({
-                  name = "processes",
-                  selector = {
-                    kind = "process_status",
-                    event = "background_process_completed",
-                    fields = { event_type = "other_event" },
-                  },
-                })
-                "#,
-            )
-            .exec()
-            .expect_err("conflicting selector fields should fail");
-
-        assert!(err.to_string().contains("conflicts"));
-    }
-
-    #[test]
     fn transcript_group_registration_remove_is_token_scoped() {
         let rt = runtime_without_builtin_groups();
         rt.lua
@@ -5500,11 +5382,7 @@ mod tests {
                     called_at_ms: None,
                     args: None,
                     output: Default::default(),
-                    event: None,
-                    process_id: None,
-                    exit_code: None,
-                    termination: None,
-                    event_data: Default::default(),
+                    delivery: None,
                 },
             )
             .collect();

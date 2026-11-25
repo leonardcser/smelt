@@ -3,7 +3,7 @@
 //! output with `get_task_output`.
 
 use super::transport::control;
-use protocol::{HistoryNote, JobTermination, NativeProcess, ProcessStatusEvent};
+use protocol::{DeliveryEvent, HistoryNote, JobTermination, NativeProcess};
 use serde_json::{json, Value};
 use smelt_text as text;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -300,9 +300,8 @@ fn finished(frame: &Value, process: NativeProcess, now_ms: u64) -> HistoryNote {
         .filter(|path| !path.is_empty())
         .and_then(|path| tail(path, FINISHED_OUTPUT_BYTES))
         .unwrap_or(process.output);
-    HistoryNote::process_status_with_output(
-        ProcessStatusEvent::background_process_completed(process.id, exit_code, termination)
-            .ended_at(now_ms),
+    HistoryNote::delivery(
+        DeliveryEvent::process_ended(process.id, exit_code, termination).ended_at(now_ms),
         output.trim_end(),
     )
 }
@@ -529,15 +528,11 @@ mod tests {
             let mut shells = Shells::new("claude-code");
             shells.frame(&started("task", "call", true), 0);
             shells.frame(&ended("task", status), 5_000);
-            let event = ProcessStatusEvent::background_process_completed(
-                "claude-code:task",
-                exit_code,
-                termination,
-            )
-            .ended_at(5_000);
+            let event = DeliveryEvent::process_ended("claude-code:task", exit_code, termination)
+                .ended_at(5_000);
             assert_eq!(
                 shells.finished(),
-                [HistoryNote::process_status_event(event)],
+                [HistoryNote::delivery(event, "")],
                 "{status}"
             );
         }

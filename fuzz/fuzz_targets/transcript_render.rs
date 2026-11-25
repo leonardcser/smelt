@@ -273,7 +273,7 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
         r#"
           smelt.transcript.groups.register({
             name = "fuzz_process_batch",
-            selector = { kind = "process_status", fields = { event = "background_process_completed" } },
+            selector = { kind = "delivery", fields = { event = "process_ended" } },
             bucket = { "process_id", "exit_code" },
             min = 2,
             default_view = "collapsed",

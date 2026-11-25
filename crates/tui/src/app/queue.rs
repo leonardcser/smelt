@@ -405,7 +405,7 @@ pub(crate) enum QueuedInput {
         line: String,
         sent_at_ms: u64,
     },
-    ProcessStatus(protocol::HistoryNote),
+    Delivery(protocol::HistoryNote),
 }
 
 impl QueuedInput {
@@ -482,7 +482,7 @@ impl QueuedInput {
         match self {
             QueuedInput::Request(req) => req.display.clone(),
             QueuedInput::Command { display, .. } => display.clone(),
-            QueuedInput::ProcessStatus(note) => note.text().to_string(),
+            QueuedInput::Delivery(note) => note.text().to_string(),
         }
     }
 
@@ -494,7 +494,7 @@ impl QueuedInput {
         match self {
             Self::Request(req) => Some(req.sent_at_ms),
             Self::Command { sent_at_ms, .. } => Some(*sent_at_ms),
-            Self::ProcessStatus(_) => None,
+            Self::Delivery(_) => None,
         }
     }
 
@@ -516,7 +516,7 @@ impl QueuedInput {
             QueuedInput::Command { display, line, .. } => {
                 protocol::StartTurnInput::user_command(Content::text(line.clone()), display.clone())
             }
-            QueuedInput::ProcessStatus(_) => return None,
+            QueuedInput::Delivery(_) => return None,
         };
         if input.provider_content().is_empty() {
             return None;

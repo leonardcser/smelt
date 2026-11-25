@@ -6191,31 +6191,40 @@ pub mod tests {
     }
 
     #[test]
-    fn built_in_background_process_completion_group_uses_typed_event_fields() {
+    fn built_in_process_group_counts_every_failed_process() {
         let lua = test_lua();
         let mut transcript = Transcript::new();
-        transcript.push(Block::ProcessStatus {
+        transcript.push(Block::Delivery {
             text: "Background process 1 finished successfully.".into(),
-            output: None,
-            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+            body: None,
+            event: protocol::DeliveryEvent::process_ended(
                 "1",
                 Some(0),
                 protocol::JobTermination::Exited,
-            )),
+            ),
         });
-        transcript.push(Block::ProcessStatus {
+        transcript.push(Block::Delivery {
             text: "Background process 2 exited with code 7.".into(),
-            output: None,
-            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+            body: None,
+            event: protocol::DeliveryEvent::process_ended(
                 "2",
                 Some(7),
                 protocol::JobTermination::Exited,
-            )),
+            ),
         });
-        transcript.push(Block::ProcessStatus {
+        transcript.push(Block::Delivery {
+            text: "Background process 3 was terminated after an out-of-memory event.".into(),
+            body: None,
+            event: protocol::DeliveryEvent::process_ended(
+                "3",
+                None,
+                protocol::JobTermination::OutOfMemory,
+            ),
+        });
+        transcript.push(Block::Delivery {
             text: "untyped process note".into(),
-            event: None,
-            output: None,
+            event: protocol::DeliveryEvent::Notice,
+            body: None,
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
@@ -6227,12 +6236,12 @@ pub mod tests {
             [
                 crate::transcript_scene::RenderNode::Group(group),
                 crate::transcript_scene::RenderNode::Block { .. },
-            ] if group.name == "background_process_completed" && group.children.len() == 2
+            ] if group.name == "processes" && group.children.len() == 3
         ));
         assert!(
             rows.iter()
-                .any(|line| line
-                    == "background processes finished: 2, 1 failed: 2 exited with code 7")
+                .any(|line| line == "background processes finished: 3, 2 failed: 2, 3"),
+            "{rows:?}"
         );
         assert!(rows.iter().any(|line| line == "untyped process note"));
     }
@@ -7904,10 +7913,10 @@ pub mod tests {
                 summary: randomish_text(seed, 24),
                 kept: Vec::new(),
             },
-            _ => Block::ProcessStatus {
+            _ => Block::Delivery {
                 text: format!("process status {i}: {}", randomish_text(seed, 6)),
-                event: None,
-                output: None,
+                event: protocol::DeliveryEvent::Notice,
+                body: None,
             },
         }
     }

@@ -771,8 +771,8 @@ fn claude_code_turns_carry_the_history_identity_and_the_host_serves_its_items() 
 }
 
 fn agent_message(from: &str, body: &str) -> protocol::HistoryItem {
-    protocol::HistoryItem::note(protocol::HistoryNote::agent_message(
-        protocol::AgentMessageEvent::MessageReceived { from: from.into() },
+    protocol::HistoryItem::note(protocol::HistoryNote::delivery(
+        protocol::DeliveryEvent::AgentMessage { from: from.into() },
         body,
     ))
 }
@@ -798,8 +798,8 @@ fn agent_messages_that_arrive_together_group_by_sender() {
     app.session_append_history(agent_message("worker", "first"));
     app.session_append_history(agent_message("worker", "second"));
     app.session_append_history(protocol::HistoryItem::note(
-        protocol::HistoryNote::agent_message(
-            protocol::AgentMessageEvent::BackgroundAgentEnded {
+        protocol::HistoryNote::delivery(
+            protocol::DeliveryEvent::AgentEnded {
                 agent_id: "claude-code:a1".into(),
                 title: "Review".into(),
                 status: protocol::AgentStatus::Completed,
@@ -835,15 +835,16 @@ fn notes_the_native_session_holds_wait_dimmed_in_the_order_they_join() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(90, 24);
     app.start_turn(7);
-    let process = protocol::HistoryNote::process_status_event(
-        protocol::ProcessStatusEvent::background_process_completed(
+    let process = protocol::HistoryNote::delivery(
+        protocol::DeliveryEvent::process_ended(
             "claude-code:shell",
             Some(0),
             protocol::JobTermination::Exited,
         ),
+        "",
     );
-    let message = protocol::HistoryNote::agent_message(
-        protocol::AgentMessageEvent::MessageReceived {
+    let message = protocol::HistoryNote::delivery(
+        protocol::DeliveryEvent::AgentMessage {
             from: "worker".into(),
         },
         "Tests pass.",

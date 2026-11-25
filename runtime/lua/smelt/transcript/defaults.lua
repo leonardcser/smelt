@@ -115,7 +115,7 @@ end
 
 local block_parts = {
   group = true, tool = true, user = true, assistant = true, thinking = true,
-  exec = true, mode = true, process_status = true, agent_message = true, compacted = true,
+  exec = true, mode = true, delivery = true, compacted = true,
   compaction_preview = true, code = true,
 }
 
@@ -810,13 +810,25 @@ function M.render_mode(block, ctx)
   })
 end
 
---- Render a process-status note.
+--- The highlight group of deliveries of `run`, or `ErrorMsg` when one failed.
+---@param run? "process"|"monitor"|"agent"
+---@param failed? boolean
+---@return string
+function M.delivery_hl(run, failed)
+  if failed then return "ErrorMsg" end
+  return run == "agent" and "SmeltAgent" or "SmeltProcess"
+end
+
+--- Render what joined the conversation on its own: what it is, with where it
+--- came from in bold, then its body. Output of background work keeps its
+--- tail when peeked; an agent's message keeps its head.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function M.render_process_status(block, ctx)
-  local hl = block.hl_group or "SmeltProcess"
-  local header = layout.runs({ block.monitor_name and {
-    { text = "event from monitor ", fg = hl, italic = true },
-    { text = block.monitor_name, fg = hl, italic = true, bold = true },
+function M.render_delivery(block, ctx)
+  local hl = M.delivery_hl(block.run, block.failed)
+  local header = layout.runs({ block.source and block.source ~= "" and {
+    { text = block.source_before or "", fg = hl, italic = true },
+    { text = block.source, fg = hl, italic = true, bold = true },
+    { text = block.source_after or "", fg = hl, italic = true },
   } or { { text = block.text or "", fg = hl, italic = true } } })
   if not block.output_id then return header end
   if ctx and ctx.view_state == "collapsed" then
@@ -831,48 +843,14 @@ function M.render_process_status(block, ctx)
     })
   end
 
-  local output = layout.content(block.output_id, { format = "text", ansi = true })
-  if ctx and ctx.view_state == "peek" then
-    output = layout.cap(output, {
-      rows = (ctx.limits and ctx.limits.tool_output_rows) or 20,
-      keep = "tail",
-      marker = "above",
-      total_rows = block.output_lines,
-    })
-  end
-  return layout.vbox({ header, layout.gutter(output, { text = "  " }) })
-end
-
---- Render what another agent added to the conversation: who it is from, then
---- its message or report, capped at its head when peeked.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function M.render_agent_message(block, ctx)
-  local failed = block.agent_status == "failed" or block.agent_status == "blocked"
-  local hl = failed and "ErrorMsg" or "SmeltAgent"
-  local header = layout.runs({ {
-    { text = block.sender_before or "", fg = hl, italic = true },
-    { text = block.sender or "", fg = hl, italic = true, bold = true },
-    { text = block.sender_after or "", fg = hl, italic = true },
-  } })
-  if not block.output_id then return header end
-  if ctx and ctx.view_state == "collapsed" then
-    local count = block.output_lines or 0
-    return layout.vbox({
-      header,
-      layout.gutter(layout.line({ {
-        text = tostring(count) .. (count == 1 and " line" or " lines"),
-        dim = true,
-        selectable = false,
-      } }), { text = "  " }),
-    })
-  end
-
-  local body = layout.content(block.output_id, { format = "markdown", dim = true })
+  local output = block.run ~= "agent"
+  local body = output and layout.content(block.output_id, { format = "text", ansi = true })
+    or layout.content(block.output_id, { format = "markdown", dim = true })
   if ctx and ctx.view_state == "peek" then
     body = layout.cap(body, {
       rows = (ctx.limits and ctx.limits.tool_output_rows) or 20,
-      keep = "head",
-      marker = "below",
+      keep = output and "tail" or "head",
+      marker = output and "above" or "below",
       total_rows = block.output_lines,
     })
   end

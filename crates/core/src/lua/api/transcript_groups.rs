@@ -45,13 +45,6 @@ fn selector_match_value(value: mlua::Value, label: &str) -> LuaResult<Option<Str
     }
 }
 
-fn canonical_selector_field(field: &str) -> &str {
-    match field {
-        "event_type" => "event",
-        other => other,
-    }
-}
-
 fn set_selector_field(
     fields: &mut Vec<TranscriptGroupFieldMatch>,
     field: &str,
@@ -61,16 +54,6 @@ fn set_selector_field(
     let Some(value) = selector_match_value(value, label)? else {
         return Ok(());
     };
-    let field = canonical_selector_field(field);
-    if let Some(existing) = fields.iter().find(|existing| existing.field == field) {
-        if existing.value != value {
-            return Err(mlua::Error::external(format!(
-                "{label} conflicts with earlier selector.{}",
-                existing.field
-            )));
-        }
-        return Ok(());
-    }
     fields.push(TranscriptGroupFieldMatch {
         field: field.to_string(),
         value,
@@ -104,14 +87,6 @@ fn parse_selector_names(table: &mlua::Table) -> LuaResult<Vec<String>> {
 
 fn parse_selector(table: mlua::Table) -> LuaResult<TranscriptGroupSelector> {
     let mut fields = Vec::new();
-    for field in ["event", "event_type", "process_id", "exit_code"] {
-        set_selector_field(
-            &mut fields,
-            field,
-            table.get::<mlua::Value>(field)?,
-            &format!("selector.{field}"),
-        )?;
-    }
     if let Some(field_table) = table.get::<Option<mlua::Table>>("fields")? {
         for pair in field_table.pairs::<String, mlua::Value>() {
             let (field, value) = pair?;
@@ -245,16 +220,6 @@ fn spec_to_lua(lua: &Lua, spec: &TranscriptGroupSpec) -> LuaResult<mlua::Table> 
         let fields = lua.create_table()?;
         for field in &spec.selector.fields {
             fields.set(field.field.as_str(), field.value.clone())?;
-            match field.field.as_str() {
-                "event" => {
-                    selector.set("event", field.value.clone())?;
-                    selector.set("event_type", field.value.clone())?;
-                }
-                "process_id" | "exit_code" => {
-                    selector.set(field.field.as_str(), field.value.clone())?;
-                }
-                _ => {}
-            }
         }
         selector.set("fields", fields)?;
     }

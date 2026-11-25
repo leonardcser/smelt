@@ -221,8 +221,9 @@ pub fn transcript_role(kind: &str) -> &'static str {
     match kind {
         "user" => "user",
         "mode" => "mode",
-        "process_status" => "process_status",
-        "agent_message" => "agent_message",
+        "delivery" => "delivery",
+        // COMPAT(delivery-notes): records written before deliveries.
+        "process_status" | "agent_message" => "delivery",
         _ => "assistant",
     }
 }
@@ -304,7 +305,9 @@ pub fn transcript_text_extent_profile(
 ) -> TranscriptExtentProfile {
     let compact = matches!(
         kind,
-        "tool" | "thinking" | "process_status" | "agent_message" | "mode"
+        // COMPAT(delivery-notes): `process_status` and `agent_message` name
+        // records written before deliveries.
+        "tool" | "thinking" | "delivery" | "process_status" | "agent_message" | "mode"
     );
     let text = if matches!(kind, "tool" | "thinking") && !preview_text.is_empty() {
         preview_text

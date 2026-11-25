@@ -120,14 +120,48 @@ impl BackgroundOutcome {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Where a delivery comes from, which decides the marker the model reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryChannel {
+    /// The session's own background work: processes and monitors.
+    Process,
+    /// Other agents.
+    Agent,
+}
+
+/// What a delivery is about. Deliveries of one run that arrive together join
+/// the conversation side by side, and group in the transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryRun {
+    Process,
+    Monitor,
+    Agent,
+}
+
+impl DeliveryRun {
+    pub fn channel(self) -> DeliveryChannel {
+        match self {
+            Self::Process | Self::Monitor => DeliveryChannel::Process,
+            Self::Agent => DeliveryChannel::Agent,
+        }
+    }
+}
+
+/// What joined the conversation on its own, outside a tool call: background
+/// work ended or reported, or another agent wrote.
+///
+/// COMPAT(delivery-notes): the aliases read the events of the
+/// `process_status` and `agent_message` notes they replace.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
-pub enum ProcessStatusEvent {
-    MonitorEvent {
-        process_id: String,
-        name: String,
-    },
-    BackgroundProcessCompleted {
+pub enum DeliveryEvent {
+    /// A notice read back from its model text, without its structure.
+    #[default]
+    Notice,
+    /// A background process ended.
+    #[serde(alias = "background_process_completed")]
+    ProcessEnded {
         process_id: String,
         termination: JobTermination,
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -136,120 +170,14 @@ pub enum ProcessStatusEvent {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         ended_at_ms: Option<u64>,
     },
-}
-
-impl ProcessStatusEvent {
-    pub fn background_process_completed(
-        process_id: impl Into<String>,
-        exit_code: Option<i32>,
-        termination: JobTermination,
-    ) -> Self {
-        Self::BackgroundProcessCompleted {
-            process_id: process_id.into(),
-            termination,
-            exit_code,
-            ended_at_ms: None,
-        }
-    }
-
-    /// The event, recording that the process ended at `ended_at_ms`.
-    pub fn ended_at(mut self, at_ms: u64) -> Self {
-        if let Self::BackgroundProcessCompleted { ended_at_ms, .. } = &mut self {
-            *ended_at_ms = Some(at_ms);
-        }
-        self
-    }
-
-    pub fn ended_at_ms(&self) -> Option<u64> {
-        match self {
-            Self::MonitorEvent { .. } => None,
-            Self::BackgroundProcessCompleted { ended_at_ms, .. } => *ended_at_ms,
-        }
-    }
-
-    pub fn event_type(&self) -> &'static str {
-        match self {
-            Self::MonitorEvent { .. } => "monitor_event",
-            Self::BackgroundProcessCompleted { .. } => "background_process_completed",
-        }
-    }
-
-    pub fn process_id(&self) -> Option<&str> {
-        match self {
-            Self::MonitorEvent { process_id, .. }
-            | Self::BackgroundProcessCompleted { process_id, .. } => Some(process_id),
-        }
-    }
-
-    pub fn exit_code(&self) -> Option<i32> {
-        match self {
-            Self::MonitorEvent { .. } => None,
-            Self::BackgroundProcessCompleted { exit_code, .. } => *exit_code,
-        }
-    }
-
-    pub fn termination(&self) -> Option<JobTermination> {
-        match self {
-            Self::MonitorEvent { .. } => None,
-            Self::BackgroundProcessCompleted { termination, .. } => Some(*termination),
-        }
-    }
-
-    /// How the background job ended.
-    pub fn outcome(&self) -> Option<BackgroundOutcome> {
-        Some(BackgroundOutcome::of_process(
-            self.termination()?,
-            self.exit_code(),
-        ))
-    }
-
-    pub fn field_value(&self, field: &str) -> Option<String> {
-        match field {
-            "event" | "event_type" => Some(self.event_type().to_string()),
-            "process_id" => self.process_id().map(str::to_string),
-            "exit_code" => self.exit_code().map(|code| code.to_string()),
-            "termination" => self.termination().map(|kind| kind.as_str().to_owned()),
-            _ => None,
-        }
-    }
-
-    pub fn display_text(&self) -> String {
-        match self {
-            Self::MonitorEvent { name, .. } => format!("event from monitor {name}"),
-            Self::BackgroundProcessCompleted {
-                process_id,
-                termination,
-                exit_code,
-                ..
-            } => {
-                let status = match termination {
-                    JobTermination::Exited => match exit_code {
-                        Some(0) => "finished successfully".to_string(),
-                        Some(code) => format!("exited with code {code}"),
-                        None => "exited".to_string(),
-                    },
-                    JobTermination::Signaled => "was terminated by a signal".to_string(),
-                    JobTermination::OutOfMemory => {
-                        "was terminated after an out-of-memory event".to_string()
-                    }
-                    JobTermination::Stopped => "was stopped".to_string(),
-                    JobTermination::Failed => "failed".to_string(),
-                };
-                format!("background process {process_id} {status}")
-            }
-        }
-    }
-}
-
-/// What another agent added to the conversation on its own, outside a tool
-/// call: a message it sent, or the report of work it did in the background.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "event", rename_all = "snake_case")]
-pub enum AgentMessageEvent {
+    /// A monitor reported what its command printed.
+    MonitorEvent { process_id: String, name: String },
     /// Another agent, such as a peer session or a teammate, sent a message.
-    MessageReceived { from: String },
+    #[serde(alias = "message_received")]
+    AgentMessage { from: String },
     /// An agent that worked in the background ended.
-    BackgroundAgentEnded {
+    #[serde(alias = "background_agent_ended")]
+    AgentEnded {
         agent_id: String,
         title: String,
         status: crate::AgentStatus,
@@ -259,19 +187,94 @@ pub enum AgentMessageEvent {
     },
 }
 
-impl AgentMessageEvent {
-    pub fn event_type(&self) -> &'static str {
-        match self {
-            Self::MessageReceived { .. } => "message_received",
-            Self::BackgroundAgentEnded { .. } => "background_agent_ended",
+/// A delivery event with what follows from it, in the flat shape renderers,
+/// group selectors and buckets read.
+#[derive(Serialize)]
+pub struct DeliveryFields<'a> {
+    #[serde(flatten)]
+    event: &'a DeliveryEvent,
+    run: DeliveryRun,
+    failed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<&'a str>,
+    source_before: &'static str,
+    source: &'a str,
+    source_after: String,
+}
+
+impl DeliveryEvent {
+    pub fn process_ended(
+        process_id: impl Into<String>,
+        exit_code: Option<i32>,
+        termination: JobTermination,
+    ) -> Self {
+        Self::ProcessEnded {
+            process_id: process_id.into(),
+            termination,
+            exit_code,
+            ended_at_ms: None,
         }
     }
 
-    /// The background agent that ended, how, and when.
-    pub fn ended_agent(&self) -> Option<(&str, BackgroundOutcome, Option<u64>)> {
+    /// The event, recording that its work ended at `at_ms`.
+    pub fn ended_at(mut self, at_ms: u64) -> Self {
+        if let Self::ProcessEnded { ended_at_ms, .. } | Self::AgentEnded { ended_at_ms, .. } =
+            &mut self
+        {
+            *ended_at_ms = Some(at_ms);
+        }
+        self
+    }
+
+    pub fn event_type(&self) -> &'static str {
         match self {
-            Self::MessageReceived { .. } => None,
-            Self::BackgroundAgentEnded {
+            Self::Notice => "notice",
+            Self::ProcessEnded { .. } => "process_ended",
+            Self::MonitorEvent { .. } => "monitor_event",
+            Self::AgentMessage { .. } => "agent_message",
+            Self::AgentEnded { .. } => "agent_ended",
+        }
+    }
+
+    pub fn run(&self) -> DeliveryRun {
+        match self {
+            Self::Notice | Self::ProcessEnded { .. } => DeliveryRun::Process,
+            Self::MonitorEvent { .. } => DeliveryRun::Monitor,
+            Self::AgentMessage { .. } | Self::AgentEnded { .. } => DeliveryRun::Agent,
+        }
+    }
+
+    pub fn channel(&self) -> DeliveryChannel {
+        self.run().channel()
+    }
+
+    /// The background job the event is about: a process, a monitor, or an
+    /// agent.
+    pub fn job_id(&self) -> Option<&str> {
+        match self {
+            Self::ProcessEnded { process_id, .. } | Self::MonitorEvent { process_id, .. } => {
+                Some(process_id)
+            }
+            Self::AgentEnded { agent_id, .. } => Some(agent_id),
+            Self::Notice | Self::AgentMessage { .. } => None,
+        }
+    }
+
+    /// The background job the event reports ended: its ID, how it ended,
+    /// and when.
+    pub fn ended_job(&self) -> Option<(&str, BackgroundOutcome, Option<u64>)> {
+        match self {
+            Self::ProcessEnded {
+                process_id,
+                termination,
+                exit_code,
+                ended_at_ms,
+            } => Some((
+                process_id,
+                BackgroundOutcome::of_process(*termination, *exit_code),
+                *ended_at_ms,
+            )),
+            Self::AgentEnded {
                 agent_id,
                 status,
                 ended_at_ms,
@@ -281,47 +284,103 @@ impl AgentMessageEvent {
                 BackgroundOutcome::of_agent(*status)?,
                 *ended_at_ms,
             )),
-        }
-    }
-
-    /// Who the message is from: the sender, or the agent that ended.
-    pub fn sender(&self) -> &str {
-        match self {
-            Self::MessageReceived { from } => from,
-            Self::BackgroundAgentEnded { title, .. } => title,
-        }
-    }
-
-    pub fn field_value(&self, field: &str) -> Option<String> {
-        match (field, self) {
-            ("event" | "event_type", _) => Some(self.event_type().to_string()),
-            ("from", Self::MessageReceived { from }) => Some(from.clone()),
-            ("agent_id", Self::BackgroundAgentEnded { agent_id, .. }) => Some(agent_id.clone()),
-            ("title", Self::BackgroundAgentEnded { title, .. }) => Some(title.clone()),
-            ("status", Self::BackgroundAgentEnded { status, .. }) => {
-                Some(status.as_str().to_string())
-            }
             _ => None,
         }
     }
 
-    pub fn display_text(&self) -> String {
-        let (before, sender, after) = self.display_parts();
-        format!("{before}{sender}{after}")
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::ProcessEnded { exit_code, .. } => *exit_code,
+            _ => None,
+        }
     }
 
-    /// [`Self::display_text`] split around its sender.
-    pub fn display_parts(&self) -> (&'static str, &str, &'static str) {
+    /// Whether the event reports a failure, or an agent that cannot go on.
+    pub fn failed(&self) -> bool {
         match self {
-            Self::MessageReceived { from } => ("message from ", from, ""),
-            Self::BackgroundAgentEnded { title, status, .. } => {
+            Self::AgentEnded {
+                status: crate::AgentStatus::Blocked,
+                ..
+            } => true,
+            _ => self
+                .ended_job()
+                .is_some_and(|(_, outcome, _)| outcome == BackgroundOutcome::Failed),
+        }
+    }
+
+    /// Whether the model reads the body. A finished process keeps its output
+    /// for the transcript; the model reads it with its own tools.
+    pub fn body_reaches_model(&self) -> bool {
+        !matches!(self, Self::ProcessEnded { .. })
+    }
+
+    pub fn fields(&self) -> DeliveryFields<'_> {
+        let (source_before, source, source_after) = self.display_parts();
+        DeliveryFields {
+            event: self,
+            run: self.run(),
+            failed: self.failed(),
+            job_id: self.job_id(),
+            source_before,
+            source,
+            source_after,
+        }
+    }
+
+    /// Field `field` of [`Self::fields`] as text, as selectors and buckets
+    /// match it.
+    pub fn field_value(&self, field: &str) -> Option<String> {
+        match serde_json::to_value(self.fields()).ok()?.get(field)? {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => Some(value.clone()),
+            value => Some(value.to_string()),
+        }
+    }
+
+    /// The name that identifies where the event came from: the sender, the
+    /// agent, the monitor, or the process.
+    pub fn source_name(&self) -> &str {
+        self.display_parts().1
+    }
+
+    pub fn display_text(&self) -> String {
+        let (before, name, after) = self.display_parts();
+        format!("{before}{name}{after}")
+    }
+
+    /// [`Self::display_text`] split around [`Self::source_name`].
+    fn display_parts(&self) -> (&'static str, &str, String) {
+        match self {
+            Self::Notice => ("", "", String::new()),
+            Self::ProcessEnded {
+                process_id,
+                termination,
+                exit_code,
+                ..
+            } => {
+                let status = match (termination, exit_code) {
+                    (JobTermination::Exited, Some(0)) => " finished successfully".to_owned(),
+                    (JobTermination::Exited, Some(code)) => format!(" exited with code {code}"),
+                    (JobTermination::Exited, None) => " exited".to_owned(),
+                    (JobTermination::Signaled, _) => " was terminated by a signal".to_owned(),
+                    (JobTermination::OutOfMemory, _) => {
+                        " was terminated after an out-of-memory event".to_owned()
+                    }
+                    (JobTermination::Stopped, _) => " was stopped".to_owned(),
+                    (JobTermination::Failed, _) => " failed".to_owned(),
+                };
+                ("background process ", process_id, status)
+            }
+            Self::MonitorEvent { name, .. } => ("event from monitor ", name, String::new()),
+            Self::AgentMessage { from } => ("message from ", from, String::new()),
+            Self::AgentEnded { title, status, .. } => {
                 let outcome = match status {
                     crate::AgentStatus::Failed => " failed",
                     crate::AgentStatus::Cancelled => " was stopped",
                     crate::AgentStatus::Blocked => " is blocked",
                     _ => " finished",
                 };
-                ("background agent ", title, outcome)
+                ("background agent ", title, outcome.to_owned())
             }
         }
     }
@@ -366,20 +425,17 @@ pub enum HistoryNote {
         name: String,
         text: String,
     },
-    ProcessStatus {
+    /// What joined the conversation on its own: what `text` names, and what
+    /// it carries in `body`, such as a message or a process's output.
+    ///
+    /// COMPAT(delivery-notes): the aliases read the `process_status` and
+    /// `agent_message` notes this replaces.
+    #[serde(alias = "process_status", alias = "agent_message")]
+    Delivery {
         text: String,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        event: Option<ProcessStatusEvent>,
-        /// Captured process output for the transcript, separate from the model notification.
-        #[serde(skip_serializing_if = "String::is_empty", default)]
-        output: String,
-    },
-    /// Another agent added to the conversation: what `text` names, and its
-    /// message or report in `body`. The model reads both.
-    AgentMessage {
-        text: String,
-        event: AgentMessageEvent,
-        #[serde(skip_serializing_if = "String::is_empty", default)]
+        #[serde(default)]
+        event: DeliveryEvent,
+        #[serde(skip_serializing_if = "String::is_empty", default, alias = "output")]
         body: String,
     },
     /// A native agent compacted its own context. The agent keeps the summary,
@@ -392,8 +448,7 @@ pub enum HistoryNote {
 pub enum HistoryNoteKind {
     ModeChange,
     Context,
-    ProcessStatus,
-    AgentMessage,
+    Delivery,
     Compaction,
 }
 
@@ -625,34 +680,21 @@ impl HistoryNote {
         }
     }
 
-    pub fn process_status(text: impl Into<String>) -> Self {
-        Self::ProcessStatus {
-            text: text.into(),
-            event: None,
-            output: String::new(),
-        }
-    }
-
-    pub fn process_status_event(event: ProcessStatusEvent) -> Self {
-        Self::process_status_with_output(event, String::new())
-    }
-
-    pub fn process_status_with_output(
-        event: ProcessStatusEvent,
-        output: impl Into<String>,
-    ) -> Self {
-        Self::ProcessStatus {
-            text: event.display_text(),
-            event: Some(event),
-            output: output.into(),
-        }
-    }
-
-    pub fn agent_message(event: AgentMessageEvent, body: impl Into<String>) -> Self {
-        Self::AgentMessage {
+    /// A delivery of `event`, carrying `body`.
+    pub fn delivery(event: DeliveryEvent, body: impl Into<String>) -> Self {
+        Self::Delivery {
             text: event.display_text(),
             event,
             body: body.into(),
+        }
+    }
+
+    /// A delivery known only by its text.
+    pub fn notice(text: impl Into<String>) -> Self {
+        Self::Delivery {
+            text: text.into(),
+            event: DeliveryEvent::Notice,
+            body: String::new(),
         }
     }
 
@@ -660,8 +702,7 @@ impl HistoryNote {
         match self {
             HistoryNote::ModeChange { .. } => HistoryNoteKind::ModeChange,
             HistoryNote::Context { .. } => HistoryNoteKind::Context,
-            HistoryNote::ProcessStatus { .. } => HistoryNoteKind::ProcessStatus,
-            HistoryNote::AgentMessage { .. } => HistoryNoteKind::AgentMessage,
+            HistoryNote::Delivery { .. } => HistoryNoteKind::Delivery,
             HistoryNote::Compaction { .. } => HistoryNoteKind::Compaction,
         }
     }
@@ -670,8 +711,7 @@ impl HistoryNote {
         match self {
             HistoryNote::ModeChange { text, .. }
             | HistoryNote::Context { text, .. }
-            | HistoryNote::ProcessStatus { text, .. }
-            | HistoryNote::AgentMessage { text, .. }
+            | HistoryNote::Delivery { text, .. }
             | HistoryNote::Compaction { text } => text,
         }
     }
@@ -697,30 +737,16 @@ impl HistoryNote {
         }
     }
 
-    pub fn process_status_event_ref(&self) -> Option<&ProcessStatusEvent> {
+    pub fn delivery_event(&self) -> Option<&DeliveryEvent> {
         match self {
-            HistoryNote::ProcessStatus { event, .. } => event.as_ref(),
+            HistoryNote::Delivery { event, .. } => Some(event),
             _ => None,
         }
     }
 
-    pub fn process_output(&self) -> Option<&str> {
+    pub fn delivery_body(&self) -> Option<&str> {
         match self {
-            HistoryNote::ProcessStatus { output, .. } if !output.is_empty() => Some(output),
-            _ => None,
-        }
-    }
-
-    pub fn agent_message_event_ref(&self) -> Option<&AgentMessageEvent> {
-        match self {
-            HistoryNote::AgentMessage { event, .. } => Some(event),
-            _ => None,
-        }
-    }
-
-    pub fn agent_message_body(&self) -> Option<&str> {
-        match self {
-            HistoryNote::AgentMessage { body, .. } if !body.is_empty() => Some(body),
+            HistoryNote::Delivery { body, .. } if !body.is_empty() => Some(body),
             _ => None,
         }
     }
@@ -740,10 +766,11 @@ impl HistoryNote {
                 crate::note::named_context_note(name, text)
             }
             HistoryNote::Context { text, .. } => crate::note::context_note(text),
-            HistoryNote::ProcessStatus { text, .. } => crate::note::process_status_note(text),
-            HistoryNote::AgentMessage { text, body, .. } => {
-                crate::note::agent_message_note(text, body)
-            }
+            HistoryNote::Delivery { text, event, body } => crate::note::delivery_note(
+                event.channel(),
+                text,
+                if event.body_reaches_model() { body } else { "" },
+            ),
             HistoryNote::Compaction { text } => crate::note::compaction_note(text),
         }
     }
@@ -928,17 +955,6 @@ impl HistoryItem {
         }
     }
 
-    /// Where the item goes among items that join the conversation at the same
-    /// moment, lowest first: agent messages follow everything else, so each
-    /// kind of arrival forms one run. Sort with a stable sort to keep arrival
-    /// order within a kind.
-    pub fn join_rank(&self) -> u8 {
-        match self.as_note().map(HistoryNote::kind) {
-            Some(HistoryNoteKind::AgentMessage) => 1,
-            _ => 0,
-        }
-    }
-
     pub fn assistant(turn: AssistantStep) -> Self {
         HistoryItem::Assistant(turn)
     }
@@ -949,6 +965,28 @@ impl HistoryItem {
             _ => None,
         }
     }
+}
+
+/// Orders items that join the conversation at the same moment: deliveries
+/// gather into runs of one [`DeliveryEvent::run`], each where its first
+/// delivery arrived, and keep their arrival order within it. Each other item
+/// is a run of its own.
+pub fn in_arrival_runs<T>(items: Vec<T>, item: impl Fn(&T) -> &HistoryItem) -> Vec<T> {
+    let mut first = std::collections::HashMap::new();
+    let mut keyed: Vec<(usize, T)> = items
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let run = item(&value)
+                .as_note()
+                .and_then(HistoryNote::delivery_event)
+                .map(DeliveryEvent::run);
+            let key = run.map_or(index, |run| *first.entry(run).or_insert(index));
+            (key, value)
+        })
+        .collect();
+    keyed.sort_by_key(|(key, _)| *key);
+    keyed.into_iter().map(|(_, value)| value).collect()
 }
 
 pub fn replace_last_note_kind(
@@ -1143,7 +1181,7 @@ pub enum UserHistoryContent {
     Plain,
     CompactionSummary { summary: String },
     ModeChange { text: String },
-    ProcessStatus { text: String },
+    Delivery { text: String },
 }
 
 pub fn classify_user_history_content(content: &Content) -> UserHistoryContent {
@@ -1158,8 +1196,11 @@ pub fn classify_user_history_content(content: &Content) -> UserHistoryContent {
             text: text::trim_whitespace(note).to_owned(),
         };
     }
-    if let Some(note) = text.strip_prefix(crate::note::PROCESS_STATUS_NOTE_PREFIX) {
-        return UserHistoryContent::ProcessStatus {
+    if let Some(note) = crate::note::DELIVERY_NOTE_PREFIXES
+        .iter()
+        .find_map(|prefix| text.strip_prefix(prefix))
+    {
+        return UserHistoryContent::Delivery {
             text: text::trim_whitespace(note).to_owned(),
         };
     }
@@ -1176,7 +1217,7 @@ pub fn compaction_summary_content(summary: &str) -> Content {
 pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
     match classify_user_history_content(content) {
         UserHistoryContent::ModeChange { text } => Some(HistoryNote::mode_change(text)),
-        UserHistoryContent::ProcessStatus { text } => Some(HistoryNote::process_status(text)),
+        UserHistoryContent::Delivery { text } => Some(HistoryNote::notice(text)),
         UserHistoryContent::Plain | UserHistoryContent::CompactionSummary { .. } => None,
     }
 }
@@ -1186,8 +1227,7 @@ enum HistoryTranscriptProjection {
     User,
     Assistant,
     Mode,
-    ProcessStatus,
-    AgentMessage,
+    Delivery,
     Compacted,
 }
 
@@ -1197,8 +1237,7 @@ impl HistoryTranscriptProjection {
             "user" => Some(Self::User),
             "assistant" | "thinking" | "tool" | "exec" | "code" => Some(Self::Assistant),
             "mode" => Some(Self::Mode),
-            "process_status" => Some(Self::ProcessStatus),
-            "agent_message" => Some(Self::AgentMessage),
+            "delivery" => Some(Self::Delivery),
             "compacted" => Some(Self::Compacted),
             _ => None,
         }
@@ -1213,15 +1252,12 @@ fn history_item_transcript_projection(item: &HistoryItem) -> Option<HistoryTrans
                 Some(HistoryTranscriptProjection::Compacted)
             }
             UserHistoryContent::ModeChange { .. } => Some(HistoryTranscriptProjection::Mode),
-            UserHistoryContent::ProcessStatus { .. } => {
-                Some(HistoryTranscriptProjection::ProcessStatus)
-            }
+            UserHistoryContent::Delivery { .. } => Some(HistoryTranscriptProjection::Delivery),
         },
         HistoryItem::Assistant(_) => Some(HistoryTranscriptProjection::Assistant),
         HistoryItem::Note(note) => match note.kind() {
             HistoryNoteKind::ModeChange => Some(HistoryTranscriptProjection::Mode),
-            HistoryNoteKind::ProcessStatus => Some(HistoryTranscriptProjection::ProcessStatus),
-            HistoryNoteKind::AgentMessage => Some(HistoryTranscriptProjection::AgentMessage),
+            HistoryNoteKind::Delivery => Some(HistoryTranscriptProjection::Delivery),
             HistoryNoteKind::Compaction => Some(HistoryTranscriptProjection::Compacted),
             HistoryNoteKind::Context => None,
         },
@@ -1665,12 +1701,14 @@ mod tests {
 
     #[test]
     fn user_content_helper_classifies_reserved_notes() {
-        let process = history_item_from_user_content(Content::text(
-            crate::note::process_status_note("background process 751225 exited with code 1"),
-        ));
+        let process = history_item_from_user_content(Content::text(crate::note::delivery_note(
+            DeliveryChannel::Process,
+            "background process 751225 exited with code 1",
+            "",
+        )));
         assert_eq!(
             process,
-            HistoryItem::note(HistoryNote::process_status(
+            HistoryItem::note(HistoryNote::notice(
                 "background process 751225 exited with code 1"
             ))
         );
@@ -1707,26 +1745,28 @@ mod tests {
         let user = HistoryItem::user(Content::text("follow up"));
         let encoded_mode =
             HistoryItem::user(Content::text(crate::note::mode_change_note("write mode")));
-        let encoded_process = HistoryItem::user(Content::text(crate::note::process_status_note(
-            "process finished",
+        let encoded_process = HistoryItem::user(Content::text(crate::note::delivery_note(
+            DeliveryChannel::Agent,
+            "message from worker",
+            "",
         )));
         let mode = HistoryItem::note(HistoryNote::mode_change("write mode"));
-        let process = HistoryItem::note(HistoryNote::process_status("process finished"));
+        let process = HistoryItem::note(HistoryNote::notice("process finished"));
         let context = HistoryItem::note(HistoryNote::context("cwd changed"));
 
         for (kind, item) in [
             ("user", &user),
             ("mode", &encoded_mode),
-            ("process_status", &encoded_process),
+            ("delivery", &encoded_process),
             ("mode", &mode),
-            ("process_status", &process),
+            ("delivery", &process),
         ] {
             assert!(transcript_block_kind_matches_history_item(kind, item));
         }
         for (kind, item) in [
             ("user", &encoded_mode),
             ("mode", &process),
-            ("process_status", &mode),
+            ("delivery", &mode),
             ("user", &context),
             ("unknown", &context),
         ] {
@@ -1882,102 +1922,163 @@ mod tests {
     }
 
     #[test]
-    fn process_status_note_serializes_typed_event() {
-        let item = HistoryItem::note(HistoryNote::process_status_event(
-            ProcessStatusEvent::background_process_completed(
-                "751225",
-                Some(1),
-                JobTermination::Exited,
-            ),
+    fn delivery_serializes_its_typed_event() {
+        let item = HistoryItem::note(HistoryNote::delivery(
+            DeliveryEvent::process_ended("751225", Some(1), JobTermination::Exited),
+            "",
         ));
-
         let json = serde_json::to_value(&item).expect("serialize note item");
-
         assert_eq!(json["kind"], "note");
-        assert_eq!(json["note_kind"], "process_status");
+        assert_eq!(json["note_kind"], "delivery");
         assert_eq!(json["text"], "background process 751225 exited with code 1");
-        assert_eq!(json["event"]["event"], "background_process_completed");
+        assert_eq!(json["event"]["event"], "process_ended");
         assert_eq!(json["event"]["process_id"], "751225");
         assert_eq!(json["event"]["termination"], "exited");
         assert_eq!(json["event"]["exit_code"], 1);
+        assert!(json.get("body").is_none());
         let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
         assert_eq!(back, item);
+
+        let oom = HistoryNote::delivery(
+            DeliveryEvent::process_ended("proc_123", None, JobTermination::OutOfMemory),
+            "",
+        );
+        assert_eq!(
+            oom.text(),
+            "background process proc_123 was terminated after an out-of-memory event"
+        );
     }
 
     #[test]
-    fn agent_message_round_trips_and_the_model_reads_its_body() {
-        let note = HistoryNote::agent_message(
-            AgentMessageEvent::MessageReceived {
+    fn each_channel_tells_the_model_what_arrived_and_its_body() {
+        let message = HistoryNote::delivery(
+            DeliveryEvent::AgentMessage {
                 from: "worker".into(),
             },
             "Tests pass.",
         );
-        let item = HistoryItem::note(note.clone());
-        let json = serde_json::to_value(&item).unwrap();
-        assert_eq!(json["note_kind"], "agent_message");
-        assert_eq!(json["event"]["event"], "message_received");
-        assert_eq!(serde_json::from_value::<HistoryItem>(json).unwrap(), item);
         assert_eq!(
-            note.to_model_text(),
+            message.to_model_text(),
             "[smelt:agent] message from worker:\nTests pass."
         );
-    }
-
-    #[test]
-    fn process_status_output_round_trips_without_changing_model_notification() {
-        let note = HistoryNote::process_status_with_output(
-            ProcessStatusEvent::background_process_completed(
-                "proc_1",
-                Some(0),
-                JobTermination::Exited,
-            ),
+        // A finished process keeps its output out of the notification.
+        let process = HistoryNote::delivery(
+            DeliveryEvent::process_ended("proc_1", Some(0), JobTermination::Exited),
             "stdout\nstderr",
         );
-        let json = serde_json::to_value(&note).unwrap();
-        assert_eq!(json["output"], "stdout\nstderr");
-        assert_eq!(serde_json::from_value::<HistoryNote>(json).unwrap(), note);
-        assert_eq!(note.process_output(), Some("stdout\nstderr"));
+        assert_eq!(process.delivery_body(), Some("stdout\nstderr"));
         assert_eq!(
-            note.to_model_text(),
-            crate::note::process_status_note(note.text())
+            process.to_model_text(),
+            "[smelt:process] background process proc_1 finished successfully"
         );
-
-        let without_output: HistoryNote = serde_json::from_value(serde_json::json!({
-            "note_kind": "process_status",
-            "text": "finished"
-        }))
-        .unwrap();
-        assert_eq!(without_output.process_output(), None);
-        assert!(serde_json::to_value(without_output)
-            .unwrap()
-            .get("output")
-            .is_none());
+        for note in [message, process] {
+            let item = HistoryItem::note(note);
+            let json = serde_json::to_value(&item).unwrap();
+            assert_eq!(serde_json::from_value::<HistoryItem>(json).unwrap(), item);
+        }
     }
 
     #[test]
-    fn out_of_memory_process_status_serializes_typed_event() {
-        let item = HistoryItem::note(HistoryNote::process_status_event(
-            ProcessStatusEvent::background_process_completed(
-                "proc_123",
-                None,
-                JobTermination::OutOfMemory,
-            ),
-        ));
-
-        let json = serde_json::to_value(&item).expect("serialize note item");
-
-        assert_eq!(json["kind"], "note");
-        assert_eq!(json["note_kind"], "process_status");
+    fn notes_of_the_kinds_deliveries_replaced_still_load() {
+        let process: HistoryNote = serde_json::from_value(serde_json::json!({
+            "note_kind": "process_status",
+            "text": "background process 7 exited with code 1",
+            "event": {"event": "background_process_completed", "process_id": "7",
+                "termination": "exited", "exit_code": 1},
+            "output": "boom",
+        }))
+        .unwrap();
         assert_eq!(
-            json["text"],
-            "background process proc_123 was terminated after an out-of-memory event"
+            process,
+            HistoryNote::delivery(
+                DeliveryEvent::process_ended("7", Some(1), JobTermination::Exited),
+                "boom"
+            )
         );
-        assert_eq!(json["event"]["event"], "background_process_completed");
-        assert_eq!(json["event"]["process_id"], "proc_123");
-        assert_eq!(json["event"]["termination"], "oom");
-        assert!(json["event"].get("exit_code").is_none());
-        let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
-        assert_eq!(back, item);
+        let plain: HistoryNote = serde_json::from_value(serde_json::json!({
+            "note_kind": "process_status", "text": "finished",
+        }))
+        .unwrap();
+        assert_eq!(plain, HistoryNote::notice("finished"));
+        let message: HistoryNote = serde_json::from_value(serde_json::json!({
+            "note_kind": "agent_message", "text": "message from worker",
+            "event": {"event": "message_received", "from": "worker"}, "body": "hi",
+        }))
+        .unwrap();
+        assert_eq!(
+            message.delivery_event(),
+            Some(&DeliveryEvent::AgentMessage {
+                from: "worker".into()
+            })
+        );
+        let ended: HistoryNote = serde_json::from_value(serde_json::json!({
+            "note_kind": "agent_message", "text": "background agent Review finished",
+            "event": {"event": "background_agent_ended", "agent_id": "a1",
+                "title": "Review", "status": "completed"},
+        }))
+        .unwrap();
+        assert_eq!(
+            ended.delivery_event().and_then(DeliveryEvent::ended_job),
+            Some(("a1", BackgroundOutcome::Completed, None))
+        );
+    }
+
+    #[test]
+    fn deliveries_join_in_runs_ordered_by_first_arrival() {
+        let message = |from: &str| {
+            HistoryItem::note(HistoryNote::delivery(
+                DeliveryEvent::AgentMessage { from: from.into() },
+                "",
+            ))
+        };
+        let process = |id: &str| {
+            HistoryItem::note(HistoryNote::delivery(
+                DeliveryEvent::process_ended(id, Some(0), JobTermination::Exited),
+                "",
+            ))
+        };
+        let mode = mode_item("write");
+        let arrived = vec![
+            message("a"),
+            process("1"),
+            mode.clone(),
+            message("b"),
+            process("2"),
+        ];
+        assert_eq!(
+            in_arrival_runs(arrived, |item| item),
+            vec![message("a"), message("b"), process("1"), process("2"), mode]
+        );
+    }
+
+    #[test]
+    fn delivery_fields_flatten_the_event_with_what_follows_from_it() {
+        let oom = DeliveryEvent::process_ended("7", None, JobTermination::OutOfMemory);
+        assert_eq!(
+            serde_json::to_value(oom.fields()).unwrap(),
+            serde_json::json!({
+                "event": "process_ended",
+                "process_id": "7",
+                "termination": "oom",
+                "run": "process",
+                "failed": true,
+                "job_id": "7",
+                "source_before": "background process ",
+                "source": "7",
+                "source_after": " was terminated after an out-of-memory event",
+            })
+        );
+        assert_eq!(oom.field_value("failed").as_deref(), Some("true"));
+        assert_eq!(oom.field_value("exit_code"), None);
+        let blocked = DeliveryEvent::AgentEnded {
+            agent_id: "a1".into(),
+            title: "Review".into(),
+            status: crate::AgentStatus::Blocked,
+            ended_at_ms: None,
+        };
+        assert_eq!(blocked.field_value("status").as_deref(), Some("blocked"));
+        assert_eq!(blocked.field_value("run").as_deref(), Some("agent"));
+        assert!(blocked.failed());
     }
 
     #[test]

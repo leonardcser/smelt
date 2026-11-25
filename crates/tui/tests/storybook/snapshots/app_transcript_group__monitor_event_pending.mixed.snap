@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 758
 expression: frame.text()
 ---
 
@@ -8,8 +9,8 @@ expression: frame.text()
 
 
 
-background process 4210 finished successfully
 monitor events: 2 from watch log
+background process 4210 finished successfully
 message from worker
 
 ─ ● … ──────────────────────────────────────────────────────────────────────

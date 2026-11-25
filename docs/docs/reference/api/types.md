@@ -1455,8 +1455,8 @@ Bounded semantic transcript metadata passed to the root renderer.
 | --- | --- | --- | --- |
 | `id` | `integer` | yes | Stable block id within the session. |
 | `index` | `integer` | yes | Zero-based block index in transcript order. |
-| `kind` | `"user"\|"assistant"\|"thinking"\|"tool"\|"group"\|"code"\|"exec"\|"mode"\|"process_status"\|"agent_message"\|"compacted"\|"compaction_preview"` | yes | Block kind. |
-| `text` | `string` |  | User/mode/process/agent message text. |
+| `kind` | `"user"\|"assistant"\|"thinking"\|"tool"\|"group"\|"code"\|"exec"\|"mode"\|"delivery"\|"compacted"\|"compaction_preview"` | yes | Block kind. |
+| `text` | `string` |  | User, mode, or delivery text. |
 | `user_lines` | `table` |  | User text as styled span lines, including slash/ref/image accents. |
 | `sent_at_ms` | `integer` |  | User-message submission time as Unix epoch milliseconds; absent for undated history. |
 | `content` | `string` |  | Code content. |
@@ -1465,12 +1465,12 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `content_bytes` | `integer` |  | Shared content size in bytes. |
 | `content_lines` | `integer` |  | Shared content logical line count. |
 | `content_preview` | `string` |  | Bounded preview for labels and fallback UI, not complete content. |
-| `title` | `string` |  | Latest structured reasoning-summary title, or the title of the background agent an agent message reports. |
+| `title` | `string` |  | Latest structured reasoning-summary title, or the title of the background agent a delivery reports. |
 | `summary_titles` | `string[]` |  | Ordered structured reasoning-summary title history. |
 | `reasoning_kind` | `"summary"\|"raw"` |  | Reasoning source for thinking blocks. |
 | `image_labels` | `string[]` |  | User image labels. |
 | `icon` | `string` |  | Mode icon. |
-| `hl_group` | `string` |  | Mode/process highlight group. |
+| `hl_group` | `string` |  | Mode highlight group. |
 | `lang` | `string` |  | Code language. |
 | `call_id` | `string` |  | Tool call id. |
 | `name` | `string` |  | Tool name. |
@@ -1479,7 +1479,7 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `summary` | `any` |  | Tool styled summary lines or compacted summary text. Header parts receive the resolved presentation title here; other parts keep the original summary. |
 | `summary_text` | `string` |  | Original tool summary flattened to plain text. |
 | `kept` | [smelt.transcript.Block[]](types.md#smelttranscriptblock) |  | Compacted marker: user, assistant, and tool entries the model still receives verbatim, oldest first. |
-| `status` | `"drafting"\|"pending"\|"confirm"\|"ok"\|"err"\|"denied"` |  | Tool status. `"drafting"` while the model still streams the call. |
+| `status` | `"drafting"\|"pending"\|"confirm"\|"ok"\|"err"\|"denied"\|"completed"\|"blocked"\|"failed"\|"cancelled"` |  | Tool status, `"drafting"` while the model still streams the call; or how the background agent a delivery reports ended. |
 | `draft` | `boolean` |  | True while the model still streams the tool call. |
 | `draft_finished` | `boolean` |  | Draft whose arguments finished streaming. |
 | `native` | `boolean` |  | Draft the provider runs itself, outside smelt's tool preflight. |
@@ -1492,18 +1492,21 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `preview_output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Immutable pending output metadata for a promoted finished draft. |
 | `background` | `boolean` |  | True when the call's work continues in the background: its result has `metadata.background = true`, or the user moved the running call there. Such a call shows status `"ok"` before its result arrives. |
 | `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output metadata. |
-| `event` | `string` |  | Process status event type, e.g. `"background_process_completed"`. |
-| `event_type` | `string` |  | Alias for `event`. |
-| `event_data` | `table` |  | Full typed process status event payload. |
-| `process_id` | `string` |  | Background process id for process status events. |
+| `event` | `"notice"\|"process_ended"\|"monitor_event"\|"agent_message"\|"agent_ended"` |  | What a delivery reports. |
+| `run` | `"process"\|"monitor"\|"agent"` |  | What a delivery is about. Deliveries of one run that arrive together join side by side, share a pending row, and group. |
+| `failed` | `boolean` |  | Whether a delivery reports a failure. |
+| `source` | `string` |  | Where a delivery comes from: the process, monitor, sender, or agent. |
+| `source_before` | `string` |  | Delivery text before `source`; `text` is `source_before .. source .. source_after`. |
+| `source_after` | `string` |  | Delivery text after `source`. |
+| `job_id` | `string` |  | Background job a delivery is about: a process, a monitor, or an agent. |
+| `process_id` | `string` |  | Process or monitor of a delivery. |
 | `exit_code` | `integer` |  | Background process exit code when known. |
-| `sender` | `string` |  | Agent message sender: the agent that sent it, or the background agent that ended. |
-| `sender_before` | `string` |  | Agent message header text before `sender`; `text` is `sender_before .. sender .. sender_after`. |
-| `sender_after` | `string` |  | Agent message header text after `sender`. |
-| `from` | `string` |  | Sender of a received agent message. |
-| `agent_id` | `string` |  | Background agent that ended, for agent messages. |
-| `agent_status` | `"completed"\|"blocked"\|"failed"\|"cancelled"` |  | How the background agent ended, for agent messages. |
-| `output_id` | `integer` |  | Stable shared-content id for exec, process-status output, or an agent message body. |
+| `termination` | `"exited"\|"signaled"\|"oom"\|"stopped"\|"failed"` |  | How a background process ended. |
+| `ended_at_ms` | `integer` |  | When the process or agent a delivery reports ended, as Unix epoch milliseconds. |
+| `name` | `string` |  | Monitor that reported a delivery. |
+| `from` | `string` |  | Sender of an agent message. |
+| `agent_id` | `string` |  | Background agent that ended. |
+| `output_id` | `integer` |  | Stable shared-content id for exec output or a delivery body. |
 | `output_revision` | `integer` |  | Shared output revision. |
 | `output_bytes` | `integer` |  | Shared output size in bytes. |
 | `output_lines` | `integer` |  | Shared output logical line count. |
@@ -1589,10 +1592,7 @@ complete child payloads are never embedded in group renderer input.
 | `called_at_ms` | `integer` |  | Invocation start as Unix epoch milliseconds. |
 | `args` | `table` |  | Bounded argument previews used by collapsed labels. |
 | `output` | `{ content_lines?: integer, is_error?: boolean }` |  | Bounded output metadata. |
-| `event` | `string` |  | Process status event type. |
-| `event_data` | `{ process_id?: string, exit_code?: integer }` |  | Bounded process metadata. |
-| `process_id` | `string` |  | Background process id. |
-| `exit_code` | `integer` |  | Background process exit code. |
+| `event` | `string` |  | Delivery event type. A delivery child also has the delivery fields of `smelt.transcript.Block`, such as `run`, `failed`, `source`, and `process_id`. |
 
 ### `smelt.transcript.GroupSelector`
 
@@ -1606,11 +1606,7 @@ Group selector declared through `smelt.transcript.groups.register`.
 | `name` | `string` |  | Match one tool name for tool blocks. |
 | `names` | `string[]` |  | Match any listed tool name for tool blocks. Cannot be combined with `name`. |
 | `terminal` | `boolean` |  | Match terminal/non-terminal blocks. |
-| `event` | `string` |  | Match typed process status event type. |
-| `event_type` | `string` |  | Alias for `event`. |
-| `process_id` | `string` |  | Match typed background process id. |
-| `exit_code` | `integer\|string` |  | Match typed background process exit code. |
-| `fields` | `table<string,string\|integer>` |  | Exact block-field matches such as `{ event = "background_process_completed" }`. |
+| `fields` | `table<string,string\|integer>` |  | Exact block-field matches, such as a delivery's `{ event = "process_ended" }` or `{ run = "agent" }`. |
 
 ### `smelt.transcript.GroupSpec`
 
@@ -2050,7 +2046,7 @@ Variants: `"fg"` \| `"bg"`
 
 Semantic stages in the bundled transcript composition pipeline.
 
-Variants: `"root"` \| `"group"` \| `"tool"` \| `"tool_header"` \| `"tool_header_content"` \| `"user"` \| `"user_content"` \| `"assistant"` \| `"thinking"` \| `"exec"` \| `"mode"` \| `"process_status"` \| `"agent_message"` \| `"compacted"` \| `"compaction_preview"` \| `"code"` \| `"unknown"`
+Variants: `"root"` \| `"group"` \| `"tool"` \| `"tool_header"` \| `"tool_header_content"` \| `"user"` \| `"user_content"` \| `"assistant"` \| `"thinking"` \| `"exec"` \| `"mode"` \| `"delivery"` \| `"compacted"` \| `"compaction_preview"` \| `"code"` \| `"unknown"`
 
 ### `smelt.transcript.RevealAlign`
 
@@ -2062,7 +2058,7 @@ Variants: `"top"`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Variants: `"user"` \| `"mode"` \| `"process_status"` \| `"agent_message"` \| `"assistant"` \| `"thinking"` \| `"tool"` \| `"code"` \| `"exec"` \| `"compacted"` \| `"compaction_preview"`
+Variants: `"user"` \| `"mode"` \| `"delivery"` \| `"assistant"` \| `"thinking"` \| `"tool"` \| `"code"` \| `"exec"` \| `"compacted"` \| `"compaction_preview"`
 
 ### `smelt.vim.Mode`
 

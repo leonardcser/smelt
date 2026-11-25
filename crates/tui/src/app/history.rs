@@ -779,19 +779,11 @@ pub(crate) fn history_note_to_block(
             Some(crate::lua::mode_block(lua, note.mode(), note.text()))
         }
         protocol::HistoryNoteKind::Context => None,
-        protocol::HistoryNoteKind::ProcessStatus => Some(Block::ProcessStatus {
+        protocol::HistoryNoteKind::Delivery => Some(Block::Delivery {
             text: note.text().to_string(),
-            event: note.process_status_event_ref().cloned(),
-            output: note.process_output().map(Into::into),
+            event: note.delivery_event().cloned().unwrap_or_default(),
+            body: note.delivery_body().map(Into::into),
         }),
-        protocol::HistoryNoteKind::AgentMessage => {
-            note.agent_message_event_ref()
-                .map(|event| Block::AgentMessage {
-                    text: note.text().to_string(),
-                    event: event.clone(),
-                    body: note.agent_message_body().map(Into::into),
-                })
-        }
         protocol::HistoryNoteKind::Compaction => Some(Block::Compacted {
             summary: note.text().to_string(),
             kept: Vec::new(),
@@ -891,10 +883,10 @@ fn user_history_to_block(
         protocol::UserHistoryContent::ModeChange { text } => {
             crate::lua::mode_block(lua, None, &text)
         }
-        protocol::UserHistoryContent::ProcessStatus { text } => Block::ProcessStatus {
+        protocol::UserHistoryContent::Delivery { text } => Block::Delivery {
             text,
-            event: None,
-            output: None,
+            event: protocol::DeliveryEvent::Notice,
+            body: None,
         },
         protocol::UserHistoryContent::Plain => {
             plain_user_history_block(content, display, command, sent_at_ms)
@@ -1237,7 +1229,7 @@ mod tests {
                     provider: None,
                 }],
             )),
-            HistoryItem::note(protocol::HistoryNote::process_status("visible process")),
+            HistoryItem::note(protocol::HistoryNote::notice("visible process")),
         ];
 
         let records = project_session_transcript_records(&session).unwrap();
@@ -4706,12 +4698,16 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn restore_screen_rebuilds_process_status_notes_as_process_blocks() {
+    fn restore_screen_rebuilds_delivery_notes_as_delivery_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let note = "background process 123 completed successfully";
         app.tui
             .conversation
-            .replace_history_for_harness(vec![user(&protocol::process_status_note(note))]);
+            .replace_history_for_harness(vec![user(&protocol::delivery_note(
+                protocol::DeliveryChannel::Process,
+                note,
+                "",
+            ))]);
 
         app.restore_screen();
 
@@ -4719,7 +4715,7 @@ mod checkpoint_tests {
         let id = history.order[0];
         assert!(matches!(
             history.block(id),
-            Some(Block::ProcessStatus { text, .. }) if text == note
+            Some(Block::Delivery { text, .. }) if text == note
         ));
     }
 

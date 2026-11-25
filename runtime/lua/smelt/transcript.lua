@@ -55,17 +55,14 @@ smelt.transcript = smelt.transcript or {}
 ---@field called_at_ms? integer Invocation start as Unix epoch milliseconds.
 ---@field args? table Bounded argument previews used by collapsed labels.
 ---@field output? { content_lines?: integer, is_error?: boolean } Bounded output metadata.
----@field event? string Process status event type.
----@field event_data? { process_id?: string, exit_code?: integer } Bounded process metadata.
----@field process_id? string Background process id.
----@field exit_code? integer Background process exit code.
+---@field event? string Delivery event type. A delivery child also has the delivery fields of `smelt.transcript.Block`, such as `run`, `failed`, `source`, and `process_id`.
 
 --- Bounded semantic transcript metadata passed to the root renderer.
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
----@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"agent_message"|"compacted"|"compaction_preview" Block kind.
----@field text? string User/mode/process/agent message text.
+---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"delivery"|"compacted"|"compaction_preview" Block kind.
+---@field text? string User, mode, or delivery text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
 ---@field sent_at_ms? integer User-message submission time as Unix epoch milliseconds; absent for undated history.
 ---@field content? string Code content.
@@ -74,12 +71,12 @@ smelt.transcript = smelt.transcript or {}
 ---@field content_bytes? integer Shared content size in bytes.
 ---@field content_lines? integer Shared content logical line count.
 ---@field content_preview? string Bounded preview for labels and fallback UI, not complete content.
----@field title? string Latest structured reasoning-summary title, or the title of the background agent an agent message reports.
+---@field title? string Latest structured reasoning-summary title, or the title of the background agent a delivery reports.
 ---@field summary_titles? string[] Ordered structured reasoning-summary title history.
 ---@field reasoning_kind? "summary"|"raw" Reasoning source for thinking blocks.
 ---@field image_labels? string[] User image labels.
 ---@field icon? string Mode icon.
----@field hl_group? string Mode/process highlight group.
+---@field hl_group? string Mode highlight group.
 ---@field lang? string Code language.
 ---@field call_id? string Tool call id.
 ---@field name? string Tool name.
@@ -88,7 +85,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field summary? any Tool styled summary lines or compacted summary text. Header parts receive the resolved presentation title here; other parts keep the original summary.
 ---@field summary_text? string Original tool summary flattened to plain text.
 ---@field kept? smelt.transcript.Block[] Compacted marker: user, assistant, and tool entries the model still receives verbatim, oldest first.
----@field status? "drafting"|"pending"|"confirm"|"ok"|"err"|"denied" Tool status. `"drafting"` while the model still streams the call.
+---@field status? "drafting"|"pending"|"confirm"|"ok"|"err"|"denied"|"completed"|"blocked"|"failed"|"cancelled" Tool status, `"drafting"` while the model still streams the call; or how the background agent a delivery reports ended.
 ---@field draft? boolean True while the model still streams the tool call.
 ---@field draft_finished? boolean Draft whose arguments finished streaming.
 ---@field native? boolean Draft the provider runs itself, outside smelt's tool preflight.
@@ -101,18 +98,21 @@ smelt.transcript = smelt.transcript or {}
 ---@field preview_output? smelt.transcript.ToolOutput Immutable pending output metadata for a promoted finished draft.
 ---@field background? boolean True when the call's work continues in the background: its result has `metadata.background = true`, or the user moved the running call there. Such a call shows status `"ok"` before its result arrives.
 ---@field output? smelt.transcript.ToolOutput Tool output metadata.
----@field event? string Process status event type, e.g. `"background_process_completed"`.
----@field event_type? string Alias for `event`.
----@field event_data? table Full typed process status event payload.
----@field process_id? string Background process id for process status events.
+---@field event? "notice"|"process_ended"|"monitor_event"|"agent_message"|"agent_ended" What a delivery reports.
+---@field run? "process"|"monitor"|"agent" What a delivery is about. Deliveries of one run that arrive together join side by side, share a pending row, and group.
+---@field failed? boolean Whether a delivery reports a failure.
+---@field source? string Where a delivery comes from: the process, monitor, sender, or agent.
+---@field source_before? string Delivery text before `source`; `text` is `source_before .. source .. source_after`.
+---@field source_after? string Delivery text after `source`.
+---@field job_id? string Background job a delivery is about: a process, a monitor, or an agent.
+---@field process_id? string Process or monitor of a delivery.
 ---@field exit_code? integer Background process exit code when known.
----@field sender? string Agent message sender: the agent that sent it, or the background agent that ended.
----@field sender_before? string Agent message header text before `sender`; `text` is `sender_before .. sender .. sender_after`.
----@field sender_after? string Agent message header text after `sender`.
----@field from? string Sender of a received agent message.
----@field agent_id? string Background agent that ended, for agent messages.
----@field agent_status? "completed"|"blocked"|"failed"|"cancelled" How the background agent ended, for agent messages.
----@field output_id? integer Stable shared-content id for exec, process-status output, or an agent message body.
+---@field termination? "exited"|"signaled"|"oom"|"stopped"|"failed" How a background process ended.
+---@field ended_at_ms? integer When the process or agent a delivery reports ended, as Unix epoch milliseconds.
+---@field name? string Monitor that reported a delivery.
+---@field from? string Sender of an agent message.
+---@field agent_id? string Background agent that ended.
+---@field output_id? integer Stable shared-content id for exec output or a delivery body.
 ---@field output_revision? integer Shared output revision.
 ---@field output_bytes? integer Shared output size in bytes.
 ---@field output_lines? integer Shared output logical line count.
@@ -132,11 +132,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field name? string Match one tool name for tool blocks.
 ---@field names? string[] Match any listed tool name for tool blocks. Cannot be combined with `name`.
 ---@field terminal? boolean Match terminal/non-terminal blocks.
----@field event? string Match typed process status event type.
----@field event_type? string Alias for `event`.
----@field process_id? string Match typed background process id.
----@field exit_code? integer|string Match typed background process exit code.
----@field fields? table<string,string|integer> Exact block-field matches such as `{ event = "background_process_completed" }`.
+---@field fields? table<string,string|integer> Exact block-field matches, such as a delivery's `{ event = "process_ended" }` or `{ run = "agent" }`.
 
 --- Declarative transcript group registration. The host owns planning; the root
 --- transcript renderer owns presentation for the resulting semantic group node.
@@ -192,7 +188,7 @@ local internal_transcript = __smelt_internal.transcript
 local parts = {}
 local part_order = {
   "root", "group", "tool", "tool_header", "tool_header_content", "user", "user_content", "assistant",
-  "thinking", "exec", "mode", "process_status", "agent_message", "compacted", "compaction_preview", "code",
+  "thinking", "exec", "mode", "delivery", "compacted", "compaction_preview", "code",
   "unknown",
 }
 local tool_presentations = {}
@@ -245,7 +241,7 @@ local function rebuild_renderer()
 end
 
 --- Semantic stages in the bundled transcript composition pipeline.
----@alias smelt.transcript.RendererPart "root"|"group"|"tool"|"tool_header"|"tool_header_content"|"user"|"user_content"|"assistant"|"thinking"|"exec"|"mode"|"process_status"|"agent_message"|"compacted"|"compaction_preview"|"code"|"unknown"
+---@alias smelt.transcript.RendererPart "root"|"group"|"tool"|"tool_header"|"tool_header_content"|"user"|"user_content"|"assistant"|"thinking"|"exec"|"mode"|"delivery"|"compacted"|"compaction_preview"|"code"|"unknown"
 
 --- Options shared by renderer replacements and middleware.
 ---@class smelt.transcript.RendererOptions

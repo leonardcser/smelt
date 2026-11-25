@@ -1528,7 +1528,13 @@ fn group_child_compile_sources(
         .filter_map(|(offset, child)| {
             let block_index = group.child_range.start.saturating_add(offset);
             let block = history.block(child.id)?;
-            let view_state = if matches!(block, Block::ProcessStatus { .. }) {
+            let view_state = if matches!(
+                block,
+                Block::Delivery {
+                    event: protocol::DeliveryEvent::ProcessEnded { .. },
+                    ..
+                }
+            ) {
                 // Opening a process group reveals its captured output, not another fold.
                 ViewState::Expanded
             } else {
@@ -2428,10 +2434,10 @@ mod tests {
                 command: false,
                 sent_at_ms: None,
             },
-            Block::ProcessStatus {
+            Block::Delivery {
                 text: "running a long process status that wraps on narrow terminals".into(),
-                event: None,
-                output: None,
+                event: protocol::DeliveryEvent::Notice,
+                body: None,
             },
             Block::Thinking {
                 title: None,

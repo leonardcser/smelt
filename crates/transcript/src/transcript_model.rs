@@ -393,18 +393,16 @@ pub enum Block {
         icon: String,
         hl_group: String,
     },
-    ProcessStatus {
+    /// What joined the conversation on its own, and what it carries.
+    ///
+    /// COMPAT(delivery-notes): the aliases read the `ProcessStatus` and
+    /// `AgentMessage` blocks this replaces.
+    #[serde(alias = "ProcessStatus", alias = "AgentMessage")]
+    Delivery {
         text: String,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        event: Option<protocol::ProcessStatusEvent>,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        output: Option<TranscriptContent>,
-    },
-    /// What another agent added to the conversation, and its message or report.
-    AgentMessage {
-        text: String,
-        event: protocol::AgentMessageEvent,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
+        #[serde(default)]
+        event: protocol::DeliveryEvent,
+        #[serde(skip_serializing_if = "Option::is_none", default, alias = "output")]
         body: Option<TranscriptContent>,
     },
     Thinking {
@@ -471,8 +469,7 @@ impl Block {
         match self {
             Block::User { .. } => "user",
             Block::Mode { .. } => "mode",
-            Block::ProcessStatus { .. } => "process_status",
-            Block::AgentMessage { .. } => "agent_message",
+            Block::Delivery { .. } => "delivery",
             Block::Thinking { .. } => "thinking",
             Block::Text { .. } => "assistant",
             Block::CodeLine { .. } => "code",
@@ -500,8 +497,7 @@ impl Block {
     pub fn row_estimate_text(&self) -> Option<BlockText<'_>> {
         match self {
             Block::User { text, .. }
-            | Block::ProcessStatus { text, .. }
-            | Block::AgentMessage { text, .. }
+            | Block::Delivery { text, .. }
             | Block::Compacted { summary: text, .. }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(BlockText::Plain(text)),
@@ -560,8 +556,7 @@ impl Block {
         match self {
             Block::User { text, .. } => Some(text.clone()),
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
-            Block::ProcessStatus { text, output, .. }
-            | Block::AgentMessage {
+            Block::Delivery {
                 text, body: output, ..
             } => Some(match output {
                 Some(output) => format!("{text}\n{}", output.snapshot()),
@@ -593,8 +588,7 @@ impl Block {
             | Block::Compacted { summary: text, .. }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(text.len()),
-            Block::ProcessStatus { text, output, .. }
-            | Block::AgentMessage {
+            Block::Delivery {
                 text, body: output, ..
             } => Some(
                 text.len()
@@ -627,10 +621,7 @@ impl Block {
             (Self::Text { content } | Self::Thinking { content, .. }, ContentChannel::Primary) => {
                 Some(content)
             }
-            (
-                Self::ProcessStatus { output, .. } | Self::AgentMessage { body: output, .. },
-                ContentChannel::Primary,
-            ) => output.as_ref(),
+            (Self::Delivery { body, .. }, ContentChannel::Primary) => body.as_ref(),
             (Self::ToolDraft(draft), ContentChannel::DraftArguments) => Some(&draft.raw_arguments),
             (Self::Exec { output, .. }, ContentChannel::ExecOutput) => Some(output),
             _ => None,
@@ -640,9 +631,7 @@ impl Block {
     pub fn registered_contents(&self) -> Vec<&TranscriptContent> {
         match self {
             Self::Text { content } | Self::Thinking { content, .. } => vec![content],
-            Self::ProcessStatus { output, .. } | Self::AgentMessage { body: output, .. } => {
-                output.iter().collect()
-            }
+            Self::Delivery { body, .. } => body.iter().collect(),
             Self::ToolDraft(draft) => draft.contents().collect(),
             Self::ToolCall { args, .. } => args.contents().collect(),
             Self::Exec { output, .. } => vec![output],
@@ -664,15 +653,8 @@ impl Block {
         &self,
     ) -> Option<(String, protocol::BackgroundOutcome, Option<u64>)> {
         match self {
-            Block::ProcessStatus {
-                event: Some(event), ..
-            } => Some((
-                event.process_id()?.to_owned(),
-                event.outcome()?,
-                event.ended_at_ms(),
-            )),
-            Block::AgentMessage { event, .. } => event
-                .ended_agent()
+            Block::Delivery { event, .. } => event
+                .ended_job()
                 .map(|(id, outcome, at)| (id.to_owned(), outcome, at)),
             _ => None,
         }
@@ -686,12 +668,9 @@ impl Block {
         }
     }
 
-    pub fn process_field(&self, field: &str) -> Option<String> {
+    pub fn delivery_event(&self) -> Option<&protocol::DeliveryEvent> {
         match self {
-            Self::ProcessStatus {
-                event: Some(event), ..
-            } => event.field_value(field),
-            Self::AgentMessage { event, .. } => event.field_value(field),
+            Self::Delivery { event, .. } => Some(event),
             _ => None,
         }
     }
@@ -1131,9 +1110,9 @@ fn visit_record_contents_mut(
 ) {
     match &mut record.block {
         Block::Text { content } | Block::Thinking { content, .. } => visit(content),
-        Block::ProcessStatus { output, .. } | Block::AgentMessage { body: output, .. } => {
-            if let Some(output) = output {
-                visit(output);
+        Block::Delivery { body, .. } => {
+            if let Some(body) = body {
+                visit(body);
             }
         }
         Block::ToolDraft(draft) => {
@@ -1412,12 +1391,7 @@ fn append_block_raw_indexed_text(text: &mut BoundedIndexedText, block: &Block) {
             text.append(icon);
             text.append(source);
         }
-        Block::ProcessStatus {
-            text: source,
-            output,
-            ..
-        }
-        | Block::AgentMessage {
+        Block::Delivery {
             text: source,
             body: output,
             ..
@@ -1838,7 +1812,6 @@ fn preview(text: &str, max_bytes: usize) -> String {
 const STORED_SELECTOR_VALUE_MAX_BYTES: usize = 512;
 const STORED_SELECTOR_FIELDS_MAX_BYTES: usize = 4 * 1024;
 const GROUP_CHILD_SUMMARY_MAX_BYTES: usize = 4 * 1024;
-const GROUP_CHILD_PROCESS_FIELD_MAX_BYTES: usize = 512;
 
 fn bounded_selector_fields(
     args: &HashMap<String, serde_json::Value>,
@@ -1889,13 +1862,6 @@ fn group_child_summary(block: &Block) -> Option<String> {
         Block::ToolCall { summary, .. } => {
             Some(bounded_styled_text(summary, GROUP_CHILD_SUMMARY_MAX_BYTES))
         }
-        Block::ProcessStatus {
-            event: Some(protocol::ProcessStatusEvent::MonitorEvent { name, .. }),
-            ..
-        } => Some(smelt_buffer::text::slice(name, 0..GROUP_CHILD_SUMMARY_MAX_BYTES).to_owned()),
-        Block::AgentMessage { event, .. } => Some(
-            smelt_buffer::text::slice(event.sender(), 0..GROUP_CHILD_SUMMARY_MAX_BYTES).to_string(),
-        ),
         _ => None,
     }
 }
@@ -1914,13 +1880,6 @@ pub struct TranscriptGroupChildOutputMetadata {
     pub is_error: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub struct TranscriptGroupChildProcessMetadata {
-    pub process_id: Option<String>,
-    pub exit_code: Option<i32>,
-    pub termination: Option<protocol::JobTermination>,
-}
-
 /// Payload-independent semantic data exposed for one retained group child.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TranscriptGroupChildMetadata {
@@ -1932,27 +1891,56 @@ pub struct TranscriptGroupChildMetadata {
     pub called_at_ms: Option<u64>,
     pub args: Option<HashMap<String, serde_json::Value>>,
     pub output: TranscriptGroupChildOutputMetadata,
-    pub event: Option<String>,
-    pub process_id: Option<String>,
-    pub exit_code: Option<i32>,
-    pub termination: Option<protocol::JobTermination>,
-    pub event_data: TranscriptGroupChildProcessMetadata,
+    /// What a delivery child delivers, as the flat [`protocol::DeliveryFields`].
+    #[serde(
+        flatten,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_delivery_fields"
+    )]
+    pub delivery: Option<protocol::DeliveryEvent>,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-struct StoredProcessMetadata {
-    event: Option<String>,
-    process_id: Option<String>,
-    exit_code: Option<i32>,
-    termination: Option<protocol::JobTermination>,
+fn serialize_delivery_fields<S: serde::Serializer>(
+    event: &Option<protocol::DeliveryEvent>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(
+        &event.as_ref().map(protocol::DeliveryEvent::fields),
+        serializer,
+    )
+}
+
+/// COMPAT(delivery-notes): summaries written before deliveries keep a
+/// `group_process` object in place of the event. A finished process reads
+/// back as its event; other blocks read back without one.
+fn lenient_group_delivery<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<protocol::DeliveryEvent>, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+fn delivery_event_retained_bytes(event: &protocol::DeliveryEvent) -> usize {
+    use protocol::DeliveryEvent as E;
+    match event {
+        E::Notice => 0,
+        E::ProcessEnded { process_id, .. } => process_id.capacity(),
+        E::MonitorEvent { process_id, name } => process_id.capacity() + name.capacity(),
+        E::AgentMessage { from } => from.capacity(),
+        E::AgentEnded {
+            agent_id, title, ..
+        } => agent_id.capacity() + title.capacity(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StoredBlockKind {
     User,
     Mode,
-    ProcessStatus,
-    AgentMessage,
+    /// COMPAT(delivery-notes): the aliases read records written before
+    /// deliveries.
+    #[serde(alias = "ProcessStatus", alias = "AgentMessage")]
+    Delivery,
     Thinking,
     Assistant,
     Code,
@@ -1967,8 +1955,7 @@ impl StoredBlockKind {
         Some(match kind {
             "user" => Self::User,
             "mode" => Self::Mode,
-            "process_status" => Self::ProcessStatus,
-            "agent_message" => Self::AgentMessage,
+            "delivery" => Self::Delivery,
             "thinking" => Self::Thinking,
             "assistant" => Self::Assistant,
             "code" => Self::Code,
@@ -1984,8 +1971,7 @@ impl StoredBlockKind {
         match self {
             Self::User => "user",
             Self::Mode => "mode",
-            Self::ProcessStatus => "process_status",
-            Self::AgentMessage => "agent_message",
+            Self::Delivery => "delivery",
             Self::Thinking => "thinking",
             Self::Assistant => "assistant",
             Self::Code => "code",
@@ -2021,7 +2007,12 @@ pub struct StoredBlockRef {
     group_summary_text: Option<String>,
     group_called_at_ms: Option<u64>,
     group_output: TranscriptGroupChildOutputMetadata,
-    group_process: StoredProcessMetadata,
+    #[serde(
+        default,
+        alias = "group_process",
+        deserialize_with = "lenient_group_delivery"
+    )]
+    group_delivery: Option<protocol::DeliveryEvent>,
     starts_with_thinking_title: bool,
     ends_with_heading: bool,
     selector_fields: HashMap<String, serde_json::Value>,
@@ -2066,24 +2057,7 @@ impl StoredBlockRef {
                 is_error: Some(output.is_error),
             })
             .unwrap_or_default();
-        let group_process = match block {
-            Block::ProcessStatus {
-                event: Some(event), ..
-            } => StoredProcessMetadata {
-                event: Some(event.event_type().to_string()),
-                process_id: event.process_id().map(|value| {
-                    smelt_buffer::text::slice(value, 0..GROUP_CHILD_PROCESS_FIELD_MAX_BYTES)
-                        .to_string()
-                }),
-                exit_code: event.exit_code(),
-                termination: event.termination(),
-            },
-            Block::AgentMessage { event, .. } => StoredProcessMetadata {
-                event: Some(event.event_type().to_string()),
-                ..StoredProcessMetadata::default()
-            },
-            _ => StoredProcessMetadata::default(),
-        };
+        let group_delivery = block.delivery_event().cloned();
         let starts_with_thinking_title = match block {
             Block::Thinking { title, content, .. } => has_thinking_title(title.as_deref(), content),
             _ => false,
@@ -2124,7 +2098,7 @@ impl StoredBlockRef {
             group_summary_text,
             group_called_at_ms,
             group_output,
-            group_process,
+            group_delivery,
             starts_with_thinking_title,
             ends_with_heading,
             selector_fields,
@@ -2147,16 +2121,9 @@ impl StoredBlockRef {
             .saturating_add(self.tool_name.as_ref().map_or(0, String::capacity))
             .saturating_add(self.group_summary_text.as_ref().map_or(0, String::capacity))
             .saturating_add(
-                self.group_process
-                    .event
+                self.group_delivery
                     .as_ref()
-                    .map_or(0, String::capacity),
-            )
-            .saturating_add(
-                self.group_process
-                    .process_id
-                    .as_ref()
-                    .map_or(0, String::capacity),
+                    .map_or(0, delivery_event_retained_bytes),
             )
             .saturating_add(
                 self.selector_fields.capacity().saturating_mul(
@@ -2188,23 +2155,7 @@ impl StoredBlockRef {
         self.selector_fields.get(arg)
     }
 
-    fn process_field(&self, field: &str) -> Option<String> {
-        match field {
-            "event" | "event_type" => self.group_process.event.clone(),
-            "process_id" => self.group_process.process_id.clone(),
-            "exit_code" => self.group_process.exit_code.map(|code| code.to_string()),
-            "termination" => self
-                .group_process
-                .termination
-                .map(|termination| termination.as_str().to_string()),
-            _ => None,
-        }
-    }
-
     fn group_child_metadata(&self, id: BlockId) -> TranscriptGroupChildMetadata {
-        let process_id = self.group_process.process_id.clone();
-        let exit_code = self.group_process.exit_code;
-        let termination = self.group_process.termination;
         TranscriptGroupChildMetadata {
             id,
             kind: self.kind.as_str(),
@@ -2218,15 +2169,7 @@ impl StoredBlockRef {
             called_at_ms: self.group_called_at_ms,
             args: (self.kind == StoredBlockKind::Tool).then(|| self.selector_fields.clone()),
             output: self.group_output.clone(),
-            event: self.group_process.event.clone(),
-            process_id: process_id.clone(),
-            exit_code,
-            termination,
-            event_data: TranscriptGroupChildProcessMetadata {
-                process_id,
-                exit_code,
-                termination,
-            },
+            delivery: self.group_delivery.clone(),
         }
     }
 }
@@ -2243,22 +2186,6 @@ fn materialized_group_child_metadata(
             is_error: Some(output.is_error),
         })
         .unwrap_or_default();
-    let (event, process_id, exit_code, termination) = match block {
-        Block::ProcessStatus {
-            event: Some(event), ..
-        } => (
-            Some(event.event_type().to_string()),
-            event
-                .process_id()
-                .map(|value| preview(value, GROUP_CHILD_PROCESS_FIELD_MAX_BYTES)),
-            event.exit_code(),
-            event.termination(),
-        ),
-        Block::AgentMessage { event, .. } => {
-            (Some(event.event_type().to_string()), None, None, None)
-        }
-        _ => (None, None, None, None),
-    };
     TranscriptGroupChildMetadata {
         id,
         kind: block.kind(),
@@ -2276,15 +2203,7 @@ fn materialized_group_child_metadata(
         called_at_ms: tool_state.and_then(|state| state.called_at_ms),
         args: group_child_args(block),
         output,
-        event,
-        process_id: process_id.clone(),
-        exit_code,
-        termination,
-        event_data: TranscriptGroupChildProcessMetadata {
-            process_id,
-            exit_code,
-            termination,
-        },
+        delivery: block.delivery_event().cloned(),
     }
 }
 
@@ -2362,33 +2281,9 @@ impl Block {
                 .capacity()
                 .saturating_add(icon.capacity())
                 .saturating_add(hl_group.capacity()),
-            Self::ProcessStatus {
-                text,
-                event,
-                output,
-            } => text
+            Self::Delivery { text, event, body } => text
                 .capacity()
-                .saturating_add(event.as_ref().map_or(0, |event| match event {
-                    protocol::ProcessStatusEvent::MonitorEvent { process_id, name } => {
-                        process_id.capacity() + name.capacity()
-                    }
-                    protocol::ProcessStatusEvent::BackgroundProcessCompleted {
-                        process_id, ..
-                    } => process_id.capacity(),
-                }))
-                .saturating_add(
-                    output
-                        .as_ref()
-                        .map_or(0, TranscriptContent::dynamic_retained_bytes),
-                ),
-            Self::AgentMessage { text, event, body } => text
-                .capacity()
-                .saturating_add(match event {
-                    protocol::AgentMessageEvent::MessageReceived { from } => from.capacity(),
-                    protocol::AgentMessageEvent::BackgroundAgentEnded {
-                        agent_id, title, ..
-                    } => agent_id.capacity().saturating_add(title.capacity()),
-                })
+                .saturating_add(delivery_event_retained_bytes(event))
                 .saturating_add(
                     body.as_ref()
                         .map_or(0, TranscriptContent::dynamic_retained_bytes),
@@ -2562,16 +2457,10 @@ impl BlockEntry {
         }
     }
 
-    fn process_field(&self, field: &str) -> Option<String> {
+    fn delivery_event(&self) -> Option<&protocol::DeliveryEvent> {
         match self {
-            Self::Stored(stored) => stored.process_field(field),
-            _ => match self.block()? {
-                Block::ProcessStatus {
-                    event: Some(event), ..
-                } => event.field_value(field),
-                Block::AgentMessage { event, .. } => event.field_value(field),
-                _ => None,
-            },
+            Self::Stored(stored) => stored.group_delivery.as_ref(),
+            _ => self.block()?.delivery_event(),
         }
     }
 
@@ -3412,10 +3301,9 @@ impl BlockHistory {
             .is_some_and(BlockEntry::is_persisted_block)
     }
 
-    pub fn process_field(&self, id: BlockId, field: &str) -> Option<String> {
-        self.entries
-            .get(&id)
-            .and_then(|entry| entry.process_field(field))
+    /// What delivery block `id` delivers, without materializing it.
+    pub fn delivery_event(&self, id: BlockId) -> Option<&protocol::DeliveryEvent> {
+        self.entries.get(&id)?.delivery_event()
     }
 
     pub fn arg_field(&self, id: BlockId, arg: &str) -> Option<&serde_json::Value> {
@@ -5135,14 +5023,14 @@ mod tests {
         let mut process_id = String::with_capacity(4 * 1024);
         process_id.push_str("42");
         let process_capacity = process_id.capacity();
-        let process = Block::ProcessStatus {
+        let process = Block::Delivery {
             text: "complete".into(),
-            output: Some("output\n".repeat(2_000).into()),
-            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+            body: Some("output\n".repeat(2_000).into()),
+            event: protocol::DeliveryEvent::process_ended(
                 process_id,
                 Some(0),
                 protocol::JobTermination::Exited,
-            )),
+            ),
         };
         let output_bytes = process
             .content(ContentChannel::Primary)
@@ -5282,11 +5170,11 @@ mod tests {
     }
 
     #[test]
-    fn process_status_output_is_registered_copyable_and_searchable() {
-        let block = Block::ProcessStatus {
+    fn delivery_body_is_registered_copyable_and_searchable() {
+        let block = Block::Delivery {
             text: "finished".into(),
-            event: None,
-            output: Some("stdout\nstderr".into()),
+            event: protocol::DeliveryEvent::Notice,
+            body: Some("stdout\nstderr".into()),
         };
         assert_eq!(
             block.raw_text().as_deref(),
@@ -5320,15 +5208,15 @@ mod tests {
                 command: "printf hi".into(),
                 output: "hi".into(),
             },
-            Block::ProcessStatus {
+            Block::Delivery {
                 text: "finished".into(),
-                event: None,
-                output: Some("stdout\nstderr".into()),
+                event: protocol::DeliveryEvent::Notice,
+                body: Some("stdout\nstderr".into()),
             },
-            Block::ProcessStatus {
+            Block::Delivery {
                 text: "finished".into(),
-                event: None,
-                output: None,
+                event: protocol::DeliveryEvent::Notice,
+                body: None,
             },
         ] {
             assert_eq!(
@@ -5468,14 +5356,39 @@ mod tests {
                 r#""stable_scroll_anchor":true,"tool_draft":false,"#,
                 r#""group_summary_text":"cargo test","group_called_at_ms":null,"#,
                 r#""group_output":{"content_lines":2,"is_error":false},"#,
-                r#""group_process":{"event":null,"process_id":null,"exit_code":null,"#,
-                r#""termination":null},"starts_with_thinking_title":false,"#,
+                r#""group_delivery":null,"starts_with_thinking_title":false,"#,
                 r#""ends_with_heading":false,"selector_fields":{"command":"cargo test"}}"#,
             )
         );
         let decoded = StoredBlockRef::from_summary(7, &row.summary).unwrap();
         assert_eq!(decoded.record_index, 7);
         assert_eq!(serde_json::to_vec(&*decoded).unwrap(), row.summary);
+
+        let summary = String::from_utf8(row.summary).unwrap();
+        let legacy = |group_process: &str| {
+            let summary = summary.replace(
+                r#""group_delivery":null"#,
+                &format!(r#""group_process":{group_process}"#),
+            );
+            StoredBlockRef::from_summary(7, summary.as_bytes())
+                .unwrap()
+                .group_delivery
+                .clone()
+        };
+        assert_eq!(
+            legacy(
+                r#"{"event":"background_process_completed","process_id":"42","exit_code":0,"termination":"exited"}"#
+            ),
+            Some(protocol::DeliveryEvent::process_ended(
+                "42",
+                Some(0),
+                protocol::JobTermination::Exited
+            ))
+        );
+        assert_eq!(
+            legacy(r#"{"event":null,"process_id":null,"exit_code":null,"termination":null}"#),
+            None
+        );
     }
 
     #[test]
@@ -6970,17 +6883,15 @@ mod tests {
             }]
         );
 
-        let note = |job: &str, exit_code| Block::ProcessStatus {
+        let note = |job: &str, exit_code| Block::Delivery {
             text: format!("background process {job} exited"),
-            event: Some(
-                protocol::ProcessStatusEvent::background_process_completed(
-                    job,
-                    Some(exit_code),
-                    protocol::JobTermination::Exited,
-                )
-                .ended_at(4_000),
-            ),
-            output: None,
+            event: protocol::DeliveryEvent::process_ended(
+                job,
+                Some(exit_code),
+                protocol::JobTermination::Exited,
+            )
+            .ended_at(4_000),
+            body: None,
         };
         history.push(note("proc_2", 0));
         assert_eq!(state(&history), Some(BackgroundState::Running));

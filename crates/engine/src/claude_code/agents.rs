@@ -4,8 +4,8 @@ use super::native_id;
 use super::transcript::Transcript;
 use crate::EngineEventSender;
 use protocol::{
-    AgentCapabilities, AgentInfo, AgentMessageEvent, AgentOwner, AgentStatus, EngineEvent,
-    HistoryItem, HistoryNote, ToolOutcome,
+    AgentCapabilities, AgentInfo, AgentOwner, AgentStatus, DeliveryEvent, EngineEvent, HistoryItem,
+    HistoryNote, ToolOutcome,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -436,8 +436,8 @@ impl Agents {
             && !child.reported
         {
             child.reported = true;
-            deliveries.push(Delivery::Report(HistoryNote::agent_message(
-                AgentMessageEvent::BackgroundAgentEnded {
+            deliveries.push(Delivery::Report(HistoryNote::delivery(
+                DeliveryEvent::AgentEnded {
                     agent_id: child.info.id.clone(),
                     title: child.info.title.clone(),
                     status: child.info.status,
@@ -1077,7 +1077,7 @@ mod tests {
             panic!("one report");
         };
         assert_eq!(report.text(), "background agent Review finished");
-        assert_eq!(report.agent_message_body(), Some("All good"));
+        assert_eq!(report.delivery_body(), Some("All good"));
     }
 
     #[test]

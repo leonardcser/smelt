@@ -501,7 +501,8 @@ end
         .collect();
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert!(
-        reports[0].contains(r#""note_kind":"agent_message""#),
+        reports[0].contains(r#""note_kind":"delivery""#)
+            && reports[0].contains(r#""event":"agent_ended""#),
         "{}",
         reports[0]
     );

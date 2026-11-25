@@ -99,6 +99,7 @@ smelt.settings.transcript = {
   view = {
     blocks = { thinking = "peek" },
     tools = { read_file = "collapsed", edit_file = "collapsed", write_file = "expanded" },
+    events = { process_ended = "collapsed", agent_message = "peek" },
     groups = { explore = "collapsed", lsp = "collapsed", web = "collapsed" },
   },
   limits = { tool_output_rows = 20, thinking_peek_rows = 4 },
@@ -106,7 +107,9 @@ smelt.settings.transcript = {
 ```
 
 - `view` sets the default fold state (`"collapsed"`, `"peek"` or `"expanded"`)
-  for block kinds, tools and groups. Use `false` for a group to switch it off.
+  for block kinds, tools, delivery events and groups. A tool's state wins over
+  its kind's, and so does a delivery event's, such as `process_ended`. Use
+  `false` for a group to switch it off.
 - `limits` caps how many rows tool output and thinking previews show:
   `tool_rows`, `tool_body_rows`, `tool_output_rows`, `collapsed_error_rows`,
   `thinking_peek_rows` and `thinking_peek_head_rows`. `tool_rows` is the

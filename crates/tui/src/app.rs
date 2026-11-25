@@ -1163,7 +1163,7 @@ impl PendingHistoryAppend {
         }
     }
 
-    pub(crate) fn process_status(note: protocol::HistoryNote) -> Self {
+    pub(crate) fn delivered(note: protocol::HistoryNote) -> Self {
         Self {
             item: protocol::HistoryItem::note(note),
             coalescing_note_kind: None,
@@ -1191,9 +1191,8 @@ impl PendingHistoryAppend {
         self.coalescing_note_kind
     }
 
-    /// See [`protocol::HistoryItem::join_rank`].
-    pub(crate) fn join_rank(&self) -> u8 {
-        self.item.join_rank()
+    pub(crate) fn item(&self) -> &protocol::HistoryItem {
+        &self.item
     }
 
     pub(crate) fn context_name(&self) -> Option<&str> {
@@ -1814,13 +1813,13 @@ impl TuiApp {
                 self.run_queued_command_line(&line, sent_at_ms);
                 true
             }
-            QueuedInput::ProcessStatus(note) if !note.text().is_empty() => {
-                let turn = self.begin_process_status_turn(note);
+            QueuedInput::Delivery(note) if !note.text().is_empty() => {
+                let turn = self.begin_delivery_turn(note);
                 let started = turn.is_some() || self.turn_submission_is_pending();
                 self.conversation.set_active(turn);
                 started
             }
-            QueuedInput::ProcessStatus(_) => true,
+            QueuedInput::Delivery(_) => true,
         };
         if started {
             if let Some(recovery) = recovery {
