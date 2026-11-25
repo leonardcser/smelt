@@ -1544,12 +1544,15 @@ impl Runtime<'_> {
                 }
             }
             UiCommand::AppendHistoryItem { .. } if self.turn.is_none() => {}
-            UiCommand::AppendHistoryItem { append } => self.deferred.push(Followup {
-                steer: None,
-                input: StartTurnInput::note(protocol::HistoryNote::context(
-                    serde_json::to_string(&append.item).unwrap_or_default(),
-                )),
-            }),
+            // The note joins the conversation when Claude Code echoes it, so
+            // the host shows it once the agent reads it.
+            UiCommand::AppendHistoryItem { append } => match append.item {
+                HistoryItem::Note(note) => self.deferred.push(Followup {
+                    steer: None,
+                    input: StartTurnInput::note(note),
+                }),
+                item => log::entry(log::Level::Warn, "claude_code_append_not_note", &item),
+            },
             other => self.background(other),
         }
         Ok(true)

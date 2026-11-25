@@ -815,6 +815,35 @@ async fn steers_reach_claude_code_mid_turn_and_follow_the_step_they_join() {
 
 #[tokio::test]
 #[serial(claude_code)]
+async fn a_mid_turn_mode_note_joins_the_conversation_as_itself_once_taken() {
+    let fixture = Fixture::new("steer");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let note = protocol::HistoryNote::mode_change_for_transition("read", "write", "now in write");
+    handle.send(UiCommand::AppendHistoryItem {
+        append: protocol::HistoryAppend::mode_change(
+            HistoryItem::note(note.clone()),
+            protocol::AgentMode::read(),
+        ),
+    });
+    let mut history = Vec::new();
+    finish(&mut handle, &mut history).await;
+    let notes: Vec<_> = history.iter().filter_map(HistoryItem::as_note).collect();
+    assert_eq!(notes, [&note]);
+    let sent = fixture
+        .calls()
+        .into_iter()
+        .find(|call| call["type"] == "user" && call["priority"] == "next")
+        .expect("the note is sent while Claude Code works");
+    assert_eq!(
+        sent["message"]["content"][0]["text"],
+        note.to_model_text(),
+        "Claude Code reads the note as the model does"
+    );
+}
+
+#[tokio::test]
+#[serial(claude_code)]
 async fn a_withdrawn_steer_is_dropped_by_claude_code_and_never_committed() {
     let fixture = Fixture::new("steer-cancel");
     let mut handle = fixture.handle();
