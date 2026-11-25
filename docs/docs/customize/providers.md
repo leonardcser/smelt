@@ -65,9 +65,10 @@ Claude Code instead. If `claude` is not on `PATH`, set
 What to expect:
 
 - `/usage` shows the plan limits that Claude Code reports.
-- Tool calls go through smelt's permission policy and dialogs. Native `Bash`
-  runs outside smelt's sandbox, so it counts as full access and asks outside
-  yolo mode. Claude Code's own permission system also applies.
+- Claude Code runs its own tools. Tools with a smelt match show under the
+  smelt name (`Bash` as `bash`). The others show as `claude-code/<Name>`.
+- Tool calls go through smelt's permissions, and Claude Code's own also apply.
+  `bash` runs outside smelt's sandbox, so it needs full access.
 - Questions and plans from Claude Code open in smelt's dialogs.
 - Background shell commands appear in `/ps` and native subagents in
   `/subagents`. Cancelling a turn with **Esc** leaves them running.
