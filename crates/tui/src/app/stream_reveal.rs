@@ -249,6 +249,10 @@ impl<K: Hash + Eq> StreamReveal<K> {
             // that reveal rather than applying its count to earlier rows.
             let mut interrupted = rewrapped;
             let mut fresh_tail = 0usize;
+            // Most glyphs gained before any row. Rows that end with fewer
+            // glyphs than this lost some of the stream's tail; a wrap only
+            // moves glyphs down, which keeps every row's tail.
+            let mut peak = 0i64;
             stream.tail_rows.clear();
             for segment in &mut stream.segments {
                 if rewrapped {
@@ -284,8 +288,8 @@ impl<K: Hash + Eq> StreamReveal<K> {
                             .get(&row)
                             .copied()
                             .unwrap_or(if is_new { 0 } else { count });
+                    peak = peak.max(gained);
                     gained += i64::from(count) - i64::from(before);
-                    interrupted |= count < before;
                     if before > 0 {
                         fresh_tail = 0;
                     }
@@ -297,6 +301,7 @@ impl<K: Hash + Eq> StreamReveal<K> {
                 segment.rows = Some(rows);
                 segment.glyphs = glyphs;
             }
+            interrupted |= gained < peak;
             if interrupted || gained > fresh_tail as i64 || (arrived.is_none() && gained != 0) {
                 stream.pace.cap(0);
             }
@@ -390,7 +395,7 @@ fn hide_tail(
         let fill = composed
             .owner(last, y)
             .is_some_and(|owner| owner.win == painted.win)
-            .then(|| grid.cell(last, y))
+            .then(|| composed.grid().cell(last, y))
             .filter(|cell| cell.symbol.as_str().chars().all(char::is_whitespace))
             .map(|cell| cell.style);
         for x in (text.x..text.right()).rev() {
@@ -400,7 +405,7 @@ fn hide_tail(
             if !is_glyph(composed.grid(), composed, painted, x, y) {
                 continue;
             }
-            let wide = grid.cell(x, y).symbol.width() > 1;
+            let wide = composed.grid().cell(x, y).symbol.width() > 1;
             for x in x..x + if wide { 2 } else { 1 } {
                 if let Some(cell) = grid.cell_mut(x, y) {
                     cell.symbol = CellSymbol::space();
@@ -615,6 +620,57 @@ mod tests {
         let mut frame = next.grid().clone();
         assert!(!reveal.present(&mut frame, &next, now + MAX_SPREAD));
         assert_eq!(frame.row(2), next.grid().row(2));
+    }
+
+    #[test]
+    fn a_word_wrapping_onto_a_new_row_keeps_typing() {
+        let start = Instant::now();
+        let mut reveal = StreamReveal::<()>::default();
+        reveal.track((), 1, Baseline::Empty);
+        let (first, window) = screen(&["abc def"], 0);
+        reveal.arrive(&(), start);
+        reveal.measure(&first, Some(window), |_| Some((0, 1)), start);
+        assert_eq!(reveal.streams[&()].pace.hidden, 5);
+
+        // "def" wraps onto the next row as "gh" arrives.
+        let next = start + Duration::from_millis(10);
+        let (wrapped, window) = screen(&["abc", "defgh"], 0);
+        reveal.arrive(&(), next);
+        reveal.measure(&wrapped, Some(window), |_| Some((0, 2)), next);
+        assert_eq!(
+            reveal.streams[&()].pace.hidden,
+            7,
+            "the pending glyphs keep typing with the new ones"
+        );
+        let mut frame = wrapped.grid().clone();
+        assert!(reveal.present(&mut frame, &wrapped, next));
+        assert_eq!(frame.cell(0, 0).symbol, 'a', "what showed stays shown");
+        assert_eq!(
+            frame.cell(1, 0).symbol,
+            ' ',
+            "what was pending stays hidden"
+        );
+    }
+
+    #[test]
+    fn a_tail_that_shrinks_as_earlier_rows_grow_shows_at_once() {
+        let start = Instant::now();
+        let mut reveal = StreamReveal::<()>::default();
+        reveal.track((), 1, Baseline::Current);
+        let (base, window) = screen(&["ab"], 0);
+        reveal.measure(&base, Some(window), |_| Some((0, 2)), start);
+        reveal.arrive(&(), start);
+        let (typing, window) = screen(&["ab", "cdefgh"], 0);
+        reveal.measure(&typing, Some(window), |_| Some((0, 2)), start);
+        assert!(reveal.streams[&()].pace.hidden > 0);
+
+        // A re-render moves the typing row's text up: the glyph total holds.
+        let (moved, window) = screen(&["abcdef", "gh"], 0);
+        reveal.measure(&moved, Some(window), |_| Some((0, 2)), start);
+        assert_eq!(reveal.streams[&()].pace.hidden, 0);
+        let mut frame = moved.grid().clone();
+        assert!(!reveal.present(&mut frame, &moved, start));
+        assert_eq!(frame.row(0), moved.grid().row(0));
     }
 
     #[test]
