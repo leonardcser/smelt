@@ -88,6 +88,25 @@ Defaults (in the built-in `smelt/permissions.lua`):
   logins, and `.env` files (except `.env.example`, `.env.sample` and
   `.env.template`).
 
+### SSH-signed commits in write mode
+
+If Git already signs with SSH, it can use your SSH agent without reading a
+key file under `~/.ssh`. In your terminal, use `ssh-add -l` to check that the
+signing identity is loaded. Then configure Git with the **public key text**
+(substitute your signing key's `.pub` file):
+
+```bash
+git config --local user.signingkey "key::$(cat ~/.ssh/id_ed25519.pub)"
+```
+
+Use `--global` instead of `--local` to make this key the default for all your
+repositories on this machine.
+
+Start smelt from that terminal so it inherits `SSH_AUTH_SOCK`. The socket
+must be accessible in the sandbox, for example in your user runtime directory
+rather than under `~/.ssh`. Git asks the agent to sign without reading the
+private key. Other processes with access to that agent can request signatures too.
+
 ## The Permission Prompt
 
 The dialog shows the call, a preview (a diff for edits) and a question. A write
