@@ -156,6 +156,7 @@ pub const OPTIONAL_PLUGINS: &[&str] = &[
     "smelt.plugins.lsp",
     "smelt.plugins.goal",
     "smelt.plugins.notebook",
+    "smelt.plugins.plot",
     "smelt.plugins.show_ansi",
 ];
 
@@ -2594,14 +2595,19 @@ impl LuaRuntime {
 
     /// Call the composed root transcript renderer for any semantic node. Blocks,
     /// groups, and recursive children all enter through this method and therefore
-    /// observe the same middleware chain. Every recursive call shares `now_ms`.
+    /// observe the same middleware chain. Every recursive call shares `now_ms`
+    /// and `width`; the result records whether any renderer read `ctx.width`.
     pub fn render_transcript_layout(
         &self,
         node: &TranscriptRenderNode,
         view_state: smelt_transcript::transcript_model::ViewState,
         now_ms: u64,
-    ) -> BlockLayout {
-        let fallback = || fallback_transcript_node_layout(node);
+        width: u16,
+    ) -> TranscriptRender {
+        let fallback = || TranscriptRender {
+            layout: fallback_transcript_node_layout(node),
+            reads_width: false,
+        };
         let render_fn = {
             let slot = self
                 .shared
@@ -2639,31 +2645,37 @@ impl LuaRuntime {
                 return fallback();
             }
         };
-        let render = match transcript_recursive_renderer(&self.lua, render_fn, ctx) {
-            Ok(function) => function,
-            Err(error) => {
-                self.record_error(format!(
-                    "transcript render: build recursive renderer: {error}"
-                ));
-                return fallback();
-            }
-        };
+        let (render, reads_width) =
+            match transcript_recursive_renderer(&self.lua, render_fn, ctx, width) {
+                Ok(functions) => functions,
+                Err(error) => {
+                    self.record_error(format!(
+                        "transcript render: build recursive renderer: {error}"
+                    ));
+                    return fallback();
+                }
+            };
 
-        let result: mlua::Value = match render.call(lua_node) {
-            Ok(value) => value,
+        let layout = match render.call(lua_node) {
+            Ok(result) => transcript_layout_from_lua_value(
+                self,
+                result,
+                &format!("transcript render `{}` #{}", node.kind(), node.index()),
+                || fallback_transcript_node_layout(node),
+            ),
             Err(error) => {
                 self.record_error(format!("transcript render: {error}"));
-                return fallback();
+                fallback_transcript_node_layout(node)
             }
         };
-        let kind = node.kind();
-        let index = node.index();
-        transcript_layout_from_lua_value(
-            self,
-            result,
-            &format!("transcript render `{kind}` #{index}"),
-            fallback,
-        )
+        let reads_width = reads_width.call::<bool>(()).unwrap_or_else(|error| {
+            self.record_error(format!("transcript render: width read probe: {error}"));
+            true
+        });
+        TranscriptRender {
+            layout,
+            reads_width,
+        }
     }
 
     /// Current monotonic time used to schedule transcript refreshes.
@@ -3453,8 +3465,19 @@ fn render_fields_to_lua_table(
 
 const TRANSCRIPT_RENDER_FACTORY_KEY: &str = "__smelt_transcript_render_factory";
 const TRANSCRIPT_RENDER_FACTORY: &str = r#"
-return function(root, base_ctx)
+return function(root, base_ctx, width)
   local depth = 0
+  local reads_width = false
+  -- `width` stays out of the raw ctx so that reading it is observable: only
+  -- nodes whose renderer reads it render again when the width changes.
+  local ctx_meta = {
+    __index = function(_, key)
+      if key == "width" then
+        reads_width = true
+        return width
+      end
+    end,
+  }
   local render
   render = function(node, overrides)
     if type(node) ~= "table" then
@@ -3468,7 +3491,7 @@ return function(root, base_ctx)
       depth = depth - 1
       error("ctx.render: maximum recursion depth exceeded", 2)
     end
-    local ctx = {}
+    local ctx = setmetatable({}, ctx_meta)
     for key, value in pairs(base_ctx) do ctx[key] = value end
     if overrides then
       for key, value in pairs(overrides) do
@@ -3485,7 +3508,7 @@ return function(root, base_ctx)
     if not ok then error(result, 0) end
     return result
   end
-  return render
+  return render, function() return reads_width end
 end
 "#;
 
@@ -3493,7 +3516,8 @@ fn transcript_recursive_renderer(
     lua: &Lua,
     root: mlua::Function,
     base_ctx: mlua::Table,
-) -> LuaResult<mlua::Function> {
+    width: u16,
+) -> LuaResult<(mlua::Function, mlua::Function)> {
     let factory = match lua.named_registry_value::<mlua::Function>(TRANSCRIPT_RENDER_FACTORY_KEY) {
         Ok(factory) => factory,
         Err(_) => {
@@ -3504,7 +3528,7 @@ fn transcript_recursive_renderer(
             factory
         }
     };
-    factory.call((root, base_ctx))
+    factory.call((root, base_ctx, width))
 }
 
 fn transcript_layout_from_lua_value(
@@ -3535,6 +3559,14 @@ fn transcript_layout_from_lua_value(
             fallback()
         }
     }
+}
+
+/// Layout produced by one top-level transcript render pass.
+#[derive(Clone, Debug)]
+pub struct TranscriptRender {
+    pub layout: BlockLayout,
+    /// A renderer read `ctx.width`, so the layout is only valid at that width.
+    pub reads_width: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -5485,12 +5517,13 @@ mod tests {
             children,
             child_ids,
         );
-        let layout = rt.render_transcript_layout(
+        let rendered = rt.render_transcript_layout(
             &node,
             smelt_transcript::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
+            80,
         );
-        match layout {
+        match rendered.layout {
             BlockLayout::Leaf(LuaLeaf::Text(spec)) => assert_eq!(spec.content, "batch:3:expanded"),
             other => panic!("unexpected layout: {other:?}"),
         }

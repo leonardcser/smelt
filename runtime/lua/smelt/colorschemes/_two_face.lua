@@ -19,6 +19,8 @@ local function mix(a, b, t)
   )
 end
 local function color(c) return rgb(c[1], c[2], c[3]) end
+-- A plot series carries its color as both fg and bg.
+local function series(c) return { fg = color(c), bg = color(c) } end
 
 local raw = {
   { name = "ansi", module = "ansi", light = false, bg = { 0, 0, 0 }, fg = { 229, 229, 229 }, muted = { 128, 128, 128 }, accent = { 0, 175, 255 }, link = { 95, 175, 255 }, success = { 95, 215, 95 }, heading = { 135, 206, 250 }, warn = { 255, 215, 0 }, error = { 255, 95, 95 } },
@@ -133,7 +135,22 @@ local function build(p)
     SmeltDiffDeleteBg       = bg(del),
     SmeltDiffAddInlineBg    = bg(add_inline),
     SmeltDiffDeleteInlineBg = bg(del_inline),
+
+    SmeltPlot1 = series(p.link),
+    SmeltPlot2 = series(p.success),
+    SmeltPlot3 = series(p.warn),
+    SmeltPlot4 = series(p.accent),
+    SmeltPlot5 = series(p.error),
+    SmeltPlot6 = series(mix(p.link, p.success, 0.5)),
   }
+  -- Heatmap ramp: a neutral tile near the background, then five steps toward
+  -- the positive and the negative color.
+  local zero = mix(bg0, fg0, 0.12)
+  groups.SmeltPlotZero = series(zero)
+  for i = 1, 5 do
+    groups["SmeltPlotPos" .. i] = series(mix(zero, p.link, i / 5))
+    groups["SmeltPlotNeg" .. i] = series(mix(zero, p.error, i / 5))
+  end
   return {
     name = p.module,
     syntax = p.name,

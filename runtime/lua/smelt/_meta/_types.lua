@@ -1065,6 +1065,7 @@
 ---@field surface string Rendering surface name, currently `"transcript"`.
 ---@field limits table Numeric product row budgets such as `tool_output_rows`.
 ---@field now_ms integer Unix epoch milliseconds shared by the complete top-level render pass.
+---@field width integer Display columns the top-level node renders into. Reading it makes the node render again whenever the width changes; nodes that never read it are only re-wrapped.
 ---@field render fun(node: smelt.transcript.Block, overrides?: { view_state?: string }): smelt.layout.Node Re-enter the composed root renderer for a semantic child.
 
 --- Visible transcript cursor position relative to the committed viewport.
@@ -1194,6 +1195,7 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ToolBodyOptions
 ---@field gutter? string Prefix rendered before each body line.
+---@field width? integer Display columns left for the body after the gutter. Reading it has the same cost as reading `ctx.width`.
 
 --- Bounded tool output metadata passed to transcript renderers.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

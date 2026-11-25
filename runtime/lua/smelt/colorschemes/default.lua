@@ -101,7 +101,37 @@ local groups = {
   SmeltDiffDeleteBg       = bg({ dark = { 60, 20, 20 }, light = { 248, 218, 218 } }),
   SmeltDiffAddInlineBg    = bg({ dark = { 35, 95, 35 }, light = { 180, 230, 180 } }),
   SmeltDiffDeleteInlineBg = bg({ dark = { 110, 35, 35 }, light = { 242, 175, 175 } }),
+
+  -- Categorical plot series. Each carries its color as both fg and bg, so a
+  -- cell can show one series above another.
+  SmeltPlot1 = { fg = dl(75, 25), bg = dl(75, 25) },    -- blue
+  SmeltPlot2 = { fg = dl(114, 28), bg = dl(114, 28) },  -- green
+  SmeltPlot3 = { fg = dl(214, 166), bg = dl(214, 166) }, -- orange
+  SmeltPlot4 = { fg = dl(176, 97), bg = dl(176, 97) },  -- purple
+  SmeltPlot5 = { fg = dl(204, 161), bg = dl(204, 161) }, -- pink
+  SmeltPlot6 = { fg = dl(80, 30), bg = dl(80, 30) },    -- teal
 }
+
+-- Heatmap ramp: a neutral tile near the background, then five steps toward
+-- blue for positive values and orange-red for negative ones.
+local function heat(name, dark, light)
+  groups[name] = { fg = dl(dark, light), bg = dl(dark, light) }
+end
+local function mix(a, b, t)
+  return {
+    math.floor(a[1] + (b[1] - a[1]) * t + 0.5),
+    math.floor(a[2] + (b[2] - a[2]) * t + 0.5),
+    math.floor(a[3] + (b[3] - a[3]) * t + 0.5),
+  }
+end
+local zero = { dark = { 45, 48, 56 }, light = { 228, 231, 236 } }
+local pos = { dark = { 110, 185, 255 }, light = { 30, 100, 200 } }
+local neg = { dark = { 235, 120, 90 }, light = { 200, 75, 40 } }
+heat("SmeltPlotZero", zero.dark, zero.light)
+for i = 1, 5 do
+  heat("SmeltPlotPos" .. i, mix(zero.dark, pos.dark, i / 5), mix(zero.light, pos.light, i / 5))
+  heat("SmeltPlotNeg" .. i, mix(zero.dark, neg.dark, i / 5), mix(zero.light, neg.light, i / 5))
+end
 
 return {
   name = "default",

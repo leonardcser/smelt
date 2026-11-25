@@ -1,0 +1,290 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 62 36
+  0   0   1 fg=AnsiValue(77)
+  0   1   5 attrs=dim
+  0  51  10 attrs=dim
+  1   2  17 fg=AnsiValue(244)
+  2   6   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+  2  11   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 97, g: 158, b: 215 }
+  2  16   5 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+  3   6   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+  3  11   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 97, g: 158, b: 215 }
+  3  16   5 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+  4   6   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+  4  11   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 97, g: 158, b: 215 }
+  4  16   5 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+  5   6   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 97, g: 158, b: 215 }
+  5  11   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+  6   6   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 97, g: 158, b: 215 }
+  6  11   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+  7   6   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 97, g: 158, b: 215 }
+  7  11   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+  8   6   5 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+  8  16   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+  9   6   5 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+  9  16   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+ 10   6   5 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+ 10  16   5 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 110, g: 185, b: 255 }
+ 11   6   3 fg=AnsiValue(244)
+ 11   9   2 fg=Reset bg=Rgb { r: 235, g: 120, b: 90 }
+ 11  11   2 fg=Reset bg=Rgb { r: 197, g: 106, b: 83 }
+ 11  13   2 fg=Reset bg=Rgb { r: 159, g: 91, b: 76 }
+ 11  15   2 fg=Reset bg=Rgb { r: 121, g: 77, b: 70 }
+ 11  17   2 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+ 11  19   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 11  21   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 11  23   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 11  25   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 11  27   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 11  29   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 11  31   2 fg=AnsiValue(244)
+ 13   0   1 fg=AnsiValue(77)
+ 13   1   5 attrs=dim
+ 13  51  10 attrs=dim
+ 14   2  50 fg=AnsiValue(244)
+ 15   6   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 15   8   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 15  10   4 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 15  14   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 15  16   4 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 15  20   4 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 15  24   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 15  26   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 15  28   4 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 15  32   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 15  34   4 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 15  38   4 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 15  42   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 15  44   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 15  46   4 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 15  50   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 15  52   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 16   6   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 16   8   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 16  10   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 16  12   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 16  14   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 16  16   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 16  18   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 16  20   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 16  22   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 16  24   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 16  26   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 16  28   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 16  30   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 16  32   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 16  34   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 16  36   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 16  38   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 16  40   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 16  42   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 16  44   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 16  46   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 16  48   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 16  50   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 16  52   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 17   6   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17   8   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  10   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 17  12   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17  14   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  16   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 17  18   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17  20   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  22   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 17  24   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17  26   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  28   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 17  30   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17  32   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  34   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 17  36   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17  38   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  40   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 17  42   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17  44   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  46   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 17  48   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 17  50   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 17  52   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 18   6   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 18   8   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 18  10   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 18  12   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 18  14   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 18  16   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 18  18   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 18  20   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 18  22   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 18  24   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 18  26   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 18  28   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 18  30   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 18  32   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 18  34   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 18  36   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 18  38   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 18  40   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 18  42   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 18  44   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 18  46   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 18  48   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 18  50   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 18  52   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 19   6   2 fg=AnsiValue(244)
+ 19   8   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 19  10   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 19  12   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 19  14   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 19  16   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 19  18   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 19  20   2 fg=AnsiValue(244)
+ 21   0   1 fg=AnsiValue(77)
+ 21   1   5 attrs=dim
+ 21  51  10 attrs=dim
+ 22   2  41 fg=AnsiValue(244)
+ 23   4   1 fg=Rgb { r: 83, g: 62, b: 63 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 23   5   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 23   6   1 fg=Rgb { r: 83, g: 62, b: 63 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 23   7   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 23   8   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 23   9   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  10   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  11   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 83, g: 62, b: 63 }
+ 23  12   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 23  13   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 83, g: 62, b: 63 }
+ 23  14   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 23  15   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 23  16   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 23  17   1 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 23  18   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  19   1 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 23  20   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  21   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  22   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  23   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  24   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 23  25   1 fg=Rgb { r: 83, g: 62, b: 63 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  26   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 23  27   1 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  28   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  29   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  30   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  31   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  32   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 83, g: 62, b: 63 }
+ 23  33   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 23  34   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 45, g: 48, b: 56 }
+ 23  35   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 23  36   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 23  37   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  38   1 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 23  39   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  40   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  41   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 23  42   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 23  43   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 24   4   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 24   5   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 24   6   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 83, g: 62, b: 63 }
+ 24   7   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 24   8   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 45, g: 48, b: 56 }
+ 24   9   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 24  10   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  11   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  12   1 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  13   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  14   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  15   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  16   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  17   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  18   1 fg=Rgb { r: 83, g: 62, b: 63 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  19   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  20   1 fg=Rgb { r: 83, g: 62, b: 63 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  21   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  22   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  23   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  24   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  25   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 83, g: 62, b: 63 }
+ 24  26   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 24  27   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 83, g: 62, b: 63 }
+ 24  28   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 24  29   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  30   1 fg=Rgb { r: 71, g: 103, b: 136 } bg=Rgb { r: 97, g: 158, b: 215 }
+ 24  31   1 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  32   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  33   1 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  34   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  35   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  36   1 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  37   1 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  38   1 fg=Rgb { r: 84, g: 130, b: 175 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  39   1 fg=Rgb { r: 83, g: 62, b: 63 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  40   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 58, g: 75, b: 96 }
+ 24  41   1 fg=Rgb { r: 45, g: 48, b: 56 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 24  42   1 fg=Rgb { r: 97, g: 158, b: 215 } bg=Rgb { r: 71, g: 103, b: 136 }
+ 24  43   1 fg=Rgb { r: 58, g: 75, b: 96 } bg=Rgb { r: 84, g: 130, b: 175 }
+ 25   4   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25   5   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25   6   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25   7   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25   8   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25   9   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  10   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  11   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  12   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  13   1 fg=Rgb { r: 83, g: 62, b: 63 }
+ 25  14   1 fg=Rgb { r: 97, g: 158, b: 215 }
+ 25  15   1 fg=Rgb { r: 45, g: 48, b: 56 }
+ 25  16   1 fg=Rgb { r: 97, g: 158, b: 215 }
+ 25  17   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25  18   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  19   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25  20   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  21   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  22   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  23   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  24   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  25   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  26   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25  27   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  28   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  29   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  30   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  31   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  32   1 fg=Rgb { r: 83, g: 62, b: 63 }
+ 25  33   1 fg=Rgb { r: 97, g: 158, b: 215 }
+ 25  34   1 fg=Rgb { r: 83, g: 62, b: 63 }
+ 25  35   1 fg=Rgb { r: 97, g: 158, b: 215 }
+ 25  36   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25  37   1 fg=Rgb { r: 97, g: 158, b: 215 }
+ 25  38   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25  39   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  40   1 fg=Rgb { r: 58, g: 75, b: 96 }
+ 25  41   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 25  42   1 fg=Rgb { r: 71, g: 103, b: 136 }
+ 25  43   1 fg=Rgb { r: 84, g: 130, b: 175 }
+ 26   4   4 fg=AnsiValue(244)
+ 26   8   2 fg=Reset bg=Rgb { r: 235, g: 120, b: 90 }
+ 26  10   2 fg=Reset bg=Rgb { r: 197, g: 106, b: 83 }
+ 26  12   2 fg=Reset bg=Rgb { r: 159, g: 91, b: 76 }
+ 26  14   2 fg=Reset bg=Rgb { r: 121, g: 77, b: 70 }
+ 26  16   2 fg=Reset bg=Rgb { r: 83, g: 62, b: 63 }
+ 26  18   2 fg=Reset bg=Rgb { r: 45, g: 48, b: 56 }
+ 26  20   2 fg=Reset bg=Rgb { r: 58, g: 75, b: 96 }
+ 26  22   2 fg=Reset bg=Rgb { r: 71, g: 103, b: 136 }
+ 26  24   2 fg=Reset bg=Rgb { r: 84, g: 130, b: 175 }
+ 26  26   2 fg=Reset bg=Rgb { r: 97, g: 158, b: 215 }
+ 26  28   2 fg=Reset bg=Rgb { r: 110, g: 185, b: 255 }
+ 26  30  24 fg=AnsiValue(244)
+ 32   0   1 fg=AnsiValue(237)
+ 32   2   1 fg=Rgb { r: 44, g: 34, b: 29 } attrs=bold
+ 32   4   1 fg=Rgb { r: 150, g: 150, b: 150 } attrs=bold
+ 32   6  56 fg=AnsiValue(237)
+ 33   1   1 fg=Black bg=White
+ 34   0  62 fg=AnsiValue(237)
+ 35   0   8 fg=AnsiValue(244) bg=AnsiValue(234)
+ 35   8  46 bg=AnsiValue(233)
+ 35  54   8 fg=AnsiValue(244) bg=AnsiValue(233)

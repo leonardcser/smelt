@@ -1860,7 +1860,8 @@ mod tests {
         view_state: smelt_transcript::transcript_model::ViewState,
         now_ms: u64,
     ) -> BlockLayout {
-        rt.render_transcript_layout(node, view_state, now_ms)
+        rt.render_transcript_layout(node, view_state, now_ms, 80)
+            .layout
     }
 
     fn assert_text_layout(layout: &BlockLayout, expected: &str) {

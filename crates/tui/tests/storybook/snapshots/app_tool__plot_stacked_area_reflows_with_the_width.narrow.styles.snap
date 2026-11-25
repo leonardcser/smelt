@@ -1,0 +1,42 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 40 18
+  0   0   1 fg=AnsiValue(77)
+  0   1   5 attrs=dim
+  0  29  10 attrs=dim
+  1   0   7 attrs=dim
+  2   2   4 fg=AnsiValue(244)
+  3   2   4 fg=AnsiValue(244)
+  4   2   4 fg=AnsiValue(244)
+  5   2   4 fg=AnsiValue(244)
+  5  37   2 fg=AnsiValue(214)
+  6   2   4 fg=AnsiValue(244)
+  6  28   4 fg=AnsiValue(214)
+  6  32   7 fg=AnsiValue(114) bg=AnsiValue(214)
+  7   2   4 fg=AnsiValue(244)
+  7  17   3 fg=AnsiValue(214)
+  7  20  11 fg=AnsiValue(114) bg=AnsiValue(214)
+  7  31   1 fg=AnsiValue(114)
+  7  32   7 fg=AnsiValue(75) bg=AnsiValue(114)
+  8   2   4 fg=AnsiValue(244)
+  8   6   3 fg=AnsiValue(114) bg=AnsiValue(214)
+  8   9  20 fg=AnsiValue(75) bg=AnsiValue(114)
+  8  29  10 fg=AnsiValue(75)
+  9   2   4 fg=AnsiValue(244)
+  9   6  33 fg=AnsiValue(75)
+ 10   2  37 fg=AnsiValue(244)
+ 11   2  37 fg=AnsiValue(244)
+ 12   2   2 fg=AnsiValue(75)
+ 12  11   2 fg=AnsiValue(114)
+ 12  19   2 fg=AnsiValue(214)
+ 14   0   1 fg=AnsiValue(237)
+ 14   2   1 fg=Rgb { r: 39, g: 27, b: 27 } attrs=bold
+ 14   4   1 fg=Rgb { r: 150, g: 150, b: 150 } attrs=bold
+ 14   6  34 fg=AnsiValue(237)
+ 15   1   1 fg=Black bg=White
+ 16   0  40 fg=AnsiValue(237)
+ 17   0   8 fg=AnsiValue(244) bg=AnsiValue(234)
+ 17   8  24 bg=AnsiValue(233)
+ 17  32   8 fg=AnsiValue(244) bg=AnsiValue(233)

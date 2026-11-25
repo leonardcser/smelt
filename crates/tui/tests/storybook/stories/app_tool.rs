@@ -450,6 +450,179 @@ app_story!(show_ansi_renders_colors_and_plain_text, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(plot_stacked_area_reflows_with_the_width, |ctx| {
+    ctx.set_viewport(64, 18);
+    ctx.run_lua("require('smelt.plugins.plot')");
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("area")),
+            ("title", json!("Monthly signups by plan")),
+            (
+                "x_labels",
+                json!(["jan", "feb", "mar", "apr", "may", "jun"]),
+            ),
+            (
+                "series",
+                json!([
+                    { "name": "free", "y": [120, 150, 180, 220, 260, 300] },
+                    { "name": "pro", "y": [40, 60, 70, 90, 130, 160] },
+                    { "name": "team", "y": [10, 15, 30, 35, 50, 80] },
+                ]),
+            ),
+            ("height", json!(8)),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    ctx.assert_snapshot_named("wide");
+    ctx.set_viewport(40, 18);
+    ctx.assert_snapshot_named("narrow");
+});
+
+app_story!(plot_heatmap_tiles_and_pixels, |ctx| {
+    ctx.set_viewport(62, 36);
+    ctx.run_lua("require('smelt.plugins.plot')");
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("heatmap")),
+            ("labels", json!(["cpu", "mem", "io"])),
+            ("x_labels", json!(["cpu", "mem", "io"])),
+            (
+                "matrix",
+                json!([[1, 0.62, -0.2], [0.62, 1, "NA"], [-0.2, "NA", 1]]),
+            ),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
+    let activity: Vec<Vec<u32>> = (0..4)
+        .map(|day| (0..24).map(|hour| (hour * (day + 1)) % 9).collect())
+        .collect();
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("heatmap")),
+            ("labels", json!(["Mon", "Tue", "Wed", "Thu"])),
+            ("x_labels", json!(hours)),
+            ("matrix", json!(activity)),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    let weeks: Vec<String> = (1..=120).map(|w| format!("w{w}")).collect();
+    let latency: Vec<Vec<i32>> = (0..5)
+        .map(|host| (0..120).map(|t| (t * 7 + host * 13) % 40 - 10).collect())
+        .collect();
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("heatmap")),
+            ("labels", json!(["a", "b", "c", "d", "e"])),
+            ("x_labels", json!(weeks)),
+            ("matrix", json!(latency)),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(plot_percent_composition, |ctx| {
+    ctx.set_viewport(54, 22);
+    ctx.run_lua("require('smelt.plugins.plot')");
+    for kind in ["area", "bar"] {
+        ctx.tool_call(
+            "plot",
+            &[
+                ("kind", json!(kind)),
+                ("percent", json!(true)),
+                ("height", json!(5)),
+                ("labels", json!(["Jan", "Feb", "Mar"])),
+                (
+                    "series",
+                    json!([{ "name": "code", "y": [1, 0, 9] }, { "name": "test", "y": [3, 0, 1] }]),
+                ),
+            ],
+            "shown to the user",
+            Some(1),
+        );
+    }
+    ctx.assert_snapshot();
+});
+
+app_story!(plot_scatter_shows_unconnected_points, |ctx| {
+    ctx.set_viewport(52, 19);
+    ctx.run_lua("require('smelt.plugins.plot')");
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("scatter")),
+            (
+                "series",
+                json!([
+                    { "name": "control", "x": [0, 2, 9], "y": [2, 8, 4] },
+                    { "name": "trial", "x": [1, 2, 7], "y": [6, 2, 8] },
+                ]),
+            ),
+            ("height", json!(7)),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(plot_line_bar_and_histogram, |ctx| {
+    ctx.set_viewport(56, 46);
+    ctx.run_lua("require('smelt.plugins.plot')");
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("line")),
+            (
+                "series",
+                json!([
+                    { "name": "p50", "y": [12, 14, 13, 18, 22, 19, 25, 24] },
+                    { "name": "p99", "y": [40, 42, 55, 48, 70, 66, 90, 84] },
+                ]),
+            ),
+            ("y_label", json!("latency ms")),
+            ("height", json!(6)),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("bar")),
+            ("series", json!([])),
+            ("labels", json!(["rust", "lua", "markdown", "toml"])),
+            ("values", json!([182_340, 24_120, 9_870, 1_204])),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    ctx.tool_call(
+        "plot",
+        &[
+            ("kind", json!("histogram")),
+            (
+                "values",
+                json!([1, 2, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 6, 6, 7, 9]),
+            ),
+            ("bins", json!(8)),
+            ("height", json!(5)),
+        ],
+        "shown to the user",
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(read_file_tool_states, |ctx| {
     ctx.set_viewport(68, 16);
     ctx.tool_started("read_file", &[("file_path", json!("pending.rs"))]);

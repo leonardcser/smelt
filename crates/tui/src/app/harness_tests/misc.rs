@@ -9306,6 +9306,78 @@ fn show_image_tool_reports_files_it_cannot_decode() {
     assert!(content.starts_with("cannot display"), "{content}");
 }
 
+#[test]
+fn plot_stacks_series_only_on_a_shared_axis() {
+    use serde_json::json;
+    for (second_x, expected) in [
+        (json!([]), "shown to the user"),
+        (json!([1, 3]), "shown to the user"),
+        (json!([1]), "series[2].x and series[2].y differ in length"),
+        (json!([1, 4]), "stacked series must share x-values"),
+    ] {
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua("require('smelt.plugins.plot')"));
+        let (_, content) = run_display_tool(
+            app,
+            "plot",
+            &[
+                ("kind", json!("area")),
+                (
+                    "series",
+                    json!([
+                        {"x": [1, 3], "y": [1, 2]}, {"x": second_x, "y": [3, 4]}
+                    ]),
+                ),
+            ],
+        );
+        assert_eq!(content, expected);
+    }
+}
+
+#[test]
+fn plot_rejects_misleading_area_and_unrenderable_scales() {
+    use serde_json::json;
+    for (kind, y, reason) in [
+        ("area", json!([-1, 2]), "nonnegative"),
+        ("line", json!([-1e308, 1e308]), "rescale"),
+    ] {
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua("require('smelt.plugins.plot')"));
+        let (_, content) = run_display_tool(
+            app,
+            "plot",
+            &[("kind", json!(kind)), ("series", json!([{"y": y}]))],
+        );
+        assert!(content.contains(reason), "{content}");
+    }
+}
+
+#[test]
+fn plot_histogram_keeps_right_endpoint_in_narrow_pane() {
+    use serde_json::json;
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua("require('smelt.plugins.plot')"));
+    let (mut app, content) = run_display_tool(
+        app,
+        "plot",
+        &[
+            ("kind", json!("histogram")),
+            ("values", json!([0, 99, 99])),
+            ("bins", json!(50)),
+            ("height", json!(4)),
+        ],
+    );
+    assert_eq!(content, "shown to the user");
+    app.set_terminal_size(28, 22);
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame
+            .lines()
+            .any(|line| line.trim_start().starts_with('0') && line.trim_end().ends_with("99")),
+        "{frame}"
+    );
+}
+
 fn run_show_ansi(args: &[(&str, serde_json::Value)]) -> (TestApp, String) {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua("require('smelt.plugins.show_ansi')"));

@@ -263,7 +263,18 @@ pub struct CompileJob {
     id: RenderNodeId,
     key: DisplayCacheKey,
     view_state: ViewState,
+    width: u16,
     source: CompileJobSource,
+}
+
+/// A compiled node ready for [`LayoutCache::insert_compiled_blocks`].
+pub struct CompiledBlock {
+    pub id: RenderNodeId,
+    pub key: DisplayCacheKey,
+    pub layout: LayoutIr,
+    pub refresh_at: Option<std::time::Instant>,
+    /// The width a renderer read while compiling; the layout serves only it.
+    pub width: Option<u16>,
 }
 
 enum CompileJobSource {
@@ -287,6 +298,7 @@ struct GroupChildCompileSource {
 struct CompiledLayout {
     layout: LayoutIr,
     refresh_after_ms: Option<u64>,
+    reads_width: bool,
 }
 
 fn earliest_delay(left: Option<u64>, right: Option<u64>) -> Option<u64> {
@@ -306,15 +318,8 @@ fn blank_line_layout() -> LayoutIr {
 }
 
 impl CompileJob {
-    fn compile(
-        self,
-        env: TranscriptRenderEnv<'_>,
-    ) -> (
-        RenderNodeId,
-        DisplayCacheKey,
-        LayoutIr,
-        Option<std::time::Instant>,
-    ) {
+    fn compile(self, env: TranscriptRenderEnv<'_>) -> CompiledBlock {
+        let width = self.width;
         let compiled = match self.source {
             CompileJobSource::Metadata {
                 node,
@@ -325,11 +330,12 @@ impl CompileJob {
                     group_children: None,
                     refresh_after_ms: None,
                 };
-                compile_node_with_lua(env.clone(), &node, self.view_state, &mut cache)
+                compile_node_with_lua(env.clone(), &node, self.view_state, width, &mut cache)
             }
             CompileJobSource::Group { node, children } => {
                 let mut child_layouts = Vec::with_capacity(children.len().saturating_mul(2));
                 let mut refresh_after_ms = None;
+                let mut reads_width = false;
                 for child in children {
                     let mut cache = CompileLayoutCache {
                         content_sources: &child.content_sources,
@@ -340,8 +346,10 @@ impl CompileJob {
                         env.clone(),
                         &child.node,
                         child.view_state,
+                        width,
                         &mut cache,
                     );
+                    reads_width |= compiled.reads_width;
                     if !child_layouts.is_empty() {
                         child_layouts.push(blank_line_layout());
                     }
@@ -355,25 +363,28 @@ impl CompileJob {
                     refresh_after_ms: None,
                 };
                 let mut compiled =
-                    compile_node_with_lua(env.clone(), &node, self.view_state, &mut cache);
+                    compile_node_with_lua(env.clone(), &node, self.view_state, width, &mut cache);
                 compiled.refresh_after_ms =
                     earliest_delay(compiled.refresh_after_ms, refresh_after_ms);
+                compiled.reads_width |= reads_width;
                 compiled
             }
             CompileJobSource::Ready(layout) => CompiledLayout {
                 layout,
                 refresh_after_ms: None,
+                reads_width: false,
             },
         };
-        (
-            self.id,
-            self.key,
-            compiled.layout,
-            compiled.refresh_after_ms.and_then(|after_ms| {
+        CompiledBlock {
+            id: self.id,
+            key: self.key,
+            layout: compiled.layout,
+            refresh_at: compiled.refresh_after_ms.and_then(|after_ms| {
                 env.refresh_now
                     .checked_add(std::time::Duration::from_millis(after_ms))
             }),
-        )
+            width: compiled.reads_width.then_some(width),
+        }
     }
 }
 
@@ -395,6 +406,8 @@ pub struct RenderCtx<'a> {
 
 struct CachedLayout {
     key: DisplayCacheKey,
+    /// Set when the renderer read the width: the layout serves only that width.
+    width: Option<u16>,
     layout: LayoutIr,
     syntax_theme_revision: Option<u64>,
     measurements: VecDeque<CachedMeasurement>,
@@ -402,6 +415,13 @@ struct CachedLayout {
     weight: usize,
     refresh_at: Option<std::time::Instant>,
     content_hash_pending: bool,
+}
+
+impl CachedLayout {
+    /// Whether this entry is the layout for `key` rendered at `width`.
+    fn serves(&self, key: DisplayCacheKey, width: u16) -> bool {
+        self.key == key && self.width.is_none_or(|compiled| compiled == width)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -816,11 +836,19 @@ impl LayoutCache {
         true
     }
 
-    fn promote_appended_content_key(&mut self, id: RenderNodeId, key: DisplayCacheKey) -> bool {
+    fn promote_appended_content_key(
+        &mut self,
+        id: RenderNodeId,
+        key: DisplayCacheKey,
+        width: u16,
+    ) -> bool {
         let Some(entry) = self.blocks.get_mut(&id) else {
             return false;
         };
-        if !entry.content_hash_pending || !entry.key.same_render_inputs_except_content(key) {
+        if !entry.content_hash_pending
+            || !entry.key.same_render_inputs_except_content(key)
+            || entry.width.is_some_and(|compiled| compiled != width)
+        {
             return false;
         }
         entry.key = key;
@@ -944,11 +972,12 @@ impl LayoutCache {
             let id = node.id();
             let display_key =
                 DisplayCacheKey::from_node_key(key, renderer_generation, render_env_key);
-            let cached_key = self.blocks.get(&id).map(|cached| cached.key);
-            if cached_key == Some(display_key) {
+            let cached = self.blocks.get(&id);
+            if cached.is_some_and(|cached| cached.serves(display_key, key.width)) {
                 self.touch(id);
                 continue;
             }
+            let cached_key = cached.map(|cached| cached.key);
             smelt_perf::perf::record_value(
                 if cached_key.is_some() {
                     "transcript:layout_cache:key_miss"
@@ -975,6 +1004,10 @@ impl LayoutCache {
                         cached_key.render_context_hash != display_key.render_context_hash,
                         "transcript:layout_cache:context_key_miss",
                     ),
+                    (
+                        cached_key == display_key,
+                        "transcript:layout_cache:width_key_miss",
+                    ),
                 ] {
                     if changed {
                         smelt_perf::perf::record_value(label, 1);
@@ -989,7 +1022,7 @@ impl LayoutCache {
                 },
                 1,
             );
-            if self.promote_appended_content_key(id, display_key) {
+            if self.promote_appended_content_key(id, display_key, key.width) {
                 continue;
             }
             let source = match node {
@@ -1053,6 +1086,7 @@ impl LayoutCache {
                 id,
                 key: display_key,
                 view_state: key.view_state,
+                width: key.width,
                 source,
             });
         }
@@ -1076,18 +1110,17 @@ impl LayoutCache {
         self.insert_compiled_blocks(layouts);
     }
 
-    pub fn insert_compiled_blocks(
-        &mut self,
-        layouts: Vec<(
-            RenderNodeId,
-            DisplayCacheKey,
-            LayoutIr,
-            Option<std::time::Instant>,
-        )>,
-    ) {
+    pub fn insert_compiled_blocks(&mut self, layouts: Vec<CompiledBlock>) {
         let _perf = smelt_perf::perf::begin("transcript:layout_cache:insert_cache");
         let mut replaced_refresh = false;
-        for (id, key, layout, refresh_at) in layouts {
+        for CompiledBlock {
+            id,
+            key,
+            layout,
+            refresh_at,
+            width,
+        } in layouts
+        {
             let weight = layout.retained_bytes();
             if let Some(previous) = self.blocks.remove(&id) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(previous.weight);
@@ -1104,6 +1137,7 @@ impl LayoutCache {
                 id,
                 CachedLayout {
                     key,
+                    width,
                     layout,
                     syntax_theme_revision: None,
                     measurements: VecDeque::new(),
@@ -1183,7 +1217,7 @@ impl LayoutCache {
         let display_key = DisplayCacheKey::from_node_key(key, renderer_generation, render_env_key);
         self.blocks
             .get(&id)
-            .is_some_and(|cached| cached.key == display_key)
+            .is_some_and(|cached| cached.serves(display_key, key.width))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1213,7 +1247,7 @@ impl LayoutCache {
             let entry = self
                 .blocks
                 .get_mut(&id)
-                .filter(|cached| cached.key == display_key)?;
+                .filter(|cached| cached.serves(display_key, key.width))?;
             retained_delta += ensure_cached_syntax_theme(entry, ctx.theme, inline_syntax);
             retained_delta += ensure_cached_measurement(
                 entry,
@@ -1312,7 +1346,7 @@ impl LayoutCache {
             let entry = self
                 .blocks
                 .get_mut(&id)
-                .filter(|cached| cached.key == display_key)?;
+                .filter(|cached| cached.serves(display_key, key.width))?;
             let retained_delta = ensure_cached_measurement(
                 entry,
                 MeasurementKey {
@@ -1351,7 +1385,7 @@ impl LayoutCache {
         let layout = self
             .blocks
             .get(&id)
-            .filter(|cached| cached.key == display_key)
+            .filter(|cached| cached.serves(display_key, key.width))
             .map(|cached| &cached.layout)?;
         self.touch(id);
         Some(layout)
@@ -1456,6 +1490,7 @@ pub fn compile_block(block: &Block) -> LayoutIr {
         TranscriptRenderEnv::new(&lua),
         &node,
         ViewState::Expanded,
+        80,
         &mut cache,
     )
     .layout
@@ -1547,17 +1582,19 @@ fn compile_node_with_lua(
     env: TranscriptRenderEnv<'_>,
     node: &TranscriptRenderNode,
     view_state: ViewState,
+    width: u16,
     cache: &mut CompileLayoutCache<'_>,
 ) -> CompiledLayout {
     let kind = node.kind();
     let index = node.index();
-    let layout = env
+    let rendered = env
         .lua
-        .render_transcript_layout(node, view_state, env.now_ms);
-    match compile_layout_ir_with_cache(&layout, cache) {
+        .render_transcript_layout(node, view_state, env.now_ms, width);
+    match compile_layout_ir_with_cache(&rendered.layout, cache) {
         Ok(layout) => CompiledLayout {
             layout,
             refresh_after_ms: cache.refresh_after_ms,
+            reads_width: rendered.reads_width,
         },
         Err(error) => {
             env.lua.record_error(format!(
@@ -1570,6 +1607,7 @@ fn compile_node_with_lua(
                     ansi: false,
                 })),
                 refresh_after_ms: None,
+                reads_width: rendered.reads_width,
             }
         }
     }
@@ -2224,6 +2262,21 @@ mod tests {
         )
     }
 
+    fn compiled(
+        id: RenderNodeId,
+        key: DisplayCacheKey,
+        layout: LayoutIr,
+        refresh_at: Option<std::time::Instant>,
+    ) -> CompiledBlock {
+        CompiledBlock {
+            id,
+            key,
+            layout,
+            refresh_at,
+            width: None,
+        }
+    }
+
     fn rendered_buffer(block: &LayoutIr, width: u16) -> Buffer {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
@@ -2535,8 +2588,8 @@ mod tests {
         let weight = small.retained_bytes();
 
         model.insert_compiled_blocks(vec![
-            (first, key, small.clone(), None),
-            (second, key, small.clone(), None),
+            compiled(first, key, small.clone(), None),
+            compiled(second, key, small.clone(), None),
         ]);
         assert_eq!(model.retained_bytes, weight * 2);
         model.touch(first);
@@ -2550,7 +2603,7 @@ mod tests {
         });
         let replacement_weight = replacement.retained_bytes();
         model.set_budget(usize::MAX);
-        model.insert_compiled_blocks(vec![(first, key, replacement, None)]);
+        model.insert_compiled_blocks(vec![compiled(first, key, replacement, None)]);
         assert_eq!(model.blocks.len(), 1);
         assert_eq!(model.retained_bytes, replacement_weight);
 
@@ -2642,7 +2695,7 @@ mod tests {
         .unwrap();
         let mut cache = LayoutCache::new();
         cache.set_budget(usize::MAX);
-        cache.insert_compiled_blocks(vec![(
+        cache.insert_compiled_blocks(vec![compiled(
             id,
             DisplayCacheKey::from_node_key(key, 0, 0),
             layout,
@@ -2694,7 +2747,7 @@ mod tests {
         }));
         let mut cache = LayoutCache::new();
         cache.set_budget(usize::MAX);
-        cache.insert_compiled_blocks(vec![(
+        cache.insert_compiled_blocks(vec![compiled(
             id,
             DisplayCacheKey::from_node_key(key, 0, 0),
             layout,
@@ -2787,19 +2840,19 @@ mod tests {
         let mut model = LayoutCache::new();
         model.set_budget(usize::MAX);
         model.insert_compiled_blocks(vec![
-            (
+            compiled(
                 first,
                 key,
                 layout.clone(),
                 Some(start + std::time::Duration::from_millis(100)),
             ),
-            (
+            compiled(
                 second,
                 key,
                 layout.clone(),
                 Some(start + std::time::Duration::from_millis(200)),
             ),
-            (static_node, key, layout.clone(), None),
+            compiled(static_node, key, layout.clone(), None),
         ]);
 
         assert_eq!(
@@ -2816,10 +2869,10 @@ mod tests {
         assert!(model.blocks.contains_key(&second));
         assert!(model.blocks.contains_key(&static_node));
 
-        model.insert_compiled_blocks(vec![(second, key, layout.clone(), None)]);
+        model.insert_compiled_blocks(vec![compiled(second, key, layout.clone(), None)]);
         assert_eq!(model.next_refresh_at(), None);
 
-        model.insert_compiled_blocks(vec![(
+        model.insert_compiled_blocks(vec![compiled(
             first,
             key,
             layout.clone(),
@@ -2828,7 +2881,7 @@ mod tests {
         model.retain_nodes(|id| id == static_node);
         assert_eq!(model.next_refresh_at(), None);
 
-        model.insert_compiled_blocks(vec![(
+        model.insert_compiled_blocks(vec![compiled(
             first,
             key,
             layout,
@@ -2910,5 +2963,83 @@ mod tests {
             1
         );
         assert_eq!(model.blocks.len(), 2);
+    }
+
+    #[test]
+    fn only_width_reading_nodes_recompile_at_a_new_width() {
+        let mut transcript = Transcript::new();
+        for text in ["wide", "static"] {
+            transcript.push(Block::User {
+                text: text.into(),
+                image_labels: Vec::new(),
+                command: false,
+                sent_at_ms: None,
+            });
+        }
+        let ids = transcript.history.order.clone();
+        let keys_at = |width: u16| {
+            ids.iter()
+                .map(|id| LayoutKey {
+                    width,
+                    ..base_key(&transcript.history, *id)
+                })
+                .collect::<Vec<_>>()
+        };
+        let lua = smelt_core::lua::runtime::LuaRuntime::new();
+        lua.lua
+            .load(
+                r#"
+                smelt.transcript.set_renderer(function(node, ctx)
+                  if node.text == "wide" then
+                    assert(ctx.width >= 40, "too narrow")
+                    return smelt.layout.line(string.rep("=", ctx.width))
+                  end
+                  return smelt.layout.text(node.text)
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let env = TranscriptRenderEnv::new(&lua);
+        let (generation, env_key) = (env.renderer_generation, env.render_env_key);
+        let mut model = LayoutCache::new();
+        let rule_at = |model: &LayoutCache, width: u16| {
+            let key = keys_at(width)[0];
+            let layout = model
+                .get(RenderNodeId::Block(ids[0]), key, generation, env_key)
+                .expect("width-reading node compiled at this width");
+            rendered_buffer(layout, width)
+                .get_line(0)
+                .unwrap()
+                .to_string()
+        };
+
+        assert_eq!(
+            model.ensure_many(env.clone(), &transcript.history, &ids, &keys_at(20)),
+            2
+        );
+        // The failed renderer read the width; its fallback must not stick.
+        assert_eq!(
+            model.ensure_many(env.clone(), &transcript.history, &ids, &keys_at(40)),
+            1
+        );
+        assert_eq!(rule_at(&model, 40), "=".repeat(40));
+        assert_eq!(
+            model.ensure_many(env.clone(), &transcript.history, &ids, &keys_at(40)),
+            0
+        );
+        assert_eq!(
+            model.ensure_many(env.clone(), &transcript.history, &ids, &keys_at(60)),
+            1
+        );
+        assert_eq!(rule_at(&model, 60), "=".repeat(60));
+        assert!(model
+            .get(
+                RenderNodeId::Block(ids[0]),
+                keys_at(40)[0],
+                generation,
+                env_key
+            )
+            .is_none());
     }
 }

@@ -56,10 +56,48 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
 | `smelt.plugins.lsp` | Optional LSP tool facade for agent code navigation. |
 | `smelt.plugins.notebook` | Optional notebook editing: edit_notebook with cell previews, staleness preflight, and per-path locking. |
+| `smelt.plugins.plot` | Optional plot tool: line, area, scatter, bar, histogram and heatmap charts drawn as text, sized to the transcript width. |
 | `smelt.plugins.show_ansi` | Optional show_ansi tool: shows ANSI-colored text, from a file of program output or hand-written escapes. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- BUNDLED_PLUGINS_END -->
+
+## Plot
+
+Add `require("smelt.plugins.plot")` to `~/.config/smelt/init.lua` to give the agent the `plot` tool. It draws line, scatter, area, horizontal bar, histogram, and heatmap charts in the transcript. Charts redraw when the pane width changes.
+
+For example, these tool arguments show how two categories contribute to a total:
+
+```json
+{
+  "kind": "area",
+  "title": "Storage by tier (GB)",
+  "x_labels": ["Jan", "Feb", "Mar"],
+  "series": [
+    { "name": "Hot", "y": [20, 24, 30] },
+    { "name": "Archive", "y": [10, 18, 25] }
+  ]
+}
+```
+
+Area series stack by default: each band shows one category, and the top edge shows 30, 42, and 55 GB. For cumulative outlines instead of bands, use `"kind": "line", "stacked": true`. Stacked series must use the same x-values; omit `x` for equally spaced samples.
+
+Set `"percent": true` on a stacked area or bar chart to compare shares rather than totals. Each nonzero sample sums to 100%. A zero-total sample is a gap, not 0%.
+
+For a heatmap, pass a row-major matrix with one row per `labels` entry and one column per `x_labels` entry. This correlation matrix shows a value in each tile:
+
+```json
+{"kind":"heatmap", "labels":["cpu","mem","io"], "x_labels":["cpu","mem","io"], "matrix":[[1,0.62,-0.2],[0.62,1,"NA"],[-0.2,"NA",1]]}
+```
+
+The heatmap picks its layout from the data and the pane width:
+
+- When every value fits, each cell is a square tile with its value in the middle.
+- Otherwise, each cell is a square of half-block pixels, as large as the width allows. At the smallest size, one line holds two matrix rows. When the matrix is wider than the pane, each cell shows the mean of several columns, and the legend says how many.
+- When all values are zero or more, the colors run from near the background to blue. When any value is negative, negative values run to red and the ramp centers on zero.
+- Missing values (`"NA"`) are blank.
+
+To change the colors, set `SmeltPlotZero`, `SmeltPlotPos1` to `SmeltPlotPos5`, and `SmeltPlotNeg1` to `SmeltPlotNeg5` in your colorscheme.
 
 ## File finder
 

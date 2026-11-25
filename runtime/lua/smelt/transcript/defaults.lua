@@ -493,11 +493,26 @@ function M.unread_file_error(block, path_arg, noun)
   return nil
 end
 
+-- Body options whose `width` is computed on first read, so only bodies that
+-- read it take on `ctx.width`'s re-render on resize.
+local function body_options(ctx, opts)
+  local width_opts = {}
+  for key, value in pairs(opts or {}) do width_opts[key] = value end
+  if rawget(width_opts, "width") ~= nil then return width_opts end
+  return setmetatable(width_opts, {
+    __index = function(_, key)
+      if key ~= "width" then return nil end
+      local gutter = rawget(width_opts, "gutter") or "  "
+      return math.max(1, ctx.width - smelt.text.width(gutter))
+    end,
+  })
+end
+
 --- Render a tool body. Drafts can provide an explicit best-effort preview;
 --- completed tools fall back to raw output or their structured body renderer.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node|nil
 function M.render_tool_body(block, ctx, opts, presentation)
-  opts = opts or {}
+  opts = body_options(ctx, opts)
   presentation = tool_presentation(block, presentation)
   local renderer = presentation.body
   local draft_renderer = presentation.draft

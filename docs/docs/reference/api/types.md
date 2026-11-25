@@ -1545,6 +1545,7 @@ Renderer context. Width, theme, and scroll state are intentionally absent.
 | `surface` | `string` | yes | Rendering surface name, currently `"transcript"`. |
 | `limits` | `table` | yes | Numeric product row budgets such as `tool_output_rows`. |
 | `now_ms` | `integer` | yes | Unix epoch milliseconds shared by the complete top-level render pass. |
+| `width` | `integer` | yes | Display columns the top-level node renders into. Reading it makes the node render again whenever the width changes; nodes that never read it are only re-wrapped. |
 | `render` | `fun(node: smelt.transcript.Block, overrides?: { view_state?: string }): smelt.layout.Node` | yes | Re-enter the composed root renderer for a semantic child. |
 
 ### `smelt.transcript.Cursor`
@@ -1749,6 +1750,7 @@ Options passed to focused tool body and draft callbacks.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `gutter` | `string` |  | Prefix rendered before each body line. |
+| `width` | `integer` |  | Display columns left for the body after the gutter. Reading it has the same cost as reading `ctx.width`. |
 
 ### `smelt.transcript.ToolOutput`
 
