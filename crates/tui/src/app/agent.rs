@@ -1471,6 +1471,7 @@ impl TuiApp {
         if self.cancel_session_handoff() {
             return;
         }
+        self.flush_runtime_sync();
         let turn_id = self.conversation.active().map(|turn| turn.turn_id);
         self.cancel_turn_work();
         self.conversation.set_turn_pause(Some(TurnPause {
@@ -1590,6 +1591,9 @@ impl TuiApp {
         self.cancel_request_hook();
         let _perf = smelt_perf::perf::begin("tui:finish_turn");
         use crate::app::TurnEnd;
+        // Choices still settling queue with the turn's other appends, which
+        // the end of the turn resolves below.
+        self.flush_runtime_sync();
 
         let turn_id = self.conversation.active().map(|turn| turn.turn_id);
         // The turn's steers end with it: the engine reported each one it

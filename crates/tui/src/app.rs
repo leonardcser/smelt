@@ -30,6 +30,7 @@ pub(crate) mod prompt_runtime;
 pub(crate) mod queue;
 pub(crate) mod render_loop;
 pub(crate) mod reveal;
+pub(crate) mod runtime_sync;
 pub(crate) mod search;
 pub(crate) mod session_document;
 pub(crate) mod session_load;
@@ -373,6 +374,8 @@ pub struct TuiApp {
     pub(crate) well_known: WellKnown,
     /// Timers + chord state observed and updated by event dispatch.
     pub(crate) timers: Timers,
+    /// Mode and reasoning choices the engine has not heard of yet.
+    pub(crate) runtime_sync: runtime_sync::RuntimeSync,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2212,6 +2215,7 @@ impl TuiApp {
                 pending_transcript_fold_chord: None,
                 pending_chord: None,
             },
+            runtime_sync: Default::default(),
         }
     }
 
@@ -3873,6 +3877,7 @@ impl TuiApp {
                 .map(|deadline| deadline.saturating_duration_since(now));
             let next_notification_delay = self.notification_expiry_delay();
             let next_keymap_delay = self.pending_keymap_chord_expiry_delay();
+            let next_runtime_sync_delay = self.runtime_sync_delay();
             let next_transcript_refresh_delay = self
                 .conversation
                 .next_transcript_refresh_at()
@@ -3882,6 +3887,7 @@ impl TuiApp {
                 next_timer_delay,
                 next_notification_delay,
                 next_keymap_delay,
+                next_runtime_sync_delay,
                 next_transcript_refresh_delay,
                 next_second_delay,
             ]

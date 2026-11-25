@@ -563,7 +563,7 @@ impl TuiApp {
             }
         }
         if self.core.config.reasoning_effort != old_reasoning {
-            self.publish_reasoning_effort_change();
+            self.publish_reasoning_effort_change(old_reasoning.clone());
             if record {
                 self.notify(format!(
                     "reasoning: {} ({} unavailable on this model)",
@@ -775,53 +775,47 @@ impl TuiApp {
             self.warn_if_recent_write_failed("mode", result);
         }
         // Publish new mode before Lua/tool snapshots for future requests.
-        if old != mode {
-            self.core
-                .signals
-                .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
-            self.drain_signals_pending();
-            self.core
-                .engine
-                .send(UiCommand::SetMode { mode: mode.clone() });
-            if matches!(note_policy, ModeNotePolicy::Append) {
-                // Queue an internal mode-change note so the next LLM request learns about
-                // the new mode without regenerating the cached prompt prefix. If a
-                // turn is active, the engine applies the same note when it reaches
-                // its next request boundary; otherwise we apply it locally before
-                // the next turn starts.
-                let mode_name = self.core.config.mode.as_str().to_string();
-                // Claude Code brings its own plan mode instructions.
-                let native_plan = mode == protocol::AgentMode::plan()
-                    && self.core.config.active_model().is_some_and(|model| {
-                        smelt_provider::BackendKind::is_claude_code(&model.provider_type)
-                    });
-                let note_text = if native_plan {
-                    format!("now in {mode_name} mode. smelt's permission policy applies; continue using Claude Code's native tools and smelt's complementary tools.")
-                } else {
-                    let lua = self.lua.execution();
-                    crate::lua::scope_app(self, || lua.mode_note(mode_name.as_str()))
-                };
-                self.queue_history_append(crate::app::PendingHistoryAppend::mode_change(
-                    mode_name, note_text,
-                ));
+        self.core
+            .signals
+            .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
+        self.drain_signals_pending();
+        match note_policy {
+            ModeNotePolicy::Append => self.sync_mode_to_engine(old),
+            ModeNotePolicy::Suppress => {
+                self.forget_mode_sync();
+                self.core.engine.send(UiCommand::SetMode { mode });
             }
-            if record {
-                self.update_session_persist_metadata();
-            }
+        }
+        if record {
+            self.update_session_persist_metadata();
         }
     }
 
-    fn publish_reasoning_effort_change(&mut self) {
-        let effort = self.core.config.reasoning_effort.clone();
+    /// The note that tells the model it is now in `mode`.
+    pub(crate) fn mode_note_text(&mut self, mode: &AgentMode) -> String {
+        let mode_name = mode.as_str().to_string();
+        // Claude Code brings its own plan mode instructions.
+        let native_plan = *mode == AgentMode::plan()
+            && self.core.config.active_model().is_some_and(|model| {
+                smelt_provider::BackendKind::is_claude_code(&model.provider_type)
+            });
+        if native_plan {
+            format!("now in {mode_name} mode. smelt's permission policy applies; continue using Claude Code's native tools and smelt's complementary tools.")
+        } else {
+            let lua = self.lua.execution();
+            crate::lua::scope_app(self, || lua.mode_note(mode_name.as_str()))
+        }
+    }
+
+    fn publish_reasoning_effort_change(&mut self, previous: ReasoningEffort) {
+        let effort = self.core.config.reasoning_effort.label().to_string();
         self.core
             .signals
-            .set_dyn("reasoning", std::rc::Rc::new(effort.label().to_string()));
+            .set_dyn("reasoning", std::rc::Rc::new(effort));
         if !self.conversation.is_active() {
             self.sync_reasoning_effort_applied();
         }
-        self.core
-            .engine
-            .send(UiCommand::SetReasoningEffort { effort });
+        self.sync_reasoning_effort_to_engine(previous);
     }
 
     /// `record=false` skips the `recent.json` write so session
@@ -851,7 +845,7 @@ impl TuiApp {
             return Ok(());
         }
         self.core.config.revision = self.core.config.revision.wrapping_add(1);
-        self.core.config.reasoning_effort = effort.clone();
+        let previous = std::mem::replace(&mut self.core.config.reasoning_effort, effort.clone());
         if record {
             self.update_session_persist_metadata();
         }
@@ -859,7 +853,7 @@ impl TuiApp {
             let result = self.core.recent.set_reasoning_effort(effort.clone());
             self.warn_if_recent_write_failed("reasoning effort", result);
         }
-        self.publish_reasoning_effort_change();
+        self.publish_reasoning_effort_change(previous);
         Ok(())
     }
 }
@@ -1125,6 +1119,13 @@ mod tests {
         ))
     }
 
+    /// Lets the choices made during a turn settle and reach the engine.
+    fn settle(app: &mut crate::app::test_harness::TestApp) {
+        app.feed_one(crate::event_source::SourceEvent::Tick(
+            crate::app::runtime_sync::SETTLE.as_millis() as u64,
+        ));
+    }
+
     fn set_history(
         app: &mut crate::app::test_harness::TestApp,
         history: Vec<protocol::HistoryItem>,
@@ -1140,6 +1141,7 @@ mod tests {
 
         let note = app.mode_note("write");
         app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
+        settle(&mut app);
         assert!(mode_blocks(&app.tui).is_empty());
 
         app.feed_one(crate::event_source::SourceEvent::engine(
@@ -1158,6 +1160,37 @@ mod tests {
     }
 
     #[test]
+    fn mode_change_during_turn_shows_once_the_agent_appends_its_note() {
+        let mut app = normal_app();
+        set_history(&mut app, vec![user("hello")]);
+        app.start_turn(1);
+        let _ = app.drain_engine_sends();
+
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
+        settle(&mut app);
+        let item = app
+            .drain_engine_sends()
+            .into_iter()
+            .find_map(|command| match command {
+                protocol::UiCommand::AppendHistoryItem { append } => Some(append.item),
+                _ => None,
+            })
+            .expect("the settled mode reaches the engine");
+        assert!(mode_blocks(&app.tui).is_empty());
+
+        app.feed_one(crate::event_source::SourceEvent::engine(
+            protocol::EngineEvent::HistoryAppended {
+                turn_id: 1,
+                delta: protocol::CanonicalHistoryDelta::new(1, vec![item]),
+            },
+        ));
+
+        assert!(app.tui.agent_is_running());
+        assert_eq!(mode_blocks(&app.tui), vec!["now in write mode"]);
+        assert!(!app.mode_pending());
+    }
+
+    #[test]
     fn multiple_mode_changes_during_turn_commit_only_the_last_request_note() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
@@ -1165,6 +1198,7 @@ mod tests {
         app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
         let note = app.mode_note("yolo");
         app.tui.set_mode(AgentMode::parse("yolo").unwrap(), false);
+        settle(&mut app);
 
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
@@ -1190,7 +1224,10 @@ mod tests {
         app.start_turn(1);
 
         app.tui.set_mode(AgentMode::parse("write").unwrap(), true);
+        assert!(app.mode_pending());
+        assert!(pending_mode_appends(&app.tui).is_empty());
 
+        settle(&mut app);
         assert!(app.mode_pending());
         assert_eq!(pending_mode_appends(&app.tui).len(), 1);
     }
@@ -1209,6 +1246,95 @@ mod tests {
         app.tui.set_mode(AgentMode::parse("read").unwrap(), true);
         assert!(!app.mode_pending());
         assert!(pending_mode_appends(&app.tui).is_empty());
+    }
+
+    fn mode_sends(commands: &[protocol::UiCommand]) -> (Vec<&str>, Vec<Option<&str>>) {
+        let set = commands
+            .iter()
+            .filter_map(|command| match command {
+                protocol::UiCommand::SetMode { mode } => Some(mode.as_str()),
+                _ => None,
+            })
+            .collect();
+        let notes = commands
+            .iter()
+            .filter_map(|command| match command {
+                protocol::UiCommand::AppendHistoryItem { append } => {
+                    Some(append.item.as_note().and_then(protocol::HistoryNote::mode))
+                }
+                _ => None,
+            })
+            .collect();
+        (set, notes)
+    }
+
+    #[test]
+    fn quick_mode_switches_during_turn_reach_the_engine_once_settled() {
+        let mut app = normal_app();
+        set_history(&mut app, vec![user("hello")]);
+        app.start_turn(1);
+        let _ = app.drain_engine_sends();
+        let step = crate::app::runtime_sync::SETTLE.as_millis() as u64 / 2;
+
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
+        app.feed_one(crate::event_source::SourceEvent::Tick(step));
+        app.tui.set_mode(AgentMode::parse("yolo").unwrap(), false);
+        app.feed_one(crate::event_source::SourceEvent::Tick(step));
+        assert_eq!(app.tui.core.config.mode.as_str(), "yolo");
+        assert_eq!(mode_sends(&app.drain_engine_sends()), (vec![], vec![]));
+
+        settle(&mut app);
+        assert_eq!(
+            mode_sends(&app.drain_engine_sends()),
+            (vec!["yolo"], vec![Some("yolo")])
+        );
+    }
+
+    #[test]
+    fn mode_switched_away_and_back_during_turn_never_reaches_the_engine() {
+        let mut app = normal_app();
+        set_history(&mut app, vec![user("hello")]);
+        app.start_turn(1);
+        let _ = app.drain_engine_sends();
+
+        app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
+        app.tui.set_mode(AgentMode::parse("read").unwrap(), false);
+        settle(&mut app);
+
+        assert_eq!(mode_sends(&app.drain_engine_sends()), (vec![], vec![]));
+        assert!(pending_mode_appends(&app.tui).is_empty());
+    }
+
+    #[test]
+    fn reasoning_switches_during_turn_reach_the_engine_once_settled() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.tui.core.config.reasoning_effort = protocol::ReasoningEffort::Off;
+        app.start_turn(1);
+        let _ = app.drain_engine_sends();
+        let efforts = |commands: Vec<protocol::UiCommand>| -> Vec<protocol::ReasoningEffort> {
+            commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    protocol::UiCommand::SetReasoningEffort { effort } => Some(effort),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        for effort in [
+            protocol::ReasoningEffort::Low,
+            protocol::ReasoningEffort::High,
+        ] {
+            app.tui.set_reasoning_effort(effort, false).unwrap();
+        }
+        assert!(app.tui.reasoning_effort_pending());
+        assert!(efforts(app.drain_engine_sends()).is_empty());
+
+        settle(&mut app);
+        assert_eq!(
+            efforts(app.drain_engine_sends()),
+            [protocol::ReasoningEffort::High]
+        );
     }
 
     #[test]
@@ -1499,6 +1625,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
+        settle(&mut app);
         let after_apply = app
             .tui
             .conversation
@@ -1517,6 +1644,7 @@ mod tests {
         assert_eq!(pending_mode_appends(&app.tui).len(), 1);
 
         app.tui.set_mode(AgentMode::parse("read").unwrap(), false);
+        settle(&mut app);
 
         let after_normal = app
             .tui
@@ -1548,6 +1676,7 @@ mod tests {
         app.start_turn(1);
 
         app.tui.set_mode(AgentMode::parse("write").unwrap(), false);
+        settle(&mut app);
         assert_eq!(app.tui.conversation.pending_history_appends().len(), 1);
 
         app.discard_turn(crate::app::TurnEnd::Cancelled);
