@@ -1496,6 +1496,7 @@ async fn cancelled_reads_preserve_fragmented_utf8_frames() {
         prompt: None,
         override_prompt: None,
         plans_directory: None,
+        loaded_files: &[],
         disallowed_tools: &[],
         tools: false,
         persist_session: false,
@@ -2259,6 +2260,61 @@ async fn ephemeral_turns_keep_context_without_native_persistence_or_links() {
     assert!(!args.iter().any(|arg| arg == "--safe-mode"));
     let prompt = calls.iter().rfind(|call| call["type"] == "user").unwrap();
     assert_eq!(prompt["message"]["content"][0]["text"], "turn 2");
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn claude_code_skips_instruction_files_that_smelt_sends() {
+    let fixture = Fixture::new("text");
+    let mut handle = fixture.handle();
+    let mut history = Vec::new();
+    let shared = fixture.root.path().join("AGENTS.md");
+    let local = fixture.root.path().join("AGENTS.local.md");
+    let link = fixture.root.path().join("linked/AGENTS.md");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::fs::write(&shared, "rules").unwrap();
+    std::os::unix::fs::symlink(&shared, &link).unwrap();
+    let file_sets = [
+        vec![],
+        vec![shared.clone()],
+        vec![shared.clone()],
+        vec![shared.clone(), local.clone()],
+        vec![link.clone()],
+    ];
+    for (turn, files) in (1..).zip(&file_sets) {
+        let UiCommand::StartTurn(mut request) = payload(fixture.root.path(), turn, history.clone())
+        else {
+            unreachable!()
+        };
+        request.native_prompt = Some(protocol::NativeSystemPrompt {
+            override_prompt: None,
+            append: "Instructions from AGENTS.md:\nrules".into(),
+            loaded_files: files.clone(),
+        });
+        handle.send(UiCommand::StartTurn(request));
+        finish(&mut handle, &mut history).await;
+    }
+    let calls = fixture.calls();
+    let excludes: Vec<Option<Value>> = calls
+        .iter()
+        .filter_map(|call| call["argv"].as_array())
+        .map(|argv| {
+            let at = argv.iter().position(|arg| arg == "--settings").unwrap();
+            let settings: Value = serde_json::from_str(argv[at + 1].as_str().unwrap()).unwrap();
+            settings.get("claudeMdExcludes").cloned()
+        })
+        .collect();
+    let canonical = std::fs::canonicalize(&shared).unwrap();
+    assert_eq!(
+        excludes,
+        vec![
+            None,
+            Some(json!([shared])),
+            Some(json!([shared, local])),
+            Some(json!([link, canonical])),
+        ],
+        "a changed file set relaunches; the same set keeps the process"
+    );
 }
 
 #[tokio::test]

@@ -453,7 +453,7 @@ impl Runtime<'_> {
         let prompt = self.payload.native_prompt.take().unwrap_or_else(|| {
             crate::build_native_system_prompt(
                 self.config.system_prompt_override.as_deref(),
-                self.config.instructions.as_deref(),
+                self.config.instructions.as_ref(),
                 None,
                 &[],
             )
@@ -470,6 +470,7 @@ impl Runtime<'_> {
             "api_base": target.api_base,
             "api_key": !target.api_key.is_empty(),
             "smelt_tools": self.tool_list(),
+            "loaded_files": prompt.loaded_files,
         });
         self.absorb_committed();
         let reuse = self.native.process.is_some()
@@ -503,6 +504,7 @@ impl Runtime<'_> {
                 prompt: Some(&prompt.append),
                 override_prompt: prompt.override_prompt.as_deref(),
                 plans_directory: Some(&plans_directory),
+                loaded_files: &prompt.loaded_files,
                 disallowed_tools: &self.catalog.disabled_native,
                 tools: target.config.tool_calling(),
                 persist_session: !self.payload.ephemeral,
@@ -2590,6 +2592,7 @@ async fn auxiliary(
         prompt: None,
         override_prompt: Some(&task.system),
         plans_directory: None,
+        loaded_files: &[],
         disallowed_tools: &[],
         tools: false,
         persist_session: false,

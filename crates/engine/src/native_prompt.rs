@@ -5,7 +5,7 @@ pub(crate) const HOST_INSTRUCTIONS: &str = include_str!("prompts/host.txt");
 /// that preset; application invariants and registered additions remain in force.
 pub fn build_native_system_prompt(
     override_prompt: Option<&str>,
-    instructions: Option<&str>,
+    instructions: Option<&protocol::Instructions>,
     skills: Option<&str>,
     fragments: &[String],
 ) -> protocol::NativeSystemPrompt {
@@ -13,10 +13,13 @@ pub fn build_native_system_prompt(
         "You are running inside smelt through the Claude Code agent. Use your native tools for coding, shell commands, search, questions, and planning. The smelt MCP server adds application capabilities and explicitly configured custom replacements. AskUserQuestion and ExitPlanMode are connected to smelt's native UI. Use smelt's workspace tools rather than a shell cd to change smelt's workspace binding. Claude Code owns native context management and native background tasks; smelt job IDs belong only to smelt-managed jobs.".to_owned(),
         HOST_INSTRUCTIONS.trim().to_owned(),
     ];
-    for section in [instructions, skills]
-        .into_iter()
-        .flatten()
-        .chain(fragments.iter().map(String::as_str))
+    for section in [
+        instructions.map(|instructions| instructions.text.as_str()),
+        skills,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(fragments.iter().map(String::as_str))
     {
         if !section.trim().is_empty() {
             sections.push(section.to_owned());
@@ -25,6 +28,9 @@ pub fn build_native_system_prompt(
     protocol::NativeSystemPrompt {
         override_prompt: override_prompt.map(str::to_owned),
         append: sections.join("\n\n"),
+        loaded_files: instructions
+            .map(|instructions| instructions.files.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -37,11 +43,18 @@ mod tests {
         for replacement in [None, Some("custom native persona")] {
             let prompt = build_native_system_prompt(
                 replacement,
-                Some("project rules"),
+                Some(&protocol::Instructions {
+                    text: "project rules".into(),
+                    files: vec!["/repo/AGENTS.md".into()],
+                }),
                 Some("smelt-only skills"),
                 &["plugin guidance".into()],
             );
             assert_eq!(prompt.override_prompt.as_deref(), replacement);
+            assert_eq!(
+                prompt.loaded_files,
+                vec![std::path::PathBuf::from("/repo/AGENTS.md")]
+            );
             for expected in [
                 "project rules",
                 "smelt-only skills",

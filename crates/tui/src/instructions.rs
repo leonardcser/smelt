@@ -60,8 +60,9 @@ fn paths(config_dir: &Path, cwd: &Path, main: Option<&MainWorktree>) -> Vec<Path
     paths
 }
 
-/// Returns all instruction files joined for the system prompt, or `None` if none found.
-pub fn load(config_dir: &Path, cwd: &Path) -> Option<String> {
+/// Returns all instruction files rendered for the system prompt, or `None` if
+/// none has content.
+pub fn load(config_dir: &Path, cwd: &Path) -> Option<protocol::Instructions> {
     let files = paths(config_dir, cwd, MainWorktree::for_cwd(cwd).as_ref());
     let pairs: Vec<(PathBuf, String)> = files
         .into_iter()
@@ -75,27 +76,23 @@ pub fn load(config_dir: &Path, cwd: &Path) -> Option<String> {
 /// Each non-blank file becomes one `Instructions from <path>:\n<content>`
 /// section; sections are joined by `\n\n`. Returns `None` when nothing
 /// usable remains after trimming.
-fn render_sections(files: &[(PathBuf, String)]) -> Option<String> {
-    let sections: Vec<String> = files
+fn render_sections(files: &[(PathBuf, String)]) -> Option<protocol::Instructions> {
+    let (sections, files): (Vec<String>, Vec<PathBuf>) = files
         .iter()
         .filter_map(|(path, content)| {
             let trimmed = text::trim_whitespace(content);
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(format!(
-                    "Instructions from {}:\n{}",
-                    path.display(),
-                    trimmed
-                ))
-            }
+            (!trimmed.is_empty()).then(|| {
+                (
+                    format!("Instructions from {}:\n{}", path.display(), trimmed),
+                    path.clone(),
+                )
+            })
         })
-        .collect();
-    if sections.is_empty() {
-        None
-    } else {
-        Some(sections.join("\n\n"))
-    }
+        .unzip();
+    (!sections.is_empty()).then(|| protocol::Instructions {
+        text: sections.join("\n\n"),
+        files,
+    })
 }
 
 #[cfg(test)]
@@ -233,7 +230,10 @@ mod tests {
     fn render_sections_renders_a_single_file_with_path_header() {
         let files = vec![pair("/work/AGENTS.md", "be terse\n")];
         let expected = "Instructions from /work/AGENTS.md:\nbe terse";
-        assert_eq!(render_sections(&files).as_deref(), Some(expected));
+        assert_eq!(
+            render_sections(&files).map(|instructions| instructions.text),
+            Some(expected.to_owned())
+        );
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
             pair("/cfg/AGENTS.md", "global rule"),
             pair("/proj/AGENTS.md", "project rule"),
         ];
-        let out = render_sections(&files).unwrap();
+        let out = render_sections(&files).unwrap().text;
         let expected = "Instructions from /cfg/AGENTS.md:\nglobal rule\n\n\
                         Instructions from /proj/AGENTS.md:\nproject rule";
         assert_eq!(out, expected);
@@ -257,20 +257,21 @@ mod tests {
         ];
         let out = render_sections(&files).unwrap();
         // Only `/b/AGENTS.md` survives; no leading/trailing separators.
-        assert_eq!(out, "Instructions from /b/AGENTS.md:\nkeep me");
+        assert_eq!(out.text, "Instructions from /b/AGENTS.md:\nkeep me");
+        assert_eq!(out.files, vec![PathBuf::from("/b/AGENTS.md")]);
     }
 
     #[test]
     fn render_sections_trims_surrounding_whitespace_from_each_content() {
         let files = vec![pair("/x/AGENTS.md", "\n\n  hello\nworld  \n\n")];
-        let out = render_sections(&files).unwrap();
+        let out = render_sections(&files).unwrap().text;
         assert_eq!(out, "Instructions from /x/AGENTS.md:\nhello\nworld");
     }
 
     #[test]
     fn render_sections_never_trims_part_of_a_grapheme() {
         let files = vec![pair("/x/AGENTS.md", " \u{301}rule\u{600} ")];
-        let out = render_sections(&files).unwrap();
+        let out = render_sections(&files).unwrap().text;
         assert_eq!(out, "Instructions from /x/AGENTS.md:\n \u{301}rule\u{600} ");
     }
 }

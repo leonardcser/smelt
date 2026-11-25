@@ -2221,7 +2221,7 @@ impl TuiApp {
     pub(crate) fn native_system_prompt(&self) -> protocol::NativeSystemPrompt {
         engine::build_native_system_prompt(
             self.prompt_inputs.system_prompt_override.as_deref(),
-            self.prompt_inputs.instructions.as_deref(),
+            self.prompt_inputs.instructions.as_ref(),
             self.core
                 .skills
                 .as_ref()
@@ -2249,7 +2249,7 @@ impl TuiApp {
                     .active_model()
                     .is_none_or(|model| model.config.tool_calling()),
             ),
-            self.prompt_inputs.instructions.as_deref(),
+            self.prompt_inputs.instructions_text(),
             self.prompt_inputs.skill_section.as_deref(),
         );
         let fragments = self.lua.system_prompt_fragments();

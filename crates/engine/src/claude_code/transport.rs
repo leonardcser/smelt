@@ -26,6 +26,9 @@ pub(super) struct LaunchOptions<'a> {
     pub prompt: Option<&'a str>,
     pub override_prompt: Option<&'a str>,
     pub plans_directory: Option<&'a Path>,
+    /// Instruction files smelt already sent in `prompt`. Claude Code skips
+    /// them in its own `CLAUDE.md` discovery and `@` imports.
+    pub loaded_files: &'a [PathBuf],
     pub disallowed_tools: &'a [String],
     pub tools: bool,
     pub persist_session: bool,
@@ -121,6 +124,7 @@ impl Process {
             prompt,
             override_prompt,
             plans_directory,
+            loaded_files,
             disallowed_tools,
             tools,
             persist_session,
@@ -210,6 +214,9 @@ impl Process {
         if let Some(directory) = plans_directory {
             settings["plansDirectory"] = json!(directory);
         }
+        if !loaded_files.is_empty() {
+            settings["claudeMdExcludes"] = json!(memory_excludes(loaded_files));
+        }
         command.arg("--settings").arg(settings.to_string());
         if tools {
             if !disallowed_tools.is_empty() {
@@ -297,6 +304,7 @@ impl Process {
             prompt: None,
             override_prompt: None,
             plans_directory: None,
+            loaded_files: &[],
             disallowed_tools: &[],
             tools: false,
             persist_session: false,
@@ -431,6 +439,21 @@ impl Process {
             }
         }
     }
+}
+
+/// `claudeMdExcludes` entries for `files`. Claude Code matches the path it
+/// discovered, so a file reached through a symlink is listed by both paths.
+fn memory_excludes(files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut excludes = Vec::new();
+    for file in files {
+        let canonical = std::fs::canonicalize(file).ok();
+        for path in std::iter::once(file.clone()).chain(canonical) {
+            if !excludes.contains(&path) {
+                excludes.push(path);
+            }
+        }
+    }
+    excludes
 }
 
 /// Masks anything that looks like a credential, since stderr reaches the

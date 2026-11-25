@@ -1060,7 +1060,7 @@ async fn async_main() {
         let fragments = lua_runtime.system_prompt_fragments();
         let native_prompt = engine::build_native_system_prompt(
             prompt_inputs.system_prompt_override.as_deref(),
-            prompt_inputs.instructions.as_deref(),
+            prompt_inputs.instructions.as_ref(),
             skill_loader.native_prompt_section(),
             &fragments,
         );
@@ -1068,7 +1068,7 @@ async fn async_main() {
             prompt_inputs.system_prompt_override.as_deref(),
             engine::SystemPromptBehavior::Autonomous,
             capabilities,
-            prompt_inputs.instructions.as_deref(),
+            prompt_inputs.instructions_text(),
             prompt_inputs.skill_section.as_deref(),
         );
         if !fragments.is_empty() {

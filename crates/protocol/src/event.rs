@@ -849,12 +849,34 @@ impl ModelHistorySource {
     }
 }
 
+/// Project and user instruction files (`AGENTS.md` and friends) rendered for
+/// the system prompt, with the files the text came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Instructions {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PathBuf>,
+}
+
+impl From<&str> for Instructions {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            files: Vec::new(),
+        }
+    }
+}
+
 /// Native agent preset (or explicit replacement) and host-owned additions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NativeSystemPrompt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_prompt: Option<String>,
     pub append: String,
+    /// Instruction files already in `append`. The native agent must not
+    /// load them again through its own memory discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loaded_files: Vec<PathBuf>,
 }
 
 /// Environment variables that tie a shell to the session and turn that
@@ -919,7 +941,7 @@ pub struct StartTurnPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProjectContext {
     pub cwd: PathBuf,
-    pub instructions: Option<String>,
+    pub instructions: Option<Instructions>,
     pub skill_section: Option<String>,
     pub system_prompt_override: Option<String>,
     pub system_prompt: String,

@@ -219,7 +219,7 @@ mod system_prompt_tests {
 }
 
 pub struct EngineConfig {
-    pub instructions: Option<String>,
+    pub instructions: Option<protocol::Instructions>,
     /// When set, replaces the built-in system prompt template entirely.
     pub system_prompt_override: Option<String>,
     pub system_prompt_behavior: SystemPromptBehavior,

@@ -1572,7 +1572,7 @@ impl SessionLuaHost<'_> {
             let instructions = (
                 "instructions",
                 "AGENTS.md instructions",
-                app.prompt_inputs.instructions.as_deref(),
+                app.prompt_inputs.instructions_text(),
             );
             let extras = if native {
                 [instructions, skills]

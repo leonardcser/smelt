@@ -72,8 +72,8 @@ What to expect:
 - Questions and plans from Claude Code open in smelt's dialogs.
 - Background shell commands appear in `/ps` and native subagents in
   `/subagents`. Cancelling a turn with **Esc** leaves them running.
-- Claude Code loads its own hooks, plugins, skills and MCP servers. Only use it
-  in projects you trust.
+- Claude Code loads its own hooks, plugins, skills, MCP servers and `CLAUDE.md`
+  files. Only use it in projects you trust.
 
 To replace a native tool with one of yours, name it in `claude_code.replaces`:
 

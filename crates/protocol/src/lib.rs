@@ -26,10 +26,10 @@ pub use content::{Content, ContentPart};
 pub use event::{
     Access, ActionId, AgentProjectContext, AskResponseFormat, CanonicalHistoryDelta,
     CanonicalHistoryIndex, ClaudeCodeToolPolicy, Decision, EngineAskError, EngineAskErrorKind,
-    EngineEvent, InvocationId, ModelHistoryCoordinates, ModelHistoryIndex, ModelHistorySource,
-    NativeCompaction, NativeProcess, NativeSystemPrompt, ReasoningKind, StartTurnInput,
-    StartTurnPayload, SteerId, ToolDef, ToolEvaluation, ToolExecutionMode, ToolMetadata,
-    ToolVisibility, UiCommand,
+    EngineEvent, Instructions, InvocationId, ModelHistoryCoordinates, ModelHistoryIndex,
+    ModelHistorySource, NativeCompaction, NativeProcess, NativeSystemPrompt, ReasoningKind,
+    StartTurnInput, StartTurnPayload, SteerId, ToolDef, ToolEvaluation, ToolExecutionMode,
+    ToolMetadata, ToolVisibility, UiCommand,
 };
 pub use history::{
     apply_history_append, classify_user_history_content, compaction_summary_content,

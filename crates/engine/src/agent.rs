@@ -220,7 +220,10 @@ pub(crate) async fn engine_task(
                             crate::SystemPromptCapabilities::from_tool_calling(
                                 provider.tool_calling(),
                             ),
-                            config.instructions.as_deref(),
+                            config
+                                .instructions
+                                .as_ref()
+                                .map(|instructions| instructions.text.as_str()),
                             config.skill_section.as_deref(),
                         )
                     });
@@ -3899,7 +3902,10 @@ mod tests {
         assert!(deferred_turn_cmds.is_empty());
         assert_eq!(turn.config.cwd, std::path::PathBuf::from("/target"));
         assert_eq!(
-            turn.config.instructions.as_deref(),
+            turn.config
+                .instructions
+                .as_ref()
+                .map(|instructions| instructions.text.as_str()),
             Some("target instructions")
         );
         assert_eq!(turn.model_target.model, "switched-model");

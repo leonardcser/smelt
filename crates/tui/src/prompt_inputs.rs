@@ -23,9 +23,9 @@ pub struct PromptInputs {
     /// inline string or when the flag was omitted.
     system_prompt_path: Option<PathBuf>,
 
-    /// Joined `AGENTS.md` content. Re-read on `/reload` and injected
+    /// Rendered `AGENTS.md` files. Re-read on `/reload` and injected
     /// into the system prompt.
-    pub instructions: Option<String>,
+    pub instructions: Option<protocol::Instructions>,
     /// Pre-rendered "# Skills" block. Refreshed alongside the
     /// `SkillLoader` so the engine and the local prompt assembly see
     /// the same string.
@@ -64,7 +64,7 @@ impl PromptInputs {
         env: &engine::env::RuntimeEnv,
         skill_extra_paths: Vec<PathBuf>,
         system_prompt_path: Option<PathBuf>,
-        instructions: Option<String>,
+        instructions: Option<protocol::Instructions>,
         system_prompt_override: Option<String>,
     ) -> (Self, Arc<SkillLoader>) {
         let mut inputs = Self::for_runtime(env);
@@ -75,6 +75,12 @@ impl PromptInputs {
         let loader = inputs.skill_loader_for_cwd(&inputs.cwd);
         inputs.skill_section = loader.prompt_section().map(String::from);
         (inputs, loader)
+    }
+
+    pub fn instructions_text(&self) -> Option<&str> {
+        self.instructions
+            .as_ref()
+            .map(|instructions| instructions.text.as_str())
     }
 
     pub fn skill_loader_for_cwd(&self, cwd: &Path) -> Arc<SkillLoader> {

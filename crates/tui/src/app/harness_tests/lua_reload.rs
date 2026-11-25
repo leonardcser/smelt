@@ -2143,7 +2143,7 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
             command,
             protocol::UiCommand::UpdateAgentProjectContext(context)
                 if context.cwd == target
-                    && context.instructions.as_deref().is_some_and(|text| text.contains("target cwd instructions"))
+                    && context.instructions.as_ref().map(|instructions| instructions.text.as_str()).is_some_and(|text| text.contains("target cwd instructions"))
                     && context.system_prompt.contains("target cwd prompt fragment")
                     && context.tools.iter().any(|tool| tool.name == "target_cwd_probe")
         ))
@@ -4397,8 +4397,7 @@ fn manual_reload_upgrades_in_flight_config_preparation_once() {
     assert!(app
         .tui
         .prompt_inputs
-        .instructions
-        .as_deref()
+        .instructions_text()
         .unwrap()
         .contains("instructions for manual reload"));
     assert!(!app.pending_lua_reload());

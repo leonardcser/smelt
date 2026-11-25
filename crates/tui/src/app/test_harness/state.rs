@@ -686,7 +686,8 @@ impl TestApp {
         skill_section: Option<String>,
     ) {
         self.tui.prompt_inputs.system_prompt_override = system_prompt_override;
-        self.tui.prompt_inputs.instructions = instructions;
+        self.tui.prompt_inputs.instructions =
+            instructions.as_deref().map(protocol::Instructions::from);
         self.tui.prompt_inputs.skill_section = skill_section;
     }
 

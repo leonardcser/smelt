@@ -1027,14 +1027,12 @@ mod runtime_path_tests {
         let first_instructions = first
             .tui
             .prompt_inputs
-            .instructions
-            .as_deref()
+            .instructions_text()
             .expect("first runtime instructions");
         let second_instructions = second
             .tui
             .prompt_inputs
-            .instructions
-            .as_deref()
+            .instructions_text()
             .expect("second runtime instructions");
         assert!(first_instructions.contains("first global instructions"));
         assert!(first_instructions.contains("first project instructions"));
