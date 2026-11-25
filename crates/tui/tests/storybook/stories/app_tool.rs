@@ -433,6 +433,23 @@ app_story!(edit_notebook_tool_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
+app_story!(show_ansi_renders_colors_and_plain_text, |ctx| {
+    ctx.set_viewport(60, 8);
+    ctx.run_lua("require('smelt.plugins.show_ansi')");
+    ctx.tool_call_with_display_content(
+        "show_ansi",
+        &[("path", json!("out.ansi"))],
+        "shown to the user",
+        json!({}),
+        &[(
+            "ansi",
+            "\x1b[1mbold\x1b[0m \x1b[31mred\x1b[0m \x1b[38;5;208morange\x1b[0m \x1b[48;2;40;40;80m bg \x1b[0m\nplain text\n",
+        )],
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(read_file_tool_states, |ctx| {
     ctx.set_viewport(68, 16);
     ctx.tool_started("read_file", &[("file_path", json!("pending.rs"))]);

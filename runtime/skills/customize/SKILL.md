@@ -550,6 +550,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
 | `smelt.plugins.lsp` | Optional LSP tool facade for agent code navigation. |
 | `smelt.plugins.notebook` | Optional notebook editing: edit_notebook with cell previews, staleness preflight, and per-path locking. |
+| `smelt.plugins.show_ansi` | Optional show_ansi tool: shows ANSI-colored text, from a file of program output or hand-written escapes. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- PLUGINS_END -->

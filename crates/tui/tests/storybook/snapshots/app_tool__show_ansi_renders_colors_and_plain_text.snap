@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 759
+expression: frame.text()
+---
+* show_ansi out.ansi                               14:37:03
+  bold red orange  bg
+  plain text
+
+─ ● … ──────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────
+ ○ read                                             1:1 100%

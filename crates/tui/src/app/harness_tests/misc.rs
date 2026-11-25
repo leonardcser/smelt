@@ -9196,18 +9196,32 @@ fn statusline_sources_get_the_width_and_clip_what_overflows() {
 /// Runs the real `show_image` tool on `path` and feeds its result back as the
 /// engine would. Returns the app and the model-facing result text.
 fn run_show_image(path: &std::path::Path) -> (TestApp, String) {
-    let mut app = TestApp::builder().build();
+    let app = TestApp::builder().build();
+    run_display_tool(
+        app,
+        "show_image",
+        &[("file_path", serde_json::json!(path.to_string_lossy()))],
+    )
+}
+
+/// Runs the real tool `tool_name` with `args` and feeds its result back as the
+/// engine would. Returns the app and the model-facing result text.
+fn run_display_tool(
+    mut app: TestApp,
+    tool_name: &str,
+    args: &[(&str, serde_json::Value)],
+) -> (TestApp, String) {
     app.set_terminal_size(80, 30);
     app.start_turn(42);
     let invocation_id = protocol::InvocationId::new(1);
-    let args = std::collections::HashMap::from([(
-        "file_path".to_string(),
-        serde_json::json!(path.to_string_lossy()),
-    )]);
+    let args: std::collections::HashMap<String, serde_json::Value> = args
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.clone()))
+        .collect();
     app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
         invocation_id,
         call_id: "show".into(),
-        tool_name: "show_image".into(),
+        tool_name: tool_name.into(),
         args: args.clone(),
         called_at_ms: 0,
     }));
@@ -9216,7 +9230,7 @@ fn run_show_image(path: &std::path::Path) -> (TestApp, String) {
         invocation_id,
         request_id: 1,
         call_id: "show".into(),
-        tool_name: "show_image".into(),
+        tool_name: tool_name.into(),
         args,
     }));
     app.wait_for_tool_result("show");
@@ -9236,7 +9250,7 @@ fn run_show_image(path: &std::path::Path) -> (TestApp, String) {
             ),
             _ => None,
         })
-        .expect("show_image result");
+        .expect("tool result");
     let content = result.content.clone();
     app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
         invocation_id,
@@ -9290,6 +9304,42 @@ fn show_image_tool_reports_files_it_cannot_decode() {
     std::fs::write(&path, "not an image").unwrap();
     let (_, content) = run_show_image(&path);
     assert!(content.starts_with("cannot display"), "{content}");
+}
+
+fn run_show_ansi(args: &[(&str, serde_json::Value)]) -> (TestApp, String) {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua("require('smelt.plugins.show_ansi')"));
+    run_display_tool(app, "show_ansi", args)
+}
+
+#[test]
+fn show_ansi_tool_turns_hand_written_escapes_into_color() {
+    let (mut app, content) = run_show_ansi(&[(
+        "text",
+        serde_json::json!("\\e[31mred\\e[0m \\033[32mgreen\\033[0m \\x1b[34mblue\\x1b[0m"),
+    )]);
+    assert_eq!(content, "shown to the user");
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("  red green blue"), "{frame}");
+    assert!(!frame.contains("[31m"), "{frame}");
+}
+
+#[test]
+fn show_ansi_tool_shows_a_file_as_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.ansi");
+    std::fs::write(&path, "\x1b[1mbuild\x1b[0m ok\nC:\\escape\n").unwrap();
+    let (mut app, content) = run_show_ansi(&[("path", serde_json::json!(path.to_string_lossy()))]);
+    assert_eq!(content, "shown to the user");
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("  build ok"), "{frame}");
+    assert!(frame.contains("  C:\\escape"), "{frame}");
+}
+
+#[test]
+fn show_ansi_tool_rejects_calls_with_nothing_to_show() {
+    let (_, content) = run_show_ansi(&[("text", serde_json::json!(""))]);
+    assert!(content.starts_with("nothing to show"), "{content}");
 }
 
 #[test]
