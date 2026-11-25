@@ -15,7 +15,15 @@ use crate::app_story;
 use crate::storybook::app_ctx::AppStoryCtx;
 use crate::storybook::args;
 
-fn open_bash_permission_dialog(ctx: &mut AppStoryCtx) {
+// These stories render permission requests; they never run the command.
+fn set_sandbox_available(ctx: &mut AppStoryCtx, available: bool) {
+    ctx.run_lua(&format!(
+        "smelt.sandbox.status = function() return {{ available = {available} }} end"
+    ));
+}
+
+fn open_bash_permission_dialog(ctx: &mut AppStoryCtx, sandbox_available: bool) {
+    set_sandbox_available(ctx, sandbox_available);
     ctx.request_permission(
         "bash",
         args([
@@ -28,15 +36,20 @@ fn open_bash_permission_dialog(ctx: &mut AppStoryCtx) {
 
 app_story!(bash_permission_dialog, |ctx| {
     ctx.set_viewport(80, 22);
-    open_bash_permission_dialog(ctx);
+    open_bash_permission_dialog(ctx, true);
     ctx.assert_snapshot();
+});
+
+app_story!(bash_permission_dialog_without_sandbox, |ctx| {
+    open_bash_permission_dialog(ctx, false);
+    ctx.wait_for_text("Run without the sandbox?");
 });
 
 app_story!(permission_request_deferred_while_typing, |ctx| {
     ctx.set_viewport(80, 14);
     ctx.start_turn();
     ctx.type_prompt("Continue drafting this response");
-    open_bash_permission_dialog(ctx);
+    open_bash_permission_dialog(ctx, true);
     ctx.assert_snapshot();
 });
 
@@ -48,20 +61,20 @@ app_story!(bash_permission_preserves_reasoning_context, |ctx| {
         content: "I need to inspect the generated fixtures before choosing an implementation.\n\nThe temporary directory should reveal whether reusable outputs already exist.".into(),
     });
     ctx.run_lua("smelt.transcript.fold_all('open')");
-    open_bash_permission_dialog(ctx);
+    open_bash_permission_dialog(ctx, true);
     ctx.assert_snapshot();
 });
 
 app_story!(bash_permission_dialog_expanded_max_height, |ctx| {
     ctx.set_viewport(80, 22);
-    open_bash_permission_dialog(ctx);
+    open_bash_permission_dialog(ctx, true);
     ctx.expand_active_dialog_to_max_height();
     ctx.assert_snapshot();
 });
 
 app_story!(bash_permission_reason_input_wraps, |ctx| {
     ctx.set_viewport(58, 22);
-    open_bash_permission_dialog(ctx);
+    open_bash_permission_dialog(ctx, true);
     ctx.press_tab();
     ctx.type_prompt(
         "Needed to inspect the temporary directory before deciding whether the generated fixtures can be reused.",
@@ -71,6 +84,7 @@ app_story!(bash_permission_reason_input_wraps, |ctx| {
 
 app_story!(bash_permission_dialog_tall_terminal, |ctx| {
     ctx.set_viewport(80, 36);
+    set_sandbox_available(ctx, true);
     ctx.request_permission(
         "bash",
         args([
@@ -83,6 +97,7 @@ app_story!(bash_permission_dialog_tall_terminal, |ctx| {
 
 app_story!(bash_multiline_command_summary, |ctx| {
     ctx.set_viewport(80, 22);
+    set_sandbox_available(ctx, true);
     ctx.request_permission(
         "bash",
         args([(
@@ -95,6 +110,7 @@ app_story!(bash_multiline_command_summary, |ctx| {
 
 app_story!(bash_long_command_summary_wraps, |ctx| {
     ctx.set_viewport(70, 22);
+    set_sandbox_available(ctx, true);
     ctx.request_permission(
         "bash",
         args([(
