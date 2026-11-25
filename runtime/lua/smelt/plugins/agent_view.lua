@@ -2,73 +2,155 @@
 local M = smelt.plugin("agent_view")
 local active
 
+local PROBLEM_NS = smelt.ns("smelt.subagents.problem")
+local ACTIVE = { running = true, queued = true, waiting = true }
+-- Status glyph and its style. `dim` rows are settled and step back.
+local MARKERS = {
+  running = { glyph = "●", style = "SmeltAccent" },
+  queued = { glyph = "●", style = "Comment" },
+  waiting = { glyph = "●", style = "Comment" },
+  completed = { glyph = "✓", dim = true },
+  cancelled = { glyph = "✗", dim = true },
+  failed = { glyph = "✗", style = "ErrorMsg" },
+  blocked = { glyph = "✗", style = "ErrorMsg" },
+}
+
+-- Arrange runs as a tree under `parent_agent_id`. Siblings with active work in
+-- their subtree come first; otherwise the observed order is kept. Each run
+-- gets a `tree_prefix` gutter (`├─ ` / `└─ `).
+local function ordered(runs)
+  local by_id, children, roots, live = {}, {}, {}, {}
+  for _, run in ipairs(runs) do by_id[run.id] = run end
+  for _, run in ipairs(runs) do
+    local parent = run.parent_agent_id
+    if parent and by_id[parent] then
+      children[parent] = children[parent] or {}
+      table.insert(children[parent], run)
+    else
+      table.insert(roots, run)
+    end
+  end
+  -- Whether the run or any descendant is active. Marked false before the
+  -- descent so a parent cycle ends instead of recursing.
+  local function is_live(run)
+    if live[run.id] == nil then
+      live[run.id] = false
+      local result = ACTIVE[run.status] or false
+      for _, child in ipairs(children[run.id] or {}) do result = is_live(child) or result end
+      live[run.id] = result
+    end
+    return live[run.id]
+  end
+  local function active_first(list)
+    local first, rest = {}, {}
+    for _, run in ipairs(list) do table.insert(is_live(run) and first or rest, run) end
+    for _, run in ipairs(rest) do table.insert(first, run) end
+    return first
+  end
+  local result, seen = {}, {}
+  local function visit(run, rails, is_last, depth)
+    if seen[run.id] then return end
+    seen[run.id] = true
+    run.tree_prefix = depth == 0 and "" or (table.concat(rails) .. (is_last and "└─ " or "├─ "))
+    table.insert(result, run)
+    local kids = active_first(children[run.id] or {})
+    local next_rails = {}
+    for i, rail in ipairs(rails) do next_rails[i] = rail end
+    if depth > 0 then table.insert(next_rails, is_last and "   " or "│  ") end
+    for i, child in ipairs(kids) do visit(child, next_rails, i == #kids, depth + 1) end
+  end
+  roots = active_first(roots)
+  for i, run in ipairs(roots) do visit(run, {}, i == #roots, 0) end
+  -- Runs caught in a parent cycle have no root; list them flat.
+  for _, run in ipairs(runs) do visit(run, {}, true, 0) end
+  return result
+end
+
+local function list_title(runs)
+  local running, done = 0, 0
+  for _, run in ipairs(runs) do
+    if ACTIVE[run.status] then running = running + 1 else done = done + 1 end
+  end
+  local counts = {}
+  if running > 0 then table.insert(counts, running .. " running") end
+  if done > 0 then table.insert(counts, done .. " done") end
+  if #counts == 0 then return " agents " end
+  return " agents  " .. table.concat(counts, " · ") .. " "
+end
+
 function M.open()
   if active then active() end
   local parent_id = smelt.session.info().id
   local layout = smelt.ui.layout
   local closed, detail, focused = false, false, "runs"
-  local overlay, timer, layout_key
+  local overlay, timer, layout_key, restore_error
   local rows, records, rows_key = {}, {}, nil
-  local function ordered(runs)
-    local by_id, children, roots, result, seen = {}, {}, {}, {}, {}
-    for _, run in ipairs(runs) do by_id[run.id] = run end
-    for _, run in ipairs(runs) do
-      local parent = run.parent_agent_id
-      if parent and by_id[parent] then
-        children[parent] = children[parent] or {}
-        table.insert(children[parent], run)
-      else
-        table.insert(roots, run)
-      end
-    end
-    local function visit(run, depth)
-      if seen[run.id] then return end
-      seen[run.id], run.depth = true, depth
-      table.insert(result, run)
-      for _, child in ipairs(children[run.id] or {}) do visit(child, depth + 1) end
-    end
-    for _, run in ipairs(roots) do visit(run, 0) end
-    for _, run in ipairs(runs) do visit(run, 0) end
-    return result
-  end
   local function window(name, surface)
     local buf = smelt.buf.new({ readonly = true })
     local win = smelt.win.new(buf, {
       name = "smelt.subagents." .. name, surface = surface, vim_enabled = surface == "readonly_text",
-      wrap = false, scrollbar = true, pad_left = 1, pad_right = 1,
+      wrap = false, scrollbar = surface == "readonly_text", pad_left = 1, pad_right = 1,
     })
     return win, buf
   end
   local sidebar, sidebar_buf = window("runs", "list_inert")
   local preview, preview_buf = window("transcript", "readonly_text")
-  local status, status_buf = window("status", "selectable_text")
+  local problem, problem_buf = window("problem", "selectable_text")
   preview_buf:lines({ "Select an agent to view its transcript." })
   local split = layout.split("horizontal", { key = "agent_view", size = 34, min_first = 24, min_second = 32 })
   local list = smelt.list.new({
-    leaf = sidebar, buf = sidebar_buf, items = rows, empty_text = "  (no subagents)",
+    leaf = sidebar, buf = sidebar_buf, items = rows, empty_text = "(no subagents)",
     render = function(run)
-      local text = string.format("%s%s  %s", string.rep("  ", math.min(run.depth or 0, 8) + 1), run.title, run.status)
-      local hl = (run.status == "running" or run.status == "queued" or run.status == "waiting") and "SmeltToolPending"
-        or (run.status == "failed" or run.status == "blocked") and "ErrorMsg" or nil
-      return { text = text, marks = hl and { { col = 0, opts = { end_col = #text, style = hl } } } }
+      local marker = MARKERS[run.status] or MARKERS.queued
+      local head = run.tree_prefix .. marker.glyph .. " "
+      local tail = run.total_tokens and ("  " .. smelt.text.format_tokens(run.total_tokens)) or ""
+      local width = sidebar:content_width()
+      local title = run.title
+      if width then
+        title = smelt.text.fit(title, math.max(width - smelt.text.width(head) - smelt.text.width(tail), 1))
+      end
+      local text = head .. title .. tail
+      local glyph_col = #run.tree_prefix
+      local marks = {}
+      if glyph_col > 0 then table.insert(marks, { col = 0, opts = { end_col = glyph_col, style = { dim = true } } }) end
+      if tail ~= "" then table.insert(marks, { col = #text - #tail, opts = { end_col = #text, style = { dim = true } } }) end
+      if marker.dim then
+        table.insert(marks, { col = 0, opts = { end_col = #text, style = { dim = true } } })
+      elseif marker.style then
+        table.insert(marks, { col = glyph_col, opts = { end_col = glyph_col + #marker.glyph, style = marker.style } })
+      end
+      return { text = text, marks = marks }
     end,
   })
   local function narrow() return (smelt.ui.size().width or 80) < 90 end
+  -- Problems the transcript cannot show. The transcript preview already ends
+  -- with the agent's own error.
+  local function problem_text()
+    if restore_error then return "Agent restoration failed; retrying: " .. restore_error end
+    local run = list:selected()
+    return run and run.persistence_error and ("Archive failed: " .. run.persistence_error) or nil
+  end
   local opts = { name = "smelt.subagents", anchor = "center", width = "94%", height = "85%", modal = true, blocks_agent = false, border = "none" }
   local function draw()
     local run = list:selected()
-    local title = run and (" " .. run.title .. " - " .. run.status .. " ") or " transcript "
+    local title = run and (" " .. run.title .. " ") or " transcript "
+    local sidebar_title = list_title(rows)
+    local issue = problem_text()
+    local issue_line = issue and (issue:gsub("%s+", " ")) or ""
+    problem_buf:lines({ issue_line })
+    problem_buf:clear_ns(PROBLEM_NS)
+    if issue then problem_buf:mark(PROBLEM_NS, 1, 0, { end_col = #issue_line, style = "ErrorMsg" }) end
     local compact = narrow()
-    local key = title .. tostring(compact) .. tostring(detail)
+    local key = table.concat({ title, sidebar_title, tostring(issue ~= nil), tostring(compact), tostring(detail) }, "\0")
     if key == layout_key then return end
     layout_key = key
-    local left = layout.leaf(sidebar, { border = compact and { all = "Comment" } or { top = "Comment", bottom = "Comment", left = "Comment" }, title = smelt.dialog.title(" agents ") })
-    local right = layout.leaf(preview, { border = (compact or detail) and { all = "Comment" } or { top = "Comment", bottom = "Comment", right = "Comment" }, title = smelt.dialog.title(title) })
-    local body = detail and right or compact and left or split:layout(left, right)
-    opts.layout = layout.vbox({
-      { layout.leaf(status, { border = { all = "Comment" }, title = smelt.dialog.title(" subagents ") }), height = 6 },
-      { body, height = "fill" },
-    })
+    local left = layout.leaf(sidebar, { border = compact and { all = "Comment" } or { top = "Comment", bottom = "Comment", left = "Comment" }, title = smelt.dialog.title(sidebar_title) })
+    local transcript = layout.leaf(preview)
+    if issue then
+      transcript = layout.vbox({ { layout.leaf(problem), height = 1 }, { transcript, height = "fill" } })
+    end
+    local right = layout.frame(transcript, { border = (compact or detail) and { all = "Comment" } or { top = "Comment", bottom = "Comment", right = "Comment" }, title = smelt.dialog.title(title) })
+    opts.layout = detail and right or compact and left or split:layout(left, right)
     overlay = smelt.overlay.new(opts)
   end
   local function render_preview()
@@ -87,10 +169,11 @@ function M.open()
     if closed then return end
     local ok, runs = pcall(smelt.agent.runs, parent_id)
     if not ok then
-      status_buf:lines({ "Agent restoration failed; retrying:", tostring(runs) })
+      restore_error = tostring(runs)
       draw()
       return
     end
+    restore_error = nil
     local next_records, keys = {}, {}
     rows = ordered(runs)
     for i, run in ipairs(rows) do
@@ -101,7 +184,7 @@ function M.open()
         rows[i], run = previous, previous
       end
       next_records[run.id] = run
-      keys[i] = { run.id, run.title, run.status, run.depth }
+      keys[i] = { run.id, run.title, run.status, run.tree_prefix, run.total_tokens }
     end
     records = next_records
     local next_key = smelt.json.encode(keys)
@@ -109,19 +192,6 @@ function M.open()
       rows_key = next_key
       list:set_items_preserve(rows, function(run) return run.id end)
     end
-    local running, finished = 0, 0
-    for _, run in ipairs(rows) do
-      if run.status == "running" or run.status == "waiting" or run.status == "queued" then running = running + 1 else finished = finished + 1 end
-    end
-    local run = list:selected()
-    local controls = run and run.capabilities.stop and "Alt-S stop selected" or "Stop unavailable"
-    local owner = run and (run.owner == "claude_code" and "Claude Code" or "smelt") or "No agent selected"
-    local usage = run and run.total_tokens and string.format("   %d tokens (agent only)", run.total_tokens) or ""
-    local activity = run and (run.error and ("Agent error: " .. run.error)
-      or run.persistence_error and ("Archive failed: " .. run.persistence_error)
-      or run.activity ~= "" and run.activity or run.result) or ""
-    status_buf:lines({ string.format("%d active / %d finished   %s", running, finished, controls),
-      owner .. usage, (activity or ""):gsub("%s+", " "), "Tab panes   Enter expand   Esc close" })
     draw()
     render_preview()
   end
@@ -139,12 +209,14 @@ function M.open()
     if pane == "preview" then preview:focus() else sidebar:focus() end
     render_preview()
   end
+  local function back() if detail then detail = false; focus("runs") else close() end end
   opts.keymaps = {
-    { key = "esc", on_press = function() if detail then detail = false; focus("runs") else close() end end },
+    { key = "esc", on_press = back },
+    { key = "q", on_press = back },
     { key = "ctrl-c", on_press = close },
     { key = "tab", on_press = function() detail = false; focus(focused == "runs" and "preview" or "runs") end },
     { key = "enter", on_press = function() detail = true; focus("preview") end },
-    { key = "alt-s", on_press = function() local run = list:selected(); if run then smelt.agent.stop(parent_id, run.id); refresh() end end },
+    { key = "alt-s", hint = "⌥s: stop", on_press = function() local run = list:selected(); if run then smelt.agent.stop(parent_id, run.id); refresh() end end },
   }
   local count
   local function nav(delta)

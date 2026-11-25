@@ -30,7 +30,7 @@ fn observed(app: &mut TestApp, status: protocol::AgentStatus) -> String {
 }
 
 #[test]
-fn agent_observation_viewer_shows_nested_order_owner_usage_and_control_errors() {
+fn agent_observation_viewer_shows_nested_tree_tokens_and_agent_errors() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(110, 30);
     let parent = app.session_snapshot().id;
@@ -86,20 +86,21 @@ fn agent_observation_viewer_shows_nested_order_owner_usage_and_control_errors() 
     let probe = app.ui_probe();
     let win = probe.win(probe.focus().unwrap()).unwrap();
     let buf = probe.buf(win.buf).unwrap();
-    assert!(buf.get_line(0).unwrap().contains("  Root"), "{frame}");
-    assert!(buf.get_line(1).unwrap().contains("    Child"), "{frame}");
+    assert!(buf.get_line(0).unwrap().starts_with("● Root"), "{frame}");
     assert!(
-        buf.get_line(2).unwrap().contains("      Grandchild"),
+        buf.get_line(1).unwrap().starts_with("└─ ● Child"),
         "{frame}"
     );
-    for width in [60, 110] {
-        app.set_terminal_size(width, 30);
-        drive_lua_tasks(&mut app);
-        let frame = app.render_to_frame().text();
-        assert!(frame.contains("Claude Code"), "{frame}");
-        assert!(frame.contains("7312 tokens (agent only)"), "{frame}");
-        assert!(frame.contains("Agent error: Stop refused"), "{frame}");
-    }
+    assert!(
+        buf.get_line(2).unwrap().starts_with("   └─ ● Grandchild"),
+        "{frame}"
+    );
+    assert!(
+        buf.get_line(0).unwrap().trim_end().ends_with("7.3k"),
+        "{frame}"
+    );
+    assert!(frame.contains("agents  3 running"), "{frame}");
+    assert!(frame.contains("Agent: Stop refused"), "{frame}");
     app.press(KeyCode::Char('j'));
     app.feed_one(SourceEvent::engine(EngineEvent::AgentOutput {
         session_id: parent,
@@ -117,6 +118,95 @@ fn agent_observation_viewer_shows_nested_order_owner_usage_and_control_errors() 
     assert_eq!(app.lua_int_global("agent_list_refreshes"), Some(1));
     assert!(app.session_history().is_empty());
     app.press(KeyCode::Esc);
+    assert!(app.state().focused_overlay.is_none());
+}
+
+fn agent(
+    session_id: &str,
+    id: &str,
+    parent: Option<&str>,
+    title: &str,
+    status: protocol::AgentStatus,
+) -> EngineEvent {
+    EngineEvent::AgentUpdated {
+        session_id: session_id.into(),
+        agent: Box::new(protocol::AgentInfo {
+            id: id.into(),
+            ephemeral: true,
+            generation: 1,
+            parent_agent_id: parent.map(str::to_owned),
+            owner: protocol::AgentOwner::ClaudeCode,
+            title: title.into(),
+            task: "Review".into(),
+            status,
+            background: false,
+            activity: String::new(),
+            result: None,
+            error: None,
+            capabilities: protocol::AgentCapabilities {
+                stop: true,
+                follow_up: false,
+            },
+            usage: None,
+            total_tokens: None,
+            cost_usd: None,
+        }),
+    }
+}
+
+#[test]
+fn agent_observation_viewer_lists_active_agents_first_and_dims_finished_ones() {
+    use protocol::AgentStatus::{Completed, Failed, Running};
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(110, 30);
+    let parent = app.session_snapshot().id;
+    for (id, owner, title, status) in [
+        ("a", None, "Finished root", Completed),
+        ("b", None, "Parent of live", Completed),
+        ("c", Some("b"), "Live child", Running),
+        ("d", None, "Broken", Failed),
+        ("e", None, "Live root", Running),
+    ] {
+        app.feed_one(SourceEvent::engine(agent(
+            &parent, id, owner, title, status,
+        )));
+    }
+    app.run_lua_result("require('smelt.plugins.agent_view').open()")
+        .unwrap();
+    drive_lua_tasks(&mut app);
+    let frame = app.render_to_frame();
+    let text = frame.text();
+    let probe = app.ui_probe();
+    let win = probe.win(probe.focus().unwrap()).unwrap();
+    let buf = probe.buf(win.buf).unwrap();
+    let rows: Vec<String> = (0..5)
+        .map(|row| buf.get_line(row).unwrap().trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "✓ Parent of live",
+            "└─ ● Live child",
+            "● Live root",
+            "✓ Finished root",
+            "✗ Broken",
+        ],
+        "{text}"
+    );
+    assert!(text.contains("agents  2 running · 3 done"), "{text}");
+    let dim_at = |name: &str| {
+        let (y, line) = text
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(name))
+            .unwrap();
+        let x = line[..line.find(name).unwrap()].chars().count() as u16;
+        frame.style_at(x, y as u16).unwrap().dim
+    };
+    assert!(dim_at("Finished root"), "{text}");
+    assert!(!dim_at("Live root"), "{text}");
+    assert!(!dim_at("Broken"), "{text}");
+    app.press(KeyCode::Char('q'));
     assert!(app.state().focused_overlay.is_none());
 }
 
