@@ -575,7 +575,7 @@ function M.open(opts)
       loading, busy = nil, nil
       if not page then
         if append then
-          smelt.notify.error("History load failed: " .. display(err))
+          smelt.notify.error("history load failed: " .. display(err))
         else
           list_error = display(err)
           commits, head, more, diff, tree, selected = {}, nil, false, nil, nil, nil
