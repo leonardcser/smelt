@@ -4,6 +4,7 @@ mod claude_code;
 pub use claude_code::cached_models as claude_code_cached_models;
 pub use claude_code::checked_as as claude_code_checked_as;
 pub use claude_code::installed as claude_code_installed;
+pub use claude_code::knows as claude_code_knows;
 pub use claude_code::models_stale as claude_code_models_stale;
 pub use claude_code::native_access as claude_code_native_access;
 pub use claude_code::plan_directory as claude_code_plan_directory;

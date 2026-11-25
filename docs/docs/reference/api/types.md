@@ -1777,7 +1777,8 @@ Registrations are copied and immutable.
 | --- | --- | --- | --- |
 | `background_hl` | `string` |  | Highlight group of the status marker while the work a call left in the background runs. Default `SmeltProcess`. |
 | `render` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node` |  | Complete replacement renderer. |
-| `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker. Return nil to use the tool summary. |
+| `summary` | `fun(args: table<string, any>, ctx: { final: boolean }): string\|smelt.transcript.StyledSpan[][]\|nil` |  | What a call does, from its arguments, for a tool that has no `summary` of its own. The header, the permission dialog and group labels all show it. `ctx.final` is false while the arguments still stream. |
+| `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker, for headers that also read the call's result. Return nil to use the tool summary. |
 | `body` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Expanded body renderer. Return nil to suppress the body. |
 | `draft` | `fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Draft body renderer. Return nil to suppress the body. |
 | `draft_error` | `fun(draft: smelt.transcript.Block): string\|nil` |  | Reason smelt's tool preflight will reject the streamed call. When it returns a string the draft shows that error instead of the `draft` body. Not consulted for `native` drafts. |

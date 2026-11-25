@@ -1,0 +1,41 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 758
+expression: frame.text()
+---
+* claude-code/ToolSearch load CronCreate, CronDelete  1 not found    14:37:03
+
+* claude-code/ToolSearch search notebook jupyter  1 match            14:37:03
+
+* claude-code/Skill review-working  --strict                         14:37:03
+
+* claude-code/LSP definition src/parser.rs:42:9                      14:37:03
+  Defined in src/lexer.rs:17:5
+
+* claude-code/LSP workspace symbols Token                            14:37:03
+  Token (struct) src/lexer.rs:4
+
+* claude-code/TaskOutput output of b7x2k9                            14:37:03
+  Compiling smelt v0.9.0
+  Finished dev profile
+
+* claude-code/TaskStop stop b7x2k9                                   14:37:03
+
+* claude-code/ReadMcpResourceTool docs docs://guide/setup            14:37:03
+  Install with cargo.
+
+* claude-code/ListMcpResourcesTool resources of every server         14:37:03
+  docs://guide/setup
+
+* claude-code/EnterPlanMode                                          14:37:03
+
+* claude-code/PushNotification build failed: 2 auth tests            14:37:03
+
+
+
+
+
+─ ● … ────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ read                                                               1:1 100%

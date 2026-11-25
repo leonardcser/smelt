@@ -1,0 +1,33 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 758
+expression: frame.text()
+---
+* claude-code/TodoWrite 1 of 3 done  Fixing the off-by-one           14:37:03
+  ✓ Read the parser
+  ● Fix the off-by-one
+  ○ Add a regression test
+
+* claude-code/TaskCreate ○ Profile the render loop  #3               14:37:03
+  Measure frame time with the release-fast build.
+
+* claude-code/TaskUpdate ● #3  in progress                           14:37:03
+
+* claude-code/TaskUpdate ✓ #1 Read the parser  completed             14:37:03
+
+* claude-code/TaskGet #9                                             14:37:03
+  Task not found
+
+* claude-code/TaskList 1 of 3 tasks done                             14:37:03
+  ✓ #1 Read the parser
+  ● #3 Profile the render loop  perf
+  ○ #4 Ship it  blocked by #3
+
+
+
+
+
+─ ● … ────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ read                                                               1:1 100%

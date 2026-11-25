@@ -299,48 +299,6 @@ impl HistoryDeltaKind {
     }
 }
 
-pub(crate) struct ToolSummaryResolver<'a> {
-    lua: &'a smelt_core::lua::LuaRuntime,
-}
-
-impl<'a> ToolSummaryResolver<'a> {
-    pub(crate) fn new(lua: &'a smelt_core::lua::LuaRuntime) -> Self {
-        Self { lua }
-    }
-
-    pub(crate) fn resolve(
-        &self,
-        name: &str,
-        args: &HashMap<String, serde_json::Value>,
-    ) -> protocol::StyledLines {
-        self.resolve_with_context(name, args, true)
-    }
-
-    pub(crate) fn resolve_with_context(
-        &self,
-        name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        final_args: bool,
-    ) -> protocol::StyledLines {
-        // A provider's native tool, shown as `provider/Name`, that a smelt tool
-        // checks takes that tool's summary, as in its permission dialog.
-        if let Some((tool, args)) = name
-            .split_once('/')
-            .and_then(|(_, native)| engine::claude_code_checked_as(native, args))
-        {
-            let summary = self.lua.tool_summary_with_context(tool, &args, final_args);
-            if !summary.is_empty() {
-                return summary;
-            }
-        }
-        let summary = self.lua.tool_summary_with_context(name, args, final_args);
-        if !summary.is_empty() || self.lua.has_tool(name) {
-            return summary;
-        }
-        smelt_core::mcp::args_summary(args)
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn live_session_for_test(
     id: String,
@@ -453,7 +411,7 @@ fn kept_history_slice(history: &[HistoryItem], range: std::ops::Range<usize>) ->
 /// row per tool invocation.
 fn kept_history_items(
     items: &[HistoryItem],
-    summary_resolver: &ToolSummaryResolver<'_>,
+    lua: &smelt_core::lua::LuaRuntime,
 ) -> Vec<KeptHistoryItem> {
     let mut kept = Vec::new();
     for item in items {
@@ -483,7 +441,7 @@ fn kept_history_items(
                         serde_json::from_str(&inv.arguments).unwrap_or_default();
                     kept.push(KeptHistoryItem::Tool {
                         name: inv.name.clone(),
-                        summary: summary_resolver.resolve(&inv.name, &args),
+                        summary: lua.tool_summary(&inv.name, &args),
                         status: invocation_status(inv),
                         presentation: Some(Box::new(
                             smelt_transcript::tool_presentation::ToolPresentation::from_result(
@@ -504,7 +462,6 @@ pub(crate) fn build_transcript_from_session(
     lua: &smelt_core::lua::LuaRuntime,
     session: &session::Session,
 ) -> Transcript {
-    let summary_resolver = ToolSummaryResolver::new(lua);
     let _perf = smelt_perf::perf::begin("transcript:build_from_session");
     smelt_perf::perf::record_value(
         "transcript:build_from_session:history_items",
@@ -518,10 +475,7 @@ pub(crate) fn build_transcript_from_session(
     let mut checkpoint_markers = checkpoint_markers_by_completion_index(session);
     for (idx, item) in session.history.iter().enumerate() {
         insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, idx, |range| {
-            kept_history_items(
-                kept_history_slice(&session.history, range),
-                &summary_resolver,
-            )
+            kept_history_items(kept_history_slice(&session.history, range), lua)
         });
         match item {
             HistoryItem::User {
@@ -539,9 +493,7 @@ pub(crate) fn build_transcript_from_session(
                 *command,
                 *sent_at_ms,
             ),
-            HistoryItem::Assistant(turn) => {
-                push_assistant_blocks(&mut transcript, &summary_resolver, idx, turn)
-            }
+            HistoryItem::Assistant(turn) => push_assistant_blocks(&mut transcript, lua, idx, turn),
             HistoryItem::Note(note) => push_note_block(&mut transcript, lua, idx, note),
             HistoryItem::System { .. } => {}
         }
@@ -550,12 +502,7 @@ pub(crate) fn build_transcript_from_session(
         &mut transcript,
         &mut checkpoint_markers,
         session.history.len(),
-        |range| {
-            kept_history_items(
-                kept_history_slice(&session.history, range),
-                &summary_resolver,
-            )
-        },
+        |range| kept_history_items(kept_history_slice(&session.history, range), lua),
     );
 
     smelt_perf::perf::record_value(
@@ -933,7 +880,7 @@ fn invocation_status(inv: &protocol::ToolInvocation) -> ToolStatus {
 
 fn push_assistant_blocks(
     transcript: &mut Transcript,
-    summary_resolver: &ToolSummaryResolver<'_>,
+    lua: &smelt_core::lua::LuaRuntime,
     history_index: usize,
     turn: &AssistantStep,
 ) {
@@ -970,7 +917,7 @@ fn push_assistant_blocks(
         );
         let elapsed_ms = inv.elapsed_ms;
         let name = inv.displayed_name();
-        let summary = summary_resolver.resolve(&name, &args);
+        let summary = lua.tool_summary(&name, &args);
         transcript.push_tool_call_with_origin(
             Block::ToolCall {
                 call_id: inv.call_id.clone(),
@@ -1032,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_uses_json_args_summary_for_resumed_mcp_tool_calls() {
+    fn resumed_mcp_tool_calls_summarize_their_arguments() {
         let lua = crate::lua::LuaRuntime::new();
         let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history.push(HistoryItem::Assistant(
@@ -1057,8 +1004,7 @@ mod tests {
         match transcript.history.block(id) {
             Some(Block::ToolCall { summary, args, .. }) => {
                 assert_eq!(args.get("label"), Some(&serde_json::json!("ok")));
-                assert_eq!(summary.as_plain_text(), r#"{"label":"ok"}"#);
-                assert_eq!(summary.0[0][0].syntax.as_deref(), Some("json"));
+                assert_eq!(summary.as_plain_text(), "label ok");
             }
             other => panic!("expected tool call, got {other:?}"),
         }
@@ -1138,7 +1084,7 @@ mod tests {
                     },
                     KeptHistoryItem::Tool {
                         name: "mcp_server_echo".into(),
-                        summary: smelt_core::mcp::args_summary(&HashMap::from([(
+                        summary: smelt_core::lua::args_summary(&HashMap::from([(
                             "label".to_string(),
                             serde_json::json!("ok"),
                         )])),
@@ -1453,7 +1399,7 @@ mod tests {
         let mut args = HashMap::new();
         args.insert("label".into(), serde_json::json!("ok"));
 
-        let summary = ToolSummaryResolver::new(&lua).resolve("quiet_tool", &args);
+        let summary = lua.tool_summary("quiet_tool", &args);
         assert!(summary.is_empty());
     }
 }
@@ -2076,12 +2022,9 @@ impl TuiApp {
                     *command,
                     *sent_at_ms,
                 ),
-                HistoryItem::Assistant(turn) => push_assistant_blocks(
-                    &mut transcript,
-                    &ToolSummaryResolver::new(&lua),
-                    history_index,
-                    turn,
-                ),
+                HistoryItem::Assistant(turn) => {
+                    push_assistant_blocks(&mut transcript, &lua, history_index, turn)
+                }
                 HistoryItem::Note(note) => {
                     push_note_block(&mut transcript, &lua, history_index, note)
                 }
@@ -2103,9 +2046,7 @@ impl TuiApp {
         range: std::ops::Range<usize>,
     ) -> Vec<KeptHistoryItem> {
         let items = kept_history_slice(&self.conversation.session().history, range).to_vec();
-        crate::lua::scope_app(self, || {
-            kept_history_items(&items, &ToolSummaryResolver::new(lua))
-        })
+        crate::lua::scope_app(self, || kept_history_items(&items, lua))
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
@@ -2624,9 +2565,7 @@ impl TuiApp {
             }
         };
         let lua = self.lua.execution();
-        let kept = crate::lua::scope_app(self, || {
-            kept_history_items(&kept_items, &ToolSummaryResolver::new(&lua))
-        });
+        let kept = crate::lua::scope_app(self, || kept_history_items(&kept_items, &lua));
         let index = match transcript_index_for_checkpoint(
             self.conversation.transcript().history(),
             &self.conversation.session().history,

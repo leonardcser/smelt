@@ -8,25 +8,21 @@ use std::collections::HashMap;
 
 /// Decide a native tool call with `smelt.permissions.check`. A native tool
 /// checked as a smelt tool ([`engine::claude_code_checked_as`]) uses that
-/// tool's rules, paths and summary. The access comes from
-/// [`engine::claude_code_native_access`].
+/// tool's rules and paths. The access comes from
+/// [`engine::claude_code_native_access`], and the summary is the one the
+/// transcript shows for the call under `provider`'s namespace.
 /// Path arguments arrive absolute. Call inside a host scope.
 pub fn evaluate(
     lua: &LuaRuntime,
     mode: AgentMode,
+    provider: &str,
     name: &str,
     args: &HashMap<String, Value>,
 ) -> ToolEvaluation {
+    let summary = lua.tool_summary(&format!("{provider}/{name}"), args);
     let access = engine::claude_code_native_access(name);
-    let (tool, args, summary) = match engine::claude_code_checked_as(name, args) {
-        Some((tool, args)) => {
-            let summary = Some(lua.tool_summary(tool, &args))
-                .filter(|summary| !summary.is_empty())
-                .unwrap_or_else(|| crate::mcp::args_summary(&args));
-            (tool, args, summary)
-        }
-        None => (name, args.clone(), crate::mcp::args_summary(args)),
-    };
+    let (tool, args) =
+        engine::claude_code_checked_as(name, args).unwrap_or_else(|| (name, args.clone()));
     let (decision, access) = match lua.check_permission(tool, &args, mode, access) {
         Ok(check) => (check.decision, check.access),
         Err(error) => (Decision::Error(error), Access::Full),
@@ -49,7 +45,7 @@ mod tests {
     fn decide(tool: &str, mode: &str) -> (Decision, Access) {
         let lua = LuaRuntime::new();
         let mode = AgentMode::parse(mode).unwrap();
-        let evaluation = evaluate(&lua, mode, tool, &HashMap::new());
+        let evaluation = evaluate(&lua, mode, "claude-code", tool, &HashMap::new());
         (evaluation.decision, evaluation.metadata.access)
     }
 
@@ -80,10 +76,52 @@ mod tests {
             .exec()
             .unwrap();
         let args = HashMap::from([("file_path".to_string(), Value::from("/w/init.lua"))]);
-        let evaluation = evaluate(&lua, AgentMode::parse("write").unwrap(), "Edit", &args);
+        let evaluation = evaluate(
+            &lua,
+            AgentMode::parse("write").unwrap(),
+            "claude-code",
+            "Edit",
+            &args,
+        );
         assert_eq!(
             evaluation.metadata.summary.as_plain_text(),
             "edit /w/init.lua"
+        );
+    }
+
+    #[test]
+    fn native_tools_of_their_own_use_their_presentation_summary() {
+        let lua = LuaRuntime::new();
+        let args = HashMap::from([("id".to_string(), Value::from("c1"))]);
+        let mode = AgentMode::parse("write").unwrap();
+        let evaluation = evaluate(&lua, mode.clone(), "claude-code", "CronDelete", &args);
+        assert_eq!(evaluation.metadata.summary.as_plain_text(), "cancel job c1");
+        let evaluation = evaluate(&lua, mode, "claude-code", "SomeFutureTool", &args);
+        assert_eq!(evaluation.metadata.summary.as_plain_text(), "id c1");
+    }
+
+    #[test]
+    fn every_native_presentation_is_for_a_tool_smelt_knows() {
+        let lua = LuaRuntime::new();
+        let names: Vec<String> = lua
+            .lua
+            .load(
+                "local names = {}
+                for name in pairs(require('smelt.transcript.native').presentations) do
+                  names[#names + 1] = name
+                end
+                return names",
+            )
+            .eval()
+            .unwrap();
+        assert!(!names.is_empty());
+        let unknown: Vec<_> = names
+            .iter()
+            .filter(|name| !engine::claude_code_knows(name))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "presentations for unknown tools: {unknown:?}"
         );
     }
 
@@ -104,7 +142,13 @@ mod tests {
             .exec()
             .unwrap();
         let args = HashMap::from([("command".to_string(), Value::from("tail -f log"))]);
-        let evaluation = evaluate(&lua, AgentMode::parse("write").unwrap(), "Monitor", &args);
+        let evaluation = evaluate(
+            &lua,
+            AgentMode::parse("write").unwrap(),
+            "claude-code",
+            "Monitor",
+            &args,
+        );
         assert_eq!(evaluation.decision, Ask);
         assert_eq!(evaluation.metadata.access, Access::Full);
         assert_eq!(

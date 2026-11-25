@@ -87,6 +87,8 @@ pub enum HostCall {
     NativeToolEvaluation {
         turn_id: u64,
         session_id: String,
+        /// The provider whose namespace the call shows under, as `provider/tool_name`.
+        provider: String,
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
         mode: protocol::AgentMode,

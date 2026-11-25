@@ -388,6 +388,7 @@ impl TuiApp {
         match call {
             HostCall::NativeToolEvaluation {
                 session_id,
+                provider,
                 tool_name,
                 args,
                 mode,
@@ -400,7 +401,9 @@ impl TuiApp {
                 {
                     let lua = self.lua.execution();
                     crate::lua::scope_app(self, || {
-                        smelt_core::claude_code_policy::evaluate(&lua, mode, &tool_name, &args)
+                        smelt_core::claude_code_policy::evaluate(
+                            &lua, mode, &provider, &tool_name, &args,
+                        )
                     })
                 } else {
                     protocol::ToolEvaluation::deny()

@@ -581,11 +581,6 @@ impl Agents {
     }
 }
 
-/// Whether Claude Code's tool `name` launches an agent.
-pub(super) fn launches(name: &str) -> bool {
-    matches!(name, "Agent" | "Task")
-}
-
 /// The result of a call that waited for the agent it launched, read from
 /// Claude Code's structured result: the agent's report. The model keeps
 /// `content`.

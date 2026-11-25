@@ -7,7 +7,7 @@ use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
@@ -104,23 +104,6 @@ impl McpToolDef {
         } else {
             crate::permissions::Access::Full
         }
-    }
-}
-
-pub fn args_summary(args: &HashMap<String, serde_json::Value>) -> protocol::StyledLines {
-    if args.is_empty() {
-        return protocol::StyledLines::empty();
-    }
-    let sorted: BTreeMap<&String, &serde_json::Value> = args.iter().collect();
-    let text = serde_json::to_string(&sorted).unwrap_or_default();
-    if text.is_empty() || text == "{}" {
-        protocol::StyledLines::empty()
-    } else {
-        protocol::StyledLines(vec![vec![protocol::StyledSpan {
-            text,
-            syntax: Some("json".into()),
-            ..Default::default()
-        }]])
     }
 }
 

@@ -1719,6 +1719,36 @@ fn native_edit_results_carry_the_whole_file_for_a_diff() {
 }
 
 #[test]
+fn native_tools_of_their_own_keep_their_structured_result() {
+    let (tx, _, _rx) = crate::output_channel(HostCallbacks::Disabled);
+    let mut transcript = Transcript::new(tx, "claude-code".into(), 1, 0);
+    let call = |id: &str, name: &str, input: Value| json!({"type":"assistant","uuid":id,"message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}});
+    let result = |id: &str, text: &str, structured: Value| json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":text}]},"tool_use_result":structured});
+    let task = json!({"task":{"id":"3","subject":"Ship it"}});
+    transcript.frame(
+        &call("t1", "TaskCreate", json!({"subject":"Ship it"})),
+        1_000,
+    );
+    transcript.frame(&result("t1", "Task #3 created", task.clone()), 1_100);
+    // A shared tool's result reads as the smelt tool's, from its text alone.
+    let read = json!({"type":"text","file":{"filePath":"/w/a.txt","content":"a"}});
+    transcript.frame(&call("t2", "Read", json!({"file_path":"/w/a.txt"})), 1_200);
+    transcript.frame(&result("t2", "1\ta", read), 1_300);
+    let results: Vec<_> = transcript
+        .committed
+        .iter()
+        .flat_map(|item| match item {
+            HistoryItem::Assistant(step) => {
+                step.invocations.iter().map(|tool| &tool.result).collect()
+            }
+            _ => Vec::new(),
+        })
+        .collect();
+    assert_eq!(results[0].metadata, Some(json!({"native": task})));
+    assert_eq!(results[1].metadata, None);
+}
+
+#[test]
 fn native_edit_results_without_the_original_file_revert_the_patch_on_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("big.txt");

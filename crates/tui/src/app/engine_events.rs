@@ -135,14 +135,7 @@ impl TuiApp {
             return summary;
         }
         let lua = self.lua.execution();
-        let summary = crate::lua::scope_app(self, || {
-            crate::app::history::ToolSummaryResolver::new(&lua).resolve(tool_name, args)
-        });
-        if summary.is_empty() {
-            protocol::StyledLines::from_plain(tool_name)
-        } else {
-            summary
-        }
+        crate::lua::scope_app(self, || lua.tool_summary(tool_name, args))
     }
 
     fn begin_tool_block_for_engine_event(
@@ -1088,14 +1081,14 @@ impl TuiApp {
                 access,
             } => {
                 assistant_output_started = true;
-                let summary =
-                    self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
+                let name = protocol::displayed_tool_name(provider.as_deref(), &tool_name);
+                let summary = self.resolve_tool_summary_for_engine_event(&name, &args, summary);
                 self.begin_tool_block_for_engine_event(
                     pending,
                     ToolStart {
                         invocation_id,
                         call_id: call_id.clone(),
-                        name: protocol::displayed_tool_name(provider.as_deref(), &tool_name),
+                        name,
                         summary: summary.clone(),
                         args: args.clone(),
                         preview_output: None,

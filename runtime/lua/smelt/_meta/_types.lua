@@ -1212,7 +1212,8 @@
 ---@class smelt.transcript.ToolPresentation
 ---@field background_hl? string Highlight group of the status marker while the work a call left in the background runs. Default `SmeltProcess`.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
----@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
+---@field summary? fun(args: table<string, any>, ctx: { final: boolean }): string|smelt.transcript.StyledSpan[][]|nil What a call does, from its arguments, for a tool that has no `summary` of its own. The header, the permission dialog and group labels all show it. `ctx.final` is false while the arguments still stream.
+---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker, for headers that also read the call's result. Return nil to use the tool summary.
 ---@field body? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Expanded body renderer. Return nil to suppress the body.
 ---@field draft? fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Draft body renderer. Return nil to suppress the body.
 ---@field draft_error? fun(draft: smelt.transcript.Block): string|nil Reason smelt's tool preflight will reject the streamed call. When it returns a string the draft shows that error instead of the `draft` body. Not consulted for `native` drafts.

@@ -1,0 +1,29 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 758
+expression: frame.text()
+---
+* claude-code/ScheduleWakeup wake in 20m  waiting for CI             14:37:03
+  Check whether CI passed and report.
+
+* claude-code/ScheduleWakeup wake in 1m 30s  idle tick               14:37:03
+
+* claude-code/CronCreate Weekdays at 9:07 AM  7 9 * * 1-5            14:37:03
+  Summarize open PRs.
+
+* claude-code/CronCreate 30 14 25 11 *  once                         14:37:03
+  Check the deploy.
+
+* claude-code/ScheduleWakeup stop loop                               14:37:03
+
+* claude-code/CronDelete cancel job c1a2                             14:37:03
+
+* claude-code/CronList 2 jobs                                        14:37:03
+  Weekdays at 9:07 AM  c1a2  Summarize open PRs.
+  30 14 25 11 *  once  c9f0  Check the deploy.
+
+
+─ ● … ────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ read                                                               1:1 100%

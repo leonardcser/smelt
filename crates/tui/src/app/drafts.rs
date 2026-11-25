@@ -114,8 +114,7 @@ impl TuiApp {
         };
         let lua = self.lua.execution();
         let summary = crate::lua::scope_app(self, || {
-            crate::app::history::ToolSummaryResolver::new(&lua)
-                .resolve_with_context(&name, &args, finished)
+            lua.tool_summary_with_context(&name, &args, finished)
         });
         self.conversation.set_tool_draft_summary(block_id, summary);
     }

@@ -647,6 +647,7 @@ impl HeadlessApp {
                 engine::EngineOutput::Event(ev) => ev,
                 engine::EngineOutput::HostCall(engine::HostCall::NativeToolEvaluation {
                     session_id,
+                    provider,
                     tool_name,
                     args,
                     mode,
@@ -659,7 +660,9 @@ impl HeadlessApp {
                                 && self.core.native_session.as_deref() == Some(&session_id) =>
                         {
                             crate::host::scope_core(&mut self.core, || {
-                                crate::claude_code_policy::evaluate(lua, mode, &tool_name, &args)
+                                crate::claude_code_policy::evaluate(
+                                    lua, mode, &provider, &tool_name, &args,
+                                )
                             })
                         }
                         _ => protocol::ToolEvaluation::deny(),

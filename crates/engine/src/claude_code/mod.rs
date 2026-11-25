@@ -14,7 +14,7 @@ mod limit;
 mod models;
 mod plans;
 pub use account::usage_scope;
-pub use catalog::{checked_as, native_access};
+pub use catalog::{checked_as, knows, native_access};
 pub use context::context_window;
 pub use models::{cached as cached_models, refresh as refresh_models, stale as models_stale};
 pub use plans::directory as plan_directory;
@@ -1894,6 +1894,7 @@ impl Runtime<'_> {
         let call = crate::HostCall::NativeToolEvaluation {
             turn_id: self.payload.turn_id,
             session_id: self.payload.session_id.clone(),
+            provider: self.payload.model_target.provider.clone(),
             tool_name: name.into(),
             args: gate.args.clone(),
             mode: self.mode.clone(),

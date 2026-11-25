@@ -862,7 +862,7 @@ app_story!(tool_header_wrapping_for_bash_glob_and_grep, |ctx| {
     ctx.assert_snapshot();
 });
 
-app_story!(mcp_tool_json_args_wrap_in_header, |ctx| {
+app_story!(mcp_tool_args_wrap_in_header, |ctx| {
     ctx.set_viewport(82, 10);
     ctx.tool_call(
         "nvim_lsp_read_lints",
@@ -1048,5 +1048,316 @@ app_story!(background_calls_show_their_work_state, |ctx| {
         "",
     );
     ctx.advance_time(61_000);
+    ctx.assert_snapshot();
+});
+
+app_story!(native_task_tools, |ctx| {
+    ctx.set_viewport(78, 28);
+    ctx.tool_call(
+        "claude-code/TodoWrite",
+        &[(
+            "todos",
+            json!([
+                {"content": "Read the parser", "status": "completed", "activeForm": "Reading the parser"},
+                {"content": "Fix the off-by-one", "status": "in_progress", "activeForm": "Fixing the off-by-one"},
+                {"content": "Add a regression test", "status": "pending", "activeForm": "Adding a regression test"},
+            ]),
+        )],
+        "Todos have been modified successfully.",
+        Some(4),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/TaskCreate",
+        &[
+            ("subject", json!("Profile the render loop")),
+            (
+                "description",
+                json!("Measure **frame time** with the release-fast build."),
+            ),
+        ],
+        "Task #3 created successfully: Profile the render loop",
+        json!({"native": {"task": {"id": "3", "subject": "Profile the render loop"}}}),
+        Some(3),
+    );
+    ctx.tool_call(
+        "claude-code/TaskUpdate",
+        &[("taskId", json!("3")), ("status", json!("in_progress"))],
+        "Updated task #3 status",
+        Some(2),
+    );
+    ctx.tool_call(
+        "claude-code/TaskUpdate",
+        &[
+            ("taskId", json!("1")),
+            ("status", json!("completed")),
+            ("subject", json!("Read the parser")),
+        ],
+        "Updated task #1 subject, status",
+        Some(2),
+    );
+    ctx.tool_call_error(
+        "claude-code/TaskGet",
+        &[("taskId", json!("9"))],
+        "Task not found",
+        Some(1),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/TaskList",
+        &[],
+        "#1 [completed] Read the parser\n#3 [in_progress] Profile the render loop\n#4 [pending] Ship it",
+        json!({"native": {"tasks": [
+            {"id": "1", "subject": "Read the parser", "status": "completed", "blocks": [], "blockedBy": []},
+            {"id": "3", "subject": "Profile the render loop", "status": "in_progress", "owner": "perf", "blocks": ["4"], "blockedBy": []},
+            {"id": "4", "subject": "Ship it", "status": "pending", "blocks": [], "blockedBy": ["3"]},
+        ]}}),
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(native_schedule_tools, |ctx| {
+    ctx.set_viewport(78, 24);
+    ctx.tool_call(
+        "claude-code/ScheduleWakeup",
+        &[
+            ("delaySeconds", json!(1200)),
+            ("reason", json!("waiting for CI")),
+            ("prompt", json!("Check whether CI passed and report.")),
+        ],
+        "Wakeup scheduled.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/ScheduleWakeup",
+        &[
+            ("delaySeconds", json!(90)),
+            ("reason", json!("idle tick")),
+            ("prompt", json!("<<autonomous-loop-dynamic>>")),
+        ],
+        "Wakeup scheduled.",
+        Some(1),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/CronCreate",
+        &[
+            ("cron", json!("7 9 * * 1-5")),
+            ("prompt", json!("Summarize open PRs.")),
+        ],
+        "Scheduled recurring job c1a2. Auto-expires after 7 days.",
+        json!({"native": {"id": "c1a2", "humanSchedule": "Weekdays at 9:07 AM", "recurring": true, "durable": false}}),
+        Some(1),
+    );
+    // Claude Code repeats an expression it cannot phrase as its schedule.
+    ctx.tool_call_with_metadata(
+        "claude-code/CronCreate",
+        &[
+            ("cron", json!("30 14 25 11 *")),
+            ("prompt", json!("Check the deploy.")),
+            ("recurring", json!(false)),
+        ],
+        "Scheduled one-shot task c9f0.",
+        json!({"native": {"id": "c9f0", "humanSchedule": "30 14 25 11 *", "recurring": false, "durable": false}}),
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/ScheduleWakeup",
+        &[("stop", json!(true))],
+        "Loop stopped.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/CronDelete",
+        &[("id", json!("c1a2"))],
+        "Cancelled job c1a2",
+        Some(1),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/CronList",
+        &[],
+        "c1a2  7 9 * * 1-5  Summarize open PRs.\nc9f0  30 14 25 11 *  once  Check the deploy.",
+        json!({"native": {"jobs": [
+            {"id": "c1a2", "cron": "7 9 * * 1-5", "humanSchedule": "Weekdays at 9:07 AM", "prompt": "Summarize open PRs.", "recurring": true, "durable": false},
+            {"id": "c9f0", "cron": "30 14 25 11 *", "humanSchedule": "30 14 25 11 *", "prompt": "Check the deploy.\nThen report.", "durable": false},
+        ]}}),
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(native_session_tools, |ctx| {
+    ctx.set_viewport(78, 36);
+    // A selection loads only the tools that exist.
+    ctx.tool_call_with_metadata(
+        "claude-code/ToolSearch",
+        &[
+            ("query", json!("select:CronCreate,CronDelete,TodoWrite")),
+            ("max_results", json!(3)),
+        ],
+        "",
+        json!({"native": {"matches": ["CronCreate", "CronDelete"], "query": "select:CronCreate,CronDelete,TodoWrite", "total_deferred_tools": 18}}),
+        Some(1),
+    );
+    ctx.tool_call_with_metadata(
+        "claude-code/ToolSearch",
+        &[
+            ("query", json!("notebook jupyter")),
+            ("max_results", json!(5)),
+        ],
+        "",
+        json!({"native": {"matches": ["NotebookEdit"], "query": "notebook jupyter", "total_deferred_tools": 18}}),
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/Skill",
+        &[
+            ("skill", json!("review-working")),
+            ("args", json!("--strict")),
+        ],
+        "Launching skill: review-working",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/LSP",
+        &[
+            ("operation", json!("goToDefinition")),
+            ("filePath", json!("src/parser.rs")),
+            ("line", json!(42)),
+            ("character", json!(9)),
+        ],
+        "Defined in src/lexer.rs:17:5",
+        Some(2),
+    );
+    ctx.tool_call(
+        "claude-code/LSP",
+        &[
+            ("operation", json!("workspaceSymbol")),
+            ("filePath", json!("src/parser.rs")),
+            ("line", json!(1)),
+            ("character", json!(1)),
+            ("query", json!("Token")),
+        ],
+        "Token (struct) src/lexer.rs:4",
+        Some(2),
+    );
+    ctx.tool_call(
+        "claude-code/TaskOutput",
+        &[("task_id", json!("b7x2k9"))],
+        "Compiling smelt v0.9.0\nFinished dev profile",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/TaskStop",
+        &[("task_id", json!("b7x2k9"))],
+        "Stopped b7x2k9",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/ReadMcpResourceTool",
+        &[
+            ("server", json!("docs")),
+            ("uri", json!("docs://guide/setup")),
+        ],
+        "Install with cargo.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/ListMcpResourcesTool",
+        &[],
+        "docs://guide/setup",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/EnterPlanMode",
+        &[],
+        "Entered plan mode.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/PushNotification",
+        &[("message", json!("build failed: 2 auth tests"))],
+        "Notification sent.",
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(native_project_tools, |ctx| {
+    ctx.set_viewport(78, 36);
+    ctx.tool_call(
+        "claude-code/Workflow",
+        &[(
+            "script",
+            json!("export const meta = { name: 'review-changes', description: 'Review each changed file' }"),
+        )],
+        "Workflow started.",
+        Some(2),
+    );
+    ctx.tool_call(
+        "claude-code/Workflow",
+        &[("scriptPath", json!("/tmp/session/workflows/review.js"))],
+        "Workflow started.",
+        Some(2),
+    );
+    ctx.tool_call(
+        "claude-code/Monitor",
+        &[
+            ("ws", json!({"url": "wss://ci.example.com/events"})),
+            ("description", json!("CI events")),
+            ("timeout_ms", json!(600000)),
+        ],
+        "Monitor started (task m2).",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/ExitWorktree",
+        &[
+            ("action", json!("remove")),
+            ("discard_changes", json!(true)),
+        ],
+        "Removed the worktree.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/SendToProject",
+        &[
+            ("project_name", json!("smelt-docs")),
+            (
+                "proposal",
+                json!({"summary": "Document the new **native tool** renderers."}),
+            ),
+        ],
+        "Sent.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/PowerShell",
+        &[(
+            "command",
+            json!("Get-ChildItem -Recurse src\nWrite-Host done"),
+        )],
+        "src/main.rs",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/ReportFindings",
+        &[
+            ("level", json!("high")),
+            (
+                "findings",
+                json!([
+                    {"file": "src/parser.rs", "line": 42, "summary": "Off-by-one at the end of input.", "short_summary": "off-by-one at end of input", "failure_scenario": "x"},
+                    {"file": "src/lexer.rs", "summary": "Token spans skip the BOM.", "failure_scenario": "y"},
+                ]),
+            ),
+        ],
+        "Reported.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "claude-code/SomeFutureTool",
+        &[("target", json!("staging")), ("dry_run", json!(true))],
+        "ok",
+        Some(1),
+    );
     ctx.assert_snapshot();
 });

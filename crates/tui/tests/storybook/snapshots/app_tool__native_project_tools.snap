@@ -1,0 +1,41 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 758
+expression: frame.text()
+---
+* claude-code/Workflow review-changes  Review each changed file      14:37:03
+
+* claude-code/Workflow /tmp/session/workflows/review.js              14:37:03
+
+* claude-code/Monitor watch wss://ci.example.com/events  CI events   14:37:03
+  Monitor started (task m2).
+
+* claude-code/ExitWorktree remove worktree  discard changes          14:37:03
+  Removed the worktree.
+
+* claude-code/SendToProject → smelt-docs                             14:37:03
+  Document the new native tool renderers.
+
+* claude-code/PowerShell PS> Get-ChildItem -Recurse src              14:37:03
+  src/main.rs
+
+* claude-code/ReportFindings 2 findings  high                        14:37:03
+  src/parser.rs:42  off-by-one at end of input
+  src/lexer.rs  Token spans skip the BOM.
+
+* claude-code/SomeFutureTool dry_run true  target staging            14:37:03
+  ok
+
+
+
+
+
+
+
+
+
+
+─ ● … ────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ read                                                               1:1 100%

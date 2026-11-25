@@ -24,80 +24,198 @@ enum Smelt {
     Owned(&'static str),
 }
 
+/// When a successful call leaves its work running in the background, read
+/// from Claude Code's structured result, and the result key that names the
+/// task its end is reported under.
+#[derive(Clone, Copy)]
+enum Background {
+    /// Every call runs in the background.
+    Always(&'static str),
+    /// A call runs in the background when its result names the task.
+    WhenTask(&'static str),
+    /// A call runs in the background when its result says it launched
+    /// asynchronously.
+    WhenAsync(&'static str),
+}
+
+/// What smelt keeps from Claude Code's structured result of a call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ResultShape {
+    /// Only the text the model reads: the smelt tool the call shares renders it.
+    Text,
+    /// The file before and after the edit, as smelt's `edit_file` reports it.
+    Edit,
+    /// The report of the agent the call waited for.
+    AgentReport,
+    /// The whole result as `native` metadata, for a presentation that reads it.
+    Structured,
+}
+
+/// A native tool smelt knows: the smelt tool it relates to, the access a call
+/// asks for, how its arguments map to the smelt tool's, and how its result
+/// reads.
+struct NativeTool {
+    name: &'static str,
+    smelt: Option<Smelt>,
+    /// `None` leaves the access to the smelt tool the call is checked as.
+    access: Option<Access>,
+    /// Argument renames from the native tool to the smelt tool.
+    renames: &'static [(&'static str, &'static str)],
+    background: Option<Background>,
+    result: ResultShape,
+}
+
+impl NativeTool {
+    /// A native tool sharing smelt tool `tool`'s capability.
+    const fn shared(name: &'static str, tool: &'static str) -> Self {
+        Self::of(name, Some(Shared(tool)), None)
+    }
+
+    /// A native tool that runs smelt tool `tool`'s capability under its own name.
+    const fn runs_as(name: &'static str, tool: &'static str, access: Access) -> Self {
+        Self::of(name, Some(RunsAs(tool)), Some(access))
+    }
+
+    /// A native tool for a capability smelt tool `tool` owns with another
+    /// argument shape.
+    const fn owned(name: &'static str, tool: &'static str, access: Access) -> Self {
+        Self::of(name, Some(Owned(tool)), Some(access))
+    }
+
+    /// A native tool smelt has no tool for, whose calls ask for `access`.
+    const fn own(name: &'static str, access: Access) -> Self {
+        Self::of(name, None, Some(access))
+    }
+
+    const fn of(name: &'static str, smelt: Option<Smelt>, access: Option<Access>) -> Self {
+        Self {
+            name,
+            smelt,
+            access,
+            renames: &[],
+            background: None,
+            result: ResultShape::Text,
+        }
+    }
+
+    const fn access(mut self, access: Access) -> Self {
+        self.access = Some(access);
+        self
+    }
+
+    const fn renames(mut self, renames: &'static [(&'static str, &'static str)]) -> Self {
+        self.renames = renames;
+        self
+    }
+
+    const fn background(mut self, background: Background) -> Self {
+        self.background = Some(background);
+        self
+    }
+
+    const fn result(mut self, result: ResultShape) -> Self {
+        self.result = result;
+        self
+    }
+}
+
 use Access::{Full, Read, Write};
+use Background::{Always, WhenAsync, WhenTask};
+use ResultShape::{AgentReport, Edit, Structured};
 use Smelt::{Owned, RunsAs, Shared};
 
-/// The native tools smelt knows, with the access a call asks for. `None`
-/// leaves the access to the smelt tool the call is checked as. Native shell
-/// commands run outside smelt's sandbox, so they need `full`. `TaskOutput`
-/// reads existing task output, and `TaskStop` stops an existing task, so
-/// neither needs the access required to start a native shell command.
-/// `read` tools only read or change state of the Claude Code session itself.
-/// Tools that act on their own or reach outside the machine, such as `Agent`,
-/// `SendMessage`, `CronCreate` and `PushNotification`, and tools smelt does
-/// not know need `full`.
-const NATIVE: &[(&str, Option<Smelt>, Option<Access>)] = &[
-    ("Read", Some(Shared("read_file")), None),
-    ("Write", Some(Shared("write_file")), None),
-    ("Edit", Some(Shared("edit_file")), None),
-    ("MultiEdit", Some(Shared("edit_file")), None),
-    ("NotebookEdit", Some(Shared("edit_notebook")), None),
-    ("Bash", Some(Shared("bash")), Some(Full)),
-    ("Glob", Some(Shared("glob")), None),
-    ("Grep", Some(Shared("grep")), None),
-    ("WebFetch", Some(Shared("web_fetch")), None),
-    ("WebSearch", Some(Shared("web_search")), None),
-    ("AskUserQuestion", Some(Shared("ask_user_question")), None),
-    ("ExitPlanMode", Some(Shared("present_plan")), None),
-    ("Monitor", Some(RunsAs("bash")), Some(Full)),
-    ("TaskOutput", Some(Owned("read_process_output")), Some(Read)),
-    ("TaskStop", Some(Owned("stop_process")), Some(Write)),
-    ("ToolSearch", None, Some(Read)),
-    ("Skill", None, Some(Read)),
-    ("LSP", None, Some(Read)),
-    ("NotebookRead", None, Some(Read)),
-    ("BashOutput", None, Some(Read)),
-    ("ListMcpResourcesTool", None, Some(Read)),
-    ("ReadMcpResourceTool", None, Some(Read)),
-    ("TodoWrite", None, Some(Read)),
-    ("TaskCreate", None, Some(Read)),
-    ("TaskGet", None, Some(Read)),
-    ("TaskList", None, Some(Read)),
-    ("TaskUpdate", None, Some(Read)),
-    ("ListAgents", None, Some(Read)),
-    ("CronList", None, Some(Read)),
-    ("EnterPlanMode", None, Some(Read)),
-    ("ReportFindings", None, Some(Read)),
-    ("StructuredOutput", None, Some(Read)),
-    ("ScheduleWakeup", None, Some(Read)),
-    ("Sleep", None, Some(Read)),
-    ("KillShell", None, Some(Write)),
-    ("KillBash", None, Some(Write)),
+/// The native tools smelt knows. Native shell commands run outside smelt's
+/// sandbox, so they need `full`. `TaskOutput` reads existing task output, and
+/// `TaskStop` stops an existing task, so neither needs the access required to
+/// start a native shell command. `read` tools only read or change state of
+/// the Claude Code session itself. Tools that act on their own or reach
+/// outside the machine, such as `Agent`, `SendMessage`, `CronCreate` and
+/// `PushNotification`, and tools smelt does not know need `full`.
+const NATIVE: &[NativeTool] = &[
+    NativeTool::shared("Read", "read_file"),
+    NativeTool::shared("Write", "write_file").result(Edit),
+    NativeTool::shared("Edit", "edit_file").result(Edit),
+    NativeTool::shared("MultiEdit", "edit_file").result(Edit),
+    NativeTool::shared("NotebookEdit", "edit_notebook"),
+    NativeTool::shared("Bash", "bash")
+        .access(Full)
+        .renames(&[
+            ("timeout", "timeout_ms"),
+            ("run_in_background", "background"),
+        ])
+        .background(WhenTask("backgroundTaskId")),
+    NativeTool::shared("Glob", "glob"),
+    NativeTool::shared("Grep", "grep"),
+    NativeTool::shared("WebFetch", "web_fetch"),
+    NativeTool::shared("WebSearch", "web_search"),
+    NativeTool::shared("AskUserQuestion", "ask_user_question"),
+    NativeTool::shared("ExitPlanMode", "present_plan"),
+    NativeTool::runs_as("Monitor", "bash", Full).background(Always("taskId")),
+    NativeTool::owned("TaskOutput", "read_process_output", Read),
+    NativeTool::owned("TaskStop", "stop_process", Write).result(Structured),
+    // Claude Code names the tool `Agent`; older versions call it `Task`.
+    NativeTool::own("Agent", Full)
+        .background(WhenAsync("agentId"))
+        .result(AgentReport),
+    NativeTool::own("Task", Full)
+        .background(WhenAsync("agentId"))
+        .result(AgentReport),
+    NativeTool::own("SendMessage", Full),
+    NativeTool::own("ToolSearch", Read).result(Structured),
+    NativeTool::own("Skill", Read),
+    NativeTool::own("LSP", Read),
+    NativeTool::own("NotebookRead", Read),
+    NativeTool::own("BashOutput", Read),
+    NativeTool::own("ListMcpResourcesTool", Read),
+    NativeTool::own("ReadMcpResourceTool", Read),
+    NativeTool::own("TodoWrite", Read),
+    NativeTool::own("TaskCreate", Read).result(Structured),
+    NativeTool::own("TaskGet", Read).result(Structured),
+    NativeTool::own("TaskList", Read).result(Structured),
+    NativeTool::own("TaskUpdate", Read),
+    NativeTool::own("ListAgents", Read),
+    NativeTool::own("CronList", Read).result(Structured),
+    NativeTool::own("CronCreate", Full).result(Structured),
+    NativeTool::own("CronDelete", Full),
+    NativeTool::own("PushNotification", Full).result(Structured),
+    NativeTool::own("EnterPlanMode", Read),
+    NativeTool::own("ReportFindings", Read),
+    NativeTool::own("StructuredOutput", Read),
+    NativeTool::own("ScheduleWakeup", Read),
+    NativeTool::own("Sleep", Read),
+    NativeTool::own("KillShell", Write),
+    NativeTool::own("KillBash", Write),
+    NativeTool::own("SendToProjectContext", Read),
+    NativeTool::own("PowerShell", Full),
+    NativeTool::own("Workflow", Full),
+    NativeTool::own("ExitWorktree", Full),
+    NativeTool::own("RemoteTrigger", Full),
+    NativeTool::own("SendToProject", Full),
+    NativeTool::own("DesignSync", Full),
+    NativeTool::own("Artifact", Full),
 ];
 
-fn smelt(native: &str) -> Option<Smelt> {
-    NATIVE
-        .iter()
-        .find(|(name, _, _)| *name == native)
-        .and_then(|(_, smelt, _)| *smelt)
+fn native(name: &str) -> Option<&'static NativeTool> {
+    NATIVE.iter().find(|tool| tool.name == name)
 }
 
 fn native_equivalents(name: &str) -> Vec<&'static str> {
     NATIVE
         .iter()
-        .filter(|(_, smelt, _)| matches!(smelt, Some(Shared(tool) | Owned(tool)) if *tool == name))
-        .map(|(native, _, _)| *native)
+        .filter(|native| matches!(native.smelt, Some(Shared(tool) | Owned(tool)) if tool == name))
+        .map(|native| native.name)
         .collect()
 }
 
 /// The smelt tool sharing a native tool's capability, with the call's
 /// arguments renamed to that tool's parameters.
 pub fn smelt_tool(
-    native: &str,
+    name: &str,
     args: &HashMap<String, Value>,
 ) -> Option<(&'static str, HashMap<String, Value>)> {
-    match smelt(native)? {
-        Shared(tool) => Some((tool, smelt_args(native, args))),
+    let native = native(name)?;
+    match native.smelt? {
+        Shared(tool) => Some((tool, native.smelt_args(args))),
         RunsAs(_) | Owned(_) => None,
     }
 }
@@ -106,64 +224,72 @@ pub fn smelt_tool(
 /// the one sharing its capability or the one it runs as, with the call's
 /// arguments renamed to that tool's parameters.
 pub fn checked_as(
-    native: &str,
+    name: &str,
     args: &HashMap<String, Value>,
 ) -> Option<(&'static str, HashMap<String, Value>)> {
-    match smelt(native)? {
-        Shared(tool) | RunsAs(tool) => Some((tool, smelt_args(native, args))),
+    let native = native(name)?;
+    match native.smelt? {
+        Shared(tool) | RunsAs(tool) => Some((tool, native.smelt_args(args))),
         Owned(_) => None,
     }
 }
 
-fn smelt_args(native: &str, args: &HashMap<String, Value>) -> HashMap<String, Value> {
-    let mut args: HashMap<String, Value> = args
-        .iter()
-        .map(|(key, value)| {
-            let key = match (native, key.as_str()) {
-                ("Bash", "timeout") => "timeout_ms",
-                ("Bash", "run_in_background") => "background",
-                _ => key,
-            };
-            (key.to_owned(), value.clone())
-        })
-        .collect();
-    if native == "Monitor" {
-        // A monitor always runs in the background and streams its output.
-        args.insert("background".into(), Value::Bool(true));
-    }
-    args
-}
-
-/// Whether a successful call of `native` left its work running in the
-/// background, read from Claude Code's structured result.
-pub(super) fn continues_in_background(native: &str, result: &Value) -> bool {
-    match native {
-        "Bash" => result["backgroundTaskId"].is_string(),
-        "Monitor" => true,
-        "Agent" | "Task" => result["isAsync"] == true || result["status"] == "async_launched",
-        _ => false,
+impl NativeTool {
+    fn smelt_args(&self, args: &HashMap<String, Value>) -> HashMap<String, Value> {
+        let mut args: HashMap<String, Value> = args
+            .iter()
+            .map(|(key, value)| {
+                let key = self
+                    .renames
+                    .iter()
+                    .find(|(from, _)| from == key)
+                    .map_or(key.as_str(), |(_, to)| to);
+                (key.to_owned(), value.clone())
+            })
+            .collect();
+        if matches!(self.background, Some(Always(_))) {
+            // The smelt tool runs the call in the background too.
+            args.insert("background".into(), Value::Bool(true));
+        }
+        args
     }
 }
 
-/// The task a call of `native` left running in the background, read from
-/// Claude Code's structured result. Its shells and agents report their end
-/// under this task.
-pub(super) fn background_task<'a>(native: &str, result: &'a Value) -> Option<&'a str> {
-    let key = match native {
-        "Bash" => "backgroundTaskId",
-        "Monitor" => "taskId",
-        "Agent" | "Task" => "agentId",
-        _ => return None,
+/// Work a successful call left running in the background.
+pub(super) struct Detached<'a> {
+    /// The task Claude Code reports the work's end under, when the result names it.
+    pub(super) task: Option<&'a str>,
+}
+
+/// The work a successful call of `name` left running in the background, read
+/// from Claude Code's structured result `result`.
+pub(super) fn detached<'a>(name: &str, result: &'a Value) -> Option<Detached<'a>> {
+    let (runs, key) = match native(name)?.background? {
+        Always(key) => (true, key),
+        WhenTask(key) => (result[key].is_string(), key),
+        WhenAsync(key) => (
+            result["isAsync"] == true || result["status"] == "async_launched",
+            key,
+        ),
     };
-    result[key].as_str().filter(|task| !task.is_empty())
+    runs.then(|| Detached {
+        task: result[key].as_str().filter(|task| !task.is_empty()),
+    })
 }
 
-/// The access a call of `native` asks for; see [`NATIVE`].
-pub fn native_access(native: &str) -> Option<Access> {
-    NATIVE
-        .iter()
-        .find(|(name, _, _)| *name == native)
-        .map_or(Some(Full), |(_, _, access)| *access)
+/// What smelt keeps from the structured result of a call of `name`.
+pub(super) fn result_shape(name: &str) -> ResultShape {
+    native(name).map_or(ResultShape::Text, |native| native.result)
+}
+
+/// Whether smelt knows the native tool `name`; see [`NATIVE`].
+pub fn knows(name: &str) -> bool {
+    native(name).is_some()
+}
+
+/// The access a call of `name` asks for; see [`NATIVE`].
+pub fn native_access(name: &str) -> Option<Access> {
+    native(name).map_or(Some(Full), |native| native.access)
 }
 
 impl Catalog {

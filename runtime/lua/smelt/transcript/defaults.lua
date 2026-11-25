@@ -311,7 +311,7 @@ function M.render_tool_header_content(block, ctx)
   end
   header = layout.row_prefix(header, {
     first = tool_header_prefix(block, tail, has_summary),
-    rest = tool_header_rest_prefix(block),
+    rest = tool_header_rest_prefix(block, tail),
   })
   local refresh_after = called_at_refresh
   local tick
@@ -421,8 +421,9 @@ function tool_header_prefix(block, tail, has_summary)
   return spans
 end
 
-function tool_header_rest_prefix(block)
-  local width = display_width((block.name or "tool") .. " ")
+--- Indent for the header rows after the first, as wide as the first row's prefix.
+function tool_header_rest_prefix(block, tail)
+  local width = display_width((block.name or "tool") .. (tail and " " or ""))
   return { { text = string.rep(" ", width), selectable = false, dim = true } }
 end
 

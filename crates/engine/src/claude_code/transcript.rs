@@ -1,3 +1,4 @@
+use super::catalog::ResultShape;
 use crate::EngineEventSender;
 use protocol::{
     displayed_tool_name, AssistantStep, Content, EngineEvent, HistoryItem, InvocationId,
@@ -445,7 +446,7 @@ impl Transcript {
         // `tool_use_result` describes the frame's only result.
         let structured = (blocks.len() == 1)
             .then(|| &frame["tool_use_result"])
-            .filter(|result| result.is_object());
+            .filter(|result| !result.is_null());
         for block in blocks {
             if block["type"].as_str() != Some("tool_result") {
                 continue;
@@ -464,32 +465,26 @@ impl Transcript {
             if is_error {
                 content = strip_tool_use_error(&content);
             }
-            let launches_agent = super::agents::launches(native);
-            let backgrounded = !is_error
-                && super::catalog::continues_in_background(
-                    native,
-                    structured.unwrap_or(&Value::Null),
-                );
             let result = self.retained_results.remove(id).unwrap_or_else(|| {
-                if backgrounded {
+                if is_error {
+                    return ToolOutcome::new(content, true, None);
+                }
+                let detached = super::catalog::detached(native, structured.unwrap_or(&Value::Null));
+                if let Some(detached) = detached {
                     let mut metadata = json!({"background": true});
-                    if let Some(task) = structured
-                        .and_then(|result| super::catalog::background_task(native, result))
-                    {
+                    if let Some(task) = detached.task {
                         metadata["background_id"] = super::native_id(&self.provider, task).into();
                     }
                     return ToolOutcome::new(content, false, Some(metadata));
                 }
-                let structured = structured.filter(|_| !is_error);
                 structured
-                    .and_then(|result| {
-                        if launches_agent {
-                            super::agents::launch_result(&content, result)
-                        } else {
-                            edit_result(&content, result)
-                        }
+                    .and_then(|result| match super::catalog::result_shape(native) {
+                        ResultShape::Text => None,
+                        ResultShape::Edit => edit_result(&content, result),
+                        ResultShape::AgentReport => super::agents::launch_result(&content, result),
+                        ResultShape::Structured => structured_result(&content, result),
                     })
-                    .unwrap_or_else(|| ToolOutcome::new(content, is_error, None))
+                    .unwrap_or_else(|| ToolOutcome::new(content, false, None))
             });
             for step in &mut self.pending {
                 if step.remaining.remove(id) {
@@ -601,6 +596,14 @@ impl Transcript {
         }
         self.flush();
     }
+}
+
+/// Claude Code's structured result as `native` metadata, for the
+/// presentation of a tool smelt has none of its own for. A result too large
+/// for tool metadata keeps only its text.
+fn structured_result(content: &str, result: &Value) -> Option<ToolOutcome> {
+    let metadata = json!({ "native": result });
+    ToolOutcome::try_from_parts(content.into(), false, Some(metadata), Vec::new(), None).ok()
 }
 
 /// Claude Code's structured Edit result in the shape of smelt's `edit_file`:

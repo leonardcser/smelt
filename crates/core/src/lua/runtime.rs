@@ -226,6 +226,42 @@ impl BootstrapMode {
 
 pub use protocol::ToolVisibility;
 
+/// The summary of a call to a tool without one of its own: each argument as
+/// a dimmed name and its value, in name order. A string reads as its words on
+/// one line, and any other value as compact JSON.
+pub fn args_summary(args: &HashMap<String, serde_json::Value>) -> protocol::StyledLines {
+    let plain = |text: String| protocol::StyledSpan {
+        text,
+        ..Default::default()
+    };
+    let sorted: std::collections::BTreeMap<&String, &serde_json::Value> = args.iter().collect();
+    let mut spans = Vec::new();
+    for (name, value) in sorted {
+        if !spans.is_empty() {
+            spans.push(plain("  ".into()));
+        }
+        spans.push(protocol::StyledSpan {
+            text: format!("{name} "),
+            dim: true,
+            ..Default::default()
+        });
+        spans.push(match value {
+            serde_json::Value::String(text) => {
+                plain(text.split_whitespace().collect::<Vec<_>>().join(" "))
+            }
+            value => protocol::StyledSpan {
+                text: value.to_string(),
+                syntax: Some("json".into()),
+                ..Default::default()
+            },
+        });
+    }
+    if spans.is_empty() {
+        return protocol::StyledLines::empty();
+    }
+    protocol::StyledLines(vec![spans])
+}
+
 #[derive(Clone)]
 struct LuaLaunchInputs {
     disabled_modules: std::collections::HashSet<String>,
@@ -2319,11 +2355,16 @@ impl LuaRuntime {
         ))
     }
 
-    /// Invoke the tool's `summary(args)` Lua hook. The hook may return:
-    ///   * `nil` / no value - empty summary (no header text)
-    ///   * a `string` - wrapped as a single plain span (each `\n`-line one row)
-    ///   * a table of `{ {span, span}, {span, span} }` - multi-line styled output;
-    ///     span shape matches `buf:styled` (`{ text, syntax?, style? }`).
+    /// The styled one-line description of a call to `tool_name`, shown in its
+    /// transcript header and permission dialog. In order, it is:
+    ///   * for a provider's native tool shown as `provider/Name` that a smelt
+    ///     tool checks ([`engine::claude_code_checked_as`]), that tool's summary;
+    ///   * the tool's own `summary(args, ctx)` hook;
+    ///   * the `summary` of its transcript presentation;
+    ///   * for a tool smelt does not register, its arguments as `key value` pairs.
+    ///
+    /// A hook may return `nil` (no header text), a `string` (each `\n`-line one
+    /// row), or `{ {span, span}, ... }` styled rows with the `buf:styled` span shape.
     pub fn tool_summary(
         &self,
         tool_name: &str,
@@ -2338,16 +2379,36 @@ impl LuaRuntime {
         args: &HashMap<String, serde_json::Value>,
         final_args: bool,
     ) -> protocol::StyledLines {
-        let meta = match self
+        let checked = tool_name
+            .split_once('/')
+            .and_then(|(_, native)| engine::claude_code_checked_as(native, args));
+        if let Some((tool, args)) = checked {
+            let summary = self.summary_hook(tool, &args, final_args);
+            if !summary.is_empty() {
+                return summary;
+            }
+        }
+        let summary = self.summary_hook(tool_name, args, final_args);
+        if !summary.is_empty() || self.has_tool(tool_name) {
+            return summary;
+        }
+        args_summary(args)
+    }
+
+    /// The summary from the tool's own hook, or else from its presentation's.
+    fn summary_hook(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        final_args: bool,
+    ) -> protocol::StyledLines {
+        let hook = self
             .lua
             .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
-        {
-            Ok(meta) => meta,
-            Err(_) => return protocol::StyledLines::empty(),
-        };
-        let func = match meta.get::<mlua::Function>("summary") {
-            Ok(func) => func,
-            Err(_) => return protocol::StyledLines::empty(),
+            .and_then(|meta| meta.get::<mlua::Function>("summary"))
+            .or_else(|_| self.presentation_summary(tool_name));
+        let Ok(func) = hook else {
+            return protocol::StyledLines::empty();
         };
         let result = (|| {
             let args_table = self
@@ -2374,6 +2435,17 @@ impl LuaRuntime {
         }
     }
 
+    /// The `summary` of the transcript presentation registered for `tool_name`.
+    fn presentation_summary(&self, tool_name: &str) -> LuaResult<mlua::Function> {
+        let transcript: mlua::Table = self
+            .lua
+            .globals()
+            .get::<mlua::Table>("smelt")?
+            .get("transcript")?;
+        let get: mlua::Function = transcript.get("get_tool_presentation")?;
+        get.call::<mlua::Table>(tool_name)?.get("summary")
+    }
+
     /// Run preparation and validation as a turn-scoped coroutine. `None` means
     /// evaluation yielded; its result is delivered by `drive_tasks`.
     pub fn evaluate_tool_metadata(
@@ -2387,7 +2459,7 @@ impl LuaRuntime {
             // An MCP tool: no Lua callbacks, so its arguments summarize it.
             let Some(handler) = handlers.get(&request.tool_name) else {
                 return Ok(Some(protocol::ToolMetadata {
-                    summary: crate::mcp::args_summary(&request.args),
+                    summary: args_summary(&request.args),
                     ..Default::default()
                 }));
             };
