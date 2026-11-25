@@ -416,8 +416,9 @@ impl Job {
     /// Orders per-file results and publishes the completed prefix.
     fn collect(&self, rx: mpsc::Receiver<(usize, FileResult)>, full: &AtomicBool) {
         let mut pending = BTreeMap::new();
+        // Matches not yet published, and all matches kept so far.
         let mut ordered = Vec::new();
-        let (mut next, mut total) = (0, 0);
+        let (mut next, mut total, mut kept) = (0, 0, 0);
         let mut published = Instant::now();
         loop {
             let received = rx.recv_timeout(PUBLISH_INTERVAL);
@@ -435,9 +436,11 @@ impl Job {
             while let Some(result) = pending.remove(&next) {
                 next += 1;
                 total += result.total;
-                let room = self.limit.saturating_sub(ordered.len());
+                let room = self.limit.saturating_sub(kept);
+                let before = ordered.len();
                 ordered.extend(result.matches.into_iter().take(room));
-                if ordered.len() >= self.limit {
+                kept += ordered.len() - before;
+                if kept >= self.limit {
                     full.store(true, Ordering::Relaxed);
                 }
             }
@@ -626,6 +629,45 @@ mod tests {
         assert_eq!((first.line, first.column), (2, 7));
         assert_eq!(first.text, "let task = async_task();");
         assert_eq!(first.ranges, vec![4..8, 17..21]);
+    }
+
+    #[test]
+    fn the_limit_holds_across_publishes() {
+        let shared = Arc::new(Shared {
+            progress: Mutex::default(),
+            cancel: AtomicBool::new(false),
+            wakeup: None,
+        });
+        let job = Job {
+            root: PathBuf::new(),
+            files: Arc::new(Vec::new()),
+            pattern: Pattern::new("x", false).unwrap(),
+            limit: 2,
+            shared: Arc::clone(&shared),
+        };
+        let file = |index: usize| FileResult {
+            matches: (1..=2)
+                .map(|line| clip_line(index, line, "x", std::slice::from_ref(&(0..1))))
+                .collect(),
+            total: 2,
+        };
+        let (tx, rx) = mpsc::channel();
+        let full = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| job.collect(rx, &full));
+            tx.send((0, file(0))).unwrap();
+            // The first file's matches publish before the second file arrives.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while shared.progress.lock().unwrap().matches.is_empty() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            tx.send((1, file(1))).unwrap();
+            drop(tx);
+        });
+        let progress = shared.progress.lock().unwrap();
+        assert_eq!(progress.total, 4);
+        assert_eq!(progress.matches.len(), 2);
     }
 
     #[test]
