@@ -193,6 +193,16 @@ impl AppStoryCtx {
     /// Push a typed background-process completion status block. This drives the
     /// same transcript block shape produced by the live job supervisor without
     /// spawning a subprocess in the story.
+    pub fn monitor_event(&mut self, name: &str, output: &str) {
+        self.app.push_process_status(
+            protocol::ProcessStatusEvent::MonitorEvent {
+                process_id: "b1".into(),
+                name: name.into(),
+            },
+            output,
+        );
+    }
+
     pub fn push_background_process_completed(
         &mut self,
         id: &str,

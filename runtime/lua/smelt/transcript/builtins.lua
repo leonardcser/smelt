@@ -222,10 +222,10 @@ end
 ---@param messages table[]
 ---@param count? integer
 ---@return string text
-function M.agent_message_summary(messages, count)
+local function delivery_summary(label, messages, count)
   local senders, seen = {}, {}
   for _, message in ipairs(messages) do
-    local sender = message.sender or message.summary_text
+    local sender = message.sender or message.monitor_name or message.summary_text
     if sender and sender ~= "" and not seen[sender] then
       seen[sender] = true
       senders[#senders + 1] = sender
@@ -234,9 +234,17 @@ function M.agent_message_summary(messages, count)
   local names = {}
   for i = 1, math.min(#senders, 3) do names[i] = senders[i] end
   if #senders > #names then names[#names + 1] = "+" .. tostring(#senders - #names) .. " more" end
-  local text = "agent messages: " .. tostring(count or #messages)
+  local text = label .. ": " .. tostring(count or #messages)
   if #names > 0 then text = text .. " from " .. table.concat(names, ", ") end
   return text
+end
+
+function M.agent_message_summary(messages, count)
+  return delivery_summary("agent messages", messages, count)
+end
+
+function M.monitor_event_summary(messages, count)
+  return delivery_summary("monitor events", messages, count)
 end
 
 local function render_agent_message_group(group, ctx)
@@ -251,6 +259,10 @@ function M.render(group, ctx)
   if kind == "background_process_completed" then
     return render_background_process_completed_group(group, ctx)
   end
+  if kind == "monitor_events" then
+    if group.view_state == "expanded" then return defaults.render_group_children(group, ctx) end
+    return process_summary_line(M.monitor_event_summary(defaults.group_children(group), group.child_count), false)
+  end
   if kind == "agent_messages" then
     return render_agent_message_group(group, ctx)
   end
@@ -264,6 +276,14 @@ function M.render(group, ctx)
 end
 
 function M.register()
+  smelt.transcript.groups.register({
+    name = "monitor_events",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = { kind = "process_status", event = "monitor_event" },
+  })
+
   smelt.transcript.groups.register({
     name = "background_process_completed",
     priority = BUILTIN_GROUP_PRIORITY,

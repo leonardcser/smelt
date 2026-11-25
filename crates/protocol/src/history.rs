@@ -123,6 +123,10 @@ impl BackgroundOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ProcessStatusEvent {
+    MonitorEvent {
+        process_id: String,
+        name: String,
+    },
     BackgroundProcessCompleted {
         process_id: String,
         termination: JobTermination,
@@ -163,24 +167,30 @@ impl ProcessStatusEvent {
     }
 
     pub fn event_type(&self) -> &'static str {
-        "background_process_completed"
+        match self {
+            Self::MonitorEvent { .. } => "monitor_event",
+            Self::BackgroundProcessCompleted { .. } => "background_process_completed",
+        }
     }
 
     pub fn process_id(&self) -> Option<&str> {
         match self {
-            Self::BackgroundProcessCompleted { process_id, .. } => Some(process_id),
+            Self::MonitorEvent { process_id, .. }
+            | Self::BackgroundProcessCompleted { process_id, .. } => Some(process_id),
         }
     }
 
     pub fn exit_code(&self) -> Option<i32> {
         match self {
+            Self::MonitorEvent { .. } => None,
             Self::BackgroundProcessCompleted { exit_code, .. } => *exit_code,
         }
     }
 
-    pub fn termination(&self) -> JobTermination {
+    pub fn termination(&self) -> Option<JobTermination> {
         match self {
-            Self::BackgroundProcessCompleted { termination, .. } => *termination,
+            Self::MonitorEvent { .. } => None,
+            Self::BackgroundProcessCompleted { termination, .. } => Some(*termination),
         }
     }
 
@@ -194,13 +204,14 @@ impl ProcessStatusEvent {
             "event" | "event_type" => Some(self.event_type().to_string()),
             "process_id" => self.process_id().map(str::to_string),
             "exit_code" => self.exit_code().map(|code| code.to_string()),
-            "termination" => Some(self.termination().as_str().to_string()),
+            "termination" => self.termination().map(|kind| kind.as_str().to_owned()),
             _ => None,
         }
     }
 
     pub fn display_text(&self) -> String {
         match self {
+            Self::MonitorEvent { name, .. } => format!("event from monitor {name}"),
             Self::BackgroundProcessCompleted {
                 process_id,
                 termination,

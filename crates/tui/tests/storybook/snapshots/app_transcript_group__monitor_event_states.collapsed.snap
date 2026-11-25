@@ -1,0 +1,18 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+monitor events: 2 from watch log
+
+
+
+
+
+
+
+
+  tip ctrl+enter / ctrl+q, steer the current response without waiting for…
+────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────
+ ○ read                                                             1:1 100%

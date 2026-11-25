@@ -237,9 +237,18 @@ impl TranscriptDefaultViewPolicy {
                 .tool_name(*id)
                 .and_then(|name| self.tools.get(name).copied())
                 .or_else(|| {
-                    history
-                        .block_kind(*id)
-                        .and_then(|kind| self.block_kinds.get(kind).copied())
+                    let kind = history.block_kind(*id)?;
+                    if kind == "process_status"
+                        && history.process_field(*id, "event").as_deref() == Some("monitor_event")
+                    {
+                        return Some(
+                            self.block_kinds
+                                .get("monitor_event")
+                                .copied()
+                                .unwrap_or(ViewState::Peek),
+                        );
+                    }
+                    self.block_kinds.get(kind).copied()
                 })
                 .unwrap_or(ViewState::Expanded),
             RenderNode::Group(group) => self

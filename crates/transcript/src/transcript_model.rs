@@ -1889,6 +1889,10 @@ fn group_child_summary(block: &Block) -> Option<String> {
         Block::ToolCall { summary, .. } => {
             Some(bounded_styled_text(summary, GROUP_CHILD_SUMMARY_MAX_BYTES))
         }
+        Block::ProcessStatus {
+            event: Some(protocol::ProcessStatusEvent::MonitorEvent { name, .. }),
+            ..
+        } => Some(smelt_buffer::text::slice(name, 0..GROUP_CHILD_SUMMARY_MAX_BYTES).to_owned()),
         Block::AgentMessage { event, .. } => Some(
             smelt_buffer::text::slice(event.sender(), 0..GROUP_CHILD_SUMMARY_MAX_BYTES).to_string(),
         ),
@@ -2072,7 +2076,7 @@ impl StoredBlockRef {
                         .to_string()
                 }),
                 exit_code: event.exit_code(),
-                termination: Some(event.termination()),
+                termination: event.termination(),
             },
             Block::AgentMessage { event, .. } => StoredProcessMetadata {
                 event: Some(event.event_type().to_string()),
@@ -2248,7 +2252,7 @@ fn materialized_group_child_metadata(
                 .process_id()
                 .map(|value| preview(value, GROUP_CHILD_PROCESS_FIELD_MAX_BYTES)),
             event.exit_code(),
-            Some(event.termination()),
+            event.termination(),
         ),
         Block::AgentMessage { event, .. } => {
             (Some(event.event_type().to_string()), None, None, None)
@@ -2365,6 +2369,9 @@ impl Block {
             } => text
                 .capacity()
                 .saturating_add(event.as_ref().map_or(0, |event| match event {
+                    protocol::ProcessStatusEvent::MonitorEvent { process_id, name } => {
+                        process_id.capacity() + name.capacity()
+                    }
                     protocol::ProcessStatusEvent::BackgroundProcessCompleted {
                         process_id, ..
                     } => process_id.capacity(),

@@ -3248,13 +3248,17 @@ fn render_fields_to_lua_table(
             if let Some(event) = event {
                 table.set("event", event.event_type)?;
                 table.set("event_type", event.event_type)?;
+                table.set("monitor_name", event.monitor_name.as_deref())?;
                 if let Some(process_id) = event.process_id.as_deref() {
                     table.set("process_id", process_id)?;
                 }
                 if let Some(exit_code) = event.exit_code {
                     table.set("exit_code", exit_code)?;
                 }
-                table.set("termination", event.termination.as_str())?;
+                table.set(
+                    "termination",
+                    event.termination.map(protocol::JobTermination::as_str),
+                )?;
                 let event_data = lua.create_table_with_capacity(0, 4)?;
                 event_data.set("event", event.event_type)?;
                 if let Some(process_id) = event.process_id.as_deref() {
@@ -3263,7 +3267,10 @@ fn render_fields_to_lua_table(
                 if let Some(exit_code) = event.exit_code {
                     event_data.set("exit_code", exit_code)?;
                 }
-                event_data.set("termination", event.termination.as_str())?;
+                event_data.set(
+                    "termination",
+                    event.termination.map(protocol::JobTermination::as_str),
+                )?;
                 table.set("event_data", event_data)?;
             }
         }
@@ -3541,8 +3548,9 @@ pub struct TranscriptRenderNode {
 struct TranscriptProcessStatusMetadata {
     event_type: &'static str,
     process_id: Option<String>,
+    monitor_name: Option<String>,
     exit_code: Option<i32>,
-    termination: protocol::JobTermination,
+    termination: Option<protocol::JobTermination>,
 }
 
 fn kept_history_to_lua(lua: &Lua, kept: &[KeptHistoryItem]) -> LuaResult<mlua::Table> {
@@ -3745,6 +3753,10 @@ fn transcript_block_render_fields(
             event: event.as_ref().map(|event| TranscriptProcessStatusMetadata {
                 event_type: event.event_type(),
                 process_id: event.process_id().map(str::to_owned),
+                monitor_name: match event {
+                    protocol::ProcessStatusEvent::MonitorEvent { name, .. } => Some(name.clone()),
+                    _ => None,
+                },
                 exit_code: event.exit_code(),
                 termination: event.termination(),
             }),

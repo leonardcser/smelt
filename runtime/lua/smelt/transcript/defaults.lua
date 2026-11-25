@@ -799,9 +799,10 @@ end
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render_process_status(block, ctx)
   local hl = block.hl_group or "SmeltProcess"
-  local header = layout.runs({ {
-    { text = block.text or "", fg = hl, italic = true },
-  } })
+  local header = layout.runs({ block.monitor_name and {
+    { text = "event from monitor ", fg = hl, italic = true },
+    { text = block.monitor_name, fg = hl, italic = true, bold = true },
+  } or { { text = block.text or "", fg = hl, italic = true } } })
   if not block.output_id then return header end
   if ctx and ctx.view_state == "collapsed" then
     local count = block.output_lines or 0

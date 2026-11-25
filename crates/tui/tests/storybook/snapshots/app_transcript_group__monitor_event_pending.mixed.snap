@@ -1,0 +1,18 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+background process 4210 finished successfully
+monitor events: 2 from watch log
+message from worker
+
+─ ● … ──────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────
+ ○ read                                                             1:1 100%

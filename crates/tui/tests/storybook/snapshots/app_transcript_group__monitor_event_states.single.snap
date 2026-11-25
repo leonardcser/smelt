@@ -1,0 +1,18 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+event from monitor watch log
+  # build failed
+
+
+
+
+
+
+
+  tip ctrl+enter / ctrl+q, steer the current response without waiting for…
+────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────
+ ○ read                                                             1:1 100%

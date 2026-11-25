@@ -12,6 +12,7 @@ mod interaction;
 mod limit;
 mod messages;
 mod models;
+mod monitors;
 mod plans;
 pub use account::usage_scope;
 pub use catalog::{checked_as, native_access};
@@ -186,6 +187,7 @@ struct Native<'a> {
     limits: limit::Limits,
     agents: agents::Agents,
     shells: shells::Shells,
+    monitor_notes: Option<mpsc::Receiver<protocol::HistoryNote>>,
     /// When the shells' output is read next.
     next_read: Option<tokio::time::Instant>,
     gates: FuturesUnordered<BoxFuture<'static, (Gate, ToolEvaluation)>>,
@@ -230,6 +232,7 @@ impl Native<'_> {
                 payload.ephemeral,
             ),
             shells: shells::Shells::new(&payload.model_target.provider),
+            monitor_notes: None,
             next_read: None,
             gates: FuturesUnordered::new(),
             approvals: HashMap::new(),
@@ -1027,6 +1030,12 @@ impl Runtime<'_> {
                         }
                     }
                 },
+                note = async { self.native.monitor_notes.as_mut().unwrap().recv().await }, if self.native.monitor_notes.is_some() => {
+                    if let Some(note) = note {
+                        self.transcript.note(HistoryItem::note(note));
+                        if self.turn.is_none() && !self.native.root_in_progress { self.commit(); }
+                    } else { self.native.monitor_notes = None; }
+                }
                 Some((gate, evaluation)) = self.native.gates.next(), if !self.native.gates.is_empty() => self.gated(gate, evaluation).await?,
                 Some((call, result)) = self.native.tool_results.next(), if !self.native.tool_results.is_empty() => {
                     self.tool_reply(call, protocol::ToolOutcome::new(result.content, result.is_error, result.metadata)).await?;
@@ -1559,6 +1568,14 @@ impl Runtime<'_> {
                 let name = input["tool_name"]
                     .as_str()
                     .ok_or("Claude Code permission hook has no tool name")?;
+                if name == "Monitor"
+                    && !self.payload.ephemeral
+                    && self.native.monitor_notes.is_none()
+                    && frame["parent_tool_use_id"].is_null()
+                {
+                    self.native.monitor_notes =
+                        monitors::follow(input, self.payload.model_target.provider.clone()).await;
+                }
                 if name.starts_with(SMELT_MCP_PREFIX) || self.answers_natively(name) {
                     // Defer interactive tools to can_use_tool so the native agent
                     // receives updated input from the host dialog.

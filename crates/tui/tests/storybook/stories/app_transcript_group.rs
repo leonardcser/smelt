@@ -162,6 +162,54 @@ app_story!(successful_background_process_group, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
+app_story!(monitor_event_pending, |ctx| {
+    use protocol::{
+        AgentMessageEvent, EngineEvent, HistoryNote, JobTermination, ProcessStatusEvent,
+    };
+    ctx.set_viewport(76, 14);
+    let monitor = |body| {
+        HistoryNote::process_status_with_output(
+            ProcessStatusEvent::MonitorEvent {
+                process_id: "b1".into(),
+                name: "watch log".into(),
+            },
+            body,
+        )
+    };
+    ctx.engine(EngineEvent::NativeHeldNotes {
+        notes: vec![
+            monitor("first"),
+            HistoryNote::process_status_event(ProcessStatusEvent::background_process_completed(
+                "4210",
+                Some(0),
+                JobTermination::Exited,
+            )),
+            monitor("second"),
+            HistoryNote::agent_message(
+                AgentMessageEvent::MessageReceived {
+                    from: "worker".into(),
+                },
+                "Done.",
+            ),
+        ],
+    });
+    ctx.assert_snapshot_named("mixed");
+    ctx.engine(EngineEvent::NativeHeldNotes {
+        notes: vec![monitor("second")],
+    });
+    ctx.assert_snapshot_named("single");
+});
+
+app_story!(monitor_event_states, |ctx| {
+    ctx.set_viewport(76, 14);
+    ctx.monitor_event("watch log", "# build failed");
+    ctx.assert_snapshot_named("single");
+    ctx.monitor_event("watch log", "tests passed");
+    ctx.assert_snapshot_named("collapsed");
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot_named("expanded");
+});
+
 app_story!(background_process_group_states, |ctx| {
     ctx.set_viewport(76, 14);
     ctx.push_background_process_completed("4210", Some(0), "tests passed");
