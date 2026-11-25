@@ -2761,6 +2761,8 @@ fn prompt_tail_edit_has_bounded_projection_allocations() {
     app.render_silent();
     for _ in 0..3 {
         app.type_char('x');
+        // The edit's Lua handlers copy the prompt; they are not the frame's.
+        app.settle_lua();
         let before = smelt_perf::alloc::thread_snapshot();
         app.render_silent();
         let allocated = smelt_perf::alloc::thread_snapshot()

@@ -19,11 +19,17 @@ impl TestApp {
         self.tui.drain_idle_work()
     }
 
-    /// Pump a bounded batch of Lua wakeups so spawned callbacks reach their next wait point.
+    /// Pump Lua wakeups until no signal, callback, command or task resume is
+    /// left queued, so spawned callbacks reach their next wait point. Each
+    /// pump has a time budget, so how many it takes depends on machine load.
     pub fn settle_lua(&mut self) {
-        for _ in 0..4 {
+        for _ in 0..1000 {
             self.feed_one(SourceEvent::LuaWakeup);
+            if !self.tui.has_queued_lua_work() {
+                return;
+            }
         }
+        panic!("Lua work did not settle");
     }
 
     /// Drive preparation wakeups until a requested workspace transition or reload finishes.
