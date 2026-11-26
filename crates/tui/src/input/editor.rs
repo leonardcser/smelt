@@ -16,11 +16,17 @@ pub(crate) struct EditorRequest {
     pub(crate) args: Vec<OsString>,
 }
 
-/// Resolve `$VISUAL` then `$EDITOR`, falling back to `vi`.
+/// Resolve `$VISUAL` then `$EDITOR`, falling back to `vi`. A variable set
+/// to blank counts as unset, as it does for Git.
 pub(crate) fn editor_command_from_env() -> io::Result<(OsString, Vec<OsString>)> {
-    let raw = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".into());
+    let var = |name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    };
+    let raw = var("VISUAL")
+        .or_else(|| var("EDITOR"))
+        .unwrap_or_else(|| "vi".into());
     split_editor_command(&raw)
 }
 
