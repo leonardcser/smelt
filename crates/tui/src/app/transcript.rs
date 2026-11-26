@@ -593,6 +593,8 @@ struct TranscriptResolvedViewportAnchor {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TranscriptPresentedRows {
     first_row: RowIndex,
+    /// Row of the first loaded row, which the projection numbers from zero.
+    row_offset: RowIndex,
     anchors: Vec<Option<TranscriptRowAnchor>>,
 }
 
@@ -2839,7 +2841,9 @@ impl TranscriptDocument {
         range: Range<RowIndex>,
         row_offset: RowIndex,
     ) -> Vec<BlockId> {
-        self.visible_block_layout()
+        self.content
+            .projection
+            .visible_block_layout()
             .filter_map(|(id, first_row, rows)| {
                 let first_row = first_row.saturating_add(row_offset);
                 let end = first_row.saturating_add(rows);
@@ -4161,6 +4165,8 @@ impl TranscriptDocument {
         )
     }
 
+    /// The blocks the presented frame laid out, as `(block, first row, rows)`
+    /// in that frame's rows, which the transcript window scrolls by.
     pub(crate) fn visible_block_layout(
         &self,
     ) -> impl Iterator<
@@ -4170,7 +4176,11 @@ impl TranscriptDocument {
             crate::smelt_edit::RowIndex,
         ),
     > + '_ {
-        self.content.projection.visible_block_layout()
+        let row_offset = self.viewport.state.presented_rows.row_offset;
+        self.content
+            .projection
+            .visible_block_layout()
+            .map(move |(id, first_row, rows)| (id, first_row.saturating_add(row_offset), rows))
     }
 
     fn record_window_count(&self, width: u16, viewport_rows: u16, total: usize) -> usize {
@@ -6355,6 +6365,7 @@ impl TranscriptDocument {
         let (first_row, anchors) = self.content.projection.materialized_row_anchors();
         self.viewport.state.presented_rows = TranscriptPresentedRows {
             first_row: first_row.saturating_add(row_offset),
+            row_offset,
             anchors,
         };
         self.clear_pending_projection();

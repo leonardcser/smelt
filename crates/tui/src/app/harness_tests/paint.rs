@@ -583,6 +583,88 @@ fn scrolling_reports_the_move_and_leaves_only_new_rows_as_damage() {
     );
 }
 
+/// An app showing the tail of a session too long to load whole.
+fn partly_loaded_app() -> TestApp {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 24);
+    for index in 0..700 {
+        app.push_transcript_block(smelt_core::Block::Text {
+            content: format!("reply number {index}").into(),
+        });
+    }
+    app.save_session_and_flush();
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_id(
+        &app.core_probe().sessions,
+        &app.session_snapshot().id,
+        60,
+        24,
+    )
+    .expect("load the session tail");
+    app.clear_transcript();
+    app.replace_loaded_transcript_for_harness(loaded);
+    app
+}
+
+#[test]
+fn streamed_text_types_in_when_the_session_is_partly_loaded() {
+    let mut app = partly_loaded_app();
+    app.start_submitted_turn("question");
+    for _ in 0..3 {
+        app.render_silent();
+    }
+    app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+        delta: "these streamed words arrive in one burst".into(),
+    });
+    let first = app.render_to_frame().text();
+    assert!(first.contains("reply number 699"), "{first}");
+    assert!(!first.contains("one burst"), "{first}");
+    app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
+    let last = app.render_to_frame().text();
+    assert!(last.contains("arrive in one burst"), "{last}");
+}
+
+#[test]
+fn visible_blocks_of_a_partly_loaded_session_report_where_they_show() {
+    let mut app = partly_loaded_app();
+    assert!(app.run_lua(
+        r#"
+        smelt.paint.frame(function(slice)
+          _G.__blocks = {}
+          for _, block in ipairs(smelt.transcript.visible_blocks()) do
+            local r = block.rect
+            if r and block.top == 0 then
+              local text = {}
+              for x = r.x, r.x + r.width - 1 do text[#text + 1] = slice:get(x, r.y).ch end
+              table.insert(_G.__blocks, { first_line = block.first_line, text = table.concat(text) })
+            end
+          end
+        end)
+        "#
+    ));
+    for _ in 0..5 {
+        app.render_silent();
+    }
+
+    let blocks: Vec<(String, String)> = app
+        .eval_lua::<mlua::Table>("return _G.__blocks")
+        .unwrap()
+        .sequence_values::<mlua::Table>()
+        .map(|block| {
+            let block = block.unwrap();
+            (block.get("first_line").unwrap(), block.get("text").unwrap())
+        })
+        .collect();
+    assert!(
+        blocks
+            .iter()
+            .any(|(first_line, _)| first_line == "reply number 699"),
+        "the last reply is on screen: {blocks:?}"
+    );
+    for (first_line, text) in &blocks {
+        assert!(text.contains(first_line.as_str()), "{blocks:?}");
+    }
+}
+
 #[test]
 fn visible_blocks_report_screen_rects_and_streaming() {
     let mut app = TestApp::builder().build();
