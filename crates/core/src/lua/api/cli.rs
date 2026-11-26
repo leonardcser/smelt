@@ -9,7 +9,7 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
-use crate::lua::shared::{CliFlagKind, CliFlagSpec, CliFlagValue};
+use crate::lua::shared::{CliCommandSpec, CliFlagKind, CliFlagSpec, CliFlagValue};
 use crate::lua::LuaShared;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
@@ -58,6 +58,30 @@ pub struct LuaRegisterFlagOpts {
     pub value_optional: Option<bool>,
 }
 
+/// Subcommand specification accepted by `smelt.cli.register_command`.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.cli.RegisterCommandOpts")]
+pub struct LuaRegisterCommandOpts {
+    /// Subcommand name, as typed after `smelt`.
+    pub name: String,
+    /// One-line description for `--help`.
+    pub description: Option<String>,
+    /// Name of the free arguments in `--help`, such as `"VIEW"`. Without it
+    /// the subcommand takes none.
+    pub args: Option<String>,
+}
+
+/// Argv is parsed after `early.lua`, so CLI declarations are only valid there.
+fn require_early(shared: &LuaShared, function: &str) -> LuaResult<()> {
+    if shared.phase() == crate::lua::Phase::Early {
+        return Ok(());
+    }
+    Err(LuaError::RuntimeError(format!(
+        "cli.{function}: only valid in `early.lua` (current phase: {})",
+        shared.phase().as_str()
+    )))
+}
+
 fn value_from_lua(kind: CliFlagKind, v: &mlua::Value) -> LuaResult<CliFlagValue> {
     Ok(match (kind, v) {
         (CliFlagKind::Boolean, mlua::Value::Boolean(b)) => CliFlagValue::Boolean(*b),
@@ -88,10 +112,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "cli",
-        "Declare and read CLI flags from Lua. `register_flag` is intended \
-to be called from `early.lua` so the flag is folded into the main binary's \
-argument parser. `get(name)` returns the parsed value (or the declared \
-default) after the binary has parsed argv.",
+        "Declare and read CLI flags and subcommands from Lua. `register_flag` \
+and `register_command` are intended to be called from `early.lua` so they \
+are folded into the main binary's argument parser. `get(name)` returns a \
+parsed flag value (or the declared default) and `command()` the launched \
+subcommand after the binary has parsed argv.",
         Tier::Host,
     )?;
 
@@ -102,12 +127,7 @@ default) after the binary has parsed argv.",
             "Register a CLI flag. MUST be called from `early.lua`. The runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `\"boolean\"`, `\"string\"`, or `\"integer\"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.",
             &["opts"],
             move |_, opts: LuaRegisterFlagOpts| -> LuaResult<()> {
-                if s.phase() != crate::lua::Phase::Early {
-                    return Err(LuaError::RuntimeError(format!(
-                        "cli.register_flag: only valid in `early.lua` (current phase: {})",
-                        s.phase().as_str()
-                    )));
-                }
+                require_early(&s, "register_flag")?;
                 let kind: CliFlagKind = opts.kind.into();
                 let default = match opts.default.as_ref() {
                     Some(v) => value_from_lua(kind, v)?,
@@ -173,6 +193,57 @@ default) after the binary has parsed argv.",
                     Some(v) => value_to_lua(lua, &v),
                     None => Ok(mlua::Value::Nil),
                 }
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        m.fn_(
+            "register_command",
+            "Register a subcommand such as `smelt diff`. MUST be called from `early.lua`, like `register_flag`. Launching it starts the TUI without an agent session: nothing is persisted, no provider setup or MCP servers start, and `smelt status` does not list the process. A plugin opens its UI as a modal overlay with `smelt.cli.on_command`; smelt quits once no modal overlay shows. Every subcommand also accepts `-C <path>`. Errors if an earlier registration took the name. A name that a built-in subcommand uses is ignored with a warning at launch.",
+            &["opts"],
+            move |_, opts: LuaRegisterCommandOpts| -> LuaResult<()> {
+                require_early(&s, "register_command")?;
+                let valid = opts.name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                    && opts.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                if !valid {
+                    return Err(LuaError::RuntimeError(format!(
+                        "cli.register_command: `{}` must be lowercase letters, digits and dashes",
+                        opts.name
+                    )));
+                }
+                let mut specs = s.cli_command_specs.lock().unwrap_or_else(|e| e.into_inner());
+                if specs.iter().any(|spec| spec.name == opts.name) {
+                    return Err(LuaError::RuntimeError(format!(
+                        "cli.register_command: `{}` already registered",
+                        opts.name
+                    )));
+                }
+                specs.push(CliCommandSpec {
+                    name: opts.name,
+                    description: opts.description,
+                    args: opts.args,
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        m.fn_(
+            "command",
+            "Return the Lua subcommand this process was launched for as `{ name, args }`, where `args` lists its free arguments, or `nil` for an agent session.",
+            &[],
+            move |lua, ()| -> LuaResult<mlua::Value> {
+                let Some(command) = s.cli_command.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let out = lua.create_table()?;
+                out.set("name", command.name)?;
+                out.set("args", command.args)?;
+                Ok(mlua::Value::Table(out))
             },
         )?;
     }

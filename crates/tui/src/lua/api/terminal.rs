@@ -143,6 +143,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     m.live_only_fn(
+        "run",
+        "Run `argv`, such as `{ \"git\", \"commit\" }`, on the terminal: smelt suspends until it exits, then repaints. Use it for interactive commands such as `git commit`, which opens Git's own editor. `opts.cwd` is relative to the session cwd. Returns `(true, nil)`, or `(false, err)` with the command's error output, or its exit status when it printed none.",
+        &["argv", "opts"],
+        |_, (argv, opts): (Vec<String>, Option<mlua::Table>)| -> LuaResult<(bool, Option<String>)> {
+            let cwd = match opts {
+                Some(opts) => opts.get::<Option<String>>("cwd")?,
+                None => None,
+            };
+            match crate::lua::with_platform_host(|host| host.run_in_terminal(&argv, cwd.as_deref())) {
+                Ok(()) => Ok((true, None)),
+                Err(error) => Ok((false, Some(error))),
+            }
+        },
+    )?;
+
+    m.live_only_fn(
         "bell",
         "Ring the terminal bell (BEL). Returns false when no interactive terminal is attached.",
         &[],

@@ -138,7 +138,7 @@ app_story!(diff_overlay, |ctx| {
         smelt.git.diff = function() return { branch = 'feature/parser', diff = smelt.diff.parse(patch) } end
     "#);
     ctx.run_command("diff");
-    ctx.wait_for_document("smelt.diff.preview");
+    ctx.wait_for_document("smelt.diff.status.preview");
     ctx.assert_snapshot();
 });
 
@@ -167,9 +167,10 @@ app_story!(diff_overlay_grouped, |ctx| {
     std::fs::write(dir.path().join("parser.rs"), "let strict = configured();\n").unwrap();
     std::fs::write(dir.path().join("test.rs"), "assert!(strict);\n").unwrap();
     ctx.set_viewport(110, 34);
+    let cwd = serde_json::to_string(&dir.path().to_str().unwrap()).unwrap();
     ctx.run_lua(&format!(
-        "local load = smelt.git.diff; smelt.git.diff = function() return load({{cwd = {}}}) end",
-        serde_json::to_string(&dir.path().to_str().unwrap()).unwrap()
+        "local load = smelt.git.diff
+        smelt.git.diff = function() return load({{cwd = {cwd}}}) end"
     ));
     ctx.run_command("diff");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -178,13 +179,9 @@ app_story!(diff_overlay_grouped, |ctx| {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         ctx.pump_lua();
     }
-    ctx.wait_for_document("smelt.diff.preview");
+    ctx.wait_for_document("smelt.diff.status.preview");
     ctx.assert_snapshot();
-    ctx.press_key(
-        crossterm::event::KeyCode::Char('w'),
-        crossterm::event::KeyModifiers::CONTROL,
-    );
-    ctx.press_char('w');
+    // Focus starts on the files sidebar, so this widens it.
     for _ in 0..3 {
         ctx.press_key(
             crossterm::event::KeyCode::Char('w'),
@@ -192,7 +189,9 @@ app_story!(diff_overlay_grouped, |ctx| {
         );
         ctx.press_char('>');
     }
-    ctx.wait_for_document("smelt.diff.preview");
+    // Resize handlers move the header joint once the wider split is painted.
+    ctx.settle_frame();
+    ctx.wait_for_document("smelt.diff.status.preview");
     ctx.assert_snapshot_named("resized");
 });
 
@@ -207,12 +206,7 @@ app_story!(diff_overlay_refresh, |ctx| {
         end
     "#);
     ctx.run_command("diff");
-    ctx.wait_for_document("smelt.diff.preview");
-    ctx.press_key(
-        crossterm::event::KeyCode::Char('w'),
-        crossterm::event::KeyModifiers::CONTROL,
-    );
-    ctx.press_char('w');
+    ctx.wait_for_document("smelt.diff.status.preview");
     ctx.run_lua("refresh_blocked = true");
     ctx.press_char('r');
     ctx.assert_snapshot_named("refreshing");
@@ -236,7 +230,7 @@ app_story!(diff_overlay_narrow, |ctx| {
         smelt.git.diff = function() return { branch = 'main', diff = smelt.diff.parse('diff --git a/界.lua b/界.lua\n@@ -1 +1 @@\n-old\n+new\n') } end
     "#);
     ctx.run_command("diff");
-    ctx.wait_for_document("smelt.diff.preview");
+    ctx.wait_for_document("smelt.diff.status.preview");
     ctx.assert_snapshot();
 });
 

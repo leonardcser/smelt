@@ -1,104 +1,100 @@
--- /diff: working changes, branch review and commit history. Layout, loading lifecycle,
--- sidebar synchronization and interaction policy live here; native documents
--- index patch bytes and materialize only the visible rows.
+-- /diff and `smelt diff`: a Git status, branch review and history viewer.
+-- Each view owns its windows and state, so switching views only swaps the
+-- layout. Native documents index patch bytes and materialize visible rows.
 
 local M = {}
+local layout = smelt.ui.layout
 local active
--- The last snapshot is shown immediately on reopen while a fresh one loads,
--- then released if the viewer stays closed.
-local RETAIN_MS = 5 * 60 * 1000
-local retained
+
+local VIEWS = { "status", "branch", "history" }
+local TITLES = { status = "Status", branch = "Branch", history = "History" }
+-- Below this width the two panes cannot both fit, so one shows at a time.
+local SINGLE_PANE_WIDTH = 72
+local MESSAGE_MS = 5000
+-- Git must never wait on a terminal or an editor it does not own.
+local GIT_ENV = { GIT_TERMINAL_PROMPT = "0", GIT_EDITOR = "true" }
 
 smelt.keymap.scope("diff", {
   desc = "/diff viewer",
   actions = {
-    changes      = "Show working changes",
+    status       = "Show the working tree status",
     branch       = "Show the branch against its base",
     history      = "Show commit history",
-    commits      = "Go back to the commit list",
-    switch_pane  = "Switch between the file list and the diff on narrow screens",
-    revision     = "Show a commit or revision",
-    base         = "Change the comparison base",
+    switch_pane  = "Switch between the file list and the diff",
     close        = "Close the viewer",
-    refresh      = "Reload the diff",
-    next_file    = "Show the next file",
-    prev_file    = "Show the previous file",
-    stage        = "Stage the selected file or hunk",
-    unstage      = "Unstage the selected file or hunk",
-    toggle_stage = "Stage or unstage the selected file or hunk",
+    refresh      = "Reload the view",
+    stage        = "Stage the selected files, or the selected hunks of the patch",
+    unstage      = "Unstage the selected files, or the selected hunks of the patch",
+    toggle_stage = "Stage or unstage the selected files or hunks",
+    discard      = "Discard changes to the selected files or hunks",
+    commit       = "Commit the staged changes",
+    amend        = "Amend the last commit",
+    push         = "Push the branch",
+    pull         = "Pull with rebase",
+    fetch        = "Fetch and prune",
+    copy         = "Copy the paths or commit ids of the selected rows",
+    commits      = "Go back to the commit list",
     next_view    = "Show the next view",
     prev_view    = "Show the previous view",
-    prev_hunk    = "Jump to the previous hunk",
+    revision     = "Show a commit or revision",
+    base         = "Change the comparison base",
+    next_file    = "Show the next file",
+    prev_file    = "Show the previous file",
     next_hunk    = "Jump to the next hunk",
+    prev_hunk    = "Jump to the previous hunk",
   },
+  -- Letter keys are Normal-mode defaults, so they stay out of the text input.
   keys = {
-    { "",  "<M-1>",   "changes"      },
+    { "",  "<M-1>",   "status"       },
     { "",  "<M-2>",   "branch"       },
     { "",  "<M-3>",   "history"      },
     { "",  "<M-w>",   "switch_pane"  },
-    { "",  "<M-r>",   "revision"     },
-    { "",  "<M-b>",   "base"         },
-    { "",  "<Esc>",   "close"        },
     { "",  "<C-c>",   "close"        },
-    { "",  "<Tab>",   "next_view"    },
-    { "",  "<S-Tab>", "prev_view"    },
-    { "n", "<BS>",    "commits"      },
+    { "",  "<Esc>",   "close"        },
     { "n", "q",       "close"        },
     { "n", "r",       "refresh"      },
-    { "n", "<C-j>",   "next_file"    },
-    { "n", "<C-k>",   "prev_file"    },
     { "n", "s",       "stage"        },
     { "n", "u",       "unstage"      },
     { "n", "-",       "toggle_stage" },
-    { "n", "{",       "prev_hunk"    },
-    { "n", "}",       "next_hunk"    },
-    { "n", "[",       "prev_file"    },
+    { "n", "X",       "discard"      },
+    { "v", "s",       "stage"        },
+    { "v", "u",       "unstage"      },
+    { "v", "-",       "toggle_stage" },
+    { "v", "X",       "discard"      },
+    { "n", "c",       "commit"       },
+    { "n", "C",       "amend"        },
+    { "n", "p",       "push"         },
+    { "n", "P",       "pull"         },
+    { "n", "F",       "fetch"        },
+    { "n", "Y",       "copy"         },
+    { "n", "<BS>",    "commits"      },
+    { "n", "<Tab>",   "next_view"    },
+    { "n", "<S-Tab>", "prev_view"    },
+    { "n", "<M-r>",   "revision"     },
+    { "n", "<M-b>",   "base"         },
+    { "n", "<C-j>",   "next_file"    },
+    { "n", "<C-k>",   "prev_file"    },
     { "n", "]",       "next_file"    },
+    { "n", "[",       "prev_file"    },
+    { "n", "}",       "next_hunk"    },
+    { "n", "{",       "prev_hunk"    },
   },
 })
 
 smelt.keymap.scope("diff.files", {
   desc = "/diff file list",
   actions = {
-    next_file = "Show the next file",
-    prev_file = "Show the previous file",
-    down      = "Select the next row",
-    up        = "Select the previous row",
-    first     = "Select the first row",
-    last      = "Select the last row",
-    open      = "Open the selected file, or toggle the folder",
-    collapse  = "Collapse the folder, or select its parent",
-    expand    = "Expand the folder, or open the file",
-    half_up   = "Move the selection up half a page",
-    half_down = "Move the selection down half a page",
-    page_up   = "Move the selection up a page",
-    page_down = "Move the selection down a page",
+    open     = "Open the selected row, or toggle the folder",
+    collapse = "Collapse the folder, or select its parent",
+    expand   = "Expand the folder, or open the file",
   },
   keys = {
-    { "", "<C-j>",      "next_file" },
-    { "", "<C-k>",      "prev_file" },
-    { "", "j",          "down"      },
-    { "", "k",          "up"        },
-    { "", "<Down>",     "down"      },
-    { "", "<Up>",       "up"        },
-    { "", "<C-n>",      "down"      },
-    { "", "<C-p>",      "up"        },
-    { "", "g",          "first"     },
-    { "", "<Home>",     "first"     },
-    { "", "G",          "last"      },
-    { "", "<End>",      "last"      },
-    { "", "<CR>",       "open"      },
-    { "", "<Space>",    "open"      },
-    { "", "h",          "collapse"  },
-    { "", "<Left>",     "collapse"  },
-    { "", "l",          "expand"    },
-    { "", "<Right>",    "expand"    },
-    { "", "<C-u>",      "half_up"   },
-    { "", "<C-d>",      "half_down" },
-    { "", "<C-b>",      "page_up"   },
-    { "", "<C-f>",      "page_down" },
-    { "", "<PageUp>",   "page_up"   },
-    { "", "<PageDown>", "page_down" },
+    { "", "<CR>",    "open"     },
+    { "", "<Space>", "open"     },
+    { "", "h",       "collapse" },
+    { "", "<Left>",  "collapse" },
+    { "", "l",       "expand"   },
+    { "", "<Right>", "expand"   },
   },
 })
 
@@ -119,814 +115,1269 @@ smelt.keymap.scope("diff.preview", {
 })
 
 local function display(text)
-  return (text or ""):gsub("%c", function(c) return string.format("\\x%02x", c:byte()) end)
+  return ((text or ""):gsub("%c", function(c) return string.format("\\x%02x", c:byte()) end))
+end
+
+-- The line of Git output worth showing: its first fatal or error line, or
+-- else its first line.
+local function summary(text)
+  text = text or ""
+  for line in text:gmatch("[^\n]+") do
+    local reason = line:match("^%s*fatal:%s*(.+)") or line:match("^%s*error:%s*(.+)")
+    if reason then return display(reason) end
+  end
+  local first = text:match("^%s*([^\n]*)") or ""
+  return display(first ~= "" and first or "git failed")
 end
 
 function M.open(opts)
   opts = opts or {}
   if active then active.close() end
   local cwd = smelt.session.cwd()
+  local surface = require("smelt.surface").new({ standalone = opts.standalone, width = 0.94, height = 0.85 })
+  local standalone = surface.standalone
+  local closed = false
+  local current = opts.view or "status"
+  local base = opts.base
+  local views = {}
+  local overlay, message, pending, query
+  -- The Git operation in progress: `{ label, job }`.
+  local change
+  local tab_ranges = {}
+  -- Line totals by commit ID, shared by the lists. They never change.
+  local stats = {}
+  local single_pane = false
+  local split = layout.split("horizontal", { key = "diff", size = 42, min_first = 26, min_second = 32 })
+  local render, render_header, flash, ask, dismiss, focus_pane
 
-  local closed, loading, changing, overlay = false, nil, nil, nil
-  local diff, selected, busy
-  local stale = false
-  local file_count = 0
-  local focused = "preview"
-  local tree, sidebar_count, folder_press
-  local layout = smelt.ui.layout
-  local views = { "changes", "branch", "history" }
-  -- Title cells the full tab row needs: " Changes  Branch  History ".
-  local tabs_width = 26
-  local compact_tabs = false
-  -- Below this overlay width the two panes cannot both fit, so one shows at a time.
-  local single_pane_width = 72
-  local function fits_one_pane()
-    return math.floor((smelt.ui.size().width or 80) * 0.94) < single_pane_width
-  end
-  local single_pane, shown_pane = fits_one_pane(), "preview"
-  local view = opts.view or "changes"
-  local browsing = view ~= "changes" and not opts.revision
-  local base, revision = opts.base, opts.revision
-  local base_id
-  local commits, entries, head, more = {}, {}, nil, false
-  local list_row, list_top = 0, 0
-  local preview_job, list_error, comparison_label, branch_totals
-  local load_history, select_commit, show_commits, switch_view
-  local input_purpose = "revision"
-  local query_open = false
-  local saved = {}
-
-  local function window(name, opts)
+  local function window(name, o)
     local buf = smelt.buf.new()
-    opts.name = "smelt.diff." .. name
-    opts.wrap = false
-    local win = smelt.win.new(buf, opts)
-    return win, buf
+    o.name = "smelt.diff." .. name
+    o.wrap = false
+    return smelt.win.new(buf, o), buf
   end
 
-  local sidebar, sidebar_buf = window("files", {
-    surface = "list", kind = "list", pad_left = 1, pad_right = 1,
-    hide_cursor = true, scrollbar = true,
-  })
-  local preview, preview_buf = window("preview", {
-    surface = "readonly_text", vim_enabled = true, scrollbar = true,
-    pad_left = 1, pad_right = 1,
-  })
-
-  -- One-line placeholder for the preview: a dim message and a key hint that
-  -- is dropped rather than cut off when the pane is narrow.
-  local function notice(message, hint)
-    preview:document(nil)
-    local line = { { text = message, style = "Comment" } }
-    local width = preview:content_width()
-    if hint and (not width or smelt.text.width(message .. "  " .. hint) <= width) then
-      line[2] = { text = "  " .. hint, style = { dim = true } }
+  for _, name in ipairs(VIEWS) do
+    local v = { name = name, focus = "files" }
+    v.sidebar, v.sidebar_buf = window(name .. ".files", {
+      surface = "readonly_text", vim_enabled = true, hide_cursor = true, cursor_line = true,
+      scrollbar = true, pad_left = 1, pad_right = 1,
+    })
+    v.preview, v.preview_buf = window(name .. ".preview", {
+      surface = "readonly_text", vim_enabled = true, scrollbar = true, pad_left = 1, pad_right = 1,
+    })
+    if name ~= "status" then
+      v.info, v.info_buf = window(name .. ".commit", { surface = "readonly_text", pad_left = 1, scrollbar = true })
+      v.commits, v.entries = {}, {}
     end
-    preview_buf:styled({ line })
+    views[name] = v
   end
-
+  local status = views.status
+  -- Filling the terminal, the header is a status line; in an overlay it is
+  -- the frame's top edge.
+  local header, header_buf = window("header", {
+    surface = "inert", pad_left = 0, pad_right = 0, scrollbar = false,
+    style = standalone and { bg = "SmeltStatusBg" } or nil,
+  })
   local input, input_buf = window("revision", {
     surface = "editable_text", kind = "input", vim_enabled = false, pad_left = 1,
-    placeholder = "Commit ID or revision",
+    placeholder = "Commit ID or revision (Enter)",
   })
-  local info, info_buf = window("commit", { surface = "readonly_text", pad_left = 1, scrollbar = true })
-  local split = layout.split("horizontal", { key = "diff", size = 42, min_first = 26, min_second = 32 })
-  -- Before the first paint, estimate the sidebar from the overlay width so the
-  -- first frame already uses the right tab labels.
-  do
-    local overlay_width = math.floor((smelt.terminal.size().width or 80) * 0.94)
-    compact_tabs = math.min(42, overlay_width - 32) - 2 < tabs_width
+
+  local function view() return views[current] end
+
+  -- ── preview ──────────────────────────────────────────────────────────
+
+  -- One-line placeholder: a dim message and a key hint that is dropped
+  -- rather than cut off when the pane is narrow.
+  -- Whatever the preview shows next replaces the comparison still loading
+  -- for it, so a late result never covers a newer selection.
+  local function cancel_preview(v)
+    if v.preview_job then v.preview_job:remove(); v.preview_job = nil end
   end
-  local status
-  local overlay_opts = { name = "smelt.diff", anchor = "center", width = "94%", height = "85%", modal = true, border = "none" }
-  function status()
-    local label = busy or (stale and "stale - r refresh")
-    -- The sidebar's top border doubles as the view switcher; span ids make it clickable.
-    local switcher = {}
-    for _, tab in ipairs(views) do
-      local name = tab:gsub("^%l", string.upper)
-      -- Narrow panes keep the current tab's name and shorten the others to an initial.
-      if compact_tabs and tab ~= view then name = name:sub(1, 1) end
-      switcher[#switcher + 1] = { id = tab, text = " " .. name .. " ",
-        style = tab == view and { fg = false, bg = "CursorLine", bold = true } or { dim = true } }
+
+  local function notice(v, text, hint)
+    cancel_preview(v)
+    v.preview:document(nil)
+    v.shown, v.shown_diff = nil, nil
+    local line = { { text = text, style = "Comment" } }
+    local width = v.preview:content_width()
+    if hint and (not width or smelt.text.width(text .. "  " .. hint) <= width) then
+      line[2] = { text = "  " .. hint, style = { dim = true } }
     end
-    shown_pane = focused
-    local files_leaf = layout.leaf(sidebar, {
-      border = single_pane and { all = "Comment" } or { top = "Comment", bottom = "Comment", left = "Comment" },
-      title = switcher,
-    })
-    local caption = label or comparison_label
-    local title = caption and smelt.dialog.title(" " .. caption .. " ") or nil
-    local pane_border = single_pane and { all = "Comment" }
-      or { top = "Comment", bottom = "Comment", right = "Comment" }
-    local detail = layout.leaf(preview, {
-      border = pane_border, title = title,
-    })
-    if view ~= "changes" then
-      detail = layout.frame(layout.vbox({
-        { layout.leaf(info), height = 3 },
-        { layout.leaf(preview, { border = { top = "Comment" }, title = title }), height = "fill" },
-      }), {
-        border = pane_border,
-        title = smelt.dialog.title(browsing and " review " or " commit "),
-      })
+    v.preview_buf:styled({ line })
+  end
+
+  -- Show a diff in the preview. `owner` names what it belongs to, so a
+  -- repeated selection keeps the reading position.
+  local function show_diff(v, diff, owner)
+    cancel_preview(v)
+    if v.shown == owner and v.shown_diff == diff then return end
+    v.shown, v.shown_diff = owner, diff
+    v.preview:document(diff:document())
+    v.preview:scroll(0)
+    v.preview:cursor(0)
+  end
+
+  -- Move the sidebar cursor without treating it as a selection by the user.
+  -- Scroll first: setting the scroll keeps the cursor on its screen row.
+  local function place_cursor(v, row)
+    if not row then return end
+    v.placed = row
+    v.sidebar:cursor(row)
+  end
+
+  -- The file tree a view's sidebar shows: the status tree, or the files of
+  -- a commit opened from a list. Both carry `diff`, `tree` and `file`.
+  local function files_of(v)
+    if v.name == "status" then return status.tree and status end
+    return v.opened
+  end
+
+  local function show_file(v, files, index)
+    cancel_preview(v)
+    if v.shown ~= files or v.shown_diff ~= files.diff then
+      v.shown, v.shown_diff = files, files.diff
+      v.preview:document(files.diff:document())
     end
-    local rows = {
-      { single_pane and (focused == "files" and files_leaf or detail) or split:layout(files_leaf, detail),
-        height = "fill" },
-      { layout.leaf(input, { border = { all = "Comment" },
-        title = smelt.dialog.title(input_purpose == "base" and " comparison base " or " revision ") }),
-        height = query_open and 3 or 0 },
-    }
-    -- Keep the metadata window alive when Changes hides it.
-    if view == "changes" then rows[#rows + 1] = { layout.leaf(info), height = 0 } end
-    overlay_opts.layout = layout.vbox(rows)
-    overlay = smelt.overlay.new(overlay_opts)
+    files.file = index
+    local row = files.diff:file_row(index)
+    v.preview:scroll(row)
+    v.preview:cursor(row)
   end
 
-  local function build_tree()
-    sidebar_count, folder_press = nil, nil
-    local collapsed = tree and tree:collapsed() or {}
-    tree = diff and diff:tree(collapsed) or nil
-    if tree then
-      sidebar:document(tree:document())
-    else
-      sidebar:document(nil)
-      sidebar_buf:lines({ "unavailable" })
-    end
-  end
+  -- ── lifecycle ────────────────────────────────────────────────────────
 
-  local function selected_node()
-    return tree and tree:node(sidebar:cursor() or 0)
-  end
-  local function reveal_file(index)
-    if tree then sidebar:cursor(tree:file_row(index, true) or 0) end
-  end
-  local function toggle_directory()
-    if not tree then return end
-    local row = tree:toggle(sidebar:cursor() or 0)
-    if row then sidebar:cursor(row) end
-  end
-
-  -- Cancel pending reads; index changes run to completion.
-  local function stop_reads()
-    if loading then loading:remove(); loading = nil end
-    if preview_job then preview_job:remove(); preview_job = nil end
-  end
-
-  local function revision_info(value)
-    info_buf:lines({ "Revision " .. display(value), "Read-only commit review", "Backspace returns to commits" })
+  local function stop(v)
+    if v.job then v.job:remove(); v.job = nil end
+    cancel_preview(v)
+    if v.stats_job then v.stats_job:remove(); v.stats_job = nil end
+    v.busy = nil
   end
 
   local function cleanup()
     if closed then return end
     closed = true
-    stop_reads()
-    if changing then changing:remove(); changing = nil end
+    for _, v in pairs(views) do stop(v) end
+    if change and change.job then change.job:remove() end
+    if message then message.timer:remove() end
     active = nil
-    -- Only working changes are retained; comparisons reload on demand.
-    local changes = view == "changes" and diff or (saved.changes and saved.changes.diff)
-    if changes and changes:file_count() > 0 then
-      if retained then retained.timer:remove() end
-      retained = { cwd = cwd, diff = changes }
-      retained.timer = smelt.timer.set(RETAIN_MS, function() retained = nil end)
-    end
-    diff, tree, selected, folder_press = nil, nil, nil, nil
-    saved, commits, entries = {}, {}, {}
-    file_count = 0
   end
 
   local function close()
     cleanup()
     if overlay then overlay:close() end
   end
-  preview:on("close", cleanup)
-  sidebar:on("close", cleanup)
 
-  local function jump_file(index, sidebar_row)
-    sidebar_count, folder_press = nil, nil
-    if not diff or file_count == 0 then return end
-    index = math.max(1, math.min(file_count, index))
-    if not selected then preview:document(diff:document()) end
-    selected = index
-    if sidebar_row then sidebar:cursor(sidebar_row) else reveal_file(index) end
-    local row = diff:file_row(index)
-    preview:scroll(row)
-    preview:cursor(row)
+  -- End the viewer because it cannot run at all, saying why.
+  local function fail(reason)
+    surface:fail(reason)
+    close()
+  end
+  for _, v in pairs(views) do
+    v.sidebar:on("close", cleanup)
+    v.preview:on("close", cleanup)
   end
 
-  local function sync_sidebar()
-    if browsing or closed or not tree or not diff or not selected or folder_press or focused ~= "preview" then return end
-    local scroll = preview:scroll()
-    if not scroll then return end
-    local index = diff:file_at(math.max(scroll.top, preview:cursor() or 0))
-    if index and index ~= selected then
-      selected = index
-      -- Following the preview never expands deliberately collapsed folders.
-      local row = tree:file_row(index)
-      if row then sidebar:cursor(row) end
-    end
+  -- One Git operation at a time changes the repository. `work` runs in a
+  -- task and may return a follow-up to run once the operation is released.
+  local function run_change(label, work)
+    if change or closed then return end
+    local current_change = { label = label }
+    change = current_change
+    render_header()
+    local job = smelt.spawn(function()
+      local ok, after = pcall(work)
+      if closed then return end
+      change = nil
+      render_header()
+      if not ok then flash(tostring(after), "error")
+      elseif after then after() end
+    end)
+    -- A task that finished at once already cleared `change`.
+    current_change.job = job
   end
 
-  local function focus_pane(name)
-    sidebar_count, folder_press = nil, nil
-    focused = name
-    if single_pane and shown_pane ~= name then status() end
-    if name == "preview" then preview:focus(); sync_sidebar() else sidebar:focus() end
+  local function git(args)
+    local result, err = smelt.process.run("git", args, { cwd = cwd, env = GIT_ENV, timeout_secs = 300 })
+    if not result then return nil, err end
+    if result.timed_out then return nil, "git " .. args[1] .. " timed out" end
+    if result.exit_code ~= 0 then return nil, result.stderr ~= "" and result.stderr or result.stdout end
+    return result
   end
-  sidebar:on("focus", function() focused = "files" end)
-  sidebar:on("blur", function() sidebar_count, folder_press = nil, nil end)
-  preview:on("focus", function() focused = "preview"; sync_sidebar() end)
-  local function select_file()
-    if browsing then select_commit(); return end
-    local node = selected_node()
-    if node and node.index and node.index ~= selected then jump_file(node.index) end
-  end
-  local function pointer_row(event)
-    local rect, scroll = sidebar:rect(), sidebar:scroll()
-    if not rect or not scroll or event.y >= rect.height or event.x < 1 or event.x >= rect.width - 1 then return end
-    return scroll.top + event.y
-  end
-  sidebar:on("press", function(event)
-    sidebar_count, folder_press = nil, nil
-    if event.button ~= "left" then return end
-    if event.title then
-      switch_view(event.title)
-      return
-    end
-    local row = pointer_row(event)
-    if browsing then
-      if row and entries[row + 1] then
-        focus_pane("files")
-        sidebar:cursor(row)
-        select_commit()
-      end
-      return
-    end
-    local node = tree and row and tree:node(row)
-    if not node then return end
-    focus_pane("files")
-    sidebar:cursor(row)
-    if node.children then
-      folder_press = { tree = tree, row = row }
-    elseif node.index then
-      jump_file(node.index)
-    end
-  end)
-  sidebar:on("release", function(event)
-    local press = folder_press
-    folder_press = nil
-    if not press or event.button ~= "left" or press.tree ~= tree then return end
-    local row = pointer_row(event)
-    sidebar:cursor(press.row)
-    if row == press.row then toggle_directory() end
-  end)
-  sidebar:on("scrolled", function() folder_press = nil end)
-  sidebar:on("resized", function() folder_press = nil end)
-  preview:on("scrolled", sync_sidebar)
-  preview:on("selection_changed", sync_sidebar)
 
-  local function nav_file(delta)
-    if browsing then
-      sidebar:cursor(math.max(0, math.min(#entries - 1, (sidebar:cursor() or 0) + delta)))
-      select_commit()
-      return
-    end
-    local node = (focused == "files" or not selected) and selected_node() or nil
-    if node and (node.children or node.group) then
-      jump_file(delta > 0 and node.first or node.first - 1)
-    else
-      jump_file((node and node.index or selected or 1) + delta)
-    end
-  end
-  local function nav_tree(delta)
-    if browsing then nav_file(delta); return end
-    if not tree then return end
-    local last = tree:document():row_count() - 1
-    local current = sidebar:cursor() or 0
-    local row = current + delta
-    local separator = view == "changes" and (tree:section_row("staged") - 1) or -1
-    if current < separator and row >= separator then
-      row = row + 1
-    elseif current > separator and row <= separator then
-      row = row - 1
-    end
-    sidebar:cursor(math.max(0, math.min(last, row)))
-    select_file()
-  end
-  local function open_node()
-    if browsing then
-      local entry = entries[(sidebar:cursor() or 0) + 1]
-      if entry and entry.more then load_history(true); return end
-      if not diff or preview_job or list_error then return end
-      list_row, list_top = sidebar:cursor() or 0, (sidebar:scroll() or {}).top or 0
-      browsing = false
-      build_tree()
-      if file_count > 0 then jump_file(1) end
-      status()
-      focus_pane("files")
-      return
-    end
-    local node = selected_node()
-    if not node then return end
-    if node.children then
-      toggle_directory()
-    elseif node.index then
-      jump_file(node.index)
-      focus_pane("preview")
-    end
-  end
-  local function left()
-    if browsing then return end
-    local node = selected_node()
-    if not node then return end
-    if node.children and node.expanded then
-      toggle_directory()
-    elseif node.parent then
-      sidebar:cursor(node.parent)
-    end
-  end
-  local function right()
-    local node = selected_node()
-    if node and node.children then
-      if node.expanded then nav_tree(1) else toggle_directory() end
-    else
-      open_node()
-    end
-  end
-  -- A typed count repeats the next motion, as in Vim.
-  local function counted(action)
-    return function()
-      local count = sidebar_count or 1
-      sidebar_count, folder_press = nil, nil
-      action(count)
-    end
-  end
-  for digit = 0, 9 do
-    sidebar:key(tostring(digit), function()
-      folder_press = nil
-      if (tree or browsing) and (sidebar_count or digit > 0) then
-        sidebar_count = math.min((sidebar_count or 0) * 10 + digit, browsing and #entries or tree:document():row_count())
-      end
+  -- Compare revisions for the preview of `v`; `loading` names what for.
+  -- `on_diff` gets the diff unless the preview showed something else first.
+  local function load_preview(v, loading, opts, on_diff)
+    notice(v, "Loading")
+    opts.cwd = cwd
+    v.loading = loading
+    v.preview_job = smelt.spawn(function()
+      local result, err = smelt.git.diff(opts)
+      if closed then return end
+      v.preview_job = nil
+      if not result then notice(v, "Comparison failed: " .. summary(err), "r retry"); return end
+      on_diff(result.diff)
     end)
   end
-  local function pages(fraction)
-    return counted(function(count)
-      local height = (sidebar:rect() or {}).height or 10
-      local delta = math.max(1, math.floor(height * math.abs(fraction))) * count
-      nav_tree(fraction < 0 and -delta or delta)
+
+  -- ── status ───────────────────────────────────────────────────────────
+
+  local load_status, load_list, reload_list
+
+  local function tracking_caption()
+    local t = status.tracking
+    if not (t and (t.branch or t.head)) then return nil end
+    local text = t.branch and display(t.branch) or ("detached " .. (t.head or "unborn"):sub(1, 8))
+    if t.upstream then
+      text = text .. (t.ahead > 0 and (" ↑" .. t.ahead) or "") .. (t.behind > 0 and (" ↓" .. t.behind) or "")
+        .. "  " .. display(t.upstream)
+    end
+    if t.operation then text = text .. " · " .. t.operation .. " in progress" end
+    return text
+  end
+
+  local function show_status_commit(commit)
+    status.caption = commit.id:sub(1, 8) .. " " .. display(commit.subject)
+    render_header()
+    if status.shown == commit.id or (status.preview_job and status.loading == commit.id) then return end
+    load_preview(status, commit.id, { revision = commit.id }, function(diff)
+      if diff:file_count() > 0 then show_diff(status, diff, commit.id); return end
+      notice(status, "No changes")
+      status.shown = commit.id
     end)
   end
-  sidebar:scope("diff.files", {
-    next_file = counted(function() nav_file(1) end),
-    prev_file = counted(function() nav_file(-1) end),
-    down = counted(function(count) nav_tree(count) end),
-    up = counted(function(count) nav_tree(-count) end),
-    first = counted(function() sidebar:cursor(0); select_file() end),
-    last = counted(function()
-      if tree or browsing then
-        sidebar:cursor(math.max(0, (browsing and #entries or tree:document():row_count()) - 1))
-        select_file()
-      end
-    end),
-    open = counted(open_node),
-    collapse = counted(left),
-    expand = counted(right),
-    half_up = pages(-0.5),
-    half_down = pages(0.5),
-    page_up = pages(-1),
-    page_down = pages(1),
-  })
 
-  local function hunk(forward)
-    if not diff or not selected then return end
-    local row = diff:hunk(preview:cursor() or 0, forward)
-    if row then preview:scroll(row); preview:cursor(row); focus_pane("preview") end
+  local function select_status_row(row)
+    local node = status.tree and status.tree:node(row)
+    if not node then return end
+    if node.commit then
+      show_status_commit(node.commit)
+      return
+    end
+    status.caption = nil
+    render_header()
+    if node.index then
+      show_file(status, status, node.index)
+    elseif node.section == "unpushed" then
+      notice(status, "Commits not on " .. display(status.tracking.upstream), "p push")
+    elseif node.section == "unpulled" then
+      notice(status, "Commits only on " .. display(status.tracking.upstream), "P pull --rebase")
+    elseif node.last < node.first then
+      notice(status, status.diff:file_count() == 0 and "Working tree clean"
+        or (node.section == "staged" and "Nothing staged" or "Everything is staged"), "r refresh")
+    elseif status.shown ~= status then
+      -- A heading or folder with files replaces a notice with its first file.
+      show_file(status, status, node.first)
+    end
   end
-  local function fold()
-    if not diff or not selected then return end
-    local row = diff:toggle_fold(preview:cursor() or 0)
-    if row then preview:scroll(row); preview:cursor(row) end
-  end
-  preview:scope("diff.preview", {
-    fold = fold,
-    pan_left = function() preview:pan(-4) end,
-    pan_right = function() preview:pan(4) end,
-  })
 
-  local function install(result, keep, next_file, restore_position)
-    local previous_tree = tree
-    local sidebar_scroll = tree and sidebar:scroll()
-    local sidebar_row = sidebar:cursor() or 0
-    local sidebar_offset = sidebar_scroll and (sidebar_row - sidebar_scroll.top)
-    local scroll = preview:scroll() or {}
+  -- What the status cursor is on, in terms that survive a refresh.
+  local function status_selection()
+    local node = status.tree and status.tree:node(status.sidebar:cursor() or 0)
+    if not node then return {} end
+    if node.index then return { file = status.diff:file(node.index) } end
+    if node.commit then return { commit = node.commit.id } end
+    return { group = true }
+  end
+
+  -- Install a working `smelt.git.diff` result: its diff and branch state.
+  -- `o.keep` names the selection to keep (the current one by default),
+  -- `o.next_file` the file to fall back to, and `o.restore` keeps the
+  -- preview position within the kept file.
+  local function install_status(snapshot, o)
+    local diff = snapshot.diff
+    o = o or {}
+    local keep = o.keep or status_selection()
+    local previous = status.tree
+    local row = status.sidebar:cursor() or 0
+    local scroll = previous and status.sidebar:scroll()
+    local offset = scroll and (row - scroll.top)
+    local preview_scroll = status.preview:scroll() or {}
+    local was_reading = status.shown == status and status.diff
+    local reading = o.restore and was_reading
     local cursor, top
-    if diff then cursor, top = result.diff:restore(diff, preview:cursor() or 0, scroll.top or 0) end
-    local pan = scroll.left or 0
-    diff, selected = result.diff, nil
-    if view ~= "changes" then
-      local entry = entries[list_row + 1]
-      comparison_label = entry and entry.combined and (display(base) .. "..." .. head:sub(1, 8)) or display(result.branch)
+    if reading then
+      cursor, top = diff:restore(status.diff, status.preview:cursor() or 0, preview_scroll.top or 0)
     end
-    stale = false
-    file_count = diff:file_count()
-    build_tree()
-    local group_row = restore_position and previous_tree and tree:restore_group(previous_tree, sidebar_row)
-    local index = keep and diff:find_file(keep.section, keep.key)
-    local same_file = index ~= nil
-    if not index and next_file then index = diff:find_file(next_file.section, next_file.key) end
-    if not index then
-      local first, last = diff:section_range(keep and keep.section or (view == "changes" and "unstaged" or "changes"))
-      if first <= last then index = first elseif not keep and file_count > 0 then index = 1 end
+    status.diff, status.tracking, status.stale, status.file = diff, snapshot, false, nil
+    status.tree = diff:tree(previous and previous:collapsed() or nil)
+    status.sidebar:document(status.tree:document())
+
+    local target, index, same_file
+    if keep.commit then
+      target = status.tree:commit_row(keep.commit)
+    elseif keep.group and previous then
+      target = status.tree:restore_group(previous, row)
+    elseif keep.file then
+      index = diff:find_file(keep.file.section, keep.file.key)
+      same_file = index ~= nil
+      if not index and o.next_file then index = diff:find_file(o.next_file.section, o.next_file.key) end
+    end
+    if not target and not index then
+      local section = keep.file and keep.file.section or "unstaged"
+      local first, last = diff:section_range(section)
+      if first <= last then index = first elseif diff:file_count() > 0 and not keep.file then index = 1 end
+      if not index then target = status.tree:section_row(section) end
     end
     if index then
-      jump_file(index, group_row)
-      if same_file and restore_position then
-        if cursor then preview:cursor(cursor) end
-        if top then preview:scroll(top) end
+      target = status.tree:file_row(index, true)
+      show_file(status, status, index)
+      if same_file and reading then
+        if top then status.preview:scroll(top) end
+        if cursor then status.preview:cursor(cursor) end
       end
-      preview:pan(pan)
-    else
-      local section = keep and keep.section or (view == "changes" and "unstaged" or "changes")
-      sidebar:cursor(tree:section_row(section))
-      notice(view ~= "changes" and "No changes" or (file_count == 0 and "Working tree clean" or
-        (section == "unstaged" and "Everything is staged" or "Nothing staged")), "r refresh")
+      if was_reading then status.preview:pan(preview_scroll.left or 0) end
     end
-    if group_row then sidebar:cursor(group_row) end
-    if sidebar_offset then
-      sidebar:scroll(math.max(0, (sidebar:cursor() or 0) - sidebar_offset))
-    end
+    if offset then status.sidebar:scroll(math.max(0, (target or 0) - offset)) end
+    place_cursor(status, target or 0)
+    if not index then select_status_row(target or 0) end
   end
 
-  local function no_commits()
-    return view == "branch" and ("Up to date with " .. display(base or "the base")) or "No commits"
-  end
-
-  local function render_commits()
-    entries = {}
-    local rows = {}
-    local width = sidebar:content_width() or 38
-    if view == "branch" and head and #commits > 0 then
-      entries[#entries + 1] = { combined = true }
-      local add = branch_totals and branch_totals[1] > 0 and (" +" .. branch_totals[1]) or ""
-      local del = branch_totals and branch_totals[2] > 0 and (" -" .. branch_totals[2]) or ""
-      local marker = branch_totals and branch_totals[3] and " binary" or ""
-      rows[#rows + 1] = {
-        { text = smelt.text.truncate_cells("Combined changes vs " .. display(base), math.max(1, width - #add - #del - #marker)), style = "SmeltAccent" },
-        { text = add, style = "SmeltDiffAddCount" },
-        { text = del, style = "SmeltDiffDeleteCount" },
-        { text = marker, style = "Comment" },
-      }
-    end
-    for _, commit in ipairs(commits) do
-      entries[#entries + 1] = commit
-      local add = commit.additions > 0 and (" +" .. commit.additions) or ""
-      local del = commit.deletions > 0 and (" -" .. commit.deletions) or ""
-      local marker = commit.binary and " binary" or ((add == "" and del == "") and " empty" or "")
-      local suffix = #add + #del + #marker
-      rows[#rows + 1] = {
-        { text = commit.id:sub(1, 7) .. " ", style = "Comment" },
-        { text = smelt.text.fit(display(commit.subject), math.max(1, width - 8 - suffix)) },
-        { text = add, style = "SmeltDiffAddCount" },
-        { text = del, style = "SmeltDiffDeleteCount" },
-        { text = marker, style = "Comment" },
-      }
-    end
-    if more then
-      entries[#entries + 1] = { more = true }
-      rows[#rows + 1] = { { text = "Load older commits (Enter)", style = "Comment" } }
-    end
-    sidebar:document(nil)
-    sidebar_buf:styled(#rows > 0 and rows or { { { text = list_error or no_commits(), style = "Comment" } } })
-  end
-
-  select_commit = function(force)
-    if loading then return end
-    local row = sidebar:cursor() or 0
-    local entry = entries[row + 1]
-    if not force and row == list_row and diff then return end
-    list_row = row
-    if preview_job then preview_job:remove(); preview_job = nil end
-    diff, selected, tree, file_count = nil, nil, nil, 0
-    preview:document(nil)
-    preview:scroll(0)
-    preview:cursor(0)
-    if not entry or entry.more then
-      info_buf:lines({ "" })
-      notice(entry and "Older commits" or (list_error or no_commits()), entry and "Enter load" or nil)
-      return
-    end
-    revision = entry.combined and head or entry.id
-    comparison_label = entry.combined and (display(base) .. "...HEAD") or (entry.id:sub(1, 8) .. " - first parent")
-    local details = { "Branch changes vs " .. display(base), "Committed changes only", #commits .. (more and "+ commits" or (#commits == 1 and " commit" or " commits")) }
-    if not entry.combined then
-      details = { entry.id:sub(1, 8) .. " | " .. display(entry.author) .. " | " .. display(entry.age) }
-      for line in (entry.message .. "\n"):gmatch("(.-)\n") do details[#details + 1] = display(line) end
-    end
-    info_buf:lines(details)
-    info:scroll(0)
-    notice("Loading")
-    status()
-    local target, target_base = revision, entry.combined and base_id or nil
-    preview_job = smelt.spawn(function()
-      local result, err = smelt.git.diff({ cwd = cwd, revision = target, base = target_base })
+  load_status = function()
+    if change then return end
+    if status.job then status.job:remove() end
+    status.busy = status.diff and "refreshing" or "loading"
+    render_header()
+    status.job = smelt.spawn(function()
+      local result, err = smelt.git.diff({ cwd = cwd })
       if closed then return end
-      preview_job = nil
+      status.job, status.busy = nil, nil
       if not result then
-        notice("Comparison failed: " .. display(err), "r retry")
-      else
-        diff = result.diff
-        file_count = diff:file_count()
-        comparison_label = entry.combined and (display(base) .. "..." .. head:sub(1, 8)) or display(result.branch)
-        selected = file_count > 0 and 1 or nil
-        if entry.combined then
-          branch_totals = { diff:totals() }
-          render_commits()
-          sidebar:cursor(list_row)
+        if standalone and not status.diff then
+          fail("smelt diff: " .. summary(err))
+          return
         end
-        if file_count > 0 then preview:document(diff:document()) else notice("No changes") end
-      end
-      status()
-    end)
-  end
-
-  show_commits = function()
-    if view == "changes" then return end
-    if loading then loading:remove(); loading = nil end
-    busy = nil
-    browsing = true
-    tree, selected = nil, nil
-    render_commits()
-    sidebar:cursor(list_row)
-    sidebar:scroll(list_top)
-    status()
-    focus_pane("files")
-  end
-
-  load_history = function(append)
-    if changing then return end
-    stop_reads()
-    busy = "loading commits"
-    browsing = true
-    if not append then branch_totals = nil end
-    status()
-    loading = smelt.spawn(function()
-      local page, err = smelt.git.history({ cwd = cwd, branch = view == "branch", base = append and base_id or base,
-        head = append and head or nil, skip = append and #commits or 0 })
-      if closed then return end
-      loading, busy = nil, nil
-      if not page then
-        if append then
-          smelt.notify.error("history load failed: " .. display(err))
+        if status.diff then
+          status.stale = true
+          flash("Refresh failed: " .. summary(err), "error")
         else
-          list_error = display(err)
-          commits, head, more, diff, tree, selected = {}, nil, false, nil, nil, nil
-          render_commits()
-          info_buf:lines({ "History unavailable" })
-          notice(list_error, "Alt-b base  r retry")
+          notice(status, "Load failed: " .. summary(err), "r retry")
+          render_header()
         end
-        status()
         return
       end
-      list_error = nil
-      if not append then commits = {} end
-      for _, commit in ipairs(page.commits) do commits[#commits + 1] = commit end
-      head, more = page.head, page.more
-      if not append and page.base then base = page.base end
-      base_id = page.base_id
-      diff, tree, selected = nil, nil, nil
-      render_commits()
-      sidebar:cursor(math.min(list_row, math.max(0, #entries - 1)))
-      select_commit(true)
-      status()
+      install_status(result, { restore = true })
+      render_header()
     end)
   end
 
-  local function refresh()
-    if browsing then load_history(false); return end
-    sidebar_count, folder_press = nil, nil
-    if changing then return end
-    if loading then loading:remove() end
-    busy = diff and "refreshing" or "loading"
-    status()
-    loading = smelt.spawn(function()
-      local entry = entries[list_row + 1]
-      local result, err = smelt.git.diff({ cwd = cwd, revision = view ~= "changes" and revision or nil,
-        base = view ~= "changes" and entry and entry.combined and base_id or nil })
-      if closed then return end
-      loading, busy = nil, nil
-      if not result then
-        if diff then
-          stale = true
-          smelt.notify.error("refresh failed: " .. display(err))
-        else
-          notice("Load failed: " .. display(err or "git diff failed"), "r retry")
-          build_tree()
+  -- Files under the cursor, or under every selected row, as an inclusive
+  -- range of one section.
+  local function file_range(v, files)
+    if v.focus == "preview" then
+      if v.shown ~= files or not files.file then return end
+      return files.file, files.file, files.diff:file(files.file).section
+    end
+    local selection = v.sidebar:selection()
+    local from = selection and selection.first or (v.sidebar:cursor() or 0)
+    local to = selection and selection.last or from
+    local first, last
+    for row = from, to do
+      local node = files.tree:node(row)
+      if node and not node.commit then
+        local lo, hi = node.index or node.first, node.index or node.last
+        if lo <= hi then first, last = math.min(first or lo, lo), math.max(last or hi, hi) end
+      end
+    end
+    if not first then return end
+    local section = files.diff:file(first).section
+    if files.diff:file(last).section ~= section then
+      flash("Select files of one section", "error")
+      return
+    end
+    return first, last, section
+  end
+
+  local function leave_visual(v)
+    if (v.focus == "files" and v.sidebar or v.preview):selection() then smelt.vim.set_mode("normal") end
+  end
+
+  -- `s`, `u`, `-` and `X` change the files under the file list's cursor or
+  -- selection, or the hunks under the preview's, as fugitive does.
+  local function change_files(action)
+    if current ~= "status" or change or status.job or status.stale or not status.diff then return end
+    local diff = status.diff
+    local first, last, section, rows
+    if status.focus == "preview" then
+      if status.shown ~= status then return end
+      local selection = status.preview:selection()
+      local cursor = status.preview:cursor() or 0
+      rows = { first = selection and selection.first or cursor, last = selection and selection.last or cursor }
+      first = diff:file_at(rows.first)
+      last = diff:file_at(rows.last)
+      if not first or not last then return end
+      section = diff:file(first).section
+    else
+      first, last, section = file_range(status, status)
+      if not first then return end
+    end
+    if (action == "stage" and section ~= "unstaged") or (action == "unstage" and section ~= "staged") then return end
+    if action == "discard" and section ~= "unstaged" then
+      flash("Only unstaged changes can be discarded; unstage first", "error")
+      return
+    end
+    local keep = diff:file(first)
+    local lo, hi = diff:section_range(section)
+    local next_file = last < hi and diff:file(last + 1) or (first > lo and diff:file(first - 1) or nil)
+    local verb = action == "discard" and "Discard" or (section == "unstaged" and "Stage" or "Unstage")
+    local function apply()
+      if status.diff ~= diff then flash("Changes were refreshed; select again", "error"); return end
+      leave_visual(status)
+      run_change(verb:lower():gsub("e$", "") .. "ing", function()
+        local result, err
+        if rows and action == "discard" then result, err = smelt.git.discard_hunks(diff, rows.first, rows.last)
+        elseif rows then result, err = smelt.git.index_hunks(diff, rows.first, rows.last, action)
+        elseif action == "discard" then result, err = smelt.git.discard(diff, first, last)
+        else result, err = smelt.git.index(diff, first, action, last) end
+        if closed then return end
+        if not result or result.refresh_error then
+          status.stale = true
+          flash(result and ("Refresh failed: " .. summary(result.refresh_error))
+            or (verb .. " failed: " .. summary(err)), "error")
+          return
         end
-      else
-        local keep = selected and diff:file(selected)
-        install(result, keep, nil, true)
-      end
-      status()
+        -- Hunk changes keep the reading position in what is left of the file.
+        install_status(result, { keep = { file = keep }, next_file = next_file, restore = rows ~= nil })
+      end)
+    end
+    if action ~= "discard" then apply(); return end
+    local what
+    if rows then what = "the selected hunks"
+    else what = first == last and display(keep.path) or ((last - first + 1) .. " files") end
+    ask("Discard changes to " .. what .. "?", { { key = "y", label = "discard", run = apply } })
+  end
+
+  -- ── commits and remotes ──────────────────────────────────────────────
+
+  -- New commits or refs: every view reloads, lists when next shown.
+  local function repository_changed()
+    for _, name in ipairs({ "branch", "history" }) do
+      stop(views[name])
+      views[name].loaded = false
+    end
+    if current ~= "status" then load_list(view(), false) end
+    load_status()
+  end
+
+  -- Run a Git command that changes refs. `after` runs once it succeeds.
+  local function remote(label, done, args, after)
+    run_change(label, function()
+      local result, err = git(args)
+      if closed then return end
+      if not result then flash(summary(err), "error"); return end
+      flash(done, "info")
+      return after or repository_changed
     end)
   end
 
-  local function change_index(action)
-    sidebar_count, folder_press = nil, nil
-    if view ~= "changes" or changing or loading or stale or not diff then return end
-    if focused == "preview" and smelt.vim.mode() ~= "normal" then return end
-    local node = focused == "files" and selected_node() or nil
-    local index = node and node.first or (focused == "preview" and selected)
-    local finish = node and node.last or index
-    if not index or index > finish then return end
-    local keep = diff:file(index)
-    if (action == "stage" and keep.section ~= "unstaged") or
-       (action == "unstage" and keep.section ~= "staged") then return end
-    if not node or node.index then reveal_file(index) end
-    local first, last = diff:section_range(keep.section)
-    local next_file = finish < last and diff:file(finish + 1) or (index > first and diff:file(index - 1) or nil)
-    local operation = keep.section == "unstaged" and "stage" or "unstage"
-    busy = operation == "stage" and "staging" or "unstaging"
-    status()
-    changing = smelt.spawn(function()
-      local result, err = smelt.git.index(diff, index, action, finish)
-      if closed then return end
-      changing, busy = nil, nil
-      if not result then
-        stale = true
-        smelt.notify.error(operation .. " failed: " .. display(err))
-      elseif result.refresh_error then
-        stale = true
-        smelt.notify.error(operation .. " succeeded; refresh failed: " .. display(result.refresh_error))
-      else
-        install(result, keep, next_file)
+  -- Where a branch without an upstream goes: `remote.pushDefault`, else
+  -- `origin`, else the only remote.
+  local function push_remote()
+    local default = git({ "config", "--get", "remote.pushDefault" })
+    if default then return (default.stdout:gsub("%s+$", "")) end
+    local listed, err = git({ "remote" })
+    if not listed then return nil, summary(err) end
+    local remotes = {}
+    for name in listed.stdout:gmatch("%S+") do
+      if name == "origin" then return name end
+      remotes[#remotes + 1] = name
+    end
+    if #remotes == 1 then return remotes[1] end
+    return nil, #remotes == 0 and "No remote to push to" or "Several remotes: set remote.pushDefault"
+  end
+
+  -- Push the branch, setting its upstream on the first push. A rejected
+  -- push asks how to go on: rebasing keeps the remote commits, forcing
+  -- drops them.
+  local function push(force)
+    local t = status.tracking
+    if change or not t then return end
+    if not t.branch then flash("Detached HEAD: check out a branch to push", "error"); return end
+    run_change(force and "force pushing" or "pushing", function()
+      local args = { "push" }
+      if force then args[#args + 1] = "--force-with-lease" end
+      if not t.upstream then
+        local name, err = push_remote()
+        if not name then flash(err, "error"); return end
+        for _, arg in ipairs({ "--set-upstream", name, t.branch }) do args[#args + 1] = arg end
       end
-      status()
+      local result, err = git(args)
+      if closed then return end
+      if result then
+        flash(force and "Force pushed" or "Pushed", "info")
+        return repository_changed
+      end
+      local rejected = err:find("[rejected]", 1, true) or err:find("non-fast-forward", 1, true)
+      if force or not rejected then flash(summary(err), "error"); return end
+      return function()
+        ask("Push rejected: remote has commits you lack.", {
+          { key = "r", label = "rebase, push", run = function()
+            remote("pulling", "Pulled", { "pull", "--rebase" }, function()
+              repository_changed()
+              push(false)
+            end)
+          end },
+          { key = "f", label = "force, drop them", run = function() push(true) end },
+        })
+      end
     end)
+  end
+
+  -- Commit with `git commit` on the terminal, so Git's editor, template
+  -- and hooks work as they do outside smelt.
+  local function commit(amend)
+    if change or not status.diff then return end
+    if not amend then
+      local first, last = status.diff:section_range("staged")
+      if first > last then flash("Nothing staged", "error"); return end
+    elseif not (status.tracking and status.tracking.head) then
+      flash("Nothing to amend", "error")
+      return
+    end
+    run_change(amend and "amending" or "committing", function()
+      local ok, err = smelt.terminal.run({ "git", "commit", amend and "--amend" or nil }, { cwd = cwd })
+      if closed then return end
+      if ok then
+        local head = git({ "log", "-1", "--format=%h %s" })
+        flash(head and summary(head.stdout) or "Committed", "info")
+      else
+        flash(summary(err), "error")
+      end
+      -- Hooks may change files even when the commit fails.
+      return repository_changed
+    end)
+  end
+
+  -- ── branch and history lists ─────────────────────────────────────────
+
+  -- One list row: a dim prefix, a label cut to fit, then its line totals
+  -- once they are known.
+  local function list_row(prefix, label, style, totals, width)
+    local counts = {}
+    if totals then
+      if totals.additions > 0 then counts[#counts + 1] = { text = " +" .. totals.additions, style = "SmeltDiffAddCount" } end
+      if totals.deletions > 0 then counts[#counts + 1] = { text = " -" .. totals.deletions, style = "SmeltDiffDeleteCount" } end
+      if totals.binary then counts[#counts + 1] = { text = " binary", style = "Comment" }
+      elseif #counts == 0 then counts[1] = { text = " empty", style = "Comment" } end
+    end
+    local room = width - smelt.text.width(prefix)
+    for _, count in ipairs(counts) do room = room - #count.text end
+    local row = { { text = prefix, style = "Comment" },
+      { text = smelt.text.truncate_cells(label, math.max(1, room)), style = style } }
+    for _, count in ipairs(counts) do row[#row + 1] = count end
+    return row
+  end
+
+  local function render_list(v)
+    v.entries = {}
+    local rows = {}
+    local width = v.sidebar:content_width() or 38
+    if v.name == "branch" and v.head and #v.commits > 0 then
+      v.entries[1] = { combined = true }
+      rows[1] = list_row("", "Combined changes vs " .. display(v.base), "SmeltAccent", v.totals, width)
+    end
+    for _, entry in ipairs(v.commits) do
+      v.entries[#v.entries + 1] = entry
+      rows[#rows + 1] = list_row(entry.id:sub(1, 7) .. " ", display(entry.subject), nil, stats[entry.id], width)
+    end
+    if v.more then
+      v.entries[#v.entries + 1] = { more = true }
+      rows[#rows + 1] = { { text = "Load older commits (Enter)", style = "Comment" } }
+    end
+    if #rows == 0 then
+      local empty = v.error or (not v.loaded and "Loading")
+        or (v.name == "branch" and ("Up to date with " .. display(v.base or "the base")) or "No commits")
+      rows[1] = { { text = empty, style = "Comment" } }
+    end
+    v.sidebar:document(nil)
+    v.sidebar_buf:styled(rows)
+  end
+
+  -- Draw the list again where it stands, such as when totals arrive.
+  local function redraw_list(v)
+    if v.opened then return end
+    local row = v.sidebar:cursor() or 0
+    render_list(v)
+    place_cursor(v, row)
+  end
+
+  -- Totals need a diff of every commit, so they load after the list.
+  local function load_stats(v)
+    local ids = {}
+    for _, entry in ipairs(v.commits) do
+      if not stats[entry.id] then ids[#ids + 1] = entry.id end
+    end
+    if #ids == 0 then return end
+    if v.stats_job then v.stats_job:remove() end
+    v.stats_job = smelt.spawn(function()
+      local result = smelt.git.stats({ cwd = cwd, commits = ids })
+      if closed then return end
+      v.stats_job = nil
+      -- Totals only decorate the list, which stays usable without them.
+      if not result then return end
+      for id, totals in pairs(result) do stats[id] = totals end
+      redraw_list(v)
+    end)
+  end
+
+  local function entry_info(v, entry)
+    if entry.combined then
+      local count = #v.commits .. (v.more and "+ commits" or (#v.commits == 1 and " commit" or " commits"))
+      return { "Branch changes vs " .. display(v.base), "Committed changes only", count }
+    end
+    local lines = { entry.id:sub(1, 8) .. " | " .. display(entry.author) .. " | " .. display(entry.age) }
+    for line in (entry.message .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = display(line) end
+    return lines
+  end
+
+  local function select_entry(v, force)
+    local row = v.sidebar:cursor() or 0
+    if not force and row == v.row then return end
+    v.row = row
+    cancel_preview(v)
+    v.selected = nil
+    local entry = v.entries[row + 1]
+    if not entry or entry.more then
+      v.caption = nil
+      v.info_buf:lines({ "" })
+      notice(v, entry and "Older commits" or (v.error or (v.loaded and "No commits" or "Loading")),
+        entry and "Enter load" or nil)
+      if v.name == current then render_header() end
+      return
+    end
+    v.caption = entry.combined and (display(v.base) .. "..." .. v.head:sub(1, 8))
+      or (entry.id:sub(1, 8) .. " - first parent")
+    v.info_buf:lines(entry_info(v, entry))
+    v.info:scroll(0)
+    if v.name == current then render_header() end
+    local owner = entry.combined and "combined" or entry.id
+    local opts = { revision = entry.combined and v.head or entry.id, base = entry.combined and v.base_id or nil }
+    load_preview(v, owner, opts, function(diff)
+      v.selected = diff
+      if entry.combined then
+        local additions, deletions, binary = diff:totals()
+        v.totals = { additions = additions, deletions = deletions, binary = binary }
+        redraw_list(v)
+      end
+      if diff:file_count() > 0 then show_diff(v, diff, owner)
+      else notice(v, "No changes") end
+    end)
+  end
+
+  load_list = function(v, append)
+    if v.job then return end
+    v.busy = "loading commits"
+    if v.name == current then render_header() end
+    v.job = smelt.spawn(function()
+      local page, err = smelt.git.history({ cwd = cwd, branch = v.name == "branch",
+        base = append and v.base_id or (v.name == "branch" and base or nil),
+        head = append and v.head or nil, skip = append and #v.commits or 0 })
+      if closed then return end
+      v.job, v.busy = nil, nil
+      if not page then
+        if append then
+          flash("History load failed: " .. summary(err), "error")
+          return
+        end
+        v.loaded, v.error, v.commits, v.head, v.more = true, summary(err), {}, nil, false
+        if not v.opened then
+          render_list(v)
+          v.info_buf:lines({ "History unavailable" })
+          notice(v, v.error, v.name == "branch" and "alt-b base  r retry" or "r retry")
+        end
+        if v.name == current then render_header() end
+        return
+      end
+      v.loaded, v.error = true, nil
+      if not append then v.commits, v.row, v.totals = {}, nil, nil end
+      for _, entry in ipairs(page.commits) do v.commits[#v.commits + 1] = entry end
+      v.head, v.more, v.base_id = page.head, page.more, page.base_id
+      if not append and page.base then v.base = page.base end
+      if not v.opened then
+        local row = v.sidebar:cursor() or 0
+        render_list(v)
+        place_cursor(v, append and math.min(row, #v.entries - 1) or 0)
+        select_entry(v, true)
+      end
+      if v.name == current then render_header() end
+      load_stats(v)
+    end)
+  end
+
+  reload_list = function(v)
+    stop(v)
+    v.opened = nil
+    load_list(v, false)
+  end
+
+  -- Show the files of a commit in the sidebar; Backspace returns to the list.
+  local function open_files(v, diff)
+    if not v.opened then v.list_top = (v.sidebar:scroll() or {}).top or 0 end
+    v.opened = { diff = diff, tree = diff:tree() }
+    v.sidebar:document(v.opened.tree:document())
+    if diff:file_count() > 0 then
+      show_file(v, v.opened, 1)
+      place_cursor(v, v.opened.tree:file_row(1, true))
+    else
+      notice(v, "No changes")
+    end
+    focus_pane(v, "files")
+  end
+
+  local function close_files(v)
+    if not v.opened then return end
+    v.opened = nil
+    if not v.loaded and not v.job then load_list(v, false) end
+    render_list(v)
+    v.sidebar:scroll(v.list_top or 0)
+    place_cursor(v, v.row or 0)
+    select_entry(v, true)
+    focus_pane(v, "files")
+  end
+
+  local function show_revision(revision)
+    local v = views.history
+    v.caption = display(revision) .. " - first parent"
+    v.info_buf:lines({ "Revision " .. display(revision), "Read-only commit review", "Backspace returns to commits" })
+    load_preview(v, revision, { revision = revision }, function(diff)
+      open_files(v, diff)
+      if v.name == current then render_header() end
+    end)
+  end
+
+  -- ── sidebar navigation ───────────────────────────────────────────────
+
+  local function on_cursor(v, row)
+    -- A move that a later placement already superseded is stale.
+    if row ~= v.sidebar:cursor() then return end
+    local placed = v.placed
+    v.placed = nil
+    if placed == row then v.last_row = row; return end
+    -- A question is about the old selection.
+    dismiss()
+    local files = files_of(v)
+    if not files then select_entry(v); return end
+    local last = files.tree:document():row_count() - 1
+    if not files.tree:node(row) and row > 0 and row < last then
+      -- Vim motions may land on the blank row between sections; step over it.
+      v.sidebar:cursor(row + (row >= (v.last_row or 0) and 1 or -1))
+      return
+    end
+    v.last_row = row
+    if v.name == "status" then
+      select_status_row(row)
+      return
+    end
+    local node = files.tree:node(row)
+    if node and node.index then show_file(v, files, node.index) end
+  end
+
+  -- Follow the preview with the sidebar while reading a file diff. Folded
+  -- folders stay folded.
+  local function follow_preview(v)
+    local files = files_of(v)
+    if closed or not files or v.shown ~= files or v.focus ~= "preview" or v.press then return end
+    local scroll = v.preview:scroll()
+    if not scroll then return end
+    local index = files.diff:file_at(math.max(scroll.top, v.preview:cursor() or 0))
+    if index and index ~= files.file then
+      files.file = index
+      place_cursor(v, files.tree:file_row(index))
+    end
+  end
+
+  local function step_file(delta)
+    local v = view()
+    local files = files_of(v)
+    if not files then
+      v.sidebar:cursor(math.max(0, math.min(#v.entries - 1, (v.sidebar:cursor() or 0) + delta)))
+      return
+    end
+    local count = files.diff:file_count()
+    if count == 0 then return end
+    local node = v.focus == "files" and files.tree:node(v.sidebar:cursor() or 0)
+    local index
+    local commits = node and (node.section == "unpushed" or node.section == "unpulled")
+    if node and not node.index and not commits then
+      -- From a heading or folder, step to its first file or the one before.
+      index = delta > 0 and node.first or node.first - 1
+    else
+      index = (files.file or 0) + delta
+    end
+    index = math.max(1, math.min(count, index))
+    show_file(v, files, index)
+    place_cursor(v, files.tree:file_row(index, true))
+    if v.name == "status" then
+      status.caption = nil
+      render_header()
+    end
+  end
+
+  local function toggle_folder(v, files, row)
+    local toggled = files.tree:toggle(row)
+    if toggled then place_cursor(v, toggled) end
+  end
+
+  local function activate(v)
+    local files = files_of(v)
+    if not files then
+      local entry = v.entries[(v.sidebar:cursor() or 0) + 1]
+      if entry and entry.more then load_list(v, true)
+      elseif v.selected and not v.preview_job then open_files(v, v.selected) end
+      return
+    end
+    local row = v.sidebar:cursor() or 0
+    local node = files.tree:node(row)
+    if not node then return end
+    if node.children then toggle_folder(v, files, row)
+    elseif node.index or node.commit then focus_pane(v, "preview") end
+  end
+
+  local function collapse(v)
+    local files = files_of(v)
+    if not files then return end
+    local row = v.sidebar:cursor() or 0
+    local node = files.tree:node(row)
+    if node and node.children and node.expanded then toggle_folder(v, files, row)
+    elseif node and node.parent then v.sidebar:cursor(node.parent)
+    elseif v.name ~= "status" then close_files(v) end
+  end
+
+  local function expand(v)
+    local files = files_of(v)
+    local row = v.sidebar:cursor() or 0
+    local node = files and files.tree:node(row)
+    if node and node.children and not node.expanded then toggle_folder(v, files, row)
+    elseif node and node.children then v.sidebar:cursor(row + 1)
+    else activate(v) end
+  end
+
+  -- Copy what identifies the rows under the cursor or selection: file paths,
+  -- or full commit ids with subjects. Vim `y` copies rows as shown.
+  local function copy_identity()
+    local v = view()
+    local selection = v.focus == "files" and v.sidebar:selection()
+    local from = selection and selection.first or (v.sidebar:cursor() or 0)
+    local to = selection and selection.last or from
+    local files = files_of(v)
+    local lines = {}
+    for row = from, to do
+      local node = files and files.tree:node(row)
+      local entry = not files and v.entries[row + 1]
+      if node and node.index then
+        lines[#lines + 1] = files.diff:file(node.index).path
+      elseif node and node.commit then
+        lines[#lines + 1] = node.commit.id .. " " .. node.commit.subject
+      elseif entry and entry.id then
+        lines[#lines + 1] = entry.id .. " " .. entry.subject
+      end
+    end
+    leave_visual(v)
+    if #lines == 0 then return end
+    smelt.clipboard.write(table.concat(lines, "\n"))
+    flash("Copied " .. #lines .. (#lines == 1 and " line" or " lines"), "info")
+  end
+
+  local function hunk(forward)
+    local v = view()
+    if not v.shown_diff then return end
+    local row = v.shown_diff:hunk(v.preview:cursor() or 0, forward)
+    if row then v.preview:scroll(row); v.preview:cursor(row); focus_pane(v, "preview") end
+  end
+
+  local function fold(v)
+    if not v.shown_diff then return end
+    local row = v.shown_diff:toggle_fold(v.preview:cursor() or 0)
+    if row then v.preview:scroll(row); v.preview:cursor(row) end
+  end
+
+  for _, v in pairs(views) do
+    v.sidebar:on("cursor_moved", function(event) on_cursor(v, event.row) end)
+    v.sidebar:on("focus", function() v.focus = "files" end)
+    v.preview:on("focus", function() v.focus = "preview"; follow_preview(v) end)
+    v.preview:on("scrolled", function() follow_preview(v) end)
+    v.preview:on("selection_changed", function() follow_preview(v) end)
+    v.sidebar:scope("diff.files", {
+      open = function() activate(v) end,
+      collapse = function() collapse(v) end,
+      expand = function() expand(v) end,
+    })
+    v.preview:scope("diff.preview", {
+      fold = function() fold(v) end,
+      pan_left = function() v.preview:pan(-4) end,
+      pan_right = function() v.preview:pan(4) end,
+    })
+    -- A folder click toggles it when released on the same row.
+    local function pointer_row(event)
+      local rect, scroll = v.sidebar:rect(), v.sidebar:scroll()
+      if not rect or not scroll then return end
+      if event.x < 0 or event.y < 0 or event.x >= rect.width or event.y >= rect.height then return end
+      return scroll.top + event.y
+    end
+    v.sidebar:on("press", function(event)
+      v.press = nil
+      local files = files_of(v)
+      local row = event.button == "left" and files and pointer_row(event)
+      local node = row and files.tree:node(row)
+      if node and node.children then v.press = { tree = files.tree, row = row } end
+      -- Clicking a file or commit shows it from the top, even when selected.
+      if node and (node.index or node.commit) then
+        v.placed = row
+        if v.name == "status" then select_status_row(row) else show_file(v, files, node.index) end
+      end
+    end)
+    v.sidebar:on("release", function(event)
+      local press = v.press
+      v.press = nil
+      local files = files_of(v)
+      if press and files and press.tree == files.tree and pointer_row(event) == press.row then
+        toggle_folder(v, files, press.row)
+      end
+    end)
+    v.sidebar:on("resized", function()
+      if not files_of(v) and v.loaded then
+        render_list(v)
+        place_cursor(v, v.row or 0)
+      end
+      -- A dragged split moves the divider joint in the header line.
+      if v.name == current then render_header() end
+    end)
+  end
+
+  -- ── header: tabs and a caption ───────────────────────────────────────
+
+  local function caption()
+    if pending then return pending.question .. "  " .. pending.hint, "SmeltAccent" end
+    local v = view()
+    -- The stale marker leads, so a long message cannot truncate it away.
+    if message then return (v.stale and "stale · " or "") .. message.text, message.style end
+    local busy = change and change.label or v.busy
+    if busy then return busy, "Comment" end
+    if v.stale then return "stale - r refresh", "ErrorMsg" end
+    if v.name == "status" then return v.caption or tracking_caption(), "Comment" end
+    return v.caption, "Comment"
+  end
+
+  -- The column of the split divider within the header, when both panes show.
+  local function divider_column()
+    local v = view()
+    local files, detail, top = v.sidebar:rect(), (v.info or v.preview):rect(), header:rect()
+    if single_pane or not (files and detail and top) then return nil end
+    local column = files.x + files.width
+    if detail.x ~= column + 1 then return nil end
+    return column - top.x
+  end
+
+  -- The header is the top border: tabs on the left and the caption on the
+  -- right of one line. Inside smelt the line closes a box with the frame.
+  render_header = function()
+    if closed then return end
+    local width = header:content_width() or smelt.terminal.size().width or 80
+    local tail = standalone and " " or "─┐"
+    local spans = { { text = standalone and "" or "┌", style = "Comment" } }
+    local x = standalone and 0 or 1
+    local compact = width < 44
+    tab_ranges = {}
+    for _, name in ipairs(VIEWS) do
+      local title = TITLES[name]
+      if compact and name ~= current then title = title:sub(1, 1) end
+      local text = " " .. title .. " "
+      spans[#spans + 1] = { text = text, style = name == current
+        and { fg = false, bg = "CursorLine", bold = true } or { dim = true } }
+      tab_ranges[#tab_ranges + 1] = { first = x, last = x + #text - 1, view = name }
+      x = x + #text
+    end
+    local text, style = caption()
+    -- The caption stays right of the divider joint, with a fill cell on
+    -- each side of its padding.
+    local divider = divider_column()
+    local start = math.max(x, divider and divider + 1 or x)
+    local room = width - start - smelt.text.width(tail) - 3
+    text = text and room > 3 and (" " .. smelt.text.truncate_cells(text, room) .. " ") or ""
+    local fill = math.max(0, width - x - smelt.text.width(text) - smelt.text.width(tail))
+    local line = {}
+    for column = x, x + fill - 1 do
+      line[#line + 1] = standalone and " " or (column == divider and "┬" or "─")
+    end
+    spans[#spans + 1] = { text = table.concat(line), style = "Comment" }
+    if text ~= "" then spans[#spans + 1] = { text = text, style = style } end
+    spans[#spans + 1] = { text = tail, style = "Comment" }
+    header_buf:styled({ spans })
+  end
+
+  flash = function(text, kind)
+    if closed then return end
+    if message then message.timer:remove() end
+    local shown = { text = text, style = kind == "error" and "ErrorMsg" or "SmeltAccent" }
+    message = shown
+    shown.timer = smelt.timer.set(MESSAGE_MS, function()
+      if message == shown and not closed then
+        message = nil
+        render_header()
+      end
+    end)
+    render_header()
+  end
+
+  dismiss = function()
+    if not pending then return end
+    for _, reg in ipairs(pending.regs) do reg:remove() end
+    pending = nil
+    render_header()
+  end
+
+  -- Ask a question in the header, listing each choice's key. n or Esc
+  -- cancels, and any other viewer action cancels before it runs.
+  ask = function(question, choices)
+    dismiss()
+    local v = view()
+    local hints = {}
+    pending = { question = question, regs = {} }
+    for _, win in ipairs({ v.sidebar, v.preview }) do
+      for _, choice in ipairs(choices) do
+        pending.regs[#pending.regs + 1] = win:key(choice.key, function() dismiss(); choice.run() end)
+      end
+      for _, key in ipairs({ "n", "esc", "q" }) do
+        pending.regs[#pending.regs + 1] = win:key(key, dismiss)
+      end
+    end
+    for _, choice in ipairs(choices) do hints[#hints + 1] = choice.key .. " " .. choice.label end
+    pending.hint = table.concat(hints, " · ")
+    render_header()
+  end
+
+  -- ── layout ───────────────────────────────────────────────────────────
+
+  local function narrow()
+    return surface:width() < SINGLE_PANE_WIDTH
+  end
+  single_pane = narrow()
+
+  focus_pane = function(v, pane)
+    v.focus = pane
+    if single_pane and v.name == current then render() end
+    if pane == "preview" then
+      v.preview:focus()
+      follow_preview(v)
+    else
+      v.sidebar:focus()
+    end
+  end
+
+  local actions
+  render = function()
+    if closed then return end
+    local v = view()
+    local shown = {}
+    local function leaf(win, o)
+      shown[win] = true
+      return layout.leaf(win, o)
+    end
+    -- The split draws the only divider.
+    local files = leaf(v.sidebar)
+    local detail = leaf(v.preview)
+    if v.info then
+      detail = layout.vbox({
+        { leaf(v.info), height = 3 },
+        { leaf(v.preview, { border = { top = "Comment" } }), height = "fill" },
+      })
+    end
+    local body = files
+    if not single_pane then
+      body = split:layout(files, detail)
+    elseif v.focus == "files" then
+      shown[v.preview] = nil
+      if v.info then shown[v.info] = nil end
+    else
+      body = detail
+      shown[v.sidebar] = nil
+    end
+    local rows = { { body, height = "fill" } }
+    if query then
+      rows[#rows + 1] = { leaf(input, { border = { top = "Comment" },
+        title = smelt.dialog.title(query == "base" and " comparison base " or " revision ") }), height = 2 }
+    end
+    -- Windows left out of the layout close, so hidden ones stay as empty rows.
+    local hidden = { input }
+    for _, name in ipairs(VIEWS) do
+      local w = views[name]
+      hidden[#hidden + 1] = w.sidebar
+      hidden[#hidden + 1] = w.preview
+      hidden[#hidden + 1] = w.info
+    end
+    for _, win in pairs(hidden) do
+      if not shown[win] then
+        shown[win] = true
+        rows[#rows + 1] = { layout.leaf(win), height = 0 }
+      end
+    end
+    local content = layout.vbox(rows)
+    if not standalone then
+      content = layout.frame(content, { border = { left = "Comment", right = "Comment", bottom = "Comment" } })
+    end
+    local root = layout.vbox({ { leaf(header), height = 1 }, { content, height = "fill" } })
+    overlay = surface:overlay({
+      name = "smelt.diff", anchor = "center", border = "none",
+      layout = root, scope = "diff", actions = actions,
+    })
+  end
+
+  local function switch_view(name)
+    if name == current or change then return end
+    dismiss()
+    query = nil
+    current = name
+    local v = view()
+    render()
+    render_header()
+    if v.name ~= "status" and not v.loaded and not v.job then load_list(v, false) end
+    focus_pane(v, v.focus)
   end
 
   local function cycle_view(step)
-    for index, tab in ipairs(views) do
-      if tab == view then switch_view(views[(index - 1 + step) % #views + 1]); return end
+    for index, name in ipairs(VIEWS) do
+      if name == current then
+        switch_view(VIEWS[(index - 1 + step) % #VIEWS + 1])
+        return
+      end
     end
   end
 
-  switch_view = function(next_view)
-    if changing or next_view == view then return end
-    query_open = false
-    stop_reads()
-    saved[view] = { diff = diff, tree = tree, selected = selected, browsing = browsing,
-      commits = commits, entries = entries, head = head, more = more, revision = revision, base_id = base_id,
-      row = sidebar:cursor() or 0, top = (sidebar:scroll() or {}).top or 0,
-      list_row = list_row, list_top = list_top, label = comparison_label,
-      preview_cursor = preview:cursor() or 0, preview_top = (preview:scroll() or {}).top or 0,
-      info = info_buf:lines(), stale = stale, branch_totals = branch_totals }
-    view, busy, list_error = next_view, nil, nil
-    local state = saved[view]
-    saved[view] = nil
-    diff, tree, selected, file_count = nil, nil, nil, 0
-    comparison_label, revision, head, more, stale = nil, nil, nil, false, false
-    commits, entries, list_row, list_top = {}, {}, 0, 0
-    browsing = view ~= "changes"
-    sidebar:document(nil)
-    notice("Loading")
-    if state then
-      diff, tree, selected, browsing = state.diff, state.tree, state.selected, state.browsing
-      commits, entries, head, more = state.commits, state.entries, state.head, state.more
-      revision, list_row, list_top, comparison_label = state.revision, state.list_row, state.list_top, state.label
-      stale, branch_totals, base_id = state.stale, state.branch_totals, state.base_id
-      file_count = diff and diff:file_count() or 0
-      info_buf:lines(state.info)
-      if browsing then render_commits() elseif tree then sidebar:document(tree:document()) end
-      sidebar:cursor(state.row)
-      sidebar:scroll(state.top)
-      if diff and file_count > 0 then
-        preview:document(diff:document())
-        preview:cursor(state.preview_cursor)
-        preview:scroll(state.preview_top)
-      elseif browsing then
-        if head or #entries > 0 then select_commit(true) else load_history(false) end
-      else refresh() end
-      status()
-    elseif browsing then load_history(false) else refresh() end
-    focus_pane(browsing and "files" or "preview")
-  end
+  header:on("press", function(event)
+    if event.button ~= "left" then return end
+    for _, range in ipairs(tab_ranges) do
+      if event.x >= range.first and event.x <= range.last then switch_view(range.view) end
+    end
+  end)
+  header:on("resized", function()
+    if narrow() ~= single_pane then
+      single_pane = not single_pane
+      render()
+    end
+    render_header()
+  end)
+
+  -- ── revision and base input ──────────────────────────────────────────
 
   local function edit_query(purpose)
-    if changing then return end
-    input_purpose = purpose
-    input_buf:lines({ purpose == "base" and (base or "") or "" })
-    input:placeholder(purpose == "base" and "Comparison base (Enter)" or "Commit ID or revision (Enter)", { dismiss_keys = {} })
-    query_open = true
-    status()
+    if change then return end
+    query = purpose
+    input_buf:lines({ purpose == "base" and (views.branch.base or base or "") or "" })
+    input:placeholder(purpose == "base" and "Comparison base (Enter)" or "Commit ID or revision (Enter)",
+      { dismiss_keys = {} })
+    render()
     input:focus()
   end
+
+  local function close_query()
+    query = nil
+    input_buf:lines({ "" })
+    render()
+    focus_pane(view(), view().focus)
+  end
+
   input:key("enter", function()
     local value = (input_buf:line(1) or ""):match("^%s*(.-)%s*$")
-    if value == "" or changing then return end
-    query_open = false
-    if input_purpose == "base" then
+    if value == "" then return end
+    local purpose = query
+    close_query()
+    if purpose == "base" then
       base = value
-      saved.branch = nil
-      if view ~= "branch" then switch_view("branch") else load_history(false) end
-      focus_pane("files")
+      views.branch.base = value
+      reload_list(views.branch)
+      switch_view("branch")
     else
-      if view ~= "history" then switch_view("history") end
-      stop_reads()
-      browsing, revision, comparison_label = false, value, display(value) .. " - first parent"
-      entries, diff, tree, selected = {}, nil, nil, nil
-      revision_info(value)
-      refresh()
-      focus_pane("files")
-    end
-    input_buf:lines({ "" })
-    input_purpose = "revision"
-    input:placeholder("Commit ID or revision", { dismiss_keys = {} })
-  end)
-  input:key("esc", function()
-    query_open = false
-    input_buf:lines({ "" })
-    focus_pane("files")
-    status()
-  end)
-  local function on_terminal_resize()
-    local narrow = fits_one_pane()
-    if narrow == single_pane then return end
-    single_pane = narrow
-    status()
-    focus_pane(focused)
-  end
-  preview:on("resized", on_terminal_resize)
-  sidebar:on("resized", function(event)
-    on_terminal_resize()
-    if browsing then render_commits() end
-    -- The title runs from after the corner to one cell before the divider.
-    local compact = event.width - 1 < tabs_width
-    if compact ~= compact_tabs then
-      compact_tabs = compact
-      status()
+      switch_view("history")
+      show_revision(value)
     end
   end)
+  input:key("esc", close_query)
 
-  -- Letter keys are Normal-mode defaults, so they stay out of the text input.
-  overlay_opts.scope = "diff"
-  overlay_opts.actions = {
-    changes = function() switch_view("changes") end,
-    branch = function() switch_view("branch") end,
-    history = function() switch_view("history") end,
-    commits = function()
-      if view ~= "changes" and not browsing then
-        if #entries == 0 then load_history(false) else show_commits() end
-      end
-    end,
-    switch_pane = function()
-      if single_pane then focus_pane(focused == "files" and "preview" or "files") end
-    end,
-    revision = function() edit_query("revision") end,
-    base = function() edit_query("base") end,
-    close = close,
-    refresh = refresh,
-    next_file = function() nav_file(1) end,
-    prev_file = function() nav_file(-1) end,
-    stage = function() change_index("stage") end,
-    unstage = function() change_index("unstage") end,
-    toggle_stage = function() change_index("toggle") end,
-    next_view = function() cycle_view(1) end,
-    prev_view = function() cycle_view(-1) end,
-    prev_hunk = function() hunk(false) end,
-    next_hunk = function() hunk(true) end,
-  }
-  status()
-  overlay_opts.scope, overlay_opts.actions = nil, nil
-  active = { close = close }
-  if revision then
-    revision_info(revision)
+  -- ── keys ─────────────────────────────────────────────────────────────
+
+  local function refresh()
+    local v = view()
+    if v.name == "status" then load_status() else reload_list(v) end
   end
-  notice("Loading")
-  if browsing then
-    focus_pane("files")
-    load_history(false)
-  else
-    preview:focus()
-    if retained then
-      local previous = retained
-      retained = nil
-      previous.timer:remove()
-      if previous.cwd == cwd then install({ diff = previous.diff }) end
+
+  local function dismissing(fn)
+    return function()
+      dismiss()
+      fn()
     end
-    refresh()
   end
+
+  -- Every action but closing cancels a pending question first.
+  actions = {
+    status = dismissing(function() switch_view("status") end),
+    branch = dismissing(function() switch_view("branch") end),
+    history = dismissing(function() switch_view("history") end),
+    switch_pane = dismissing(function()
+      local v = view()
+      focus_pane(v, v.focus == "files" and "preview" or "files")
+    end),
+    -- Questions, inputs and Vim's visual or pending state take Esc first.
+    close = close,
+    refresh = dismissing(refresh),
+    stage = dismissing(function() change_files("stage") end),
+    unstage = dismissing(function() change_files("unstage") end),
+    toggle_stage = dismissing(function() change_files("toggle") end),
+    discard = dismissing(function() change_files("discard") end),
+    commit = dismissing(function() commit(false) end),
+    amend = dismissing(function() commit(true) end),
+    push = dismissing(function() push(false) end),
+    pull = dismissing(function() remote("pulling", "Pulled", { "pull", "--rebase" }) end),
+    fetch = dismissing(function() remote("fetching", "Fetched", { "fetch", "--prune" }) end),
+    copy = dismissing(copy_identity),
+    commits = dismissing(function() if current ~= "status" then close_files(view()) end end),
+    next_view = dismissing(function() cycle_view(1) end),
+    prev_view = dismissing(function() cycle_view(-1) end),
+    revision = dismissing(function() edit_query("revision") end),
+    base = dismissing(function() edit_query("base") end),
+    next_file = dismissing(function() step_file(1) end),
+    prev_file = dismissing(function() step_file(-1) end),
+    next_hunk = dismissing(function() hunk(true) end),
+    prev_hunk = dismissing(function() hunk(false) end),
+  }
+  -- Unhandled dismiss chords close the overlay through its first leaf.
+  header:on("dismiss", close)
+
+  -- ── start ────────────────────────────────────────────────────────────
+
+  active = { close = close }
+  for _, name in ipairs({ "branch", "history" }) do
+    render_list(views[name])
+    views[name].info_buf:lines({ "" })
+    notice(views[name], "Loading")
+  end
+  notice(status, "Loading")
+  render()
+  render_header()
+  focus_pane(view(), "files")
+  if opts.revision then show_revision(opts.revision) end
+  load_status()
+  if current ~= "status" and not opts.revision then load_list(view(), false) end
 end
 
-smelt.cmd.register("diff", function(arg)
+-- "status", "branch [base]", "history" or a revision.
+local function parse(arg)
   local word, value = (arg or ""):match("^(%S+)%s*(.-)%s*$")
-  if not word then M.open()
-  elseif word == "branch" then M.open({ view = "branch", base = value ~= "" and value or nil })
-  elseif word == "history" then M.open({ view = "history" })
-  else M.open({ view = "history", revision = arg }) end
-end, {
-  desc = "review working changes, branch commits, history, or one revision",
-  args = { "[branch [base]|history|revision]" }, busy = "run",
+  if not word or word == "status" then return {} end
+  if word == "branch" then return { view = "branch", base = value ~= "" and value or nil } end
+  if word == "history" then return { view = "history" } end
+  return { view = "history", revision = arg:match("^%s*(.-)%s*$") }
+end
+
+smelt.cmd.register("diff", function(arg) M.open(parse(arg)) end, {
+  desc = "review status, branch commits, history, or one revision",
+  args = { "[status|branch [base]|history|revision]" }, busy = "run",
 })
+
+smelt.cli.on_command("diff", function(args)
+  local o = parse(table.concat(args, " "))
+  o.standalone = true
+  M.open(o)
+end)
 
 return M

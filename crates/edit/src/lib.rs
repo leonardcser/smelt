@@ -2202,7 +2202,13 @@ impl Ui {
     }
 
     /// Register an event callback. Multiple callbacks per (win, event) fire in registration order.
+    /// A `CursorMoved` subscription starts from the current row, so the next move fires.
     pub fn win_on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
+        if ev == WinEvent::CursorMoved {
+            if let Some(w) = self.wins.get_mut(&win) {
+                w.last_emitted_cursor.get_or_insert(w.cursor_abs_row());
+            }
+        }
         self.callbacks.on_event(win, ev, cb);
     }
 
@@ -2402,6 +2408,7 @@ impl Ui {
     /// Focus `win`. Returns `false` unless it belongs to the active modal, when
     /// one exists, or is otherwise a focusable split, decoration, or overlay
     /// leaf. Re-focusing the current window is a no-op (no history push).
+    /// Leaving a window drops its pending vim command.
     pub fn set_focus(&mut self, win: WinId) -> bool {
         let active_modal = self.active_modal();
         let is_active_modal_leaf = active_modal
@@ -2425,6 +2432,10 @@ impl Ui {
             return false;
         }
         if let Some(p) = prior {
+            // A command typed in one window does not finish in another.
+            if let Some(w) = self.wins.get_mut(&p) {
+                w.cancel_vim_pending();
+            }
             self.focus_history.push(p);
         }
         self.focus = Some(win);
@@ -3864,6 +3875,31 @@ impl Ui {
             };
             self.fire_win_event(win, WinEvent::Scrolled, payload, lua_invoke);
         }
+    }
+
+    /// Fire `WinEvent::CursorMoved` on every subscribed window whose cursor
+    /// row changed since the last emission or since the subscription.
+    /// Returns whether any event fired.
+    pub fn dispatch_cursor_events(&mut self, lua_invoke: &mut LuaInvoke) -> bool {
+        let mut fired = false;
+        for win in self.callbacks.wins_with_event(WinEvent::CursorMoved) {
+            let Some(w) = self.wins.get_mut(&win) else {
+                continue;
+            };
+            let row = w.cursor_abs_row();
+            let previous = w.last_emitted_cursor.replace(row);
+            if previous.is_none_or(|previous| previous == row) {
+                continue;
+            }
+            fired = true;
+            self.fire_win_event(
+                win,
+                WinEvent::CursorMoved,
+                Payload::Cursor { row },
+                lua_invoke,
+            );
+        }
+        fired
     }
 
     /// Fire `WinEvent::Resized` on every subscribed window whose viewport

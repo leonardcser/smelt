@@ -244,6 +244,7 @@ pub struct TestAppBuilder {
     cwd: Option<std::path::PathBuf>,
     ephemeral: bool,
     model_available: bool,
+    cli_command: Option<smelt_core::lua::CliCommand>,
     wall_time: Option<SystemTime>,
     engine: Option<EngineHandle>,
 }
@@ -262,6 +263,7 @@ impl Default for TestAppBuilder {
             cwd: None,
             ephemeral: false,
             model_available: true,
+            cli_command: None,
             wall_time: None,
             engine: None,
         }
@@ -319,6 +321,16 @@ impl TestAppBuilder {
 
     pub fn with_ephemeral(mut self, ephemeral: bool) -> Self {
         self.ephemeral = ephemeral;
+        self
+    }
+
+    /// Launch as `smelt <name> <args>`, a Lua subcommand such as `smelt diff`,
+    /// instead of an agent session.
+    pub fn with_cli_command(mut self, name: &str, args: &[&str]) -> Self {
+        self.cli_command = Some(smelt_core::lua::CliCommand {
+            name: name.into(),
+            args: args.iter().map(|arg| (*arg).into()).collect(),
+        });
         self
     }
 
@@ -508,6 +520,7 @@ impl TestAppBuilder {
         }
         lua.load_early_init();
         lua.load_project_early_init(&cwd);
+        *lua.core_shared().cli_command.lock().unwrap() = self.cli_command.clone();
         lua.freeze_launch_inputs();
 
         let session_persistence = if self.ephemeral {
@@ -534,8 +547,9 @@ impl TestAppBuilder {
         // Match production startup by finishing generation-zero loading with a
         // live frontend host. Stories skip the `on_ready` drain on purpose:
         // it is reserved for interactive decoration that storybook snapshots
-        // should not include.
-        if let Some(error) = app.finish_lua_launch(false) {
+        // should not include. A subcommand opens its view there, so it runs.
+        let run_ready_hooks = self.cli_command.is_some();
+        if let Some(error) = app.finish_lua_launch(run_ready_hooks) {
             panic!("test app Lua launch failed: {error}");
         }
         app.conversation.clear_pending_history_appends();

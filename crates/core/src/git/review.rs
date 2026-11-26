@@ -9,9 +9,6 @@ pub struct Commit {
     pub age: String,
     pub subject: String,
     pub message: String,
-    pub additions: u64,
-    pub deletions: u64,
-    pub binary: bool,
 }
 
 #[derive(Debug)]
@@ -108,34 +105,7 @@ pub async fn history(
         let range = base_id
             .as_ref()
             .map_or_else(|| head.clone(), |base| format!("{base}..{head}"));
-        let output = checked(
-            git(
-                &root,
-                &args(&[
-                    "log",
-                    "--topo-order",
-                    "--diff-merges=first-parent",
-                    "--root",
-                    "--numstat",
-                    "-z",
-                    "--find-renames",
-                    "--no-color",
-                    "--diff-algorithm=histogram",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--format=%x00COMMIT%x00%H%x00%an%x00%ar%x00%s%x00%B%x00",
-                    &format!("--max-count={}", PAGE_SIZE + 1),
-                    &format!("--skip={skip}"),
-                    &range,
-                    "--",
-                ]),
-                &cancel,
-            )
-            .await?,
-        )?;
-        let mut commits = parse_log(&output)?;
-        let more = commits.len() > PAGE_SIZE;
-        commits.truncate(PAGE_SIZE);
+        let (commits, more) = log(&root, &range, skip, &cancel).await?;
         Ok(Page {
             commits,
             base,
@@ -148,48 +118,128 @@ pub async fn history(
     .map_err(|_| "git history timed out after 120 seconds".to_string())?
 }
 
-fn parse_log(output: &[u8]) -> Result<Vec<Commit>, String> {
-    let mut fields = output.split(|byte| *byte == 0);
-    let mut commits: Vec<Commit> = Vec::new();
-    while let Some(field) = fields.next() {
-        if field == b"COMMIT" {
-            let mut next = || {
-                fields
-                    .next()
-                    .map(|value| String::from_utf8_lossy(value).into_owned())
-                    .ok_or_else(|| "invalid Git history record".to_string())
-            };
-            commits.push(Commit {
-                id: next()?,
-                author: next()?,
-                age: next()?,
-                subject: next()?,
-                message: next()?,
-                additions: 0,
-                deletions: 0,
-                binary: false,
-            });
-        } else if let Some(commit) = commits.last_mut() {
-            let mut columns = field.splitn(3, |byte| *byte == b'\t');
-            let add = columns.next().unwrap_or_default();
-            let Some(del) = columns.next() else { continue };
-            if columns.next() == Some(b"".as_slice()) {
-                // A -z rename carries two additional NUL-delimited paths.
-                fields.next();
-                fields.next();
-            }
-            if add == b"-" || add == b"\n-" {
-                commit.binary = true;
-                continue;
-            }
-            if let (Ok(add), Ok(del)) = (
-                String::from_utf8_lossy(add).trim().parse::<u64>(),
-                String::from_utf8_lossy(del).parse::<u64>(),
-            ) {
-                commit.additions += add;
-                commit.deletions += del;
-            }
+/// One page of commits in `range`, newest first, and whether more follow.
+pub(crate) async fn log(
+    root: &Path,
+    range: &str,
+    skip: usize,
+    cancel: &CancellationToken,
+) -> Result<(Vec<Commit>, bool), String> {
+    let output = checked(
+        git(
+            root,
+            &args(&[
+                "log",
+                "--topo-order",
+                "-z",
+                "--no-color",
+                "--format=%H%x00%an%x00%ar%x00%s%x00%B",
+                &format!("--max-count={}", PAGE_SIZE + 1),
+                &format!("--skip={skip}"),
+                range,
+                "--",
+            ]),
+            cancel,
+        )
+        .await?,
+    )?;
+    let mut commits = parse_log(&output)?;
+    let more = commits.len() > PAGE_SIZE;
+    commits.truncate(PAGE_SIZE);
+    Ok((commits, more))
+}
+
+/// Line totals of one commit against its first parent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub additions: u64,
+    pub deletions: u64,
+    pub binary: bool,
+}
+
+/// Line totals of each commit in `ids`, against its first parent. Unlike a
+/// commit list, this diffs every commit, so callers load it after the list.
+pub async fn stats(
+    root: PathBuf,
+    ids: Vec<String>,
+    cancel: CancellationToken,
+) -> Result<HashMap<String, Stats>, String> {
+    // Only object IDs are read from stdin, never options or revision syntax.
+    if let Some(id) = ids
+        .iter()
+        .find(|id| id.len() < 4 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(format!("not a commit ID: {id}"));
+    }
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let input: String = ids.iter().map(|id| format!("{id}\n")).collect();
+    let argv = args(&[
+        "log",
+        "--no-walk=unsorted",
+        "--stdin",
+        "--diff-merges=first-parent",
+        "--root",
+        "--numstat",
+        "--find-renames",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--format=%x01%H",
+        "--",
+    ]);
+    let output = tokio::time::timeout(
+        Duration::from_secs(120),
+        git_input(&root, &argv, Some(input.as_bytes()), None, &cancel),
+    )
+    .await
+    .map_err(|_| "git stats timed out after 120 seconds".to_string())??;
+    Ok(parse_stats(&checked(output)?))
+}
+
+/// `\x01<id>` heads each commit; its `<added>\t<deleted>\t<path>` lines
+/// follow, with `-` counts for a binary file.
+fn parse_stats(output: &[u8]) -> HashMap<String, Stats> {
+    let mut stats: Vec<(String, Stats)> = Vec::new();
+    for line in String::from_utf8_lossy(output).lines() {
+        if let Some(id) = line.strip_prefix('\x01') {
+            stats.push((id.to_string(), Stats::default()));
+            continue;
         }
+        let (Some((_, commit)), Some((added, rest))) = (stats.last_mut(), line.split_once('\t'))
+        else {
+            continue;
+        };
+        let deleted = rest.split('\t').next().unwrap_or_default();
+        match (added.parse::<u64>(), deleted.parse::<u64>()) {
+            (Ok(added), Ok(deleted)) => {
+                commit.additions += added;
+                commit.deletions += deleted;
+            }
+            _ => commit.binary = true,
+        }
+    }
+    stats.into_iter().collect()
+}
+
+/// Records are NUL-terminated under `-z`; their fields are NUL-separated.
+fn parse_log(output: &[u8]) -> Result<Vec<Commit>, String> {
+    let mut fields = output
+        .strip_suffix(b"\0")
+        .unwrap_or(output)
+        .split(|byte| *byte == 0)
+        .map(|field| String::from_utf8_lossy(field).into_owned());
+    let mut commits = Vec::new();
+    while let Some(id) = fields.next().filter(|id| !id.is_empty()) {
+        let mut next = || fields.next().ok_or("invalid Git history record");
+        commits.push(Commit {
+            id,
+            author: next()?,
+            age: next()?,
+            subject: next()?,
+            message: next()?,
+        });
     }
     Ok(commits)
 }
@@ -204,14 +254,11 @@ pub async fn comparison(
 ) -> Result<DiffSnapshot, String> {
     tokio::time::timeout(Duration::from_secs(120), async {
         let revision = resolve(&root, &revision, &cancel).await?;
-        let (before, label) = if let Some(base) = base {
+        let before = if let Some(base) = base {
             let base_id = resolve(&root, &base, &cancel).await?;
             let ancestor =
                 checked(git(&root, &args(&["merge-base", &base_id, &revision]), &cancel).await?)?;
-            (
-                String::from_utf8_lossy(&ancestor).trim().to_string(),
-                format!("{base}...{}", &revision[..8]),
-            )
+            String::from_utf8_lossy(&ancestor).trim().to_string()
         } else {
             let parents = checked(
                 git(
@@ -222,11 +269,10 @@ pub async fn comparison(
                 .await?,
             )?;
             let parents = String::from_utf8_lossy(&parents);
-            let parent = match parents.split_whitespace().nth(1) {
+            match parents.split_whitespace().nth(1) {
                 Some(parent) => parent.to_string(),
                 None => empty_tree(&root, &cancel).await?,
-            };
-            (parent, format!("{} (first parent)", &revision[..8]))
+            }
         };
         let patch = checked(
             git(
@@ -267,8 +313,8 @@ pub async fn comparison(
         };
         Ok(DiffSnapshot {
             root,
-            branch: label,
             view,
+            tracking: None,
         })
     })
     .await
@@ -345,10 +391,6 @@ mod tests {
         .unwrap();
         assert_eq!(refreshed.base_id, page.base_id);
         assert_eq!(refreshed.commits.len(), 1);
-        assert_eq!(
-            (page.commits[0].additions, page.commits[0].deletions),
-            (2, 1)
-        );
         run(root, &["branch", "-f", "main", &feature]);
         let pinned = history(
             root.into(),
@@ -407,8 +449,14 @@ mod tests {
         .is_err());
     }
 
+    async fn stats_rejects(root: &Path, id: &str) -> bool {
+        stats(root.into(), vec![id.into()], CancellationToken::new())
+            .await
+            .is_err()
+    }
+
     #[tokio::test]
-    async fn history_counts_renames_binary_merges_and_pages_from_pinned_head() {
+    async fn history_pages_and_stats_cover_merges_renames_and_binaries() {
         let dir = repo();
         let root = dir.path();
         std::fs::write(root.join("old"), "same\n").unwrap();
@@ -429,16 +477,25 @@ mod tests {
             .unwrap();
         assert_eq!(page.commits.len(), 4);
         assert_eq!(page.commits[0].subject, "merge side");
-        assert_eq!(page.commits[0].additions, 1);
-        let renamed = page
+        assert_eq!(page.commits[1].message, "side change\n");
+        let ids: Vec<_> = page
             .commits
             .iter()
-            .find(|commit| commit.subject == "rename and binary")
+            .map(|commit| commit.id.clone())
+            .collect();
+        let stats = stats(root.into(), ids.clone(), CancellationToken::new())
+            .await
             .unwrap();
-        assert_eq!(
-            (renamed.additions, renamed.deletions, renamed.binary),
-            (0, 0, true)
-        );
+        let totals = |index: usize| {
+            let stats = &stats[&ids[index]];
+            (stats.additions, stats.deletions, stats.binary)
+        };
+        assert_eq!(totals(0), (1, 0, false), "a merge counts its first parent");
+        assert_eq!(totals(2), (0, 0, true), "a pure rename adds no lines");
+        assert_eq!(totals(3), (1, 0, false), "a root commit counts every line");
+        for id in ["--output=x", "HEAD~1"] {
+            assert!(stats_rejects(root, id).await, "{id}");
+        }
         for _ in 0..PAGE_SIZE - 1 {
             run(root, &["commit", "--allow-empty", "-qm", "empty"]);
         }

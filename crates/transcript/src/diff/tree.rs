@@ -15,9 +15,11 @@ use crate::content::width::truncate_to_cells;
 
 #[derive(Debug)]
 struct Node {
-    section: Section,
+    section: TreeSection,
     group: bool,
     separator: bool,
+    /// Index of a commit row in [`TreeIndex::commits`].
+    commit: Option<usize>,
     status: char,
     binary: bool,
     path: String,
@@ -31,7 +33,7 @@ struct Node {
 
 impl Node {
     fn is_directory(&self) -> bool {
-        !self.group && !self.separator && self.file.is_none()
+        !self.group && !self.separator && self.file.is_none() && self.commit.is_none()
     }
 }
 
@@ -101,10 +103,12 @@ impl State {
 }
 
 pub struct TreeNode {
-    pub section: Section,
+    pub section: TreeSection,
     pub group: bool,
     pub children: bool,
     pub file: Option<usize>,
+    /// The commit a commit row lists.
+    pub commit: Option<CommitRow>,
     pub first: usize,
     pub end: usize,
     pub parent: Option<u64>,
@@ -116,52 +120,66 @@ pub struct TreeNode {
 pub struct TreeIndex {
     nodes: Vec<Node>,
     files: Vec<usize>,
-    groups: [usize; 3],
+    /// Heading node of each section the tree lists, by [`TreeSection::slot`].
+    groups: [Option<usize>; TreeSection::COUNT],
     directories: Vec<usize>,
     counts: Vec<Counts>,
+    /// Every listed commit, in row order.
+    commits: Vec<CommitRow>,
     visible: Arc<Vec<usize>>,
 }
 
 impl TreeIndex {
-    pub fn new(diff: &Diff) -> Self {
+    /// The file sections of `diff`, followed by `commits`, each list under
+    /// its own heading.
+    pub fn new(diff: &Diff, commits: &[CommitSection]) -> Self {
         let mut nodes: Vec<Node> = Vec::new();
         let mut files = Vec::with_capacity(diff.files.len());
-        let mut groups = [0; 3];
+        let mut groups = [None; TreeSection::COUNT];
+        let mut listed = Vec::new();
         let mut counts: Vec<_> = diff
             .files
             .iter()
             .map(|file| Counts::new(file.additions, file.deletions))
             .collect();
-        counts.extend((0..3).map(|_| Counts::new(0, 0)));
-        for &section in diff.sections() {
-            let start = diff.files.partition_point(|file| file.section < section);
-            let end = diff.files.partition_point(|file| file.section <= section);
-            if section == Section::Staged {
-                nodes.push(Node {
-                    section,
-                    group: false,
-                    separator: true,
-                    status: ' ',
-                    binary: false,
-                    path: String::new(),
-                    label: String::new(),
-                    depth: 0,
-                    parent: None,
-                    file: None,
-                    first: start,
-                    end: nodes.len() + 1,
-                });
+        counts.extend((0..TreeSection::COUNT).map(|_| Counts::new(0, 0)));
+        let separator = |section, end| Node {
+            section,
+            group: false,
+            separator: true,
+            commit: None,
+            status: ' ',
+            binary: false,
+            path: String::new(),
+            label: String::new(),
+            depth: 0,
+            parent: None,
+            file: None,
+            first: 0,
+            end,
+        };
+        for &file_section in diff.sections() {
+            let section = TreeSection::Files(file_section);
+            let start = diff
+                .files
+                .partition_point(|file| file.section < file_section);
+            let end = diff
+                .files
+                .partition_point(|file| file.section <= file_section);
+            if !nodes.is_empty() {
+                nodes.push(separator(section, nodes.len() + 1));
             }
             let group = nodes.len();
-            groups[section as usize] = group;
+            groups[section.slot()] = Some(group);
             nodes.push(Node {
                 section,
                 group: true,
                 separator: false,
+                commit: None,
                 status: ' ',
                 binary: false,
                 path: String::new(),
-                label: format!("{} ({})", section.name(), end - start),
+                label: format!("{} ({})", file_section.name(), end - start),
                 depth: 0,
                 parent: None,
                 file: None,
@@ -189,6 +207,7 @@ impl TreeIndex {
                                 section,
                                 group: false,
                                 separator: false,
+                                commit: None,
                                 status: ' ',
                                 binary: false,
                                 path: format!("{}\0{:x?}", section.name(), path),
@@ -208,6 +227,7 @@ impl TreeIndex {
                             section,
                             group: false,
                             separator: false,
+                            commit: None,
                             status: entry.status.chars().next().unwrap_or(' '),
                             binary: entry.binary,
                             path: String::new(),
@@ -228,7 +248,47 @@ impl TreeIndex {
                 }
             }
             nodes[group].end = nodes.len();
-            counts[diff.files.len() + section as usize] = Counts::new(added, deleted);
+            counts[diff.files.len() + section.slot()] = Counts::new(added, deleted);
+        }
+        for commit_section in commits {
+            let section = TreeSection::Commits(commit_section.list);
+            nodes.push(separator(section, nodes.len() + 1));
+            let group = nodes.len();
+            groups[section.slot()] = Some(group);
+            nodes.push(Node {
+                section,
+                group: true,
+                separator: false,
+                commit: None,
+                status: ' ',
+                binary: false,
+                path: String::new(),
+                label: commit_section.label(),
+                depth: 0,
+                parent: None,
+                file: None,
+                first: 0,
+                end: group + 1 + commit_section.commits.len(),
+            });
+            for commit in &commit_section.commits {
+                let short = commit.id.get(..7).unwrap_or(&commit.id);
+                nodes.push(Node {
+                    section,
+                    group: false,
+                    separator: false,
+                    commit: Some(listed.len()),
+                    status: ' ',
+                    binary: false,
+                    path: String::new(),
+                    label: format!("{short} {}", label(&commit.subject)),
+                    depth: 1,
+                    parent: Some(group),
+                    file: None,
+                    first: 0,
+                    end: nodes.len() + 1,
+                });
+                listed.push(commit.clone());
+            }
         }
         let mut directories: Vec<_> = (0..nodes.len())
             .filter(|index| nodes[*index].is_directory())
@@ -241,7 +301,12 @@ impl TreeIndex {
             groups,
             directories,
             counts,
+            commits: listed,
         }
+    }
+
+    fn group(&self, section: TreeSection) -> Option<usize> {
+        self.groups[section.slot()]
     }
 
     fn directory(&self, key: &str) -> Option<usize> {
@@ -249,6 +314,85 @@ impl TreeIndex {
             .binary_search_by(|index| self.nodes[*index].path.as_str().cmp(key))
             .ok()
             .map(|index| self.directories[index])
+    }
+}
+
+/// Which side of the upstream comparison a commit list shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitList {
+    /// Commits on `HEAD` that its upstream lacks.
+    Unpushed,
+    /// Commits on the upstream that `HEAD` lacks.
+    Unpulled,
+}
+
+impl CommitList {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unpushed => "unpushed",
+            Self::Unpulled => "unpulled",
+        }
+    }
+}
+
+/// The section a tree row belongs to: a file section of the diff, or a
+/// commit list after them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeSection {
+    Files(Section),
+    Commits(CommitList),
+}
+
+impl TreeSection {
+    const COUNT: usize = 5;
+
+    /// Dense index over every section, file sections first.
+    fn slot(self) -> usize {
+        match self {
+            Self::Files(section) => section as usize,
+            Self::Commits(CommitList::Unpushed) => 3,
+            Self::Commits(CommitList::Unpulled) => 4,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Files(section) => section.name(),
+            Self::Commits(list) => list.name(),
+        }
+    }
+}
+
+/// One commit listed below the file sections.
+#[derive(Clone, Debug)]
+pub struct CommitRow {
+    pub id: String,
+    pub subject: String,
+}
+
+/// Unpushed or unpulled commits relative to `upstream`. `total` counts every
+/// such commit; `commits` may hold only the newest of them.
+#[derive(Clone, Debug)]
+pub struct CommitSection {
+    pub list: CommitList,
+    pub upstream: String,
+    pub total: usize,
+    pub commits: Vec<CommitRow>,
+}
+
+impl CommitSection {
+    fn label(&self) -> String {
+        let relation = match self.list {
+            CommitList::Unpushed => "unpushed to",
+            CommitList::Unpulled => "unpulled from",
+        };
+        let shown = self.commits.len();
+        let count = if self.total > shown {
+            format!("{shown}+")
+        } else {
+            shown.to_string()
+        };
+        format!("{relation} {} ({count})", label(&self.upstream))
     }
 }
 
@@ -261,7 +405,7 @@ pub struct DiffTree {
 
 impl DiffTree {
     pub fn new(diff: &Diff) -> Self {
-        Self::from_index(Arc::new(TreeIndex::new(diff)))
+        Self::from_index(Arc::new(TreeIndex::new(diff, &[])))
     }
 
     pub fn from_index(index: Arc<TreeIndex>) -> Self {
@@ -295,19 +439,18 @@ impl DiffTree {
     /// Restore a directory or section by identity, never by its former row.
     /// File selection is restored separately through the diff's raw file key.
     pub fn restore_group(&self, previous: &Self, row: u64) -> Option<u64> {
-        let old_index = *previous
-            .state
-            .lock()
-            .unwrap()
-            .visible
-            .get(usize::try_from(row).ok()?)?;
+        // Release `previous` before locking `self`: they may be the same tree.
+        let old_index = {
+            let state = previous.state.lock().unwrap();
+            *state.visible.get(usize::try_from(row).ok()?)?
+        };
         let old = &previous.index.nodes[old_index];
         let mut index = if old.group {
-            self.index.groups[old.section as usize]
+            self.index.group(old.section)?
         } else if old.is_directory() {
             self.index
                 .directory(&old.path)
-                .unwrap_or(self.index.groups[old.section as usize])
+                .or_else(|| self.index.group(old.section))?
         } else {
             return None;
         };
@@ -320,12 +463,26 @@ impl DiffTree {
         }
     }
 
-    pub fn section_row(&self, section: Section) -> u64 {
-        self.state
-            .lock()
-            .unwrap()
-            .row(self.index.groups[section as usize])
-            .unwrap()
+    /// Row of a section heading, or `None` for a section the tree does not
+    /// list. The diff's file sections are always listed, even when empty.
+    pub fn section_row(&self, section: TreeSection) -> Option<u64> {
+        let group = self.index.group(section)?;
+        self.state.lock().unwrap().row(group)
+    }
+
+    /// Visible row of the commit `id`, or `None` for one the tree does not list.
+    pub fn commit_row(&self, id: &str) -> Option<u64> {
+        let commit = self
+            .index
+            .commits
+            .iter()
+            .position(|commit| commit.id == id)?;
+        let node = self
+            .index
+            .nodes
+            .iter()
+            .position(|node| node.commit == Some(commit))?;
+        self.state.lock().unwrap().row(node)
     }
 
     pub fn node(&self, row: u64) -> Option<TreeNode> {
@@ -340,6 +497,7 @@ impl DiffTree {
             group: node.group,
             children: node.is_directory(),
             file: node.file,
+            commit: node.commit.map(|commit| self.index.commits[commit].clone()),
             first: node.first,
             end: self.index.nodes[node.end - 1]
                 .file
@@ -411,6 +569,17 @@ impl DiffTree {
                 ..Default::default()
             };
         }
+        if node.commit.is_some() {
+            let id = node
+                .label
+                .split_once(' ')
+                .map_or(0, |(id, _)| text_width(id) + 1);
+            return DocumentRow {
+                text: fit(&node.label, width),
+                spans: vec![span(0, id.min(width), intern("Comment"))],
+                ..Default::default()
+            };
+        }
         let depth = node.depth.saturating_sub(1);
         if node.is_directory() {
             let indent = " ".repeat((depth * 2).min(width));
@@ -422,7 +591,7 @@ impl DiffTree {
         }
         let counts = &self.index.counts[node
             .file
-            .unwrap_or(self.index.files.len() + node.section as usize)];
+            .unwrap_or(self.index.files.len() + node.section.slot())];
         let count_width = |added: &str, deleted: &str| {
             [added, deleted]
                 .into_iter()
@@ -650,10 +819,12 @@ mod tests {
         );
         let empty = DiffTree::new(&Diff::parse(String::new()));
         assert_eq!(empty.restore_group(&previous, old_src), Some(0));
-        let staged = previous.section_row(Section::Staged);
+        let staged = previous
+            .section_row(TreeSection::Files(Section::Staged))
+            .unwrap();
         assert_eq!(
             empty.restore_group(&previous, staged),
-            Some(empty.section_row(Section::Staged))
+            empty.section_row(TreeSection::Files(Section::Staged))
         );
         assert!(empty.restore_group(&previous, staged - 1).is_none());
         let mut staged_diff = fixture();
@@ -676,7 +847,7 @@ mod tests {
             tree.restore_collapsed(&["unstaged".into(), "staged".into()]);
             assert!(tree.collapsed().is_empty());
             for section in [Section::Unstaged, Section::Staged] {
-                let row = tree.section_row(section);
+                let row = tree.section_row(TreeSection::Files(section)).unwrap();
                 let node = tree.node(row).unwrap();
                 assert!(node.group && node.expanded && !node.children);
                 assert_eq!(
@@ -689,7 +860,10 @@ mod tests {
                     .text
                     .starts_with(section.name()));
             }
-            let gap = tree.section_row(Section::Staged) - 1;
+            let gap = tree
+                .section_row(TreeSection::Files(Section::Staged))
+                .unwrap()
+                - 1;
             assert!(tree.rows(gap..gap + 1, &crate::theme::Theme::default())[0]
                 .text
                 .trim()
@@ -826,5 +1000,92 @@ mod tests {
             "{group}"
         );
         assert_eq!(label("line\t\n\u{1b}"), "line\\t\\n\\u{1b}");
+    }
+
+    #[test]
+    fn commit_sections_follow_file_sections() {
+        let commit = |id: &str, subject: &str| CommitRow {
+            id: id.repeat(40),
+            subject: subject.into(),
+        };
+        let sections = || {
+            vec![
+                CommitSection {
+                    list: CommitList::Unpushed,
+                    upstream: "origin/main".into(),
+                    total: 2,
+                    commits: vec![
+                        commit("a", "fix: tab"),
+                        commit("b", "feat: 界 wide subject"),
+                    ],
+                },
+                CommitSection {
+                    list: CommitList::Unpulled,
+                    upstream: "origin/main".into(),
+                    total: 80,
+                    commits: vec![commit("c", "docs: readme")],
+                },
+            ]
+        };
+        let tree = DiffTree::from_index(Arc::new(TreeIndex::new(&fixture(), &sections())));
+        let files = DiffTree::new(&fixture()).snapshot().total_rows;
+        assert_eq!(tree.snapshot().total_rows, files + 2 + 2 + 2 + 1);
+
+        let unpushed = tree
+            .section_row(TreeSection::Commits(CommitList::Unpushed))
+            .unwrap();
+        assert_eq!(unpushed, files + 1);
+        assert!(tree.node(unpushed - 1).is_none(), "separator");
+        let group = tree.node(unpushed).unwrap();
+        assert!(
+            group.group
+                && group.commit.is_none()
+                && group.section == TreeSection::Commits(CommitList::Unpushed)
+        );
+        let second = tree.node(unpushed + 2).unwrap();
+        let id = second.commit.as_ref().map(|commit| commit.id.clone());
+        assert_eq!(second.parent, Some(unpushed));
+        assert_eq!(tree.commit_row(&id.unwrap()), Some(unpushed + 2));
+        assert_eq!(tree.commit_row("missing"), None);
+        assert_eq!(second.first..second.end, 0..0, "commits select no files");
+        assert_eq!(tree.toggle(unpushed + 1), None);
+
+        let rows = tree.rows_at(unpushed..unpushed + 3, Some(60));
+        assert_eq!(rows[0].text.trim_end(), "unpushed to origin/main (2)");
+        assert_eq!(rows[1].text.trim_end(), "aaaaaaa fix: tab");
+        assert_eq!(rows[1].spans[0].col_end, 8);
+        let narrow = tree.rows_at(unpushed + 2..unpushed + 3, Some(20));
+        assert_eq!(text_width(&narrow[0].text), 20);
+        assert!(narrow[0].text.ends_with('…'));
+        let unpulled = tree
+            .section_row(TreeSection::Commits(CommitList::Unpulled))
+            .unwrap();
+        assert_eq!(
+            tree.rows_at(unpulled..unpulled + 1, Some(60))[0]
+                .text
+                .trim_end(),
+            "unpulled from origin/main (1+)",
+            "a truncated list says so"
+        );
+        assert!(tree.rows_at(unpulled + 1..unpulled + 2, Some(60))[0]
+            .text
+            .starts_with("ccccccc docs: readme "));
+
+        let without = DiffTree::new(&fixture());
+        assert_eq!(
+            without.section_row(TreeSection::Commits(CommitList::Unpushed)),
+            None
+        );
+        let refreshed = DiffTree::from_index(Arc::new(TreeIndex::new(
+            &Diff::parse(String::new()),
+            &sections(),
+        )));
+        assert_eq!(
+            refreshed.restore_group(&tree, unpulled),
+            refreshed.section_row(TreeSection::Commits(CommitList::Unpulled))
+        );
+        assert_eq!(refreshed.restore_group(&tree, unpushed + 1), None);
+        assert_eq!(without.restore_group(&tree, unpushed), None);
+        assert_eq!(tree.restore_group(&tree, unpushed), Some(unpushed));
     }
 }

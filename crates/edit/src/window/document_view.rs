@@ -525,6 +525,33 @@ impl Window {
         })
     }
 
+    /// First and last row (inclusive) of the active Vim Visual selection, in
+    /// document rows for a row-backed viewer and buffer lines otherwise.
+    /// `None` outside Visual and VisualLine modes.
+    pub fn visual_rows(&self, buf: &Buffer) -> Option<(RowIndex, RowIndex)> {
+        if !matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine) {
+            return None;
+        }
+        if self.document_view_state_ref().active {
+            let range = self.row_selection_anchor_range(buf)?;
+            let last = if range.end.byte_col == 0 && range.end.row > range.start.row {
+                range.end.row - 1
+            } else {
+                range.end.row
+            };
+            return Some((range.start.row, last));
+        }
+        let (start, end) = self.selection_range(buf)?;
+        let text = buf.text();
+        let row = |byte: usize| {
+            smelt_buffer::text::slice(&text, 0..byte)
+                .matches('\n')
+                .count()
+        };
+        let last_byte = crate::text::prev_char_boundary(&text, end).max(start);
+        Some((row(start) as RowIndex, row(last_byte) as RowIndex))
+    }
+
     pub fn row_yank_flash_range(&self, now: Instant) -> Option<DocRange> {
         if !self.document_view_state_ref().active {
             return None;

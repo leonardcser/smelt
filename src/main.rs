@@ -19,6 +19,11 @@ pub struct Args {
     version_flag: Option<bool>,
     #[command(subcommand)]
     command: Option<Commands>,
+    /// Run as if smelt was started in PATH
+    // `startup::prepare_launch` applies it and `startup::clap_args` removes
+    // it before clap parses, so it is declared, globally, only for `--help`.
+    #[arg(short = 'C', long = "cwd", value_name = "PATH", global = true)]
+    cwd: Option<PathBuf>,
     /// Initial message to send (auto-submits on startup)
     message: Option<String>,
     #[arg(
@@ -723,13 +728,23 @@ async fn async_main() {
         .map(|s| s.clone())
         .unwrap_or_default();
 
-    let (mut args, lua_flag_values) = parse_with_lua_flags(&lua_flag_specs);
+    let lua_command_specs: Vec<tui::CliCommandSpec> = lua_runtime
+        .shared()
+        .cli_command_specs
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (mut args, lua_flag_values, lua_command) =
+        parse_with_lua_flags(&lua_flag_specs, &lua_command_specs);
     let startup_resume = lua_flag_values.get("resume").and_then(|value| match value {
         tui::CliFlagValue::String(id) if !id.is_empty() => Some(id.clone()),
         _ => None,
     });
     if let Ok(mut map) = lua_runtime.shared().cli_flag_values.lock() {
         *map = lua_flag_values;
+    }
+    if let Ok(mut command) = lua_runtime.shared().cli_command.lock() {
+        command.clone_from(&lua_command);
     }
     lua_runtime.freeze_launch_inputs();
     drop(cli_parse_startup);
@@ -777,6 +792,12 @@ async fn async_main() {
         eprintln!("error: --headless requires a message argument or --prompt-file");
         std::process::exit(1);
     }
+    // A Lua subcommand such as `smelt diff` runs its plugin's UI without an
+    // agent session: nothing to resume, set up, persist or publish.
+    let agent_session = lua_command.is_none();
+    if !agent_session {
+        args.ephemeral = true;
+    }
 
     if !args.headless {
         if let Some(restored_cwd) = startup_resume
@@ -807,6 +828,7 @@ async fn async_main() {
         || args.r#type.is_some()
         || args.model.is_some();
     if !args.headless
+        && agent_session
         && !has_provider_cli_flags
         && args.config.is_none()
         && init_lua.as_deref().is_some_and(|p| !p.exists())
@@ -1002,7 +1024,14 @@ async fn async_main() {
     // add servers later through `smelt.mcp.register` and the dispatcher
     // sees them live without the engine having to restart. Desired slots are
     // published now; process launch and tool discovery continue asynchronously.
-    let mcp_manager = smelt_core::mcp::McpManager::start_detached(&runtime.mcp, &cwd);
+    // Without an agent session no tool runs, so no MCP server starts.
+    let no_servers = std::collections::HashMap::new();
+    let mcp_servers = if agent_session {
+        &runtime.mcp
+    } else {
+        &no_servers
+    };
+    let mcp_manager = smelt_core::mcp::McpManager::start_detached(mcp_servers, &cwd);
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> = Box::new(
         smelt_core::mcp::dispatcher::McpDispatcher::new(Arc::clone(&mcp_manager)),
     );
@@ -1153,10 +1182,11 @@ async fn async_main() {
             },
         );
         drop(tui_construct_startup);
-        redirect_stderr();
+        let stderr_redirect = StderrRedirect::start();
 
         println!();
         app.run(startup_http_client, initial_message).await;
+        drop(stderr_redirect);
         // Fire `smelt.lifecycle.on("shutdown", fn)` hooks. The TUI is torn
         // down at this point so stdout is in cooked mode - plugins (e.g.
         // the bundled resume-hint banner) can `print(...)` straight to the
@@ -1168,22 +1198,78 @@ async fn async_main() {
         if let Some(error) = flush_error {
             eprintln!("smelt: flush persistent state: {error}");
         }
+        if let Some(exit) = app.quit_exit() {
+            if let Some(ref message) = exit.message {
+                eprintln!("{message}");
+            }
+            if exit.code != 0 {
+                smelt_perf::perf::print_summary();
+                std::process::exit(exit.code);
+            }
+        }
     }
     smelt_perf::perf::print_summary();
 }
 
 /// Parse argv with the static [`Args`] surface augmented by every
-/// `smelt.cli.register_flag{}` spec declared from `early.lua`. Returns
-/// the resolved `Args` plus a `name -> value` map for the Lua flags;
-/// the caller stashes the map back onto `LuaShared::cli_flag_values`
-/// so `smelt.cli.get(name)` can read it later.
+/// `smelt.cli.register_flag{}` and `smelt.cli.register_command{}` spec
+/// declared from `early.lua`. Returns the resolved `Args`, a `name -> value`
+/// map for the Lua flags, and the Lua subcommand if one was given; the caller
+/// stores the last two on `LuaShared` for `smelt.cli.get` and
+/// `smelt.cli.command`.
 ///
-/// On parse error / `--help` / `--version` clap exits the process via
-/// `get_matches()` - matching the original `Args::parse()` behavior.
+/// `-C` was applied before parsing and is left out of argv. On parse error /
+/// `--help` / `--version` clap exits the process via `get_matches_from()` -
+/// matching the original `Args::parse()` behavior.
 fn parse_with_lua_flags(
     specs: &[tui::CliFlagSpec],
-) -> (Args, std::collections::HashMap<String, tui::CliFlagValue>) {
-    use clap::{Arg, ArgAction, CommandFactory, FromArgMatches};
+    commands: &[tui::CliCommandSpec],
+) -> (
+    Args,
+    std::collections::HashMap<String, tui::CliFlagValue>,
+    Option<tui::CliCommand>,
+) {
+    parse_lua_cli(startup::clap_args(std::env::args_os()), specs, commands)
+}
+
+/// Parse `argv` with the Lua flags and subcommands. A Lua subcommand whose
+/// name a built-in one uses is dropped with a warning, so the built-in
+/// always wins.
+fn parse_lua_cli(
+    argv: Vec<std::ffi::OsString>,
+    specs: &[tui::CliFlagSpec],
+    commands: &[tui::CliCommandSpec],
+) -> (
+    Args,
+    std::collections::HashMap<String, tui::CliFlagValue>,
+    Option<tui::CliCommand>,
+) {
+    use clap::CommandFactory;
+
+    let built_in = <Args as CommandFactory>::command();
+    let commands: Vec<tui::CliCommandSpec> = commands
+        .iter()
+        .filter(|spec| {
+            let taken = built_in.find_subcommand(&spec.name).is_some();
+            if taken {
+                eprintln!(
+                    "warning: Lua subcommand `{}` is ignored: smelt already has it",
+                    spec.name
+                );
+            }
+            !taken
+        })
+        .cloned()
+        .collect();
+    from_lua_matches(
+        lua_cli(specs, &commands).get_matches_from(argv),
+        specs,
+        &commands,
+    )
+}
+
+fn lua_cli(specs: &[tui::CliFlagSpec], commands: &[tui::CliCommandSpec]) -> clap::Command {
+    use clap::{Arg, ArgAction, CommandFactory};
 
     // clap's Arg API expects `&'static str`. Specs live for the
     // process lifetime once parsed, so leaking is the simplest contract.
@@ -1225,8 +1311,44 @@ fn parse_with_lua_flags(
         };
         cmd = cmd.arg(arg);
     }
+    for spec in commands {
+        let mut sub = clap::Command::new(leak(&spec.name));
+        if let Some(ref desc) = spec.description {
+            sub = sub.about(leak(desc));
+        }
+        if let Some(ref name) = spec.args {
+            sub = sub.arg(Arg::new("args").value_name(leak(name)).num_args(0..));
+        }
+        cmd = cmd.subcommand(sub);
+    }
+    cmd
+}
 
-    let matches = cmd.get_matches();
+fn from_lua_matches(
+    mut matches: clap::ArgMatches,
+    specs: &[tui::CliFlagSpec],
+    commands: &[tui::CliCommandSpec],
+) -> (
+    Args,
+    std::collections::HashMap<String, tui::CliFlagValue>,
+    Option<tui::CliCommand>,
+) {
+    use clap::FromArgMatches;
+
+    let command = match matches.subcommand_name() {
+        Some(name) if commands.iter().any(|spec| spec.name == name) => matches
+            .remove_subcommand()
+            .map(|(name, sub)| tui::CliCommand {
+                name,
+                args: sub
+                    .try_get_many::<String>("args")
+                    .ok()
+                    .flatten()
+                    .map(|values| values.cloned().collect())
+                    .unwrap_or_default(),
+            }),
+        _ => None,
+    };
     let args = <Args as FromArgMatches>::from_arg_matches(&matches)
         .expect("Args parser must succeed after clap match");
 
@@ -1249,27 +1371,89 @@ fn parse_with_lua_flags(
         values.insert(spec.name.clone(), val);
     }
 
-    (args, values)
+    (args, values, command)
 }
 
-/// Redirect stderr to a log file to prevent stray output from corrupting the TUI display.
-fn redirect_stderr() {
+/// Sends stderr to a log file while the TUI owns the terminal, so stray
+/// output cannot corrupt the display. Dropping it restores the terminal.
+struct StderrRedirect {
     #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let dir = engine::log::logs_dir();
-        let path = dir.join("stderr.log");
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
+    saved: Option<i32>,
+}
+
+impl StderrRedirect {
+    fn start() -> Self {
+        #[cfg(unix)]
         {
-            let file_fd = file.as_raw_fd();
-            // SAFETY: both fds are valid open file descriptors.
-            unsafe {
-                libc::dup2(file_fd, 2);
+            use std::os::unix::io::AsRawFd;
+            let path = engine::log::logs_dir().join("stderr.log");
+            let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            else {
+                return Self { saved: None };
+            };
+            // SAFETY: fd 2 and the log file are valid open descriptors. The
+            // duplicate keeps the terminal reachable for `Drop`.
+            let saved = unsafe { libc::dup(2) };
+            if saved < 0 {
+                return Self { saved: None };
             }
-            // `file` drops here but fd 2 now shares the same open file description.
+            unsafe {
+                libc::dup2(file.as_raw_fd(), 2);
+            }
+            Self { saved: Some(saved) }
         }
+        #[cfg(not(unix))]
+        Self {}
+    }
+}
+
+impl Drop for StderrRedirect {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(saved) = self.saved.take() {
+            // SAFETY: `saved` is the descriptor duplicated in `start`.
+            unsafe {
+                libc::dup2(saved, 2);
+                libc::close(saved);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(name: &str) -> tui::CliCommandSpec {
+        tui::CliCommandSpec {
+            name: name.into(),
+            description: None,
+            args: Some("ARGS".into()),
+        }
+    }
+
+    #[test]
+    fn built_in_subcommand_wins_over_a_lua_one_of_the_same_name() {
+        let commands = [command("status"), command("diff")];
+        let (args, _, lua) = parse_lua_cli(vec!["smelt".into(), "status".into()], &[], &commands);
+        assert!(matches!(args.command, Some(Commands::Status(_))));
+        assert_eq!(lua, None);
+
+        let (args, _, lua) = parse_lua_cli(
+            vec!["smelt".into(), "diff".into(), "branch".into()],
+            &[],
+            &commands,
+        );
+        assert!(args.command.is_none());
+        assert_eq!(
+            lua,
+            Some(tui::CliCommand {
+                name: "diff".into(),
+                args: vec!["branch".into()],
+            })
+        );
     }
 }

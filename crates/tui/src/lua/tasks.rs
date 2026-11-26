@@ -133,6 +133,7 @@ fn populate_payload_table(
             table.set("follow", *follow)?;
             Ok(())
         }
+        crate::smelt_edit::Payload::Cursor { row } => table.set("row", *row),
         crate::smelt_edit::Payload::Rect {
             x,
             y,

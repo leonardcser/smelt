@@ -66,6 +66,9 @@ pub enum LuaWinEvent {
     /// Window's scroll state changed. Payload: `{ top, follow }` where
     /// `top` is the new `scroll_top` and `follow` is the pin-to-tail flag.
     Scrolled,
+    /// Window's cursor row changed, from keys, mouse or Lua. Payload:
+    /// `{ row }`, the new 0-based cursor row. Fires at most once per frame.
+    CursorMoved,
     /// Leaf's viewport rect changed. Payload: `{ x, y, width, height,
     /// content_width }` for the new outer rect and inner cell budget.
     /// Fires once after the first paint and on every later resize/reflow.
@@ -100,6 +103,7 @@ impl From<LuaWinEvent> for crate::smelt_edit::WinEvent {
             LuaWinEvent::Leave => WinEvent::PointerLeave,
             LuaWinEvent::Move => WinEvent::PointerMove,
             LuaWinEvent::Scrolled => WinEvent::Scrolled,
+            LuaWinEvent::CursorMoved => WinEvent::CursorMoved,
             LuaWinEvent::Resized => WinEvent::Resized,
             LuaWinEvent::PlaceholderAccepted => WinEvent::PlaceholderAccepted,
             LuaWinEvent::PlaceholderDismissed => WinEvent::PlaceholderDismissed,
@@ -343,6 +347,19 @@ impl mlua::UserData for LuaWin {
                 }
             },
         );
+
+        // ── selection: rows of the active Visual selection ─────────
+        methods.add_method("selection", |lua, this, ()| -> LuaResult<mlua::Value> {
+            let Some((first, last)) =
+                crate::lua::try_with_ui_host(|host| host.visual_rows(this.id)).flatten()
+            else {
+                return Ok(mlua::Value::Nil);
+            };
+            let range = lua.create_table()?;
+            range.set("first", first)?;
+            range.set("last", last)?;
+            Ok(mlua::Value::Table(range))
+        });
 
         // ── move_cursor(delta) - chainable ─────────────────────────
         methods.add_function(
@@ -954,6 +971,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
             "decorate" => fn(opts: mlua::Table) -> LuaDecoration, "Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.",
             "cursor" => fn(row: Option<u64>) -> mlua::Value, "Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
+            "selection" => fn() -> Option<mlua::Table>, "Return the rows of the active Vim Visual or VisualLine selection as `{ first, last }` (0-based, inclusive, `first <= last`), or `nil` when the window is not in a Visual mode. Rows are document rows for windows showing a native document.",
             "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "reveal" => fn(row: u64, opts: Option<mlua::Table>) -> LuaWin, "Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor; `opts.jump = true` first leaves the current cursor in the window's jump list so `win:jump{ older = 1 }` or vim's `Ctrl-O` returns to it. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should resolve a target from a committed `smelt.transcript.View` and pass it to `smelt.transcript.reveal`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "jump" => fn(opts: mlua::Table) -> bool, "Walk the window's jump list, the positions its vim jumps (`G`, `}`, `]u`, searches) left from; vim's `Ctrl-O`, `Ctrl-I` and `''`. Pass exactly one of `opts.older = n` (back `n` jumps), `opts.newer = n` (forward again) or `opts.previous = true` (toggle between the last two positions). Returns whether the cursor moved. The built-in prompt window has no jump list and returns false.",
@@ -966,7 +984,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "configure" => fn(opts: mlua::Table) -> LuaWin, "Atomically change live options, including on built-in windows. Unknown keys, wrong types and invalid enum values raise before any change. Absent keys stay unchanged. `style` is a shared style value filling every row including padding; false clears it. `prefix` is a string or `{ first, rest?, style? }`, clipped to pad_left; false clears it. `focus_on_click` is a Win or false. Also accepts pad_left, pad_right, scrollbar, wrap, surface, cursor_line, selection_highlight, hide_cursor, vim_enabled and gutter. Prompt resize gestures are configured through smelt.prompt.set_resize_handle, not window options.",
             "row_highlights" => fn(specs: Option<mlua::Table>) -> LuaWin, "Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
-            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
+            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top`, keeping the cursor on the same screen row, and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
             "set_renderer" => fn(renderer: Option<LuaCallback<(LuaWin,), ()>>) -> LuaWin, "Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.",
             "invalidate" => fn() -> LuaWin, "Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.",
             "invalidate_after" => fn(ms: u64) -> LuaReg, "Invalidate this window after ms milliseconds. Returns a cancellable one-shot registration; timers are allocated only when requested.",

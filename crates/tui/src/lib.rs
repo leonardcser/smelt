@@ -40,7 +40,7 @@ pub mod theme;
 pub use ::smelt_edit;
 
 pub use smelt_core::attachment;
-pub use smelt_core::lua::{CliFlagKind, CliFlagSpec, CliFlagValue};
+pub use smelt_core::lua::{CliCommand, CliCommandSpec, CliFlagKind, CliFlagSpec, CliFlagValue};
 pub use smelt_core::session;
 
 /// Render a complete session through the production transcript builder for dev fixtures.

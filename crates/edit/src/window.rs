@@ -825,6 +825,8 @@ pub struct Window {
     pub pending_scroll_to_cursor: bool,
     /// `(scroll_top, tail-follow)` last emitted via `WinEvent::Scrolled`.
     pub(crate) last_emitted_scroll: Option<(RowIndex, bool)>,
+    /// Cursor row last emitted via `WinEvent::CursorMoved`.
+    pub(crate) last_emitted_cursor: Option<RowIndex>,
     /// `(rect, content_width)` last emitted via `WinEvent::Resized`. Tracked
     /// here so the dispatcher can fire only when the leaf's geometry
     /// actually changed since the last frame.
@@ -864,6 +866,7 @@ impl Window {
             pending_recenter: false,
             pending_scroll_to_cursor: false,
             last_emitted_scroll: None,
+            last_emitted_cursor: None,
             last_emitted_resize: None,
         }
     }
@@ -1276,6 +1279,11 @@ impl Window {
             return None;
         }
         text.vim_state.pending_input()
+    }
+
+    /// Drop the vim command being typed, such as a count.
+    pub fn cancel_vim_pending(&mut self) {
+        self.surface.text_mut().vim_state.cancel_pending();
     }
 
     pub fn vim_has_pending_input(&self) -> bool {

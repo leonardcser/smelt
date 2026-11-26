@@ -263,6 +263,18 @@ Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of 
 | `dialogs` | `string[]` |  | Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`). |
 | `modules` | `string[]` |  | Fully-qualified `smelt.<dotted>` module names, passed through verbatim. |
 
+### `smelt.cli.RegisterCommandOpts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Subcommand specification accepted by `smelt.cli.register_command`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | Subcommand name, as typed after `smelt`. |
+| `description` | `string` |  | One-line description for `--help`. |
+| `args` | `string` |  | Name of the free arguments in `--help`, such as `"VIEW"`. Without it the subcommand takes none. |
+
 ### `smelt.cli.RegisterFlagOpts`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
@@ -415,7 +427,7 @@ Indexed unified patch with a continuous foldable row projection. File indices ar
 | --- | --- | --- | --- |
 | `document` | `fun(self: smelt.diff.Diff): smelt.document.Document` | yes | Row source for `win:document`. Native storage is shared, not copied. |
 | `view` | `fun(self: smelt.diff.Diff): smelt.diff.Diff` | yes | Create an independent view, initially preserving the current folds. Shares immutable patch storage, metadata and syntax caches, not subsequent fold changes. Each attached window submits independent syntax demand. |
-| `tree` | `fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree` | yes | Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width. |
+| `tree` | `fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree` | yes | Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width. A working `smelt.git.diff` snapshot also lists its unpushed and unpulled commits after the file sections, each list headed by the upstream name and its commit count. |
 | `restore` | `fun(self: smelt.diff.Diff, previous: smelt.diff.Diff, cursor: integer, top: integer): integer?, integer?` | yes | Restore expanded context and return cursor/top rows for a refreshed snapshot, matching section, raw path and source line numbers rather than display offsets. A missing file returns nil for its anchor. Does not change the previous view. |
 | `files` | `fun(self: smelt.diff.Diff): smelt.diff.File[]` | yes | All file metadata, grouped by section and directory-first within each section. Prefer file(index) for bounded UI-thread allocation. |
 | `totals` | `fun(self: smelt.diff.Diff): integer, integer, boolean` | yes | Added and deleted line totals, plus whether any file is binary. Linear in changed files, not patch lines. Working snapshots count each section separately. |
@@ -460,7 +472,8 @@ Independent virtual file sidebar sharing immutable file metadata and ordering. E
 | `file_row` | `fun(self: smelt.diff.Tree, index: integer, reveal: boolean?): integer?` | yes | Visible row of a file, or nil when hidden. With reveal=true, expand its ancestors first. Logarithmic lookup when no folders change. |
 | `toggle` | `fun(self: smelt.diff.Tree, row: integer): integer?` | yes | Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil. |
 | `collapsed` | `fun(self: smelt.diff.Tree): string[]` | yes | Opaque collapsed directory keys for restoring a new snapshot. |
-| `section_row` | `fun(self: smelt.diff.Tree, section: 'unstaged'\|'staged'\|'changes'): integer` | yes | Visible row of a section header, including an empty section. |
+| `commit_row` | `fun(self: smelt.diff.Tree, id: string): integer?` | yes | Visible row of an unpushed or unpulled commit, or nil when the tree does not list it. |
+| `section_row` | `fun(self: smelt.diff.Tree, section: 'unstaged'\|'staged'\|'changes'\|'unpushed'\|'unpulled'): integer?` | yes | Visible row of a section header. File sections always have one, even when empty; a commit section has one only when the tree lists it. |
 | `restore_group` | `fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer?` | yes | Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic. |
 
 ### `smelt.diff.TreeNode`
@@ -471,12 +484,13 @@ Metadata for one visible file-tree row. File indices are one-based and tree rows
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `index` | `integer` |  | File index, or nil for a directory. |
+| `index` | `integer` |  | File index, or nil for a directory or commit. |
+| `commit` | `{ id: string, subject: string }` |  | The commit an unpushed or unpulled row lists. |
 | `first` | `integer` | yes | First descendant file index. |
 | `last` | `integer` | yes | Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section. |
 | `parent` | `integer` |  | Visible parent directory row. |
 | `children` | `boolean` | yes | Whether this row is an expandable directory. Section headings are fixed. |
-| `section` | `'unstaged'\|'staged'\|'changes'` | yes | Section containing this row. |
+| `section` | `'unstaged'\|'staged'\|'changes'\|'unpushed'\|'unpulled'` | yes | Section containing this row. |
 | `group` | `boolean` | yes | Whether this is a section header. |
 | `expanded` | `boolean` | yes | Whether the directory is expanded. Always true for section headings. |
 
@@ -638,6 +652,39 @@ A running content search from `smelt.files.grep`. Rows are zero-based. The searc
 | `fill` | `fun(self: smelt.files.Grep, rows: integer): integer` | yes | Keep at least `rows` rows in a reversed document, filling above the matches, so a short list sits at the bottom of a window that tall. Returns the rows added above, as `sync` does; negative when it removed some. |
 | `root` | `fun(self: smelt.files.Grep): string` | yes | Directory that item paths are relative to. |
 | `cancel` | `fun(self: smelt.files.Grep)` | yes | Stop searching. Rows found so far stay available. |
+
+### `smelt.git.Commit`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+One commit of a history page or a tracking list.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `string` | yes | Full commit ID. |
+| `author` | `string` | yes | Author name. |
+| `age` | `string` | yes | Relative author date, such as `2 days ago`. |
+| `subject` | `string` | yes | First line of the message. |
+| `message` | `string` | yes | Full raw message. |
+
+### `smelt.git.Snapshot`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+A `smelt.git.diff`, `git.index` or `git.discard` result. Branch fields are present only for working snapshots.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `root` | `string` | yes | Repository root. |
+| `diff` | [smelt.diff.Diff](types.md#smeltdiffdiff) |  | The snapshot. Nil when a mutation succeeded but its refresh failed. |
+| `index_updated` | `boolean` |  | True when `git.index` or `git.discard` changed the repository. |
+| `refresh_error` | `string` |  | Why the refresh after a successful mutation failed. |
+| `branch` | `string` |  | Checked-out branch. Nil when detached. |
+| `head` | `string` |  | `HEAD` commit. Nil before the first commit. |
+| `upstream` | `string` |  | Upstream such as `origin/main`. Nil when none is configured or it was deleted. |
+| `ahead` | `integer` |  | Commits on `HEAD` but not on the upstream. |
+| `behind` | `integer` |  | Commits on the upstream but not on `HEAD`. |
+| `operation` | `string` |  | Rebase, merge, cherry-pick, revert or bisect in progress. |
 
 ### `smelt.input.Input`
 
@@ -1913,6 +1960,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Handles to the same windo
 | `content_width` | `fun(): any` | yes | Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget. |
 | `decorate` | `fun(opts: table): smelt.win.Decoration` | yes | Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays. |
 | `cursor` | `fun(row: integer?): any` | yes | Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
+| `selection` | `fun(): table?` | yes | Return the rows of the active Vim Visual or VisualLine selection as `{ first, last }` (0-based, inclusive, `first <= last`), or `nil` when the window is not in a Visual mode. Rows are document rows for windows showing a native document. |
 | `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `reveal` | `fun(row: integer, opts: table?): smelt.win.Win` | yes | Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor; `opts.jump = true` first leaves the current cursor in the window's jump list so `win:jump{ older = 1 }` or vim's `Ctrl-O` returns to it. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should resolve a target from a committed `smelt.transcript.View` and pass it to `smelt.transcript.reveal`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `jump` | `fun(opts: table): boolean` | yes | Walk the window's jump list, the positions its vim jumps (`G`, `}`, `]u`, searches) left from; vim's `Ctrl-O`, `Ctrl-I` and `''`. Pass exactly one of `opts.older = n` (back `n` jumps), `opts.newer = n` (forward again) or `opts.previous = true` (toggle between the last two positions). Returns whether the cursor moved. The built-in prompt window has no jump list and returns false. |
@@ -1925,7 +1973,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Handles to the same windo
 | `configure` | `fun(opts: table): smelt.win.Win` | yes | Atomically change live options, including on built-in windows. Unknown keys, wrong types and invalid enum values raise before any change. Absent keys stay unchanged. `style` is a shared style value filling every row including padding; false clears it. `prefix` is a string or `{ first, rest?, style? }`, clipped to pad_left; false clears it. `focus_on_click` is a Win or false. Also accepts pad_left, pad_right, scrollbar, wrap, surface, cursor_line, selection_highlight, hide_cursor, vim_enabled and gutter. Prompt resize gestures are configured through smelt.prompt.set_resize_handle, not window options. |
 | `row_highlights` | `fun(specs: table?): smelt.win.Win` | yes | Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text. |
 | `link_scroll` | `fun(others: smelt.win.Win): smelt.win.Win` | yes | Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining. |
-| `scroll` | `fun(arg: any): any` | yes | Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow. |
+| `scroll` | `fun(arg: any): any` | yes | Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top`, keeping the cursor on the same screen row, and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow. |
 | `set_renderer` | `fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win` | yes | Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it. |
 | `invalidate` | `fun(): smelt.win.Win` | yes | Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining. |
 | `invalidate_after` | `fun(ms: integer): smelt.Reg` | yes | Invalidate this window after ms milliseconds. Returns a cancellable one-shot registration; timers are allocated only when requested. |
@@ -2052,5 +2100,5 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
-Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"enter"` \| `"leave"` \| `"move"` \| `"scrolled"` \| `"resized"` \| `"placeholder_accepted"` \| `"placeholder_dismissed"`
+Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"enter"` \| `"leave"` \| `"move"` \| `"scrolled"` \| `"cursor_moved"` \| `"resized"` \| `"placeholder_accepted"` \| `"placeholder_dismissed"`
 

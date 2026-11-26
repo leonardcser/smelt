@@ -80,12 +80,12 @@ frame (e.g. from an event callback) it raises immediately.
 ## `smelt.quit`
 
 ```lua
-fun(): nil
+fun(opts: table?): nil
 ```
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.
+Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns. `opts.code` sets the process exit status (default 0) and `opts.message` is printed to stderr once the terminal is restored, such as the reason a subcommand could not run.
 
 ## `smelt.sleep`
 

@@ -295,6 +295,11 @@ pub struct LuaShared {
     /// CLI flag *values* parsed from argv after `early.lua` declared them.
     /// Populated by the main binary; read by `smelt.cli.get(name)`.
     pub cli_flag_values: Mutex<HashMap<String, CliFlagValue>>,
+    /// Subcommands registered from `early.lua` via `smelt.cli.register_command`.
+    pub cli_command_specs: Mutex<Vec<CliCommandSpec>>,
+    /// The Lua subcommand this process was launched for. Populated by the
+    /// main binary; read by `smelt.cli.command()`.
+    pub cli_command: Mutex<Option<CliCommand>>,
     /// Every callback-list surface, grouped under one struct so registration
     /// and cleanup use one shared pattern.
     pub hooks: Hooks,
@@ -360,6 +365,22 @@ pub struct Hooks {
     /// hook fires at most once per launch. `name` is the event name
     /// (currently only `"ready"`).
     pub lifecycle: Arc<HookRegistry>,
+}
+
+/// Spec for a Lua-declared subcommand, such as `smelt diff`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CliCommandSpec {
+    pub name: String,
+    pub description: Option<String>,
+    /// Name of the free arguments in `--help`, such as `VIEW`.
+    pub args: Option<String>,
+}
+
+/// The Lua subcommand on the command line and its free arguments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CliCommand {
+    pub name: String,
+    pub args: Vec<String>,
 }
 
 /// Spec for a Lua-declared CLI flag. Mirrors the subset of clap we need.
@@ -478,6 +499,8 @@ impl Default for LuaShared {
             native_module_names: Mutex::new(HashSet::new()),
             cli_flag_specs: Mutex::new(Vec::new()),
             cli_flag_values: Mutex::new(HashMap::new()),
+            cli_command_specs: Mutex::new(Vec::new()),
+            cli_command: Mutex::new(None),
             hooks: Hooks::default(),
             default_shell: Mutex::new(None),
             watchers: Mutex::new(HashMap::new()),

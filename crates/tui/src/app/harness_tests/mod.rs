@@ -29,6 +29,7 @@ mod resources;
 mod row_presentation;
 mod scroll_geometry;
 mod search;
+mod standalone;
 mod transcript_folds;
 mod ui_api;
 mod ui_pills;

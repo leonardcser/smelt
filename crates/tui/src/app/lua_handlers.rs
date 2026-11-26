@@ -309,9 +309,10 @@ impl TuiApp {
 
     /// Mark a full reload for the next point where no turn or modal can hold
     /// callbacks that the reload would wipe. Returns `true` for a new request
-    /// and `false` when one was already pending.
+    /// and `false` when one was already pending, or when the process runs a
+    /// Lua subcommand, whose one-off tool never reloads.
     pub(crate) fn schedule_lua_reload(&mut self) -> bool {
-        self.lua.schedule_reload(LuaReloadKind::Manual)
+        self.agent_session() && self.lua.schedule_reload(LuaReloadKind::Manual)
     }
 
     /// Mark a Lua-config-only reload for auto-reload. If a full reload is
@@ -516,7 +517,12 @@ impl TuiApp {
             self.run_lua_ready_hooks("launch");
         }
 
-        load_failure.or(runtime_failure)
+        let failure = load_failure.or(runtime_failure);
+        if run_ready_hooks {
+            let reason = failure.as_ref().map(|error| format!("lua init: {error}"));
+            self.require_standalone_view(reason.as_deref());
+        }
+        failure
     }
 
     /// Build and commit a fresh Lua generation for manual reload, automatic

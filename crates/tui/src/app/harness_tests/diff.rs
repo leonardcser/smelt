@@ -1,10 +1,46 @@
 use super::*;
 use std::sync::Arc;
 
+const DIFF_VIEWS: [&str; 3] = ["status", "branch", "history"];
+
+/// A part (`files`, `preview` or `commit`) of the diff view on screen, or of
+/// the status view before the first paint.
+fn diff_win(app: &TestApp, part: &str) -> Option<WinId> {
+    let probe = app.ui_probe();
+    let shown = |view: &str| {
+        ["files", "preview"].iter().any(|pane| {
+            probe
+                .named_win(&format!("smelt.diff.{view}.{pane}"))
+                .and_then(|win| probe.win(win))
+                .and_then(|win| win.viewport)
+                .is_some_and(|viewport| viewport.rect.height > 0)
+        })
+    };
+    let view = DIFF_VIEWS
+        .into_iter()
+        .find(|view| shown(view))
+        .unwrap_or("status");
+    probe.named_win(&format!("smelt.diff.{view}.{part}"))
+}
+
+fn sidebar(app: &TestApp) -> WinId {
+    diff_win(app, "files").expect("diff sidebar")
+}
+
 fn preview(app: &TestApp) -> WinId {
-    app.ui_probe()
-        .named_win("smelt.diff.preview")
-        .expect("diff preview")
+    diff_win(app, "preview").expect("diff preview")
+}
+
+/// Whether every diff viewer window has been released.
+fn diff_closed(app: &TestApp) -> bool {
+    let probe = app.ui_probe();
+    DIFF_VIEWS.into_iter().all(|view| {
+        ["files", "preview", "commit"].iter().all(|part| {
+            probe
+                .named_win(&format!("smelt.diff.{view}.{part}"))
+                .is_none()
+        })
+    }) && probe.named_win("smelt.diff.header").is_none()
 }
 
 async fn wait_for_diff(app: &mut TestApp, done: impl Fn(&mut TestApp) -> bool) {
@@ -27,19 +63,17 @@ async fn wait_for_diff(app: &mut TestApp, done: impl Fn(&mut TestApp) -> bool) {
 
 async fn wait_for_diff_section(app: &mut TestApp, label: &str) {
     wait_for_diff(app, |app| {
-        app.ui_probe()
-            .named_win("smelt.diff.files")
-            .is_some_and(|win| {
-                app.ui_probe()
-                    .buf(app.ui_probe().win(win).unwrap().buf)
-                    .unwrap()
-                    .lines()
-                    .iter()
-                    .any(|line| {
-                        line.strip_prefix(label)
-                            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
-                    })
-            })
+        diff_win(app, "files").is_some_and(|win| {
+            app.ui_probe()
+                .buf(app.ui_probe().win(win).unwrap().buf)
+                .unwrap()
+                .lines()
+                .iter()
+                .any(|line| {
+                    line.strip_prefix(label)
+                        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
+                })
+        })
     })
     .await;
 }
@@ -49,7 +83,7 @@ fn open_fixture(app: &mut TestApp, lines: usize) {
         local patch = 'diff --git a/first.rs b/first.rs\n@@ -0,0 +1,{lines} @@\n'
           .. string.rep('+abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789\n', {lines})
           .. 'diff --git a/last.rs b/last.rs\n@@ -1 +1 @@\n-old\n+last change\n'
-        smelt.git.diff = function() return {{ branch = 'feature/test', root = '.', diff = smelt.diff.parse(patch) }} end
+        smelt.git.diff = function() return {{ root = '.', diff = smelt.diff.parse(patch) }} end
         smelt.cmd.run('diff')
     "#)));
     drive_lua_tasks(app);
@@ -59,9 +93,6 @@ fn open_fixture(app: &mut TestApp, lines: usize) {
         "{frame}\nLua messages: {:?}",
         app.tui.lua.core_shared().messages.lock().unwrap().entries()
     );
-    assert!(!frame.contains("feature/test"), "{frame}");
-    assert!(app.ui_probe().named_win("smelt.diff.header").is_none());
-    assert!(app.ui_probe().named_win("smelt.diff.footer").is_none());
     assert_eq!(
         app.ui_probe()
             .win(preview(app))
@@ -129,13 +160,83 @@ fn click_title(app: &mut TestApp, label: &str) {
     let (row, line) = frame
         .lines()
         .enumerate()
-        .find(|(_, line)| line.contains(" Changes  Branch  History "))
+        .find(|(_, line)| line.contains(" Status  Branch  History "))
         .expect("view switcher");
     let column = line[..line.find(label).unwrap()].chars().count();
     let at = (column as u16 + 1, row as u16);
     use crossterm::event::{MouseButton, MouseEventKind};
     app.mouse(MouseEventKind::Down(MouseButton::Left), at);
     app.mouse(MouseEventKind::Up(MouseButton::Left), at);
+}
+
+#[tokio::test]
+async fn diff_rejected_push_rebases_onto_remote_commits_before_pushing() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let origin = dir.path().join("origin.git");
+    git(
+        dir.path(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    let clone = |name: &str| {
+        let path = dir.path().join(name);
+        git(dir.path(), &["clone", "-q", origin.to_str().unwrap(), name]);
+        git(&path, &["config", "user.name", name]);
+        git(&path, &["config", "user.email", "test@example.invalid"]);
+        path
+    };
+    let (work, other) = (clone("work"), clone("other"));
+    std::fs::write(work.join("ours"), "base\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-qm", "base"]);
+    git(&work, &["push", "-q", "-u", "origin", "main"]);
+    git(&other, &["pull", "-q", "origin", "main"]);
+    std::fs::write(other.join("theirs"), "theirs\n").unwrap();
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "-qm", "their commit"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    std::fs::write(work.join("ours"), "ours\n").unwrap();
+    git(&work, &["commit", "-qam", "our commit"]);
+
+    let mut app = TestApp::builder().with_cwd(&work).build();
+    app.set_terminal_size(140, 40);
+    app.type_text("/diff");
+    app.press(KeyCode::Enter);
+    wait_for_diff_section(&mut app, "unpushed to origin/main (1)").await;
+    app.type_char('p');
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains(
+            "Push rejected: remote has commits you lack.  r rebase, push · f force, drop them",
+        )
+    })
+    .await;
+    app.type_char('r');
+    let log = || git(&origin, &["log", "--format=%s", "main"]);
+    wait_for_diff(&mut app, |_| log().lines().count() == 3).await;
+    assert_eq!(
+        log(),
+        "our commit\ntheir commit\nbase",
+        "nothing is dropped"
+    );
 }
 
 #[tokio::test]
@@ -193,15 +294,11 @@ async fn git_workspace_reviews_branch_history_and_preserves_changes() {
     })
     .await;
     let frame = app.render_to_frame().text();
-    assert!(frame.contains(" Changes  Branch  History "), "{frame}");
+    assert!(frame.contains(" Status  Branch  History "), "{frame}");
     assert!(!frame.contains("working version"), "{frame}");
     let id = git(&["rev-parse", "HEAD"]);
     assert!(
-        frame
-            .lines()
-            .find(|line| line.contains(&id[..7]))
-            .unwrap()
-            .contains("+2 -1"),
+        frame.contains(&format!("{} feature revision", &id[..7])),
         "{frame}"
     );
     insta::assert_snapshot!(
@@ -214,11 +311,7 @@ async fn git_workspace_reviews_branch_history_and_preserves_changes() {
     paint_diff(&mut app);
     let narrow = app.render_to_frame().text();
     assert!(
-        narrow
-            .lines()
-            .find(|line| line.contains(&id[..7]))
-            .unwrap()
-            .contains("+2 -1"),
+        narrow.contains(&format!("{} feature revision", &id[..7])),
         "{narrow}"
     );
     app.set_terminal_size(140, 40);
@@ -265,7 +358,7 @@ async fn git_workspace_reviews_branch_history_and_preserves_changes() {
     assert!(app.render_to_frame().text().contains("revision"));
     app.press(KeyCode::Esc);
     paint_diff(&mut app);
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_some());
+    assert!(!diff_closed(&app));
     assert!(app
         .ui_probe()
         .win(input)
@@ -315,7 +408,7 @@ async fn git_workspace_reviews_branch_history_and_preserves_changes() {
     })
     .await;
     app.type_char('q');
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+    assert!(diff_closed(&app));
 }
 
 #[test]
@@ -336,12 +429,13 @@ fn diff_plugin_continuous_navigation_horizontal_scroll_sidebar_and_close() {
     let buf = app.ui_probe().win(win).unwrap().buf;
     assert!(app.ui_probe().buf(buf).unwrap().line_count() < 30);
 
+    focus_pane(&mut app, win);
     app.type_char('G');
     let frame = app.render_to_frame().text();
     assert!(frame.contains("last change"), "{frame}");
     assert!(app.ui_probe().win(win).unwrap().scroll_top() > 980);
     app.dispatch_ui_window_events(false);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     assert_eq!(app.ui_probe().win(sidebar).unwrap().cursor_row(), 2);
     app.type_text("gg");
     app.render_silent();
@@ -355,10 +449,11 @@ fn diff_plugin_continuous_navigation_horizontal_scroll_sidebar_and_close() {
     assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, 0);
     switch_pane(&mut app);
     app.type_char('j');
+    paint_diff(&mut app);
     let frame = app.render_to_frame().text();
     assert!(frame.contains("last change"), "{frame}");
     app.press(KeyCode::Esc);
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+    assert!(diff_closed(&app));
 }
 
 fn click_diff_row(app: &mut TestApp, win: WinId, row: u16) {
@@ -411,7 +506,8 @@ fn diff_split_drag_preserves_selection_and_scroll() {
     app.set_terminal_size(140, 32);
     open_fixture(&mut app, 1000);
     let win = preview(&app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
+    focus_pane(&mut app, win);
     app.type_text("500G");
     app.type_char('L');
     paint_diff(&mut app);
@@ -531,15 +627,15 @@ fn diff_narrow_terminal_shows_one_pane_at_a_time() {
     open_fixture(&mut app, 1);
     paint_diff(&mut app);
     let frame = app.render_to_frame().text();
-    assert!(frame.contains("abcdefghijklmnopqrstuvwxyz"), "{frame}");
-    assert!(!frame.contains("unstaged (2)"), "{frame}");
-    app.press_mod(KeyCode::Char('w'), KeyModifiers::ALT);
-    paint_diff(&mut app);
-    let frame = app.render_to_frame().text();
     assert!(!frame.contains("abcdefghijklmnopqrstuvwxyz"), "{frame}");
     for label in ["unstaged (2) +2 -1", "M first.rs +1", "M last.rs +1 -1"] {
         assert!(frame.contains(label), "missing {label:?}:\n{frame}");
     }
+    app.press_mod(KeyCode::Char('w'), KeyModifiers::ALT);
+    paint_diff(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("abcdefghijklmnopqrstuvwxyz"), "{frame}");
+    assert!(!frame.contains("unstaged (2)"), "{frame}");
 }
 
 #[test]
@@ -547,7 +643,7 @@ fn diff_file_click_jumps_from_preview_and_repeated_click_returns_to_header() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(110, 28);
     open_fixture(&mut app, 100);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let win = preview(&app);
     click_diff_row(&mut app, sidebar, 2);
     assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), 104);
@@ -576,8 +672,9 @@ fn diff_preview_order_matches_tree_and_scroll_moves_selection_forward() {
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
     let win = preview(&app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let source = Arc::clone(app.ui_probe().win(win).unwrap().row_source().unwrap());
+    focus_pane(&mut app, win);
     for (index, (path, tree_row)) in [
         ("src/nested/a.rs", 3),
         ("src/nested/b.rs", 4),
@@ -607,7 +704,7 @@ fn diff_ctrl_j_k_select_files_from_either_pane_without_changing_focus() {
     app.set_terminal_size(110, 28);
     open_fixture(&mut app, 100);
     let win = preview(&app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     for focus in [win, sidebar] {
         if app.ui_probe().focus() != Some(focus) {
             switch_pane(&mut app);
@@ -643,9 +740,10 @@ fn open_sidebar_motion_fixture(app: &mut TestApp) -> WinId {
     "#).unwrap();
     drive_lua_tasks(app);
     paint_diff(app);
-    switch_pane(app);
+    let sidebar = sidebar(app);
+    focus_pane(app, sidebar);
     paint_diff(app);
-    app.ui_probe().named_win("smelt.diff.files").unwrap()
+    sidebar
 }
 
 #[test]
@@ -703,7 +801,7 @@ fn diff_sidebar_motion_counts_apply_to_j_and_k() {
     paint_diff(&mut app);
     assert_eq!(
         app.ui_probe().win(sidebar).unwrap().cursor_abs_row(),
-        total - 4
+        total - 3
     );
     app.type_text("2j");
     paint_diff(&mut app);
@@ -724,7 +822,7 @@ fn diff_sidebar_motion_counts_apply_to_j_and_k() {
 }
 
 #[test]
-fn diff_sidebar_wheel_keeps_selection_attached_to_the_file() {
+fn diff_sidebar_wheel_carries_selection_and_preview_along() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(120, 25);
     app.run_lua_result(r#"
@@ -738,36 +836,40 @@ fn diff_sidebar_wheel_keeps_selection_attached_to_the_file() {
     "#).unwrap();
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
-    switch_pane(&mut app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
+    focus_pane(&mut app, sidebar);
     let selected = app.ui_probe().win(sidebar).unwrap().cursor_abs_row();
-    let preview_row = app.ui_probe().win(preview(&app)).unwrap().cursor_abs_row();
     for _ in 0..8 {
         wheel_diff(&mut app, sidebar, true);
     }
     let window = app.ui_probe().win(sidebar).unwrap();
-    assert!(window.scroll_top() > selected);
-    assert_eq!(window.cursor_abs_row(), selected);
-    assert_eq!(
-        app.ui_probe().win(preview(&app)).unwrap().cursor_abs_row(),
-        preview_row
+    let rect = window.viewport.unwrap().rect;
+    let cursor = window.cursor_abs_row();
+    let top = window.scroll_top();
+    assert!(top > selected);
+    assert!(
+        (top..top + u64::from(rect.height)).contains(&cursor),
+        "the selection rides along with the viewport"
     );
+    let shown = format!("content {cursor}");
     let frame = app.render_to_frame();
-    let rect = app.ui_probe().win(sidebar).unwrap().viewport.unwrap().rect;
-    let selected_bg = app.ui_probe().theme().clone().get("Visual").bg;
+    assert!(frame.text().contains(&shown), "{}", frame.text());
+    let selected_bg = app.ui_probe().theme().clone().get("CursorLine").bg;
     assert!(selected_bg.is_some());
+    let screen_row = rect.y + (cursor - top) as u16;
     for row in rect.y..rect.y + rect.height {
-        assert_ne!(
-            frame.styles[row as usize][rect.x as usize + 3].bg,
-            selected_bg,
-            "an unrelated visible file acquired the offscreen selection: {}",
+        let bg = frame.styles[row as usize][rect.x as usize + 3].bg;
+        assert_eq!(
+            bg == selected_bg,
+            row == screen_row,
+            "only the selected file is highlighted: {}",
             frame.text()
         );
     }
     app.type_char('j');
     paint_diff(&mut app);
-    assert!(app.ui_probe().win(preview(&app)).unwrap().cursor_abs_row() > preview_row);
-    assert!(app.render_to_frame().text().contains("content 2"));
+    let next = format!("content {}", cursor + 1);
+    assert!(app.render_to_frame().text().contains(&next));
 }
 
 #[tokio::test]
@@ -1091,7 +1193,7 @@ fn diff_sidebar_has_neutral_names_colored_status_and_green_red_counts() {
     "#).unwrap();
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let lines = app
         .ui_probe()
         .buf(app.ui_probe().win(sidebar).unwrap().buf)
@@ -1158,13 +1260,13 @@ fn diff_sidebar_keeps_tree_layout_and_ctrl_w_switches_panes() {
     "#).unwrap();
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let source = Arc::clone(app.ui_probe().win(sidebar).unwrap().row_source().unwrap());
     let rows = source.rows(0..100, app.ui_probe().theme());
     let snapshot = source.snapshot();
     let win = preview(&app);
     for key in ['w', 'h', 'l'] {
-        for focus in [sidebar, win] {
+        for focus in [win, sidebar] {
             if key == 'w' {
                 switch_pane(&mut app);
             } else {
@@ -1177,7 +1279,7 @@ fn diff_sidebar_keeps_tree_layout_and_ctrl_w_switches_panes() {
             assert!(app
                 .render_to_frame()
                 .text()
-                .contains(" Changes  Branch  History ─"));
+                .contains(" Status  Branch  History "));
         }
     }
     let staged = rows
@@ -1266,7 +1368,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     app.press(KeyCode::Enter);
     wait_for_diff_section(&mut app, "unstaged (2)").await;
     let win = preview(&app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let source = Arc::clone(app.ui_probe().win(win).unwrap().row_source().unwrap());
     let selected_header = |app: &TestApp| {
         let window = app.ui_probe().win(win).unwrap();
@@ -1278,6 +1380,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
             .text
             .clone()
     };
+    focus_pane(&mut app, win);
     app.type_text("4GL");
     paint_diff(&mut app);
     app.type_char('-');
@@ -1396,9 +1499,9 @@ async fn diff_refresh_preserves_folder_and_section_stage_targets() {
     app.type_text("/diff");
     app.press(KeyCode::Enter);
     wait_for_diff_section(&mut app, "unstaged (3)").await;
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
-    switch_pane(&mut app);
-    app.type_text("gjh");
+    let sidebar = sidebar(&app);
+    focus_pane(&mut app, sidebar);
+    app.type_text("ggjh");
     paint_diff(&mut app);
     let selected_label = |app: &TestApp| {
         let win = app.ui_probe().win(sidebar).unwrap();
@@ -1483,9 +1586,10 @@ async fn diff_tree_groups_toggle_index_entries() {
     app.type_text("/diff");
     app.press(KeyCode::Enter);
     wait_for_diff_section(&mut app, "unstaged (4)").await;
-    switch_pane(&mut app);
+    let sidebar = sidebar(&app);
+    focus_pane(&mut app, sidebar);
     // Select and collapse src, then stage all descendants, not outside.rs.
-    app.type_text("gjh-");
+    app.type_text("ggjh-");
     wait_for_diff_section(&mut app, "unstaged (1)").await;
     assert_eq!(
         git(&["diff", "--cached", "--name-only"]),
@@ -1494,10 +1598,11 @@ async fn diff_tree_groups_toggle_index_entries() {
     assert_eq!(git(&["show", ":src/a.rs"]), "working\n");
 
     // Stage the entire unstaged section, then unstage the staged section.
-    app.type_text("g-");
+    app.type_text("gg-");
     wait_for_diff_section(&mut app, "unstaged (0)").await;
     assert_eq!(git(&["diff", "--cached", "--name-only"]).lines().count(), 4);
-    app.type_text("gj-");
+    // Two rows down past the blank row between sections.
+    app.type_text("ggjj-");
     wait_for_diff_section(&mut app, "staged (0)").await;
     assert!(git(&["diff", "--cached"]).is_empty());
     assert_eq!(
@@ -1506,9 +1611,9 @@ async fn diff_tree_groups_toggle_index_entries() {
     );
 
     // Explicit stage/unstage also work on section and folder selections.
-    app.type_text("gs");
+    app.type_text("ggs");
     wait_for_diff_section(&mut app, "unstaged (0)").await;
-    app.type_text("gjju");
+    app.type_text("ggjjju");
     wait_for_diff_section(&mut app, "staged (1)").await;
     assert_eq!(git(&["diff", "--cached", "--name-only"]), "outside.rs\n");
     app.press(KeyCode::Esc);
@@ -1555,7 +1660,7 @@ async fn diff_tree_staging_keeps_sidebar_scroll() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let rect = app.ui_probe().win(sidebar).unwrap().viewport.unwrap().rect;
     for (key, counts, wheels) in [('s', [79, 78, 77], 8), ('u', [78, 79, 80], 24)] {
         for _ in 0..wheels {
@@ -1625,131 +1730,6 @@ async fn diff_tree_staging_keeps_sidebar_scroll() {
     app.press(KeyCode::Esc);
 }
 
-#[tokio::test]
-async fn diff_tree_staging_reveals_offscreen_sidebar_selection() {
-    for preview_focused in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .current_dir(dir.path())
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap()
-        };
-        git(&["init", "-q"]);
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        for index in 0..80 {
-            if index == 40 {
-                git(&["add", "."]);
-            }
-            std::fs::write(dir.path().join(format!("src/file{index:03}.rs")), "new\n").unwrap();
-        }
-        let mut app = TestApp::builder().with_cwd(dir.path()).build();
-        app.set_terminal_size(110, 24);
-        app.type_text("/diff");
-        app.press(KeyCode::Enter);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            app.feed_one(SourceEvent::LuaWakeup);
-            paint_diff(&mut app);
-            if app.render_to_frame().text().contains("unstaged (40)") {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline);
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
-        let visible = |app: &TestApp| {
-            let window = app.ui_probe().win(sidebar).unwrap();
-            let top = window.scroll_top();
-            let height = u64::from(window.viewport.unwrap().rect.height);
-            (top..top + height).contains(&window.cursor_abs_row())
-        };
-        for (key, name, scroll_down, staged) in [
-            ('s', "file050.rs", true, true),
-            ('s', "file070.rs", false, true),
-            ('u', "file010.rs", true, false),
-            ('u', "file020.rs", false, false),
-            ('-', "file055.rs", true, true),
-            ('-', "file025.rs", false, false),
-        ] {
-            let source = Arc::clone(app.ui_probe().win(sidebar).unwrap().row_source().unwrap());
-            let rows = source.rows(0..source.snapshot().total_rows, app.ui_probe().theme());
-            let row = rows.iter().position(|row| row.text.contains(name)).unwrap();
-            let next = rows[row + 1].text.clone();
-            let screen_row = show_tree_row(&mut app, sidebar, row);
-            click_diff_row(&mut app, sidebar, screen_row);
-            if preview_focused {
-                switch_pane(&mut app);
-                paint_diff(&mut app);
-            }
-            for _ in 0..10 {
-                wheel_diff(&mut app, sidebar, scroll_down);
-            }
-            assert!(!visible(&app), "fixture cursor is still visible: {name}");
-            let focus = app.ui_probe().focus();
-            let top = app.ui_probe().win(sidebar).unwrap().scroll_top();
-            assert_eq!(
-                app.ui_probe().win(sidebar).unwrap().cursor_abs_row(),
-                row as u64
-            );
-            assert_eq!((row as u64) < top, scroll_down);
-            app.type_char(key);
-            let visible_on_start = visible(&app);
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                app.feed_one(SourceEvent::LuaWakeup);
-                paint_diff(&mut app);
-                if !Arc::ptr_eq(
-                    &source,
-                    app.ui_probe().win(sidebar).unwrap().row_source().unwrap(),
-                ) {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "{}",
-                    app.render_to_frame().text()
-                );
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            assert!(
-                visible(&app),
-                "{key} {name}, preview_focused={preview_focused}: {}",
-                app.render_to_frame().text()
-            );
-            assert!(
-                visible_on_start,
-                "{key} must reveal the selected file before waiting for Git"
-            );
-            assert_eq!(app.ui_probe().focus(), focus);
-            let window = app.ui_probe().win(sidebar).unwrap();
-            let cursor = window.cursor_abs_row();
-            assert_eq!(
-                window
-                    .row_source()
-                    .unwrap()
-                    .rows(cursor..cursor + 1, app.ui_probe().theme())[0]
-                    .text,
-                next
-            );
-            assert_eq!(
-                git(&["ls-files"])
-                    .lines()
-                    .any(|path| path == format!("src/{name}")),
-                staged
-            );
-        }
-        app.press(KeyCode::Esc);
-    }
-}
-
 fn open_folder_click_fixture(app: &mut TestApp) -> WinId {
     app.set_terminal_size(110, 28);
     app.run_lua_result(r#"
@@ -1761,9 +1741,12 @@ fn open_folder_click_fixture(app: &mut TestApp) -> WinId {
         smelt.cmd.run('diff')
     "#).unwrap();
     drive_lua_tasks(app);
+    paint_diff(app);
+    let preview = preview(app);
+    focus_pane(app, preview);
     app.type_text("70GL");
     paint_diff(app);
-    app.ui_probe().named_win("smelt.diff.files").unwrap()
+    sidebar(app)
 }
 
 #[test]
@@ -1892,7 +1875,7 @@ fn diff_tree_consecutive_folder_clicks_work_after_projection_changes() {
     "#).unwrap();
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let source = Arc::clone(app.ui_probe().win(sidebar).unwrap().row_source().unwrap());
     let preview = preview(&app);
     let preview_position = |app: &TestApp| {
@@ -2015,12 +1998,16 @@ fn diff_tree_folder_click_cancels_when_its_target_changes() {
         app.feed_one(SourceEvent::Term(Event::Mouse(event)));
         paint_diff(&mut app);
         assert_eq!(source.snapshot(), snapshot, "{interruption}");
-        // Resizing may clamp the preview viewport to its larger height.
-        if interruption != "resize" {
+        // Resizing may clamp the preview viewport to its larger height, and a
+        // drag to another row selects through to the file there.
+        if !matches!(interruption, "resize" | "other row") {
             assert_eq!(position(&app), before, "{interruption}");
         }
-        if matches!(interruption, "other row" | "outside") {
-            assert_eq!(app.ui_probe().win(sidebar).unwrap().cursor_abs_row(), 1);
+        let cursor = app.ui_probe().win(sidebar).unwrap().cursor_abs_row();
+        match interruption {
+            "other row" => assert_eq!(cursor, 3),
+            "outside" => assert_eq!(cursor, 1),
+            _ => {}
         }
     }
 }
@@ -2041,7 +2028,7 @@ fn diff_tree_mouse_folders_keyboard_navigation_and_explicit_file_reveal() {
     drive_lua_tasks(&mut app);
     app.render_silent();
     app.dispatch_ui_window_events(false);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let win = preview(&app);
     let tree = |app: &TestApp| {
         app.ui_probe()
@@ -2167,7 +2154,7 @@ fn diff_scrolled_tree_click_targets_the_visible_file() {
     .unwrap();
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     let row = show_tree_row(&mut app, sidebar, 73);
     assert!(app.ui_probe().win(sidebar).unwrap().scroll_top() > 0);
     click_diff_row(&mut app, sidebar, row);
@@ -2188,7 +2175,7 @@ fn diff_source_rows_have_syntax_foregrounds_over_diff_backgrounds() {
         smelt.cmd.run('diff')
     "#).unwrap();
     drive_lua_tasks(&mut app);
-    app.wait_for_document("smelt.diff.preview", Duration::from_secs(5));
+    app.wait_for_document("smelt.diff.status.preview", Duration::from_secs(5));
     let window = app.ui_probe().win(preview(&app)).unwrap();
     let source = Arc::clone(window.row_source().unwrap());
     let generation = source.snapshot().generation;
@@ -2276,7 +2263,7 @@ fn diff_full_width_backgrounds_markers_and_inline_changes_survive_pan_and_theme(
         smelt.cmd.run('diff')
     "#).unwrap();
     drive_lua_tasks(&mut app);
-    app.wait_for_document("smelt.diff.preview", Duration::from_secs(5));
+    app.wait_for_document("smelt.diff.status.preview", Duration::from_secs(5));
     for pass in 0..3 {
         let frame = app.render_to_frame();
         let rect = app
@@ -2365,6 +2352,7 @@ fn diff_visual_copy_crosses_materialized_rows_and_esc_leaves_selection_first() {
     app.set_terminal_size(100, 24);
     open_fixture(&mut app, 100);
     let win = preview(&app);
+    focus_pane(&mut app, win);
     app.type_text("3GV50G");
     paint_diff(&mut app);
     let before = app.ui_probe().win(win).unwrap().viewport.unwrap().rect;
@@ -2413,45 +2401,63 @@ fn diff_visual_copy_crosses_materialized_rows_and_esc_leaves_selection_first() {
     app.press(KeyCode::Esc);
     assert_eq!(app.ui_probe().win(win).unwrap().vim_mode(), VimMode::Normal);
     app.press(KeyCode::Esc);
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+    assert!(diff_closed(&app));
 }
 
 #[test]
-fn diff_index_shortcuts_do_not_escape_visual_or_pending_vim_input() {
+fn diff_preview_index_keys_act_on_hunks_but_not_through_pending_vim_input() {
     let mut app = TestApp::builder().build();
     open_fixture(&mut app, 100);
     let win = preview(&app);
-    app.run_lua_result("index_actions = {}; smelt.git.index = function(_, _, action) table.insert(index_actions, action); return smelt.git.diff() end").unwrap();
-    for prefix in ['v', 'V', 'y', '3'] {
+    focus_pane(&mut app, win);
+    app.run_lua_result(
+        r#"
+        index_actions = {}
+        local function record(kind, at)
+          return function(...)
+            table.insert(index_actions, kind .. ":" .. select(at, ...))
+            return smelt.git.diff()
+          end
+        end
+        smelt.git.index = record("files", 3)
+        smelt.git.index_hunks = record("hunks", 4)
+        "#,
+    )
+    .unwrap();
+    let actions = |app: &mut TestApp| {
+        app.eval_lua::<String>("return table.concat(index_actions, ',')")
+            .unwrap()
+    };
+    for prefix in ['y', '3'] {
         for key in ['s', 'u', '-'] {
             app.type_text(&format!("{prefix}{key}"));
             paint_diff(&mut app);
             drive_lua_tasks(&mut app);
-            assert_eq!(
-                app.eval_lua::<usize>("return #index_actions").unwrap(),
-                0,
-                "{prefix}{key} staged a file"
-            );
+            assert_eq!(actions(&mut app), "", "{prefix}{key} changed the index");
             let window = app.ui_probe().win(win).unwrap();
-            if prefix == '3' {
-                assert!(
-                    window.vim_state().is_idle(),
-                    "invalid counted motion was not canceled"
-                );
-            }
-            if window.vim_mode() != VimMode::Normal || !window.vim_state().is_idle() {
+            assert_eq!(window.vim_mode(), VimMode::Normal);
+            if !window.vim_state().is_idle() {
                 app.press(KeyCode::Esc);
             }
         }
+    }
+    for visual in ["v", "V"] {
+        app.type_text(&format!("{visual}js"));
+        drive_lua_tasks(&mut app);
+        assert_eq!(
+            app.ui_probe().win(win).unwrap().vim_mode(),
+            VimMode::Normal,
+            "staging leaves {visual}"
+        );
     }
     for key in ['s', 'u', '-'] {
         app.type_char(key);
         drive_lua_tasks(&mut app);
     }
     assert_eq!(
-        app.eval_lua::<String>("return table.concat(index_actions, ',')")
-            .unwrap(),
-        "stage,toggle"
+        actions(&mut app),
+        "hunks:stage,hunks:stage,hunks:stage,hunks:toggle",
+        "u is inert on unstaged changes"
     );
 }
 
@@ -2463,7 +2469,8 @@ fn diff_wheel_scroll_updates_sidebar_in_both_directions() {
     open_fixture(&mut app, 100);
     let win = preview(&app);
     let rect = app.ui_probe().win(win).unwrap().viewport.unwrap().rect;
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
+    focus_pane(&mut app, win);
     app.type_char('G');
     app.render_silent();
     app.dispatch_ui_window_events(false);
@@ -2482,7 +2489,7 @@ fn diff_wheel_scroll_updates_sidebar_in_both_directions() {
 }
 
 #[test]
-fn diff_closing_reopening_and_reload_release_native_documents() {
+fn diff_closing_and_reload_release_native_documents() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(100, 24);
     open_fixture(&mut app, 100);
@@ -2495,11 +2502,8 @@ fn diff_closing_reopening_and_reload_release_native_documents() {
     );
     let scratch = app.ui_probe().win(preview(&app)).unwrap().buf;
     app.type_char('q');
-    assert!(app.run_lua("smelt.git.diff = nil; collectgarbage('collect')"));
-    assert!(
-        source.upgrade().is_some(),
-        "closed snapshot not retained for reopen"
-    );
+    assert!(app.run_lua("collectgarbage('collect')"));
+    assert!(source.upgrade().is_none(), "closed document retained");
     assert!(
         app.ui_probe().buf(scratch).is_none(),
         "closed projection retained"
@@ -2515,28 +2519,13 @@ fn diff_closing_reopening_and_reload_release_native_documents() {
     let scratch = app.ui_probe().win(preview(&app)).unwrap().buf;
     app.exec_lua_entry("smelt.engine.reload()").unwrap();
     app.wait_for_workspace();
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+    assert!(diff_closed(&app));
     assert!(source.upgrade().is_none(), "reloaded document retained");
     assert!(
         app.ui_probe().buf(scratch).is_none(),
         "reloaded projection retained"
     );
     open_fixture(&mut app, 10);
-}
-
-#[test]
-fn diff_reopen_shows_previous_snapshot_while_refreshing() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(100, 24);
-    open_fixture(&mut app, 10);
-    app.type_char('q');
-    assert!(app.run_lua("smelt.cmd.run('diff')"));
-    let frame = app.render_to_frame().text();
-    assert!(frame.contains("first.rs"), "{frame}");
-    drive_lua_tasks(&mut app);
-    let frame = app.render_to_frame().text();
-    assert!(frame.contains("first.rs"), "{frame}");
-    assert!(!frame.contains("refreshing"), "{frame}");
 }
 
 #[test]
@@ -2596,7 +2585,7 @@ fn diff_context_fold_expands_and_resize_keeps_virtual_projection() {
         r#"
         local patch = 'diff --git a/fold.rs b/fold.rs\n@@ -1,101 +1,101 @@\n'
           .. string.rep(' context\n', 100) .. '-old\n+new\n'
-        smelt.git.diff = function() return { branch = 'main', diff = smelt.diff.parse(patch) } end
+        smelt.git.diff = function() return { diff = smelt.diff.parse(patch) } end
         smelt.cmd.run('diff')
     "#
     ));
@@ -2604,6 +2593,7 @@ fn diff_context_fold_expands_and_resize_keeps_virtual_projection() {
     let frame = app.render_to_frame().text();
     assert!(frame.contains("▶ 94 unchanged lines"), "{frame}");
     let win = preview(&app);
+    focus_pane(&mut app, win);
     app.type_text("6G");
     app.press(KeyCode::Enter);
     assert!(app
@@ -2626,7 +2616,7 @@ fn diff_context_fold_expands_and_resize_keeps_virtual_projection() {
     let buf = app.ui_probe().win(win).unwrap().buf;
     assert!(app.ui_probe().buf(buf).unwrap().line_count() < 18);
     app.type_char('q');
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+    assert!(diff_closed(&app));
 }
 
 #[tokio::test]
@@ -2664,7 +2654,7 @@ async fn diff_command_loads_real_git_worktree_and_refreshes() {
     app.type_char('r');
     wait(&mut app, "refreshed local change").await;
     app.press(KeyCode::Esc);
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+    assert!(diff_closed(&app));
 }
 
 #[tokio::test]
@@ -2710,7 +2700,7 @@ async fn diff_large_worktree_is_usable_without_waiting_for_all_syntax() {
     );
     app.type_text("900000G");
     paint_diff(&mut app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     click_diff_row(&mut app, sidebar, 2);
     assert!(app.render_to_frame().text().contains("last file"));
     assert!(app.ui_probe().win(preview(&app)).unwrap().cursor_abs_row() > 1_000_000);
@@ -2930,6 +2920,8 @@ fn diff_refresh_failure_keeps_the_previous_snapshot_visible() {
         frame.contains("stale"),
         "stale snapshot is not identified:\n{frame}"
     );
+    let win = preview(&app);
+    focus_pane(&mut app, win);
     app.type_char('G');
     assert!(app.render_to_frame().text().contains("last change"));
 }
@@ -2948,10 +2940,11 @@ fn diff_refresh_preserves_expanded_context_and_source_position() {
     )
     .unwrap();
     drive_lua_tasks(&mut app);
+    let win = preview(&app);
+    focus_pane(&mut app, win);
     app.type_text("6G");
     app.press(KeyCode::Enter);
     app.type_text("40G");
-    let win = preview(&app);
     let before = app.ui_probe().win(win).unwrap().cursor_abs_row();
     app.type_char('r');
     drive_lua_tasks(&mut app);
@@ -2976,6 +2969,7 @@ fn diff_refresh_preserves_hunk_added_deleted_and_no_newline_rows() {
     "#).unwrap();
     drive_lua_tasks(&mut app);
     let win = preview(&app);
+    focus_pane(&mut app, win);
     for row in 0..7 {
         app.type_text(&format!("{}G", row + 1));
         assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), row);
@@ -3210,7 +3204,7 @@ fn diff_empty_error_and_close_while_loading() {
     app.set_terminal_size(100, 24);
     assert!(app.run_lua(
         r#"
-        smelt.git.diff = function() return { branch = 'main', diff = smelt.diff.parse('') } end
+        smelt.git.diff = function() return { diff = smelt.diff.parse('') } end
         smelt.cmd.run('diff')
     "#
     ));
@@ -3242,7 +3236,7 @@ fn diff_empty_error_and_close_while_loading() {
     drive_lua_tasks(&mut app);
     app.press(KeyCode::Esc);
     app.feed_one(SourceEvent::Tick(20000));
-    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+    assert!(diff_closed(&app));
 }
 
 /// A deterministic allocation guard accompanies the timed benchmark below:
@@ -3291,7 +3285,7 @@ fn diff_many_file_tree_keeps_folder_frames_bounded() {
     .unwrap();
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
-    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    let sidebar = sidebar(&app);
     for _ in 0..2 {
         let before = smelt_perf::alloc::thread_snapshot();
         let start = std::time::Instant::now();
@@ -3308,6 +3302,14 @@ fn diff_many_file_tree_keeps_folder_frames_bounded() {
         assert!(app.ui_probe().buf(window.buf).unwrap().line_count() <= 40);
         assert!(window.row_source().unwrap().snapshot().total_rows >= 10000);
     }
+}
+
+/// Focus the diff pane `win`, switching panes when the other one has focus.
+fn focus_pane(app: &mut TestApp, win: WinId) {
+    if app.ui_probe().focus() != Some(win) {
+        switch_pane(app);
+    }
+    assert_eq!(app.ui_probe().focus(), Some(win));
 }
 
 /// `Ctrl-W w`: move focus to the other diff pane.
@@ -3408,7 +3410,7 @@ async fn diff_loading_benchmark() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         let usable = start.elapsed();
-        app.wait_for_document("smelt.diff.preview", Duration::from_secs(5));
+        app.wait_for_document("smelt.diff.status.preview", Duration::from_secs(5));
         let highlighted = start.elapsed();
         let buf = app
             .ui_probe()
@@ -3456,7 +3458,7 @@ async fn diff_loading_benchmark() {
                         .1
                         .saturating_sub(before.1),
                 );
-                let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+                let sidebar = sidebar(&app);
                 let tree = app.ui_probe().win(sidebar).unwrap().row_source().unwrap();
                 let rows = tree.rows(0..tree.snapshot().total_rows, app.ui_probe().theme());
                 if rows.iter().any(|row| row.text.starts_with(&staged_header)) {
@@ -3539,7 +3541,7 @@ fn diff_viewer_benchmark() {
         paint_diff(&mut app);
         let load = start.elapsed();
         let win = preview(&app);
-        let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+        let sidebar = sidebar(&app);
         let total = app
             .ui_probe()
             .win(win)
@@ -3573,7 +3575,7 @@ fn diff_viewer_benchmark() {
                 }
                 app.type_text("gg");
                 paint_diff(&mut app);
-                app.wait_for_document("smelt.diff.preview", Duration::from_secs(5));
+                app.wait_for_document("smelt.diff.status.preview", Duration::from_secs(5));
                 let buf = app
                     .ui_probe()
                     .buf(app.ui_probe().win(win).unwrap().buf)
@@ -4038,6 +4040,7 @@ fn diff_search_keeps_preview_focus_across_repeated_searches() {
     app.set_terminal_size(110, 28);
     open_fixture(&mut app, 1000);
     let win = preview(&app);
+    focus_pane(&mut app, win);
     for _ in 0..2 {
         app.type_text("gg/last change");
         app.press(KeyCode::Enter);
@@ -4143,4 +4146,297 @@ fn native_document_scroll_writes_use_rows_added_since_the_last_paint() {
         .unwrap();
     app.render_silent();
     assert_eq!(app.ui_probe().win(win).unwrap().scroll_top(), bottom + 10);
+}
+
+#[test]
+fn diff_header_spans_the_frame_border_or_is_a_full_screen_status_line() {
+    let cells = |line: &str| line.chars().collect::<Vec<_>>();
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    open_fixture(&mut app, 10);
+    let frame = app.render_to_frame().text();
+    let lines: Vec<_> = frame.lines().collect();
+    let top = lines.iter().position(|line| line.contains('┌')).unwrap();
+    let corner = cells(lines[top]).iter().position(|c| *c == '┐');
+    let side = cells(lines[top + 1]).iter().rposition(|c| *c == '│');
+    assert!(corner.is_some() && corner == side, "{frame}");
+
+    app.type_char('q');
+    assert!(app.run_lua("require('smelt.plugins.diff').open({ standalone = true })"));
+    drive_lua_tasks(&mut app);
+    let snapshot = app.render_to_frame();
+    let frame = snapshot.text();
+    let row = frame
+        .lines()
+        .position(|line| line.contains("History"))
+        .unwrap();
+    let line = cells(frame.lines().nth(row).unwrap());
+    assert!(!line.contains(&'─') && !line.contains(&'┬'), "{frame}");
+    assert_eq!(snapshot.styles[row].len(), 100, "{frame}");
+    let status_bg = app.ui_probe().theme().get("SmeltStatusBg").bg;
+    assert!(status_bg.is_some());
+    assert_eq!(snapshot.styles[row][99].bg, status_bg, "{frame}");
+    let current_tab_bg = app.ui_probe().theme().get("CursorLine").bg;
+    assert_eq!(snapshot.styles[row][1].bg, current_tab_bg, "{frame}");
+}
+
+#[test]
+fn diff_full_screen_esc_quits_only_when_nothing_is_pending() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    open_fixture(&mut app, 10);
+    app.type_char('q');
+    assert!(app.run_lua("require('smelt.plugins.diff').open({ standalone = true })"));
+    drive_lua_tasks(&mut app);
+    app.render_silent();
+
+    app.type_char('V');
+    app.press(KeyCode::Esc);
+    assert!(!diff_closed(&app), "Esc leaves visual mode first");
+
+    app.type_char('X');
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("Discard changes"), "{frame}");
+    app.press(KeyCode::Esc);
+    let frame = app.render_to_frame().text();
+    assert!(
+        !diff_closed(&app) && !frame.contains("Discard changes"),
+        "{frame}"
+    );
+
+    app.press(KeyCode::Esc);
+    assert!(diff_closed(&app));
+}
+
+#[test]
+fn diff_discard_question_ends_when_the_cursor_moves() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    open_fixture(&mut app, 10);
+    app.type_char('q');
+    assert!(app.run_lua("require('smelt.plugins.diff').open({ standalone = true })"));
+    drive_lua_tasks(&mut app);
+    app.render_silent();
+    assert!(app.run_lua(
+        "_G.discarded = 0; smelt.git.discard = function() _G.discarded = _G.discarded + 1 end"
+    ));
+    app.type_char('X');
+    assert!(app.render_to_frame().text().contains("Discard changes"));
+    app.type_char('j');
+    paint_diff(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("Discard changes"), "{frame}");
+    app.type_char('y');
+    drive_lua_tasks(&mut app);
+    assert!(app.run_lua("assert(_G.discarded == 0)"));
+}
+
+/// A repository whose `file.rs` has two changes far enough apart to show as
+/// two hunks, with nothing staged.
+fn two_hunk_repo() -> (tempfile::TempDir, impl Fn(&[&str]) -> String) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let git = move |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    let base: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+    std::fs::write(dir.path().join("file.rs"), base.join("\n") + "\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    let mut changed = base.clone();
+    changed[1] = "first change".into();
+    changed[27] = "second change".into();
+    std::fs::write(dir.path().join("file.rs"), changed.join("\n") + "\n").unwrap();
+    (dir, git)
+}
+
+/// Move the preview cursor to the last row showing `text`.
+fn preview_cursor_to(app: &mut TestApp, text: &str) {
+    let win = preview(app);
+    let Some(source) = app.ui_probe().win(win).unwrap().row_source().cloned() else {
+        panic!(
+            "the preview shows no patch:\n{}",
+            app.render_to_frame().text()
+        );
+    };
+    let rows = source.rows(0..200, app.ui_probe().theme());
+    let row = rows
+        .iter()
+        .rposition(|row| row.text.contains(text))
+        .unwrap_or_else(|| panic!("no row shows {text:?}:\n{}", app.render_to_frame().text()));
+    app.type_text(&format!("{}G", row + 1));
+    paint_diff(app);
+}
+
+#[tokio::test]
+async fn diff_opens_with_the_file_list_focused() {
+    let (dir, _git) = two_hunk_repo();
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(120, 40);
+    app.type_text("/diff");
+    app.press(KeyCode::Enter);
+    wait_for_diff_section(&mut app, "unstaged (1)").await;
+    assert_eq!(app.ui_probe().focus(), Some(sidebar(&app)));
+}
+
+#[tokio::test]
+async fn diff_preview_stages_unstages_and_discards_the_hunks_under_cursor_or_selection() {
+    let (dir, git) = two_hunk_repo();
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(120, 40);
+    app.type_text("/diff");
+    app.press(KeyCode::Enter);
+    wait_for_diff_section(&mut app, "unstaged (1)").await;
+    let win = preview(&app);
+    focus_pane(&mut app, win);
+
+    preview_cursor_to(&mut app, "first change");
+    app.type_char('s');
+    wait_for_diff_section(&mut app, "staged (1)").await;
+    let staged = git(&["diff", "--cached"]);
+    assert!(staged.contains("+first change"), "{staged}");
+    assert!(!staged.contains("second change"), "{staged}");
+    assert!(git(&["diff"]).contains("+second change"));
+    assert_eq!(
+        app.ui_probe().focus(),
+        Some(win),
+        "focus stays in the patch"
+    );
+
+    // The staged copy of the hunk comes last, in the staged section.
+    preview_cursor_to(&mut app, "first change");
+    app.type_char('u');
+    wait_for_diff_section(&mut app, "staged (0)").await;
+    assert!(git(&["diff", "--cached"]).is_empty());
+    assert!(app.render_to_frame().text().contains("Nothing staged"));
+    let files = sidebar(&app);
+    focus_pane(&mut app, files);
+    app.type_text("ggj");
+    paint_diff(&mut app);
+    focus_pane(&mut app, win);
+
+    // A Visual selection over both hunks stages them together, as the whole file.
+    preview_cursor_to(&mut app, "first change");
+    app.type_char('V');
+    preview_cursor_to(&mut app, "second change");
+    app.type_char('s');
+    wait_for_diff_section(&mut app, "unstaged (0)").await;
+    assert_eq!(app.ui_probe().win(win).unwrap().vim_mode(), VimMode::Normal);
+    assert!(git(&["diff"]).is_empty());
+    git(&["reset", "-q"]);
+
+    // Discard asks first, then drops only the hunk under the cursor.
+    app.type_char('r');
+    wait_for_diff_section(&mut app, "unstaged (1)").await;
+    focus_pane(&mut app, win);
+    preview_cursor_to(&mut app, "second change");
+    app.type_char('X');
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("Discard changes to the selected hunks?"));
+    app.type_char('y');
+    wait_for_diff(&mut app, |_| {
+        !std::fs::read_to_string(dir.path().join("file.rs"))
+            .unwrap()
+            .contains("second change")
+    })
+    .await;
+    let worktree = std::fs::read_to_string(dir.path().join("file.rs")).unwrap();
+    assert!(worktree.contains("first change"), "{worktree}");
+    assert!(worktree.contains("line 28"), "{worktree}");
+
+    // A hunk from a snapshot the index has moved past changes nothing.
+    wait_for_diff(&mut app, |app| {
+        !app.render_to_frame().text().contains("discarding")
+    })
+    .await;
+    git(&["add", "file.rs"]);
+    let index = git(&["diff", "--cached"]);
+    focus_pane(&mut app, win);
+    preview_cursor_to(&mut app, "first change");
+    app.type_char('s');
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("Stage failed")
+    })
+    .await;
+    assert_eq!(git(&["diff", "--cached"]), index);
+}
+
+#[tokio::test]
+async fn diff_q_closes_the_viewer_and_quits_a_standalone_run() {
+    let (dir, _git) = two_hunk_repo();
+    for standalone in [false, true] {
+        let builder = TestApp::builder().with_cwd(dir.path());
+        let mut app = if standalone {
+            builder.with_cli_command("diff", &[]).build()
+        } else {
+            builder.build()
+        };
+        app.set_terminal_size(110, 20);
+        if !standalone {
+            assert!(app.run_lua("require('smelt.plugins.diff').open()"));
+        }
+        wait_for_diff_section(&mut app, "unstaged (1)").await;
+        app.type_char('q');
+        drive_lua_tasks(&mut app);
+        app.settle_frame();
+        assert!(diff_closed(&app), "standalone = {standalone}");
+        assert_eq!(app.tui.pending_quit, standalone);
+        assert_eq!(app.tui.quit_exit().map(|exit| exit.code), None);
+    }
+}
+
+/// `c` and `C` run `git commit` and `git commit --amend` on the terminal, in
+/// the repository, so Git's own editor and hooks run. The header reports the
+/// new commit or Git's error.
+#[tokio::test]
+async fn diff_commit_runs_git_commit_on_the_terminal() {
+    let (dir, git) = two_hunk_repo();
+    git(&["add", "."]);
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(110, 20);
+    assert!(app.run_lua(
+        r#"
+        smelt.terminal.run = function(argv, opts)
+          ran = { table.concat(argv, " "), opts.cwd }
+          if argv[3] == "--amend" then return false, "error: commit-msg hook failed" end
+          smelt.process.run("git", { "commit", "-qm", "from editor" }, { cwd = opts.cwd })
+          return true
+        end
+        smelt.cmd.run("diff")
+        "#
+    ));
+    wait_for_diff_section(&mut app, "staged (1)").await;
+
+    app.type_char('c');
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("from editor")
+    })
+    .await;
+    assert!(app.run_lua("assert(ran[1] == 'git commit' and ran[2] == smelt.session.cwd())"));
+    wait_for_diff_section(&mut app, "staged (0)").await;
+    assert_eq!(git(&["log", "-1", "--format=%s"]), "from editor\n");
+
+    app.type_char('C');
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame()
+            .text()
+            .contains("commit-msg hook failed")
+    })
+    .await;
+    assert!(app.run_lua("assert(ran[1] == 'git commit --amend')"));
 }

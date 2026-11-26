@@ -311,7 +311,13 @@ impl TuiApp {
     }
 
     pub(super) fn finish_lua_work(&self, work: &crate::lua::LuaWorkGuard) {
-        if work.root && self.has_queued_lua_work() {
+        if !work.root {
+            return;
+        }
+        // A dropped callback handle keeps its Lua value, and everything the
+        // value captures, until the registry slot is expired.
+        self.lua.lua().expire_registry_values();
+        if self.has_queued_lua_work() {
             let _ = self.lua.wakeup_sender().send(());
         }
     }

@@ -274,10 +274,18 @@ impl LuaRuntime {
         )?;
         smelt_root.live_only_fn(
             "quit",
-            "Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.",
-            &[],
-            |_, ()| -> LuaResult<()> {
-                crate::lua::with_agent_host(|host| host.request_quit());
+            "Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns. `opts.code` sets the process exit status (default 0) and `opts.message` is printed to stderr once the terminal is restored, such as the reason a subcommand could not run.",
+            &["opts"],
+            |_, opts: Option<mlua::Table>| -> LuaResult<()> {
+                let exit = opts
+                    .map(|opts| -> LuaResult<_> {
+                        Ok(crate::app::QuitExit {
+                            code: opts.get::<Option<i32>>("code")?.unwrap_or(0),
+                            message: opts.get::<Option<String>>("message")?,
+                        })
+                    })
+                    .transpose()?;
+                crate::lua::with_agent_host(|host| host.request_quit(exit));
                 Ok(())
             },
         )?;

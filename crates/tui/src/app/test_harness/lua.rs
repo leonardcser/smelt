@@ -19,6 +19,15 @@ impl TestApp {
         self.tui.drain_idle_work()
     }
 
+    /// Paint a frame, then run the runtime work the main loop does before
+    /// it waits again: the standalone quit check, timers, Lua tasks and
+    /// window events about that frame.
+    pub fn settle_frame(&mut self) {
+        self.render_silent();
+        self.tui.quit_closed_standalone();
+        self.tui.tick_runtime();
+    }
+
     /// Pump Lua wakeups until no signal, callback, command or task resume is
     /// left queued, so spawned callbacks reach their next wait point. Each
     /// pump has a time budget, so how many it takes depends on machine load.

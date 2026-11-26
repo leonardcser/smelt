@@ -244,6 +244,8 @@ struct LuaLaunchInputs {
     disabled_modules: std::collections::HashSet<String>,
     cli_flag_specs: Vec<crate::lua::CliFlagSpec>,
     cli_flag_values: HashMap<String, crate::lua::CliFlagValue>,
+    cli_command_specs: Vec<crate::lua::CliCommandSpec>,
+    cli_command: Option<crate::lua::CliCommand>,
 }
 
 #[derive(Clone)]
@@ -612,6 +614,18 @@ impl LuaRuntime {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .clone(),
+            cli_command_specs: self
+                .shared
+                .cli_command_specs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            cli_command: self
+                .shared
+                .cli_command
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
         }
     }
 
@@ -642,6 +656,16 @@ impl LuaRuntime {
             .cli_flag_values
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = launch.cli_flag_values.clone();
+        *self
+            .shared
+            .cli_command_specs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = launch.cli_command_specs.clone();
+        *self
+            .shared
+            .cli_command
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = launch.cli_command.clone();
         self.launch_inputs = Some(launch);
     }
 
@@ -1053,6 +1077,11 @@ impl LuaRuntime {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .clear();
+            self.shared
+                .cli_command_specs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
         }
         if candidate {
             crate::lua::doc::begin_candidate_load(&self.lua);
@@ -1101,15 +1130,28 @@ impl LuaRuntime {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .clone();
+            let candidate_commands = std::mem::take(
+                &mut *self
+                    .shared
+                    .cli_command_specs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            );
             let launch = launch.as_ref().expect("candidate launch inputs");
             if candidate_disabled != launch.disabled_modules
                 || candidate_specs != launch.cli_flag_specs
+                || candidate_commands != launch.cli_command_specs
             {
                 self.load_warnings.push(
-                    "early.lua launch declarations changed; restart smelt to apply CLI flag or builtin module changes"
+                    "early.lua launch declarations changed; restart smelt to apply CLI flag, subcommand or builtin module changes"
                         .to_string(),
                 );
             }
+            *self
+                .shared
+                .cli_command_specs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = launch.cli_command_specs.clone();
             *self
                 .shared
                 .disabled_modules

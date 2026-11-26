@@ -1,6 +1,6 @@
 ---
 title: "smelt.cli: Lua API reference"
-description: "Declare and read CLI flags from Lua. Lua API reference for smelt.cli in smelt, the Lua-scriptable terminal coding agent."
+description: "Declare and read CLI flags and subcommands from Lua. Lua API reference for smelt.cli in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.cli`
@@ -9,7 +9,15 @@ description: "Declare and read CLI flags from Lua. Lua API reference for smelt.c
 
 **Availability:** Everywhere, including headless mode.
 
-Declare and read CLI flags from Lua. `register_flag` is intended to be called from `early.lua` so the flag is folded into the main binary's argument parser. `get(name)` returns the parsed value (or the declared default) after the binary has parsed argv.
+Declare and read CLI flags and subcommands from Lua. `register_flag` and `register_command` are intended to be called from `early.lua` so they are folded into the main binary's argument parser. `get(name)` returns a parsed flag value (or the declared default) and `command()` the launched subcommand after the binary has parsed argv.
+
+## `smelt.cli.command`
+
+```lua
+fun(): any
+```
+
+Return the Lua subcommand this process was launched for as `{ name, args }`, where `args` lists its free arguments, or `nil` for an agent session.
 
 ## `smelt.cli.get`
 
@@ -26,6 +34,31 @@ fun(): table
 ```
 
 Return the names of every Lua-declared CLI flag, in registration order.
+
+## `smelt.cli.on_command`
+
+```lua
+fun(name: string, open: fun(args: string[])): smelt.Reg
+```
+
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Open a tool when smelt launches as `smelt <name>`, a subcommand that
+`smelt.cli.register_command` declared in `early.lua`. Once the launch
+is ready, calls `open(args)` with the subcommand's free arguments.
+`open` must show a modal overlay that fills the terminal; smelt quits
+once no modal overlay shows, and exits with code 1 if none ever did.
+Returns a `Reg` whose `:remove()` drops the hook before it fires.
+
+## `smelt.cli.register_command`
+
+```lua
+fun(opts: smelt.cli.RegisterCommandOpts): nil
+```
+
+Types: [`smelt.cli.RegisterCommandOpts`](types.md#smeltcliregistercommandopts)
+
+Register a subcommand such as `smelt diff`. MUST be called from `early.lua`, like `register_flag`. Launching it starts the TUI without an agent session: nothing is persisted, no provider setup or MCP servers start, and `smelt status` does not list the process. A plugin opens its UI as a modal overlay with `smelt.cli.on_command`; smelt quits once no modal overlay shows. Every subcommand also accepts `-C <path>`. Errors if an earlier registration took the name. A name that a built-in subcommand uses is ignored with a warning at launch.
 
 ## `smelt.cli.register_flag`
 

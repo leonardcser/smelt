@@ -592,7 +592,11 @@ impl TuiApp {
 
     /// Request background context discovery. Reconciliation deduplicates unchanged
     /// targets; an explicit refresh starts a new revision even for the same model.
+    /// Without an agent session no model runs, so nothing is requested.
     pub(crate) fn request_context_window(&mut self, request: ContextWindowRequest) {
+        if !self.agent_session() {
+            return;
+        }
         let Some(active) = self.core.config.active_model().cloned() else {
             if self.clear_context_window_target() {
                 self.core.config.context_window = None;
@@ -696,9 +700,12 @@ impl TuiApp {
         )
     }
 
+    /// A Lua subcommand such as `smelt diff` is a one-off tool, so it never
+    /// watches the config for edits.
     fn set_auto_reload_enabled(&mut self, enabled: bool) {
         let paths = self.committed_watch_paths();
-        self.auto_reload.set_desired(enabled, paths);
+        self.auto_reload
+            .set_desired(enabled && self.agent_session(), paths);
     }
 
     pub(crate) fn reconcile_auto_reload(&mut self) {

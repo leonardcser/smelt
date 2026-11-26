@@ -76,9 +76,7 @@ pub(super) fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         SubState::WaitingOp(op) => {
             if let KeyCode::Char(c) = key.code {
                 if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count2.is_some()) {
-                    ctx.vim_state.count2 = Some(
-                        ctx.vim_state.count2.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize,
-                    );
+                    ctx.vim_state.count2 = Some(push_count_digit(ctx.vim_state.count2, c));
                     return Action::Consumed;
                 }
                 if c == op.char() {
@@ -288,8 +286,7 @@ pub(super) fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
     }
 
     if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count1.is_some()) {
-        ctx.vim_state.count1 =
-            Some(ctx.vim_state.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+        ctx.vim_state.count1 = Some(push_count_digit(ctx.vim_state.count1, c));
         return Action::Consumed;
     }
 

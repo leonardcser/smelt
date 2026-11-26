@@ -81,6 +81,7 @@ pub(super) struct PlatformRuntime {
 impl PlatformRuntime {
     pub(super) fn new(
         env: &engine::env::RuntimeEnv,
+        agent_session: bool,
         sessions: smelt_core::session::SessionStorage,
         job_completion_rx: tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::JobCompletion>,
         app_events: Option<(
@@ -94,12 +95,13 @@ impl PlatformRuntime {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 (tx, Some(rx))
             });
-        let public_status = match smelt_core::public_status::StatusPublisher::new_in(
-            env.runtime_dir(),
-            env.pid(),
-        ) {
-            Ok(publisher) => Some(publisher),
-            Err(error) => {
+        // Only agent sessions are listed by `smelt status`.
+        let public_status = match agent_session.then(|| {
+            smelt_core::public_status::StatusPublisher::new_in(env.runtime_dir(), env.pid())
+        }) {
+            None => None,
+            Some(Ok(publisher)) => Some(publisher),
+            Some(Err(error)) => {
                 engine::log::entry(
                     engine::log::Level::Warn,
                     "public_status_init_failed",
@@ -463,16 +465,66 @@ impl crate::app::TuiApp {
         program: &std::ffi::OsStr,
         args: &[std::ffi::OsString],
     ) -> std::io::Result<std::process::ExitStatus> {
-        let cwd = self.core.env.cwd();
-        let status = self.platform.suspend_terminal(|| {
-            std::process::Command::new(program)
-                .args(args)
-                .current_dir(cwd)
-                .status()
-        });
-        // Editors overwrite the alternate screen; rebuild the render baseline.
+        let mut command = std::process::Command::new(program);
+        command.args(args).current_dir(self.core.env.cwd());
+        self.run_suspended(|| command.status())
+    }
+
+    /// Run `argv` on the terminal, relative to the session cwd, the way
+    /// [`Self::run_editor`] runs an editor. Its error output shows on the
+    /// terminal as it comes and is kept, so a failure reads as the command's
+    /// own message.
+    pub(crate) fn run_in_terminal(
+        &mut self,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> Result<(), String> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err("terminal.run: empty command".into());
+        };
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .current_dir(self.core.env.cwd().join(cwd.unwrap_or(".")))
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped());
+        let (status, stderr) = self
+            .run_suspended(|| {
+                // Start on a clear screen, not over smelt's last frame. The
+                // alternate screen stays, so the user's scrollback never
+                // flashes before an editor the command opens.
+                use std::io::Write;
+                let mut terminal = std::io::stdout();
+                terminal.write_all(b"\x1b[H\x1b[2J")?;
+                terminal.flush()?;
+                let mut child = command.spawn()?;
+                let stderr = child.stderr.take().map(tee_to_terminal);
+                let status = child.wait()?;
+                let stderr = stderr
+                    .and_then(|reader| reader.join().ok())
+                    .unwrap_or_default();
+                Ok((status, stderr))
+            })
+            .map_err(|error| format!("{program}: {error}"))?;
+        if status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!("{program} exited with {status}")
+        } else {
+            stderr
+        })
+    }
+
+    /// Hand the terminal to `run` until it returns, then repaint smelt.
+    fn run_suspended<R>(&mut self, run: impl FnOnce() -> std::io::Result<R>) -> std::io::Result<R> {
+        let result = self.platform.suspend_terminal(run);
+        // The command may overwrite the alternate screen; rebuild the
+        // render baseline.
         self.ui.force_redraw();
-        status.unwrap_or_else(|| {
+        result.unwrap_or_else(|| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
                 "unavailable without an attached terminal",
@@ -541,6 +593,33 @@ impl crate::app::TuiApp {
     }
 }
 
+/// Most error output [`crate::app::TuiApp::run_in_terminal`] keeps: the end of it, where
+/// a command says why it failed.
+const KEPT_ERROR_BYTES: usize = 64 * 1024;
+
+/// Copy `pipe` to the terminal as it arrives, and return the end of it once
+/// every writer closed it. Smelt's own stderr goes to a log while it runs,
+/// so the copy goes to stdout, the terminal while smelt is suspended.
+fn tee_to_terminal(mut pipe: std::process::ChildStderr) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut kept = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut terminal = std::io::stdout();
+        while let Ok(read) = pipe.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            let _ = terminal.write_all(&chunk[..read]);
+            let _ = terminal.flush();
+            kept.extend_from_slice(&chunk[..read]);
+            let excess = kept.len().saturating_sub(KEPT_ERROR_BYTES);
+            kept.drain(..excess);
+        }
+        kept
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +651,7 @@ mod tests {
         let (_, job_completion_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut platform = PlatformRuntime::new(
             &env,
+            true,
             smelt_core::session::SessionStorage::from_env(&env),
             job_completion_rx,
             None,
@@ -675,6 +755,7 @@ mod tests {
         supervisor.set_completion_sender(completion_tx);
         let mut platform = PlatformRuntime::new(
             &env,
+            true,
             smelt_core::session::SessionStorage::from_env(&env),
             completion_rx,
             None,

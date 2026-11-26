@@ -49,8 +49,8 @@ smelt.ns = nil
 ---@type fun(name: string): smelt.Plugin
 smelt.plugin = nil
 
---- Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.
----@type fun(): nil
+--- Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns. `opts.code` sets the process exit status (default 0) and `opts.message` is printed to stderr once the terminal is restored, such as the reason a subcommand could not run.
+---@type fun(opts: table?): nil
 smelt.quit = nil
 
 --- Tier: Host - Available in every runtime, including headless mode.

@@ -643,6 +643,12 @@ impl AppStoryCtx {
     }
 
     /// Pump spawned Lua coroutines to their next yield point.
+    /// Paint a frame and run the runtime work that follows it in the app
+    /// loop, so window handlers see the geometry they will be shown at.
+    pub fn settle_frame(&mut self) {
+        self.app.settle_frame();
+    }
+
     pub fn pump_lua(&mut self) {
         self.app.settle_lua();
     }

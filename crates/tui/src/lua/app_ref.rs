@@ -903,8 +903,11 @@ impl AgentLuaHost<'_> {
         }
     }
 
-    pub(crate) fn request_quit(&mut self) {
+    pub(crate) fn request_quit(&mut self, exit: Option<crate::app::QuitExit>) {
         self.app.pending_quit = true;
+        if exit.is_some() {
+            self.app.quit_exit = exit;
+        }
     }
 }
 
@@ -915,6 +918,14 @@ pub(crate) struct PlatformLuaHost<'a> {
 impl PlatformLuaHost<'_> {
     pub(crate) fn open_editor(&mut self, path: &str, line: Option<u32>) -> Result<(), String> {
         self.app.open_file_in_editor(path, line)
+    }
+
+    pub(crate) fn run_in_terminal(
+        &mut self,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> Result<(), String> {
+        self.app.run_in_terminal(argv, cwd)
     }
 
     pub(crate) fn write_terminal_control(&mut self, bytes: &[u8]) -> std::io::Result<bool> {
@@ -1136,6 +1147,10 @@ impl UiLuaHost<'_> {
 
     pub(crate) fn cursor_row(&mut self, window: crate::smelt_edit::WinId) -> Option<u64> {
         crate::lua::ui_ops::cursor_row(self.app, window)
+    }
+
+    pub(crate) fn visual_rows(&mut self, window: crate::smelt_edit::WinId) -> Option<(u64, u64)> {
+        crate::lua::ui_ops::visual_rows(self.app, window)
     }
 
     pub(crate) fn move_cursor(&mut self, window: crate::smelt_edit::WinId, delta: isize) {

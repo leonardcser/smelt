@@ -30,7 +30,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.block_nav` | Transcript block navigation. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
-| `smelt.plugins.diff` | /diff: working changes, branch review and commit history. |
+| `smelt.plugins.diff` | /diff and `smelt diff`: a Git status, branch review and history viewer. |
 | `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
 | `smelt.plugins.file_finder` | /files and /search: find workspace or Git-tracked files by name, or search their contents, with a source preview beside the results. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |

@@ -374,28 +374,39 @@ Read-only content viewers. Extends `dialog.view`.
 
 | Key | Mode | Action | Description |
 | --- | ---- | ------ | ----------- |
-| `alt+b` | all | `base` | Change the comparison base |
+| `C` | normal | `amend` | Amend the last commit |
+| `alt+b` | normal | `base` | Change the comparison base |
 | `alt+2` | all | `branch` | Show the branch against its base |
-| `alt+1` | all | `changes` | Show working changes |
 | `ctrl+c` | all | `close` | Close the viewer |
 | `esc` | all | `close` | Close the viewer |
 | `q` | normal | `close` | Close the viewer |
+| `c` | normal | `commit` | Commit the staged changes |
 | `backspace` | normal | `commits` | Go back to the commit list |
+| `Y` | normal | `copy` | Copy the paths or commit ids of the selected rows |
+| `X` | normal | `discard` | Discard changes to the selected files or hunks |
+| `X` | visual | `discard` | Discard changes to the selected files or hunks |
+| `F` | normal | `fetch` | Fetch and prune |
 | `alt+3` | all | `history` | Show commit history |
 | `]` | normal | `next_file` | Show the next file |
 | `ctrl+j` | normal | `next_file` | Show the next file |
 | `}` | normal | `next_hunk` | Jump to the next hunk |
-| `tab` | all | `next_view` | Show the next view |
+| `tab` | normal | `next_view` | Show the next view |
 | `[` | normal | `prev_file` | Show the previous file |
 | `ctrl+k` | normal | `prev_file` | Show the previous file |
 | `{` | normal | `prev_hunk` | Jump to the previous hunk |
-| `shift+tab` | all | `prev_view` | Show the previous view |
-| `r` | normal | `refresh` | Reload the diff |
-| `alt+r` | all | `revision` | Show a commit or revision |
-| `s` | normal | `stage` | Stage the selected file or hunk |
-| `alt+w` | all | `switch_pane` | Switch between the file list and the diff on narrow screens |
-| `-` | normal | `toggle_stage` | Stage or unstage the selected file or hunk |
-| `u` | normal | `unstage` | Unstage the selected file or hunk |
+| `shift+tab` | normal | `prev_view` | Show the previous view |
+| `P` | normal | `pull` | Pull with rebase |
+| `p` | normal | `push` | Push the branch |
+| `r` | normal | `refresh` | Reload the view |
+| `alt+r` | normal | `revision` | Show a commit or revision |
+| `s` | normal | `stage` | Stage the selected files, or the selected hunks of the patch |
+| `s` | visual | `stage` | Stage the selected files, or the selected hunks of the patch |
+| `alt+1` | all | `status` | Show the working tree status |
+| `alt+w` | all | `switch_pane` | Switch between the file list and the diff |
+| `-` | normal | `toggle_stage` | Stage or unstage the selected files or hunks |
+| `-` | visual | `toggle_stage` | Stage or unstage the selected files or hunks |
+| `u` | normal | `unstage` | Unstage the selected files, or the selected hunks of the patch |
+| `u` | visual | `unstage` | Unstage the selected files, or the selected hunks of the patch |
 
 ### `diff.files`
 
@@ -405,28 +416,10 @@ Read-only content viewers. Extends `dialog.view`.
 | --- | ---- | ------ | ----------- |
 | `h` | all | `collapse` | Collapse the folder, or select its parent |
 | `left` | all | `collapse` | Collapse the folder, or select its parent |
-| `ctrl+n` | all | `down` | Select the next row |
-| `down` | all | `down` | Select the next row |
-| `j` | all | `down` | Select the next row |
 | `l` | all | `expand` | Expand the folder, or open the file |
 | `right` | all | `expand` | Expand the folder, or open the file |
-| `g` | all | `first` | Select the first row |
-| `home` | all | `first` | Select the first row |
-| `ctrl+d` | all | `half_down` | Move the selection down half a page |
-| `ctrl+u` | all | `half_up` | Move the selection up half a page |
-| `G` | all | `last` | Select the last row |
-| `end` | all | `last` | Select the last row |
-| `ctrl+j` | all | `next_file` | Show the next file |
-| `enter` | all | `open` | Open the selected file, or toggle the folder |
-| `space` | all | `open` | Open the selected file, or toggle the folder |
-| `ctrl+f` | all | `page_down` | Move the selection down a page |
-| `pgdn` | all | `page_down` | Move the selection down a page |
-| `ctrl+b` | all | `page_up` | Move the selection up a page |
-| `pgup` | all | `page_up` | Move the selection up a page |
-| `ctrl+k` | all | `prev_file` | Show the previous file |
-| `ctrl+p` | all | `up` | Select the previous row |
-| `k` | all | `up` | Select the previous row |
-| `up` | all | `up` | Select the previous row |
+| `enter` | all | `open` | Open the selected row, or toggle the folder |
+| `space` | all | `open` | Open the selected row, or toggle the folder |
 
 ### `diff.preview`
 

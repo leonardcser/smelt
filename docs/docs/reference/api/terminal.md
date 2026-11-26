@@ -59,6 +59,14 @@ fun(message: string, opts: table?): boolean
 
 Post an OSC 9 terminal notification with `message`. Pass `{ dcs_passthrough = true }` inside tmux to wrap the notification for tmux passthrough. Control characters are stripped from messages before writing.
 
+## `smelt.terminal.run`
+
+```lua
+fun(argv: string[], opts: table?): boolean, string?
+```
+
+Run `argv`, such as `{ "git", "commit" }`, on the terminal: smelt suspends until it exits, then repaints. Use it for interactive commands such as `git commit`, which opens Git's own editor. `opts.cwd` is relative to the session cwd. Returns `(true, nil)`, or `(false, err)` with the command's error output, or its exit status when it printed none.
+
 ## `smelt.terminal.set_title`
 
 ```lua

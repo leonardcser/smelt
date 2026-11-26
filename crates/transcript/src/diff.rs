@@ -419,6 +419,178 @@ impl Diff {
         smelt_buffer::text::slice(&self.patch, line.start..end)
     }
 
+    /// Raw lines of file `index`: its header, then its hunks.
+    pub fn file_lines(&self, index: usize) -> Range<usize> {
+        let start = self.files[index].start;
+        let end = self
+            .files
+            .get(index + 1)
+            .map_or(self.lines.len(), |file| file.start);
+        start..end
+    }
+
+    /// The first raw line of file `index` after its header and hunk lines.
+    fn body_start(&self, index: usize) -> usize {
+        let lines = self.file_lines(index);
+        lines
+            .clone()
+            .find(|&raw| !matches!(self.lines[raw].kind, Kind::File | Kind::Meta | Kind::Hunk))
+            .unwrap_or(lines.end)
+    }
+
+    /// Raw context runs in `lines` too long to show whole with `context`
+    /// lines kept around each change: the folds a new view starts with.
+    fn context_folds(&self, lines: Range<usize>, context: usize) -> Vec<Range<usize>> {
+        let mut folds = Vec::new();
+        let mut raw = lines.start;
+        while raw < lines.end {
+            if self.lines[raw].kind != Kind::Context {
+                raw += 1;
+                continue;
+            }
+            let start = raw;
+            while raw < lines.end && self.lines[raw].kind == Kind::Context {
+                raw += 1;
+            }
+            let keep = context.min((raw - start) / 2);
+            if raw - start > keep.saturating_mul(2).saturating_add(1) {
+                folds.push(start + keep..raw - keep);
+            }
+        }
+        folds
+    }
+
+    /// Raw line ranges of file `index`'s hunks: its changes with up to
+    /// `context` lines around them, split where a fold or hunk header
+    /// separates them. Expanding a fold does not merge hunks.
+    fn hunks(&self, index: usize, context: usize) -> Vec<Range<usize>> {
+        let body = self.body_start(index)..self.file_lines(index).end;
+        let mut cuts = self.context_folds(body.clone(), context);
+        cuts.extend(
+            body.clone()
+                .filter(|&raw| self.lines[raw].kind == Kind::Hunk)
+                .map(|raw| raw..raw + 1),
+        );
+        cuts.sort_unstable_by_key(|cut| cut.start);
+        let mut hunks = Vec::new();
+        let mut start = body.start;
+        for cut in cuts.into_iter().chain(std::iter::once(body.end..body.end)) {
+            let piece = start..cut.start;
+            if piece
+                .clone()
+                .any(|raw| matches!(self.lines[raw].kind, Kind::Add | Kind::Delete))
+            {
+                hunks.push(piece);
+            }
+            start = cut.end;
+        }
+        hunks
+    }
+
+    /// A patch for `git apply` of `files`, each with the raw line ranges
+    /// whose changes it keeps. Other changes turn into what the target
+    /// already has: forward, a deletion stays as context and an addition
+    /// goes; with `reverse`, which applies the patch backwards, an addition
+    /// stays and a deletion goes.
+    pub fn patch(&self, files: &[(usize, Vec<Range<usize>>)], reverse: bool) -> String {
+        let mut out = String::new();
+        for (file, kept) in files {
+            self.file_patch(*file, kept, reverse, &mut out);
+        }
+        out
+    }
+
+    fn file_patch(&self, file: usize, kept: &[Range<usize>], reverse: bool, out: &mut String) {
+        let lines = self.file_lines(file);
+        let Some(first_hunk) = lines
+            .clone()
+            .find(|&raw| self.lines[raw].kind == Kind::Hunk)
+        else {
+            return;
+        };
+        let text = |raw: usize| {
+            let line = self.lines[raw];
+            smelt_buffer::text::slice(&self.patch, line.start..line.end)
+        };
+        out.push_str(smelt_buffer::text::slice(
+            &self.patch,
+            self.lines[lines.start].start..self.lines[first_hunk].start,
+        ));
+        let is_kept = |raw: usize| kept.iter().any(|range| range.contains(&raw));
+        // Git matches the preimage, old forward and new in reverse, against
+        // the target. Unkept changes become what the target has, so the
+        // preimage stays the original side and keeps its header. Only the
+        // postimage moves: by the line count change of the hunks before it.
+        let mut shift: i64 = 0;
+        let mut raw = first_hunk;
+        while raw < lines.end {
+            let Some((old_start, old_len, new_start, new_len)) = hunk_range(text(raw)) else {
+                return;
+            };
+            let (pre_start, pre_len) = if reverse {
+                (new_start, new_len)
+            } else {
+                (old_start, old_len)
+            };
+            raw += 1;
+            let mut body = String::new();
+            let (mut post_len, mut changed, mut shown) = (0i64, false, false);
+            while raw < lines.end && self.lines[raw].kind != Kind::Hunk {
+                let kind = self.lines[raw].kind;
+                // A "\ No newline" marker belongs to the line before it.
+                if kind == Kind::Meta {
+                    if shown {
+                        body.push_str(text(raw));
+                        body.push('\n');
+                    }
+                    raw += 1;
+                    continue;
+                }
+                let prefix = match kind {
+                    Kind::Add if is_kept(raw) => Some('+'),
+                    Kind::Delete if is_kept(raw) => Some('-'),
+                    Kind::Add => reverse.then_some(' '),
+                    Kind::Delete => (!reverse).then_some(' '),
+                    _ => Some(' '),
+                };
+                shown = prefix.is_some();
+                if let Some(prefix) = prefix {
+                    changed |= prefix != ' ';
+                    // Reverse application reads `-` lines as the postimage.
+                    post_len += i64::from(prefix != if reverse { '+' } else { '-' });
+                    body.push(prefix);
+                    body.push_str(text(raw));
+                    body.push('\n');
+                }
+                raw += 1;
+            }
+            if !changed {
+                continue;
+            }
+            // A side's start names its first line, or the line before it
+            // when the side is empty.
+            let begins = i64::from(pre_start) + i64::from(pre_len == 0) + shift;
+            let post_start = begins - i64::from(post_len == 0);
+            shift += post_len - i64::from(pre_len);
+            let (old, new) = if reverse {
+                (
+                    (post_start, post_len),
+                    (i64::from(pre_start), i64::from(pre_len)),
+                )
+            } else {
+                (
+                    (i64::from(pre_start), i64::from(pre_len)),
+                    (post_start, post_len),
+                )
+            };
+            out.push_str(&format!(
+                "@@ -{},{} +{},{} @@\n",
+                old.0, old.1, new.0, new.1
+            ));
+            out.push_str(&body);
+        }
+    }
+
     /// Retained patch and row indexes, excluding the bounded viewport syntax cache.
     pub fn indexed_bytes(&self) -> usize {
         self.patch.capacity()
@@ -520,6 +692,26 @@ fn unquote(path: &str) -> Vec<u8> {
     out
 }
 
+/// The changes rows of a [`DiffView`] select, for staging: files selected
+/// whole, and the hunks selected of the others.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// Indexes of the files selected whole.
+    pub whole: Vec<usize>,
+    /// Files with only some hunks selected, and those hunks' raw lines.
+    pub partial: Vec<(usize, Vec<Range<usize>>)>,
+}
+
+impl Selection {
+    /// Indexes of every file with selected changes.
+    pub fn files(&self) -> impl Iterator<Item = usize> + '_ {
+        self.whole
+            .iter()
+            .copied()
+            .chain(self.partial.iter().map(|(file, _)| *file))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Segment {
     raw: Range<usize>,
@@ -529,6 +721,30 @@ struct Segment {
 }
 
 impl Segment {
+    /// Push the rows of `raw` shown in full, with a divider before every
+    /// file after the first.
+    fn push_shown(segments: &mut Vec<Segment>, diff: &Diff, raw: Range<usize>) {
+        let shown = |raw| Segment {
+            raw,
+            start: 0,
+            fold: false,
+            expanded: false,
+        };
+        let mut begin = raw.start;
+        for line in raw.clone() {
+            if line > 0 && diff.lines[line].kind == Kind::File {
+                if begin < line {
+                    segments.push(shown(begin..line));
+                }
+                segments.push(shown(line..line));
+                begin = line;
+            }
+        }
+        if begin < raw.end {
+            segments.push(shown(begin..raw.end));
+        }
+    }
+
     fn len(&self) -> u64 {
         if self.raw.is_empty() {
             2
@@ -615,67 +831,29 @@ pub struct DiffView {
 
 impl DiffView {
     pub fn new(diff: Arc<Diff>, context: usize) -> Self {
+        Self::with_commits(diff, context, &[])
+    }
+
+    /// A view whose file trees list `commits` after the file sections.
+    pub fn with_commits(diff: Arc<Diff>, context: usize, commits: &[tree::CommitSection]) -> Self {
         let mut projection = Projection::default();
+        let segments = &mut projection.segments;
         let mut begin = 0;
-        let mut i = 0;
-        while i < diff.lines.len() {
-            if i > 0 && diff.lines[i].kind == Kind::File {
-                if begin < i {
-                    projection.segments.push(Segment {
-                        raw: begin..i,
-                        start: 0,
-                        fold: false,
-                        expanded: false,
-                    });
-                }
-                projection.segments.push(Segment {
-                    raw: i..i,
-                    start: 0,
-                    fold: false,
-                    expanded: false,
-                });
-                begin = i;
-            }
-            if diff.lines[i].kind != Kind::Context {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < diff.lines.len() && diff.lines[i].kind == Kind::Context {
-                i += 1;
-            }
-            let keep = context.min((i - start) / 2);
-            if i - start > keep.saturating_mul(2).saturating_add(1) {
-                let fold = start + keep..i - keep;
-                if begin < fold.start {
-                    projection.segments.push(Segment {
-                        raw: begin..fold.start,
-                        start: 0,
-                        fold: false,
-                        expanded: false,
-                    });
-                }
-                begin = fold.end;
-                projection.segments.push(Segment {
-                    raw: fold,
-                    start: 0,
-                    fold: true,
-                    expanded: false,
-                });
-            }
-        }
-        if begin < diff.lines.len() {
-            projection.segments.push(Segment {
-                raw: begin..diff.lines.len(),
+        for fold in diff.context_folds(0..diff.lines.len(), context) {
+            Segment::push_shown(segments, &diff, begin..fold.start);
+            begin = fold.end;
+            segments.push(Segment {
+                raw: fold,
                 start: 0,
-                fold: false,
+                fold: true,
                 expanded: false,
             });
         }
+        Segment::push_shown(segments, &diff, begin..diff.lines.len());
         projection.reindex();
         Self {
             syntax: Arc::new(SyntaxCache::new(Arc::clone(&diff))),
-            tree: Arc::new(tree::TreeIndex::new(&diff)),
+            tree: Arc::new(tree::TreeIndex::new(&diff, commits)),
             context,
             diff,
             projection: Mutex::new(projection),
@@ -742,6 +920,48 @@ impl DiffView {
                 .checked_sub(1)
                 .map(|index| projection.display_row(self.diff.hunks[index]))
         }
+    }
+
+    /// The changes display rows `rows` select. A row of a file header or
+    /// the divider above it selects the whole file; any other row selects the
+    /// hunk it is in, as [`Diff::hunks`] defines them with this view's
+    /// context. Folded and other unchanged rows outside hunks select nothing.
+    /// A file with every hunk selected counts as whole. `None` when nothing
+    /// is selected.
+    pub fn selection(&self, rows: std::ops::RangeInclusive<u64>) -> Option<Selection> {
+        let diff = &self.diff;
+        let (lo, hi) = {
+            let projection = self.projection.lock().unwrap();
+            (
+                projection.raw_row(*rows.start())?,
+                projection.raw_row(*rows.end())?,
+            )
+        };
+        let file_of = |raw: usize| {
+            diff.files
+                .partition_point(|file| file.start <= raw)
+                .checked_sub(1)
+        };
+        let mut selection = Selection::default();
+        for file in file_of(lo).unwrap_or(0)..=file_of(hi)? {
+            if diff.file_lines(file).start <= hi && lo < diff.body_start(file) {
+                selection.whole.push(file);
+                continue;
+            }
+            let hunks = diff.hunks(file, self.context);
+            let picked: Vec<_> = hunks
+                .iter()
+                .filter(|hunk| hunk.start <= hi && lo < hunk.end)
+                .cloned()
+                .collect();
+            if !hunks.is_empty() && picked.len() == hunks.len() {
+                selection.whole.push(file);
+            } else if !picked.is_empty() {
+                selection.partial.push((file, picked));
+            }
+        }
+        let any = selection.files().next().is_some();
+        any.then_some(selection)
     }
 
     /// Toggle the fold containing `row`, returning its marker row for anchoring.
@@ -1798,6 +2018,68 @@ mod tests {
         assert_eq!(view.hunk(first, true), Some(second + 4));
         assert_eq!(view.file_at(u64::MAX), None);
         assert_eq!(view.toggle_fold(u64::MAX), None);
+    }
+
+    #[test]
+    fn hunk_selection_builds_partial_patches_both_ways_and_takes_whole_files() {
+        let patch = "diff --git a/a b/a\n@@ -1,12 +1,12 @@\n-old\n+new\n".to_string()
+            + &" context\n".repeat(10)
+            + "-old end\n+new end\n\\ No newline at end of file\n"
+            + "diff --git a/b b/b\n@@ -0,0 +1 @@\n+added\n";
+        let view = DiffView::new(Arc::new(Diff::parse(patch)), 3);
+        let first = view.hunk(0, true).unwrap();
+        let second = view.hunk(first, true).unwrap();
+        let added = view.hunk(second, true).unwrap();
+
+        let only_first = view.selection(first..=first + 1).unwrap();
+        assert!(only_first.whole.is_empty());
+        assert_eq!(
+            view.diff.patch(&only_first.partial, false),
+            "diff --git a/a b/a\n@@ -1,12 +1,12 @@\n-old\n+new\n".to_string()
+                + &" context\n".repeat(10)
+                + " old end\n"
+        );
+        let only_second = view.selection(second..=second).unwrap();
+        assert_eq!(
+            view.diff.patch(&only_second.partial, true),
+            "diff --git a/a b/a\n@@ -1,12 +1,12 @@\n new\n".to_string()
+                + &" context\n".repeat(10)
+                + "-old end\n+new end\n\\ No newline at end of file\n"
+        );
+
+        // Both hunks are all of `a`; a header row picks all of `b`.
+        let both = view.selection(first..=second).unwrap();
+        assert_eq!((both.whole, both.partial.len()), (vec![0], 0));
+        let header = view.file_row(1).unwrap();
+        let mixed = view.selection(second..=header).unwrap();
+        assert_eq!(mixed.files().collect::<Vec<_>>(), vec![1, 0]);
+        assert_eq!(view.selection(added..=added).unwrap().whole, vec![1]);
+
+        // Folded context selects nothing, and expanding it neither selects
+        // it nor merges the hunks around it.
+        let fold = first + 5;
+        assert_eq!(view.selection(fold..=fold), None);
+        assert_eq!(view.toggle_fold(fold), Some(fold));
+        assert_eq!(view.selection(fold + 2..=fold + 2), None);
+        assert_eq!(view.selection(first..=first), Some(only_first));
+    }
+
+    #[test]
+    fn partial_patches_shift_later_hunk_postimages() {
+        let original =
+            "diff --git a/c b/c\n@@ -1,3 +1,1 @@\n-x\n-y\n c\n@@ -10,1 +8,2 @@\n d\n+z\n";
+        let diff = Diff::parse(original.to_string());
+        let all = diff.file_lines(0);
+        let second = diff.hunks(0, 3)[1].clone();
+        assert_eq!(diff.patch(&[(0, vec![all])], false), original);
+        assert_eq!(
+            diff.patch(&[(0, vec![second.clone()])], false),
+            "diff --git a/c b/c\n@@ -10,1 +10,2 @@\n d\n+z\n"
+        );
+        assert_eq!(
+            diff.patch(&[(0, vec![second])], true),
+            "diff --git a/c b/c\n@@ -8,1 +8,2 @@\n d\n+z\n"
+        );
     }
 
     #[test]

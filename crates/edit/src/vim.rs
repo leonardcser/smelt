@@ -599,6 +599,20 @@ pub struct VimWindowState {
     pub(crate) count2: Option<usize>,
 }
 
+/// Largest count a typed number reaches. Larger counts clamp here, so
+/// counts, their products and their signed row deltas never overflow.
+const MAX_COUNT: usize = 999_999_999;
+
+/// Append the typed digit `c` to `count`, clamped to [`MAX_COUNT`].
+fn push_count_digit(count: Option<usize>, c: char) -> usize {
+    let digit = c.to_digit(10).unwrap_or(0) as usize;
+    count
+        .unwrap_or(0)
+        .saturating_mul(10)
+        .saturating_add(digit)
+        .min(MAX_COUNT)
+}
+
 impl VimWindowState {
     /// Visual anchor, snapped to a grapheme boundary in `buf`. All consumers
     /// must go through this accessor - the raw field may be stale.
@@ -664,7 +678,7 @@ impl VimWindowState {
     fn take_typed_count(&mut self) -> Option<usize> {
         let typed = match (self.count1, self.count2) {
             (None, None) => None,
-            (a, b) => Some(a.unwrap_or(1) * b.unwrap_or(1)),
+            (a, b) => Some(a.unwrap_or(1).saturating_mul(b.unwrap_or(1))),
         };
         self.reset_counts();
         typed
@@ -676,7 +690,7 @@ impl VimWindowState {
         let c2 = self.count2.unwrap_or(1);
         self.count1 = None;
         self.count2 = None;
-        c1 * c2
+        c1.saturating_mul(c2)
     }
 
     /// Clear count accumulators; leaves `sub` untouched.
@@ -792,6 +806,12 @@ impl VimWindowState {
         }
 
         (!out.is_empty()).then_some(out)
+    }
+
+    /// Drop the command being typed: its counts, sub-state and register.
+    pub fn cancel_pending(&mut self) {
+        self.reset_pending();
+        self.register = None;
     }
 
     /// Set mode and clear the pending sequence.

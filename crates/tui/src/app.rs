@@ -222,6 +222,13 @@ impl SessionPersistence {
     }
 }
 
+/// How the process should exit after the app quits, from `smelt.quit(opts)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QuitExit {
+    pub code: i32,
+    pub message: Option<String>,
+}
+
 pub struct TuiAppOptions {
     pub startup_auth_error: Option<String>,
     pub app_events: Option<(
@@ -323,6 +330,11 @@ pub struct TuiApp {
     pub(crate) task_label: Option<String>,
     pub(crate) pending_quit: bool,
     pub(crate) pending_session_save: bool,
+    /// Exit status and message requested by `smelt.quit(opts)`.
+    pub(crate) quit_exit: Option<QuitExit>,
+    /// The Lua subcommand, such as `smelt diff`, that the app runs instead
+    /// of an agent session. The Lua launch inputs name it.
+    pub(crate) standalone: Option<smelt_core::lua::CliCommand>,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     pub(crate) paint_timeline: crate::lua::paint::PaintTimeline,
     /// Leaf under the pointer while hover events are subscribed.
@@ -1960,6 +1972,13 @@ impl TuiApp {
             prompt_inputs,
             session_persistence,
         } = options;
+        let standalone = lua
+            .core_shared()
+            .cli_command
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let agent_session = standalone.is_none();
         let managed_models = managed_models.unwrap_or_else(smelt_core::ManagedModels::empty);
         let command_catalog = Arc::new(smelt_core::commands::CommandCatalog::new(
             lua.command_names_handle(),
@@ -2135,6 +2154,7 @@ impl TuiApp {
         core.jobs.set_completion_sender(job_completion_tx);
         let platform = crate::app::platform_runtime::PlatformRuntime::new(
             &core.env,
+            agent_session,
             sessions.clone(),
             job_completion_rx,
             app_events,
@@ -2175,6 +2195,8 @@ impl TuiApp {
             task_label: None,
             pending_quit: false,
             pending_session_save: false,
+            quit_exit: None,
+            standalone,
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             paint_timeline: crate::lua::paint::PaintTimeline::default(),
             hovered_leaf: None,
@@ -3516,23 +3538,46 @@ impl TuiApp {
         };
     }
 
+    /// A cursor handler that moves the cursor again sees that move in the
+    /// same dispatch, so a later key cannot hide it. The rounds are bounded
+    /// so handlers that keep moving the cursor cannot loop forever.
+    ///
+    /// Focus, resize, scroll and cursor events report a change from the
+    /// last frame, often after the loop has painted it. Their handlers may
+    /// change what is shown, so they get a frame of their own.
     fn dispatch_ui_window_events(&mut self, include_tick: bool) {
-        {
-            let lua = &self.lua;
-            let mut lua_invoke =
-                |handle: crate::smelt_edit::LuaHandle,
-                 win: crate::smelt_edit::WinId,
-                 payload: &crate::smelt_edit::Payload| {
-                    lua.queue_invocation(handle, win, payload);
-                };
-            if include_tick {
-                self.ui.dispatch_tick(&mut lua_invoke);
+        const CURSOR_ROUNDS: usize = 4;
+        let mut changed = false;
+        for round in 0..CURSOR_ROUNDS {
+            let cursor_moved = {
+                let lua = &self.lua;
+                if round == 0 && include_tick {
+                    self.ui.dispatch_tick(&mut |handle, win, payload| {
+                        lua.queue_invocation(handle, win, payload);
+                    });
+                }
+                let mut lua_invoke =
+                    |handle: crate::smelt_edit::LuaHandle,
+                     win: crate::smelt_edit::WinId,
+                     payload: &crate::smelt_edit::Payload| {
+                        changed = true;
+                        lua.queue_invocation(handle, win, payload);
+                    };
+                if round == 0 {
+                    self.ui.dispatch_focus_events(&mut lua_invoke);
+                    self.ui.dispatch_resize_events(&mut lua_invoke);
+                    self.ui.dispatch_scroll_events(&mut lua_invoke);
+                }
+                self.ui.dispatch_cursor_events(&mut lua_invoke)
+            };
+            self.flush_lua_callbacks();
+            if !cursor_moved {
+                break;
             }
-            self.ui.dispatch_focus_events(&mut lua_invoke);
-            self.ui.dispatch_resize_events(&mut lua_invoke);
-            self.ui.dispatch_scroll_events(&mut lua_invoke);
         }
-        self.flush_lua_callbacks();
+        if changed {
+            self.request_continuation_render();
+        }
     }
 
     fn warmup_workspace_files(&mut self) {
@@ -3625,7 +3670,7 @@ impl TuiApp {
         }
     }
 
-    fn tick_runtime(&mut self) {
+    pub(crate) fn tick_runtime(&mut self) {
         self.tick_timers();
         self.expire_actions();
         self.drain_persist_reports();
@@ -3641,6 +3686,46 @@ impl TuiApp {
         }
         self.pump_lua();
         self.dispatch_ui_window_events(true);
+    }
+
+    /// Whether the app runs an agent session. A Lua subcommand such as
+    /// `smelt diff` runs without one: no session control, model catalog,
+    /// context window, reload or `smelt status` entry.
+    pub(crate) fn agent_session(&self) -> bool {
+        self.standalone.is_none()
+    }
+
+    /// A Lua subcommand's view is its only UI, so its launch hooks must open
+    /// a modal one. Without one, quit with an error that names `failure`,
+    /// why Lua failed to launch, if it did.
+    pub(crate) fn require_standalone_view(&mut self, failure: Option<&str>) {
+        let Some(command) = &self.standalone else {
+            return;
+        };
+        if self.pending_quit || self.ui.active_modal().is_some() {
+            return;
+        }
+        let reason = failure.unwrap_or("no view opened");
+        let message = format!("smelt {}: {reason}", command.name);
+        self.pending_quit = true;
+        self.quit_exit = Some(QuitExit {
+            code: 1,
+            message: Some(message),
+        });
+    }
+
+    /// Once a Lua subcommand's view closes, quit rather than reveal the
+    /// empty agent session behind it. The main loop checks before it waits
+    /// for the next event, so the event that closed the view ends the run.
+    pub(crate) fn quit_closed_standalone(&mut self) {
+        if self.standalone.is_some() && self.ui.active_modal().is_none() {
+            self.pending_quit = true;
+        }
+    }
+
+    /// Exit status and message requested by `smelt.quit(opts)`, if any.
+    pub fn quit_exit(&self) -> Option<&QuitExit> {
+        self.quit_exit.as_ref()
     }
 
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
@@ -3663,8 +3748,11 @@ impl TuiApp {
         // shutdown, early return, or panic. Lua title effects are committed only
         // after the platform has claimed the terminal.
         self.platform.start(http_client);
-        if let Err(error) = self.core.session_control.initialize() {
-            self.notify_warn(format!("session completion unavailable: {error}"));
+        let agent_session = self.agent_session();
+        if agent_session {
+            if let Err(error) = self.core.session_control.initialize() {
+                self.notify_warn(format!("session completion unavailable: {error}"));
+            }
         }
         drop(platform_startup);
 
@@ -3677,8 +3765,10 @@ impl TuiApp {
 
         let mut pre_first_frame_startup = smelt_perf::perf::begin("startup:pre_first_frame");
         let mut first_frame_pending = true;
-        self.submit_managed_model_refreshes();
-        self.list_claude_code_models();
+        if agent_session {
+            self.submit_managed_model_refreshes();
+            self.list_claude_code_models();
+        }
         self.request_context_window(ContextWindowRequest::Reconcile);
 
         if !self.session_is_empty() {
@@ -3691,16 +3781,18 @@ impl TuiApp {
             self.finish_transcript_turn();
             self.transcript_win_mut().follow_tail();
         }
-        if let Some(message) = self.startup_auth_error.take() {
-            self.notify_workspace_error_sticky(message);
-        }
-        self.warn_if_api_base_normalized();
+        if agent_session {
+            if let Some(message) = self.startup_auth_error.take() {
+                self.notify_workspace_error_sticky(message);
+            }
+            self.warn_if_api_base_normalized();
 
-        self.core.signals.emit_dyn(
-            "session_started",
-            std::rc::Rc::new(self.conversation.session().id.clone()),
-        );
-        self.drain_signals_pending();
+            self.core.signals.emit_dyn(
+                "session_started",
+                std::rc::Rc::new(self.conversation.session().id.clone()),
+            );
+            self.drain_signals_pending();
+        }
         if let Some(state) = self.project_trust.take() {
             if matches!(state, smelt_core::trust::TrustState::Untrusted { .. }) {
                 self.notify(
@@ -3792,6 +3884,7 @@ impl TuiApp {
 
         let mut animating_last_tick = false;
         'main: loop {
+            self.quit_closed_standalone();
             if self.pending_quit {
                 self.discard_turn(TurnEnd::Cancelled);
                 break 'main;

@@ -130,3 +130,19 @@ if smelt.engine and smelt.lifecycle then
     return guarded_ask(raw_engine_ask_inherited, spec)
   end
 end
+
+if smelt.cli and smelt.lifecycle then
+  --- Open a tool when smelt launches as `smelt <name>`, a subcommand that
+  --- `smelt.cli.register_command` declared in `early.lua`. Once the launch
+  --- is ready, calls `open(args)` with the subcommand's free arguments.
+  --- `open` must show a modal overlay that fills the terminal; smelt quits
+  --- once no modal overlay shows, and exits with code 1 if none ever did.
+  --- Returns a `Reg` whose `:remove()` drops the hook before it fires.
+  ---@type fun(name: string, open: fun(args: string[])): smelt.Reg
+  function smelt.cli.on_command(name, open)
+    return smelt.lifecycle.on_ready(function(ctx)
+      local command = smelt.cli.command()
+      if ctx.kind == "launch" and command and command.name == name then open(command.args) end
+    end)
+  end
+end

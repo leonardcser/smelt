@@ -72,6 +72,8 @@ pub enum WinEvent {
     PointerMove,
     /// Window's scroll state changed. Payload carries the new `top` and `follow` flag.
     Scrolled,
+    /// Window's cursor row changed, by any means. Payload carries the new row.
+    CursorMoved,
     /// Leaf's viewport rect changed (first paint, terminal resize, layout
     /// reflow). Payload carries the new `{ x, y, width, height }` rect
     /// and the inner `content_width` in `Payload::Rect`.
@@ -122,6 +124,10 @@ pub enum Payload {
     Scroll {
         top: RowIndex,
         follow: bool,
+    },
+    /// Cursor payload. `row` is the new absolute cursor row.
+    Cursor {
+        row: RowIndex,
     },
     /// Resize payload. `x`/`y`/`width`/`height` describe the new outer
     /// rect (matches `win:rect()`); `content_width` is the inner cell

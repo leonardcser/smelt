@@ -30,6 +30,9 @@ where
     S: Into<std::ffi::OsString>,
 {
     let bootstrap = scan_bootstrap_args(args);
+    if let Some(ref dir) = bootstrap.cwd {
+        enter_startup_cwd(&mut cwd, dir);
+    }
     let prompt = bootstrap
         .prompt_file
         .map(|path| {
@@ -45,6 +48,15 @@ where
         }
     }
     (cwd, prompt)
+}
+
+fn enter_startup_cwd(cwd: &mut std::path::PathBuf, dir: &std::path::Path) {
+    let target = cwd.join(dir);
+    if let Err(e) = std::env::set_current_dir(&target) {
+        eprintln!("error: -C {}: {e}", target.display());
+        std::process::exit(1);
+    }
+    *cwd = std::env::current_dir().unwrap_or(target);
 }
 
 fn enter_startup_worktree(cwd: &mut std::path::PathBuf, requested: &str, root: Option<&str>) {
@@ -73,8 +85,64 @@ fn enter_startup_worktree(cwd: &mut std::path::PathBuf, requested: &str, root: O
     }
 }
 
+/// Argv for the full CLI parse, without the `-C`/`--cwd` arguments that
+/// [`prepare_launch`] already applied. Clap rejects top-level flags next to
+/// a subcommand, so dropping them lets `-C` come before or after one.
+pub fn clap_args<I, S>(args: I) -> Vec<std::ffi::OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString>,
+{
+    let mut out = Vec::new();
+    let mut iter = args.into_iter().map(Into::into);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            out.push(arg);
+            out.extend(iter);
+            break;
+        }
+        match cwd_flag(&arg) {
+            None => out.push(arg),
+            Some(CwdFlag::Attached(_)) => {}
+            // Without a value, let clap report it missing.
+            Some(CwdFlag::Separate) => {
+                if iter.next().is_none() {
+                    out.push(arg);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How an argument spells `-C`/`--cwd`.
+enum CwdFlag {
+    /// The path is the next argument.
+    Separate,
+    /// `-C<path>`, `-C=<path>` or `--cwd=<path>`.
+    Attached(std::path::PathBuf),
+}
+
+fn cwd_flag(arg: &std::ffi::OsStr) -> Option<CwdFlag> {
+    if arg == "-C" || arg == "--cwd" {
+        return Some(CwdFlag::Separate);
+    }
+    let value = strip_os_prefix(arg, "--cwd=").or_else(|| {
+        let value = strip_os_prefix(arg, "-C")?;
+        Some(strip_os_prefix(value, "=").unwrap_or(value))
+    })?;
+    Some(CwdFlag::Attached(value.into()))
+}
+
+fn strip_os_prefix<'a>(arg: &'a std::ffi::OsStr, prefix: &str) -> Option<&'a std::ffi::OsStr> {
+    let value = arg.as_encoded_bytes().strip_prefix(prefix.as_bytes())?;
+    // SAFETY: Splitting after an ASCII prefix preserves OsStr's encoded boundaries.
+    Some(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(value) })
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct BootstrapArgs {
+    cwd: Option<std::path::PathBuf>,
     worktree: Option<String>,
     worktree_root: Option<String>,
     prompt_file: Option<std::path::PathBuf>,
@@ -85,6 +153,7 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString>,
 {
+    let mut cwd = None;
     let mut worktree = None;
     let mut worktree_root = None;
     let mut prompt_file = None;
@@ -112,11 +181,18 @@ where
             prompt_file = Some(std::path::PathBuf::from(path));
             continue;
         }
-        if s.starts_with("--prompt-file=") {
-            let value = &arg.as_encoded_bytes()["--prompt-file=".len()..];
-            // SAFETY: Splitting after an ASCII prefix preserves OsStr's encoded boundaries.
-            let value = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(value) };
-            prompt_file = Some(std::path::PathBuf::from(value));
+        if let Some(value) = strip_os_prefix(&arg, "--prompt-file=") {
+            prompt_file = Some(value.into());
+            continue;
+        }
+        if let Some(flag) = cwd_flag(&arg) {
+            cwd = Some(match flag {
+                CwdFlag::Attached(path) => path,
+                CwdFlag::Separate => match iter.next() {
+                    Some(path) => path.into(),
+                    None => return BootstrapArgs::default(),
+                },
+            });
             continue;
         }
         if s == "--set" {
@@ -158,6 +234,7 @@ where
         }
     }
     BootstrapArgs {
+        cwd,
         worktree,
         worktree_root,
         prompt_file,
@@ -503,6 +580,62 @@ mod tests {
             .worktree_root,
             Some(".agent/worktrees".into())
         );
+    }
+
+    #[test]
+    fn bootstrap_args_detect_cwd_forms() {
+        for args in [
+            &["smelt", "-C", "repo"][..],
+            &["smelt", "--cwd", "repo"],
+            &["smelt", "--cwd=repo"],
+            &["smelt", "-Crepo"],
+            &["smelt", "-C=repo"],
+            &["smelt", "diff", "branch", "-C", "repo"],
+        ] {
+            assert_eq!(bootstrap(args).cwd, Some("repo".into()), "{args:?}");
+        }
+        assert_eq!(bootstrap(&["smelt", "--", "-C", "repo"]).cwd, None);
+    }
+
+    #[test]
+    fn lua_subcommands_parse_free_args_and_cwd() {
+        let commands = [tui::CliCommandSpec {
+            name: "diff".into(),
+            description: Some("Review changes".into()),
+            args: Some("VIEW".into()),
+        }];
+        for argv in [
+            &["smelt", "-C", "repo", "diff", "branch", "main"][..],
+            &["smelt", "diff", "-C", "repo", "branch", "main"],
+            &["smelt", "diff", "branch", "main", "--cwd=repo"],
+            &["smelt", "diff", "-Crepo", "branch", "main"],
+        ] {
+            let matches = crate::lua_cli(&[], &commands)
+                .try_get_matches_from(clap_args(argv.iter().copied()))
+                .unwrap();
+            let (args, _, command) = crate::from_lua_matches(matches, &[], &commands);
+            let command = command.expect("a Lua subcommand");
+            assert_eq!(command.name, "diff");
+            assert_eq!(command.args, ["branch", "main"]);
+            assert!(args.command.is_none() && args.message.is_none());
+        }
+        for (argv, message) in [
+            (&["smelt", "fix it"][..], "fix it"),
+            (&["smelt", "--", "-C"], "-C"),
+        ] {
+            let matches = crate::lua_cli(&[], &commands)
+                .try_get_matches_from(clap_args(argv.iter().copied()))
+                .unwrap();
+            let (args, _, command) = crate::from_lua_matches(matches, &[], &commands);
+            assert_eq!((command, args.message.as_deref()), (None, Some(message)));
+        }
+        // After another top-level flag a bare word is the message, as with
+        // built-in subcommands.
+        let matches = crate::lua_cli(&[], &commands)
+            .try_get_matches_from(["smelt", "--headless", "diff"])
+            .unwrap();
+        let (args, _, command) = crate::from_lua_matches(matches, &[], &commands);
+        assert_eq!((command, args.message.as_deref()), (None, Some("diff")));
     }
 
     #[test]

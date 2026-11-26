@@ -1,6 +1,6 @@
 ---
 title: "smelt.git: Lua API reference"
-description: "Asynchronous Git history, read-only revision comparisons, and explicit file or range staging. Lua API reference for smelt.git in smelt, the Lua-scriptable terminal coding agent."
+description: "Asynchronous Git history, read-only revision comparisons, explicit file or range staging, and discarding unstaged changes. Lua API reference for smelt.git in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.git`
@@ -11,30 +11,63 @@ description: "Asynchronous Git history, read-only revision comparisons, and expl
 
 **Advanced:** Low-level building block for plugins that need full control. It may change more freely than the rest of the API.
 
-Asynchronous Git history, read-only revision comparisons, and explicit file or range staging. `git.history(opts?)` loads bounded commit pages with first-parent statistics. `git.diff({revision, base?})` compares a commit to its first parent or a branch to its merge base; historical snapshots cannot be staged. `git.diff(opts?)` without a revision yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.
+Asynchronous Git history, read-only revision comparisons, explicit file or range staging, and discarding unstaged changes. `git.history(opts?)` loads bounded commit pages and `git.stats(opts)` their line totals. `git.diff({revision, base?})` compares a commit to its first parent or a branch to its merge base; historical snapshots cannot be staged. `git.diff(opts?)` without a revision yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches, with the branch, its upstream and ahead/behind counts from the same `git status`; its file tree lists the unpushed and unpulled commits. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, and `git.discard(diff, file, last?)` throws away its unstaged worktree changes; then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.
 
 ## `smelt.git.diff`
 
 ```lua
-fun(opts: { cwd: string?, context: integer?, revision: string?, base: string? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
+fun(opts: { cwd: string?, context: integer?, revision: string?, base: string? }?): smelt.git.Snapshot?, string?
 ```
 
-Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff)
+Types: [`smelt.git.Snapshot`](types.md#smeltgitsnapshot)
 
 Load separate unstaged (index to worktree) and staged (HEAD to index) changes
 without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
 defaults to the runtime workspace and `context` to 3. The snapshot is stable
 until explicitly refreshed; a clean repository returns an empty diff.
+A working snapshot also reports, from the same `git status`, the checked-out
+branch (nil when detached), the `HEAD` commit (nil before the first commit),
+its upstream such as `origin/main`, the full `ahead`/`behind` counts, and
+the rebase, merge, cherry-pick, revert or bisect `operation` in progress.
+Its file tree lists up to 50 unpushed and 50 unpulled commits. Reads local refs only; no fetch runs.
 With `revision`, load a read-only first-parent commit patch. With `base` too,
 compare the merge base of base/revision to revision. Revisions resolve to immutable IDs.
+
+## `smelt.git.discard`
+
+```lua
+fun(diff: smelt.diff.Diff, file: integer, last: integer?): smelt.git.Snapshot?, string?
+```
+
+Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff), [`smelt.git.Snapshot`](types.md#smeltgitsnapshot)
+
+Throw away unstaged changes to files of a Git snapshot: tracked files
+return to their staged content and new files, untracked or added with
+`git add -N`, are deleted. Staged
+changes stay. File indices are one-based; optional last selects an
+inclusive range, all in the unstaged section. Returns like
+`smelt.git.index`, with a fresh snapshot of both sections.
+
+## `smelt.git.discard_hunks`
+
+```lua
+fun(diff: smelt.diff.Diff, first: integer, last: integer): smelt.git.Snapshot?, string?
+```
+
+Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff), [`smelt.git.Snapshot`](types.md#smeltgitsnapshot)
+
+Throw away the unstaged hunks that rows `first` to `last` select, chosen
+as `smelt.git.index_hunks` chooses them. Returns like `smelt.git.discard`.
 
 ## `smelt.git.history`
 
 ```lua
-fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer? }?): { commits: { id: string, author: string, age: string, subject: string, message: string, additions: integer, deletions: integer, binary: boolean }[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
+fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer? }?): { commits: smelt.git.Commit[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
 ```
 
-Load up to 50 commits with first-parent line statistics, including merge commits.
+Types: [`smelt.git.Commit`](types.md#smeltgitcommit)
+
+Load up to 50 commits, including merge commits.
 `branch` restricts history to base..HEAD; base defaults to main, then master.
 Pass returned `head`, `base_id` as `base`, and an accumulated `skip` for stable pagination.
 `more` indicates another page. No network operations are performed.
@@ -42,10 +75,10 @@ Pass returned `head`, `base_id` as `base`, and an accumulated `skip` for stable 
 ## `smelt.git.index`
 
 ```lua
-fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle", last: integer?): { root: string, index_updated: boolean, branch: string?, diff: smelt.diff.Diff?, refresh_error: string? }?, string?
+fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle", last: integer?): smelt.git.Snapshot?, string?
 ```
 
-Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff)
+Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff), [`smelt.git.Snapshot`](types.md#smeltgitsnapshot)
 
 Stage, unstage, or toggle files from a Git snapshot. File indices are
 one-based. Optional last selects an inclusive range within one section.
@@ -56,4 +89,35 @@ index operation returns index_updated=true even if refresh fails: diff is then
 nil and refresh_error explains why. Retain the old snapshot as stale and
 refresh before another mutation. nil, error means the mutation did not report
 success; cancellation/timeouts may require refreshing to verify repository state.
+A refreshed result carries the branch state of a working `smelt.git.diff`.
+
+## `smelt.git.index_hunks`
+
+```lua
+fun(diff: smelt.diff.Diff, first: integer, last: integer, action: "stage"|"unstage"|"toggle"): smelt.git.Snapshot?, string?
+```
+
+Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff), [`smelt.git.Snapshot`](types.md#smeltgitsnapshot)
+
+Stage, unstage, or toggle the hunks that rows `first` to `last` of a Git
+snapshot's document select, as fugitive does in a diff. Rows are 0-based
+and inclusive. A row in a hunk, a change with the context the document
+first shows around it, selects the hunk, even after folds are expanded; a
+file header row selects the whole file; other unchanged rows select
+nothing. Selected changes must belong to one section. Modified text files
+change in one `git apply`, which fails without changes when the index
+moved on. New, deleted, renamed, binary and unmerged files change only as
+a whole. Returns like `smelt.git.index`; nil, error when the rows select
+no change.
+
+## `smelt.git.stats`
+
+```lua
+fun(opts: { cwd: string?, commits: string[] }): table<string, { additions: integer, deletions: integer, binary: boolean }>?, string?
+```
+
+Line totals of commits against their first parent, keyed by full commit ID:
+`{ [id] = { additions, deletions, binary } }`. Git diffs every listed commit,
+so load a history page first and its totals after. `commits` are full or
+abbreviated hexadecimal IDs; revision syntax is rejected.
 

@@ -3,11 +3,11 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 
-  ┌──────────────────────────────────────────────────────┐
-  │             M  界 .lua  unstaged +1 -1                │
-  │             @@ -1 +1 @@                              │
-  │    1        - old                                    │
-  │          1  + new                                    │
+  ┌ Status  Branch  History ────────────────────── main ─┐
+  │ unstaged (1) +1 -1                                   │
+  │ M 界 .lua +1 -1                                       │
+  │                                                      │
+  │ staged (0)                                           │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -19,4 +19,4 @@ expression: frame.text()
 ──│                                                      │──
   └──────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────
- NORMAL  ○ read                                       1:1 0%
+ NORMAL  ○ read                                      2:1 33%

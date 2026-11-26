@@ -180,6 +180,13 @@
 ---@field dialogs? string[] Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`).
 ---@field modules? string[] Fully-qualified `smelt.<dotted>` module names, passed through verbatim.
 
+--- Subcommand specification accepted by `smelt.cli.register_command`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.cli.RegisterCommandOpts
+---@field name string Subcommand name, as typed after `smelt`.
+---@field description? string One-line description for `--help`.
+---@field args? string Name of the free arguments in `--help`, such as `"VIEW"`. Without it the subcommand takes none.
+
 --- Flag specification accepted by `smelt.cli.register_flag`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.cli.RegisterFlagOpts
@@ -287,7 +294,7 @@
 ---@class smelt.diff.Diff
 ---@field document fun(self: smelt.diff.Diff): smelt.document.Document Row source for `win:document`. Native storage is shared, not copied.
 ---@field view fun(self: smelt.diff.Diff): smelt.diff.Diff Create an independent view, initially preserving the current folds. Shares immutable patch storage, metadata and syntax caches, not subsequent fold changes. Each attached window submits independent syntax demand.
----@field tree fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width.
+---@field tree fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width. A working `smelt.git.diff` snapshot also lists its unpushed and unpulled commits after the file sections, each list headed by the upstream name and its commit count.
 ---@field restore fun(self: smelt.diff.Diff, previous: smelt.diff.Diff, cursor: integer, top: integer): integer?, integer? Restore expanded context and return cursor/top rows for a refreshed snapshot, matching section, raw path and source line numbers rather than display offsets. A missing file returns nil for its anchor. Does not change the previous view.
 ---@field files fun(self: smelt.diff.Diff): smelt.diff.File[] All file metadata, grouped by section and directory-first within each section. Prefer file(index) for bounded UI-thread allocation.
 ---@field totals fun(self: smelt.diff.Diff): integer, integer, boolean Added and deleted line totals, plus whether any file is binary. Linear in changed files, not patch lines. Working snapshots count each section separately.
@@ -322,18 +329,20 @@
 ---@field file_row fun(self: smelt.diff.Tree, index: integer, reveal: boolean?): integer? Visible row of a file, or nil when hidden. With reveal=true, expand its ancestors first. Logarithmic lookup when no folders change.
 ---@field toggle fun(self: smelt.diff.Tree, row: integer): integer? Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil.
 ---@field collapsed fun(self: smelt.diff.Tree): string[] Opaque collapsed directory keys for restoring a new snapshot.
----@field section_row fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'|'changes'): integer Visible row of a section header, including an empty section.
+---@field commit_row fun(self: smelt.diff.Tree, id: string): integer? Visible row of an unpushed or unpulled commit, or nil when the tree does not list it.
+---@field section_row fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'|'changes'|'unpushed'|'unpulled'): integer? Visible row of a section header. File sections always have one, even when empty; a commit section has one only when the tree lists it.
 ---@field restore_group fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer? Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic.
 
 --- Metadata for one visible file-tree row. File indices are one-based and tree rows are zero-based.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.diff.TreeNode
----@field index? integer File index, or nil for a directory.
+---@field index? integer File index, or nil for a directory or commit.
+---@field commit? { id: string, subject: string } The commit an unpushed or unpulled row lists.
 ---@field first integer First descendant file index.
 ---@field last integer Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section.
 ---@field parent? integer Visible parent directory row.
 ---@field children boolean Whether this row is an expandable directory. Section headings are fixed.
----@field section 'unstaged'|'staged'|'changes' Section containing this row.
+---@field section 'unstaged'|'staged'|'changes'|'unpushed'|'unpulled' Section containing this row.
 ---@field group boolean Whether this is a section header.
 ---@field expanded boolean Whether the directory is expanded. Always true for section headings.
 
@@ -440,6 +449,29 @@
 ---@field fill fun(self: smelt.files.Grep, rows: integer): integer Keep at least `rows` rows in a reversed document, filling above the matches, so a short list sits at the bottom of a window that tall. Returns the rows added above, as `sync` does; negative when it removed some.
 ---@field root fun(self: smelt.files.Grep): string Directory that item paths are relative to.
 ---@field cancel fun(self: smelt.files.Grep) Stop searching. Rows found so far stay available.
+
+--- One commit of a history page or a tracking list.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.git.Commit
+---@field id string Full commit ID.
+---@field author string Author name.
+---@field age string Relative author date, such as `2 days ago`.
+---@field subject string First line of the message.
+---@field message string Full raw message.
+
+--- A `smelt.git.diff`, `git.index` or `git.discard` result. Branch fields are present only for working snapshots.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.git.Snapshot
+---@field root string Repository root.
+---@field diff? smelt.diff.Diff The snapshot. Nil when a mutation succeeded but its refresh failed.
+---@field index_updated? boolean True when `git.index` or `git.discard` changed the repository.
+---@field refresh_error? string Why the refresh after a successful mutation failed.
+---@field branch? string Checked-out branch. Nil when detached.
+---@field head? string `HEAD` commit. Nil before the first commit.
+---@field upstream? string Upstream such as `origin/main`. Nil when none is configured or it was deleted.
+---@field ahead? integer Commits on `HEAD` but not on the upstream.
+---@field behind? integer Commits on the upstream but not on `HEAD`.
+---@field operation? string Rebase, merge, cherry-pick, revert or bisect in progress.
 
 --- Single-line input handle returned by `smelt.input.new(opts)`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1308,6 +1340,7 @@
 ---@field content_width fun(): any Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget.
 ---@field decorate fun(opts: table): smelt.win.Decoration Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.
 ---@field cursor fun(row: integer?): any Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
+---@field selection fun(): table? Return the rows of the active Vim Visual or VisualLine selection as `{ first, last }` (0-based, inclusive, `first <= last`), or `nil` when the window is not in a Visual mode. Rows are document rows for windows showing a native document.
 ---@field move_cursor fun(delta: integer): smelt.win.Win Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field reveal fun(row: integer, opts: table?): smelt.win.Win Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor; `opts.jump = true` first leaves the current cursor in the window's jump list so `win:jump{ older = 1 }` or vim's `Ctrl-O` returns to it. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should resolve a target from a committed `smelt.transcript.View` and pass it to `smelt.transcript.reveal`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field jump fun(opts: table): boolean Walk the window's jump list, the positions its vim jumps (`G`, `}`, `]u`, searches) left from; vim's `Ctrl-O`, `Ctrl-I` and `''`. Pass exactly one of `opts.older = n` (back `n` jumps), `opts.newer = n` (forward again) or `opts.previous = true` (toggle between the last two positions). Returns whether the cursor moved. The built-in prompt window has no jump list and returns false.
@@ -1320,7 +1353,7 @@
 ---@field configure fun(opts: table): smelt.win.Win Atomically change live options, including on built-in windows. Unknown keys, wrong types and invalid enum values raise before any change. Absent keys stay unchanged. `style` is a shared style value filling every row including padding; false clears it. `prefix` is a string or `{ first, rest?, style? }`, clipped to pad_left; false clears it. `focus_on_click` is a Win or false. Also accepts pad_left, pad_right, scrollbar, wrap, surface, cursor_line, selection_highlight, hide_cursor, vim_enabled and gutter. Prompt resize gestures are configured through smelt.prompt.set_resize_handle, not window options.
 ---@field row_highlights fun(specs: table?): smelt.win.Win Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.
 ---@field link_scroll fun(others: smelt.win.Win): smelt.win.Win Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.
----@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
+---@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top`, keeping the cursor on the same screen row, and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
 ---@field set_renderer fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.
 ---@field invalidate fun(): smelt.win.Win Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.
 ---@field invalidate_after fun(ms: integer): smelt.Reg Invalidate this window after ms milliseconds. Returns a cancellable one-shot registration; timers are allocated only when requested.
@@ -1384,5 +1417,5 @@
 
 --- Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
----@alias smelt.win.Event "open"|"close"|"focus"|"blur"|"selection_changed"|"submit"|"text_changed"|"dismiss"|"tick"|"press"|"release"|"drag"|"enter"|"leave"|"move"|"scrolled"|"resized"|"placeholder_accepted"|"placeholder_dismissed"
+---@alias smelt.win.Event "open"|"close"|"focus"|"blur"|"selection_changed"|"submit"|"text_changed"|"dismiss"|"tick"|"press"|"release"|"drag"|"enter"|"leave"|"move"|"scrolled"|"cursor_moved"|"resized"|"placeholder_accepted"|"placeholder_dismissed"
 

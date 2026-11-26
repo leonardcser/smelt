@@ -672,6 +672,12 @@ pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<RowIndex> {
     app.ui.win(leaf).map(|w| w.cursor_abs_row())
 }
 
+/// Inclusive first and last row of `leaf`'s active Vim Visual selection.
+pub(crate) fn visual_rows(app: &TuiApp, leaf: WinId) -> Option<(RowIndex, RowIndex)> {
+    let win = app.ui.win(leaf)?;
+    win.visual_rows(app.ui.buf(win.buf)?)
+}
+
 /// Wire the built-in input recipe. The window joins native scope `input`,
 /// whose actions edit the line and submit it (see [`edit_input`] and
 /// [`submit_input`]). A key fallback below the keymap scopes inserts printable
@@ -679,15 +685,18 @@ pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<RowIndex> {
 /// window listens for it. Every edit also fires `WinEvent::TextChanged`.
 ///
 /// Placeholder: when `placeholder` is non-empty, it is rendered as virtual text
-/// while the buffer remains empty. The first printable keystroke inserts real
-/// input at column 0; Backspace and horizontal movement are no-ops while only
-/// the placeholder is visible.
+/// while the buffer remains empty. The cursor starts after any text the input
+/// already has; Backspace and horizontal movement are no-ops while only the
+/// placeholder is visible.
 pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: String) {
     if !placeholder.is_empty() {
         app.set_placeholder(leaf, placeholder.clone());
     }
+    // Typing continues any text the input starts with.
+    let text = input_line(&app.ui, leaf);
     if let Some(win) = app.ui.win_mut(leaf) {
         win.reset_cursor();
+        win.set_cursor_byte_single_line(&text, text.len());
     }
     app.ui.set_base_scope(leaf, Some("input"));
 

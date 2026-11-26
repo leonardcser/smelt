@@ -25,11 +25,11 @@ pub use runtime::{
     PermissionTarget, ShutdownHookContext, ToolVisibility, OPTIONAL_PLUGINS,
 };
 pub use shared::{
-    AskCallbacks, CliFlagKind, CliFlagSpec, CliFlagValue, CommandBusyBehavior, DefaultShell, Hooks,
-    LuaHostServices, LuaResumeSink, LuaShared, LuaWorkGuard, Phase, RegisteredCommand,
-    RegisteredWinRenderer, ToolHandles, TranscriptGroupBucket, TranscriptGroupFieldMatch,
-    TranscriptGroupSelector, TranscriptGroupSpec, LUA_BUF_ID_BASE, LUA_WORK_BATCH,
-    MAX_LUA_WORK_PER_PUMP,
+    AskCallbacks, CliCommand, CliCommandSpec, CliFlagKind, CliFlagSpec, CliFlagValue,
+    CommandBusyBehavior, DefaultShell, Hooks, LuaHostServices, LuaResumeSink, LuaShared,
+    LuaWorkGuard, Phase, RegisteredCommand, RegisteredWinRenderer, ToolHandles,
+    TranscriptGroupBucket, TranscriptGroupFieldMatch, TranscriptGroupSelector, TranscriptGroupSpec,
+    LUA_BUF_ID_BASE, LUA_WORK_BATCH, MAX_LUA_WORK_PER_PUMP,
 };
 pub(crate) use task::step_task_owned;
 pub use task::{

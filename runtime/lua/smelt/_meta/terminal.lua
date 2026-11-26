@@ -32,6 +32,10 @@ terminal.open_editor = nil
 ---@type fun(message: string, opts: table?): boolean
 terminal.osc9_notify = nil
 
+--- Run `argv`, such as `{ "git", "commit" }`, on the terminal: smelt suspends until it exits, then repaints. Use it for interactive commands such as `git commit`, which opens Git's own editor. `opts.cwd` is relative to the session cwd. Returns `(true, nil)`, or `(false, err)` with the command's error output, or its exit status when it printed none.
+---@type fun(argv: string[], opts: table?): boolean, string?
+terminal.run = nil
+
 --- Set the terminal window/tab title using OSC 0. Pass nil to clear it. Control characters are stripped from titles before writing.
 ---@type fun(title: string?): boolean
 terminal.set_title = nil

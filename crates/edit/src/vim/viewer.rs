@@ -222,14 +222,11 @@ fn viewer_key(key: KeyEvent, mode: &mut VimMode, state: &mut VimWindowState) -> 
     let rows = |state: &mut VimWindowState| state.take_count() as isize;
     match key.code {
         KeyCode::Char(c @ '1'..='9') => {
-            let digit = c.to_digit(10).unwrap() as usize;
-            let prev = state.count1.unwrap_or(0);
-            state.count1 = Some(prev.saturating_mul(10).saturating_add(digit));
+            state.count1 = Some(push_count_digit(state.count1, c));
             DocumentKeyResult::Consumed
         }
         KeyCode::Char('0') if state.count1.is_some() => {
-            let prev = state.count1.unwrap_or(0);
-            state.count1 = Some(prev.saturating_mul(10));
+            state.count1 = Some(push_count_digit(state.count1, '0'));
             DocumentKeyResult::Consumed
         }
         KeyCode::Char('g') => {
