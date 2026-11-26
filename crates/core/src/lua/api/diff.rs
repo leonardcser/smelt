@@ -9,9 +9,19 @@ use mlua::prelude::*;
 use smelt_transcript::diff::{Diff, DiffView};
 use std::sync::{Arc, Mutex};
 
-/// The repository behind a working snapshot, which file changes apply to.
+/// The repository behind a working snapshot, which file changes apply to,
+/// and the paths its refreshed snapshots stay limited to.
 struct Repository {
     root: std::path::PathBuf,
+    paths: crate::git::Pathspec,
+}
+
+/// The `paths` option of a `smelt.git` read, relative to `cwd`.
+fn pathspec(opts: &mlua::Table, cwd: &std::path::Path) -> LuaResult<crate::git::Pathspec> {
+    let paths = opts
+        .get::<Option<Vec<String>>>("paths")?
+        .unwrap_or_default();
+    Ok(crate::git::Pathspec::resolve(cwd, &paths))
 }
 
 #[derive(Clone)]
@@ -294,6 +304,7 @@ impl mlua::UserData for LuaDiffJob {
                                     (!snapshot.view.diff.is_comparison()).then(|| {
                                         Arc::new(Repository {
                                             root: snapshot.root,
+                                            paths: snapshot.paths,
                                         })
                                     }),
                                 ),
@@ -366,8 +377,13 @@ where
         let value = match mutation {
             Err(error) => Err(error),
             Ok(()) => {
-                let refresh =
-                    crate::git::working_diff(repository.root.clone(), context, cancel).await;
+                let refresh = crate::git::working_diff(
+                    repository.root.clone(),
+                    repository.paths.clone(),
+                    context,
+                    cancel,
+                )
+                .await;
                 if let Ok(snapshot) = &refresh {
                     snapshot.view.set_wakeup(wakeup);
                 }
@@ -588,13 +604,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             let branch = opts.get::<Option<bool>>("branch")?.unwrap_or(false);
             let head = opts.get::<Option<String>>("head")?;
             let skip = opts.get::<Option<usize>>("skip")?.unwrap_or(0);
+            let paths = pathspec(&opts, &cwd)?;
             let result: DiffResult = Arc::new(Mutex::new(None));
             let output = result.clone();
             let cancel = crate::lua::current_task_cancel().unwrap_or_default();
             let sink = history_shared.resume_sink();
             tokio::spawn(async move {
                 let value =
-                    crate::git::review::history(cwd, base, branch, head, skip, cancel).await;
+                    crate::git::review::history(cwd, base, branch, head, skip, paths, cancel).await;
                 *output.lock().unwrap() = Some(value.map(GitResult::History));
                 sink.resolve_json(id, serde_json::Value::Null);
             });
@@ -611,12 +628,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 .map(|path| stats_shared.resolve_project_path(path))
                 .unwrap_or_else(|| stats_shared.evaluation_cwd());
             let commits = opts.get::<Vec<String>>("commits")?;
+            let paths = pathspec(&opts, &cwd)?;
             let result: DiffResult = Arc::new(Mutex::new(None));
             let output = result.clone();
             let cancel = crate::lua::current_task_cancel().unwrap_or_default();
             let sink = stats_shared.resume_sink();
             tokio::spawn(async move {
-                let value = crate::git::review::stats(cwd, commits, cancel).await;
+                let value = crate::git::review::stats(cwd, commits, paths, cancel).await;
                 *output.lock().unwrap() = Some(value.map(GitResult::Stats));
                 sink.resolve_json(id, serde_json::Value::Null);
             });
@@ -643,6 +661,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             if base.is_some() && revision.is_none() {
                 return Err(LuaError::external("base requires revision"));
             }
+            let paths = pathspec(&opts, &cwd)?;
             let result: DiffResult = Arc::new(Mutex::new(None));
             let output = Arc::clone(&result);
             let cancel = crate::lua::current_task_cancel().unwrap_or_default();
@@ -651,9 +670,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             tokio::spawn(async move {
                 let value = match revision {
                     Some(revision) => {
-                        crate::git::review::comparison(cwd, revision, base, context, cancel).await
+                        crate::git::review::comparison(cwd, revision, base, paths, context, cancel)
+                            .await
                     }
-                    None => crate::git::working_diff(cwd, context, cancel).await,
+                    None => crate::git::working_diff(cwd, paths, context, cancel).await,
                 };
                 if let Ok(snapshot) = &value {
                     snapshot.view.set_wakeup(wakeup);

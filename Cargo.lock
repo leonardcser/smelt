@@ -2863,6 +2863,7 @@ version = "0.0.0-dev"
 dependencies = [
  "atomic-write-file",
  "chrono",
+ "clap",
  "dirs",
  "ego-tree",
  "glob",

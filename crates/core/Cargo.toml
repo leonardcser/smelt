@@ -44,6 +44,7 @@ atomic-write-file = "0.3.1"
 tempfile.workspace = true
 mimalloc = "0.1.52"
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+clap = { version = "4.6.10", features = ["string"] }
 
 # musl's malloc maps and unmaps large blocks on every call. Overriding the C
 # allocator routes bundled C libraries such as SQLite through mimalloc too.

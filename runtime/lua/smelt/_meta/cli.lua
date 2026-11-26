@@ -8,7 +8,7 @@
 ---@class smelt.cli
 local cli = {}
 
---- Return the Lua subcommand this process was launched for as `{ name, args }`, where `args` lists its free arguments, or `nil` for an agent session.
+--- Return the Lua subcommand this process was launched for as `{ name, args, flags, rest }`, where `args` lists its free arguments, `flags` maps each of its flag names to the parsed value or default, and `rest` lists its arguments after `--`; or `nil` for an agent session.
 ---@type fun(): any
 cli.command = nil
 
@@ -22,17 +22,21 @@ cli.list = nil
 
 --- Open a tool when smelt launches as `smelt <name>`, a subcommand that
 --- `smelt.cli.register_command` declared in `early.lua`. Once the launch
---- is ready, calls `open(args)` with the subcommand's free arguments.
+--- is ready, calls `open(args, flags, rest)` with the subcommand's free
+--- arguments, its flag values by name and its arguments after `--`, as
+--- a slash command with the same spec gets them.
 --- `open` must show a modal overlay that fills the terminal; smelt quits
 --- once no modal overlay shows, and exits with code 1 if none ever did.
 --- Returns a `Reg` whose `:remove()` drops the hook before it fires.
 ---@see smelt.cli.register_command
----@type fun(name: string, open: fun(args: string[])): smelt.Reg
+---@type fun(name: string, open: fun(args: string[], flags: table<string, any>, rest: string[])): smelt.Reg
 cli.on_command = nil
 
---- Register a subcommand such as `smelt diff`. MUST be called from `early.lua`, like `register_flag`. Launching it starts the TUI without an agent session: nothing is persisted, no provider setup or MCP servers start, and `smelt status` does not list the process. A plugin opens its UI as a modal overlay with `smelt.cli.on_command`; smelt quits once no modal overlay shows. Every subcommand also accepts `-C <path>`. Errors if an earlier registration took the name. A name that a built-in subcommand uses is ignored with a warning at launch.
+--- Register a subcommand such as `smelt diff`. MUST be called from `early.lua`, like `register_flag`. Launching it starts the TUI without an agent session: nothing is persisted, no provider setup, engine, language servers or MCP servers start, and `smelt status` does not list the process. A plugin opens its UI as a modal overlay with `smelt.cli.on_command`. That overlay is the whole screen: smelt draws no prompt, transcript or statusline under it, and quits once no modal overlay shows. `spec` is a `smelt.cli.CommandSpec`; pass the same table to `smelt.cmd.register` as `opts.spec` so `/name` reads the same arguments. Every subcommand also accepts `-C <path>`. Errors if an earlier registration took the name. A name that a built-in subcommand uses is ignored with a warning at launch.
 ---@see smelt.cli.on_command
----@type fun(opts: smelt.cli.RegisterCommandOpts): nil
+---@see smelt.cli.CommandSpec
+---@see smelt.cmd.register
+---@type fun(spec: smelt.cli.CommandSpec): nil
 cli.register_command = nil
 
 --- Register a CLI flag. MUST be called from `early.lua`. The runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `"boolean"`, `"string"`, or `"integer"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.

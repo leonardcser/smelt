@@ -16,7 +16,7 @@ Asynchronous Git history, read-only revision comparisons, explicit file or range
 ## `smelt.git.diff`
 
 ```lua
-fun(opts: { cwd: string?, context: integer?, revision: string?, base: string? }?): smelt.git.Snapshot?, string?
+fun(opts: { cwd: string?, context: integer?, revision: string?, base: string?, paths: string[]? }?): smelt.git.Snapshot?, string?
 ```
 
 Types: [`smelt.git.Snapshot`](types.md#smeltgitsnapshot)
@@ -32,6 +32,8 @@ the rebase, merge, cherry-pick, revert or bisect `operation` in progress.
 Its file tree lists up to 50 unpushed and 50 unpulled commits. Reads local refs only; no fetch runs.
 With `revision`, load a read-only first-parent commit patch. With `base` too,
 compare the merge base of base/revision to revision. Revisions resolve to immutable IDs.
+`paths` limits the snapshot to Git pathspecs relative to `cwd`, such as
+`src` or `*.rs`; snapshots refreshed after `smelt.git.index` keep them.
 
 ## `smelt.git.discard`
 
@@ -62,7 +64,7 @@ as `smelt.git.index_hunks` chooses them. Returns like `smelt.git.discard`.
 ## `smelt.git.history`
 
 ```lua
-fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer? }?): { commits: smelt.git.Commit[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
+fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer?, paths: string[]? }?): { commits: smelt.git.Commit[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
 ```
 
 Types: [`smelt.git.Commit`](types.md#smeltgitcommit)
@@ -71,6 +73,7 @@ Load up to 50 commits, including merge commits.
 `branch` restricts history to base..HEAD; base defaults to main, then master.
 Pass returned `head`, `base_id` as `base`, and an accumulated `skip` for stable pagination.
 `more` indicates another page. No network operations are performed.
+`paths` keeps only commits that touch those pathspecs, relative to `cwd`.
 
 ## `smelt.git.index`
 
@@ -113,11 +116,12 @@ no change.
 ## `smelt.git.stats`
 
 ```lua
-fun(opts: { cwd: string?, commits: string[] }): table<string, { additions: integer, deletions: integer, binary: boolean }>?, string?
+fun(opts: { cwd: string?, commits: string[], paths: string[]? }): table<string, { additions: integer, deletions: integer, binary: boolean }>?, string?
 ```
 
 Line totals of commits against their first parent, keyed by full commit ID:
 `{ [id] = { additions, deletions, binary } }`. Git diffs every listed commit,
 so load a history page first and its totals after. `commits` are full or
-abbreviated hexadecimal IDs; revision syntax is rejected.
+abbreviated hexadecimal IDs; revision syntax is rejected. `paths` counts
+only lines within those pathspecs, relative to `cwd`.
 

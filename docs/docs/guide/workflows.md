@@ -66,16 +66,18 @@ Use `/diff` to review what the session changed in the working tree:
 <figure class="term" data-replay="../../assets/replays/diff.json" aria-label="Reviewing the working tree changes with /diff" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 Run `/files` to search workspace files, including untracked files that are not
-ignored. Use `/files git` for Git-tracked files only. Press `Enter` to open the
+ignored. Use `/files --git` (`-g`) for Git-tracked files only. Press `Enter` to open the
 selection in `$VISUAL`, then `$EDITOR`, then `vi`. Quit the editor to return to
 smelt.
 
 <figure class="term" data-replay="../../assets/replays/files.json" aria-label="Finding src/pricing.rs with /files, opening it in Neovim, then returning to smelt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
-Run `/search` to search the contents of the same files, or `/search git` for
+Run `/search` to search the contents of the same files, or `/search --git` for
 Git-tracked files only. Results list each matching line as
 `path:line:column: text` and stream in as files are searched. The query is
-literal, and case-insensitive unless it has an uppercase letter. The preview
+literal, and case-insensitive unless it has an uppercase letter. Use
+`/search --regex` (`-e`) to read it as a regular expression. Put a query that
+starts with `-` after `--`. The preview
 shows the file at the selected line with every match highlighted. `Enter` opens
 the editor at that line.
 

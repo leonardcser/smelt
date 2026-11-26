@@ -147,7 +147,7 @@ smelt.settings.vim = false
 smelt.provider.register("local", {{ type = "openai-compatible", api_base = "http://127.0.0.1:9", api_key_env = "MOCK_KEY", models = {{ "test" }} }})
 smelt.defaults.set({{ model = "local/test" }})
 smelt.lifecycle.on_ready(function() smelt.fs.write({:?}, "ready") end)
-smelt.keymap.set("", "<F6>", function() smelt.cmd.run("files all") end)
+smelt.keymap.set("", "<F6>", function() smelt.cmd.run("files") end)
 smelt.keymap.set("", "<F7>", function() smelt.fs.write({:?}, smelt.prompt.text()) end)
 "#, ready.to_str().unwrap(), resumed.to_str().unwrap())).unwrap();
     let mut command = isolated_smelt_command(root.path());

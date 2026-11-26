@@ -721,14 +721,14 @@ async fn async_main() {
     drop(lua_early_startup);
 
     let cli_parse_startup = smelt_perf::perf::begin("startup:cli_parse");
-    let lua_flag_specs: Vec<tui::CliFlagSpec> = lua_runtime
+    let lua_flag_specs: Vec<tui::FlagSpec> = lua_runtime
         .shared()
         .cli_flag_specs
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
 
-    let lua_command_specs: Vec<tui::CliCommandSpec> = lua_runtime
+    let lua_command_specs: Vec<tui::CommandSpec> = lua_runtime
         .shared()
         .cli_command_specs
         .lock()
@@ -737,7 +737,7 @@ async fn async_main() {
     let (mut args, lua_flag_values, lua_command) =
         parse_with_lua_flags(&lua_flag_specs, &lua_command_specs);
     let startup_resume = lua_flag_values.get("resume").and_then(|value| match value {
-        tui::CliFlagValue::String(id) if !id.is_empty() => Some(id.clone()),
+        tui::FlagValue::String(id) if !id.is_empty() => Some(id.clone()),
         _ => None,
     });
     if let Ok(mut map) = lua_runtime.shared().cli_flag_values.lock() {
@@ -875,10 +875,13 @@ async fn async_main() {
         managed_models,
         mut startup_auth_error,
     } = resolved_startup;
-    lua_runtime
-        .shared()
-        .lsp
-        .configure_detached(runtime.lsp.clone(), &cwd, env.home());
+    // Language servers serve the agent's tools; a Lua subcommand has none.
+    if agent_session {
+        lua_runtime
+            .shared()
+            .lsp
+            .configure_detached(runtime.lsp.clone(), &cwd, env.home());
+    }
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
         engine::log::set_level(level);
@@ -1032,25 +1035,29 @@ async fn async_main() {
         &no_servers
     };
     let mcp_manager = smelt_core::mcp::McpManager::start_detached(mcp_servers, &cwd);
-    let dispatcher: Box<dyn engine::tools::ToolDispatcher> = Box::new(
-        smelt_core::mcp::dispatcher::McpDispatcher::new(Arc::clone(&mcp_manager)),
-    );
-
-    let engine_handle = engine::start(
-        engine::EngineConfig {
-            instructions: prompt_inputs.instructions.clone(),
-            system_prompt_override: prompt_inputs.system_prompt_override.clone(),
-            system_prompt_behavior: if args.headless {
-                engine::SystemPromptBehavior::Autonomous
-            } else {
-                engine::SystemPromptBehavior::Interactive
+    // A Lua subcommand runs no agent, so no engine starts behind it.
+    let engine_handle = if agent_session {
+        let dispatcher: Box<dyn engine::tools::ToolDispatcher> = Box::new(
+            smelt_core::mcp::dispatcher::McpDispatcher::new(Arc::clone(&mcp_manager)),
+        );
+        engine::start(
+            engine::EngineConfig {
+                instructions: prompt_inputs.instructions.clone(),
+                system_prompt_override: prompt_inputs.system_prompt_override.clone(),
+                system_prompt_behavior: if args.headless {
+                    engine::SystemPromptBehavior::Autonomous
+                } else {
+                    engine::SystemPromptBehavior::Interactive
+                },
+                host_callbacks: engine::HostCallbacks::Enabled,
+                skill_section: prompt_inputs.skill_section.clone(),
+                ..engine::EngineConfig::new(cwd.clone(), Arc::clone(&clock))
             },
-            host_callbacks: engine::HostCallbacks::Enabled,
-            skill_section: prompt_inputs.skill_section.clone(),
-            ..engine::EngineConfig::new(cwd.clone(), Arc::clone(&clock))
-        },
-        dispatcher,
-    );
+            dispatcher,
+        )
+    } else {
+        engine::EngineHandle::idle()
+    };
     drop(services_startup);
 
     let color_mode = match args.color {
@@ -1184,7 +1191,12 @@ async fn async_main() {
         drop(tui_construct_startup);
         let stderr_redirect = StderrRedirect::start();
 
-        println!();
+        // A blank line under the shell command sets off what the session
+        // prints when it exits, such as its resume hint. A Lua subcommand
+        // prints only an error, which goes right under the command.
+        if agent_session {
+            println!();
+        }
         app.run(startup_http_client, initial_message).await;
         drop(stderr_redirect);
         // Fire `smelt.lifecycle.on("shutdown", fn)` hooks. The TUI is torn
@@ -1222,12 +1234,12 @@ async fn async_main() {
 /// `--help` / `--version` clap exits the process via `get_matches_from()` -
 /// matching the original `Args::parse()` behavior.
 fn parse_with_lua_flags(
-    specs: &[tui::CliFlagSpec],
-    commands: &[tui::CliCommandSpec],
+    specs: &[tui::FlagSpec],
+    commands: &[tui::CommandSpec],
 ) -> (
     Args,
-    std::collections::HashMap<String, tui::CliFlagValue>,
-    Option<tui::CliCommand>,
+    std::collections::HashMap<String, tui::FlagValue>,
+    Option<tui::CommandArgs>,
 ) {
     parse_lua_cli(startup::clap_args(std::env::args_os()), specs, commands)
 }
@@ -1237,17 +1249,17 @@ fn parse_with_lua_flags(
 /// always wins.
 fn parse_lua_cli(
     argv: Vec<std::ffi::OsString>,
-    specs: &[tui::CliFlagSpec],
-    commands: &[tui::CliCommandSpec],
+    specs: &[tui::FlagSpec],
+    commands: &[tui::CommandSpec],
 ) -> (
     Args,
-    std::collections::HashMap<String, tui::CliFlagValue>,
-    Option<tui::CliCommand>,
+    std::collections::HashMap<String, tui::FlagValue>,
+    Option<tui::CommandArgs>,
 ) {
     use clap::CommandFactory;
 
     let built_in = <Args as CommandFactory>::command();
-    let commands: Vec<tui::CliCommandSpec> = commands
+    let commands: Vec<tui::CommandSpec> = commands
         .iter()
         .filter(|spec| {
             let taken = built_in.find_subcommand(&spec.name).is_some();
@@ -1268,109 +1280,41 @@ fn parse_lua_cli(
     )
 }
 
-fn lua_cli(specs: &[tui::CliFlagSpec], commands: &[tui::CliCommandSpec]) -> clap::Command {
-    use clap::{Arg, ArgAction, CommandFactory};
-
-    // clap's Arg API expects `&'static str`. Specs live for the
-    // process lifetime once parsed, so leaking is the simplest contract.
-    fn leak(s: &str) -> &'static str {
-        Box::leak(s.to_string().into_boxed_str())
-    }
+fn lua_cli(specs: &[tui::FlagSpec], commands: &[tui::CommandSpec]) -> clap::Command {
+    use clap::CommandFactory;
 
     let mut cmd = <Args as CommandFactory>::command();
     for spec in specs {
-        let name_static: &'static str = leak(&spec.name);
-        let long_static: &'static str = leak(spec.long.as_deref().unwrap_or(&spec.name));
-        let mut arg = Arg::new(name_static).long(long_static);
-        if let Some(short) = spec.short {
-            arg = arg.short(short);
-        }
-        if let Some(ref desc) = spec.description {
-            arg = arg.help(leak(desc));
-        }
-        arg = match spec.kind {
-            tui::CliFlagKind::Boolean => arg.action(ArgAction::SetTrue),
-            tui::CliFlagKind::String => {
-                let a = arg.action(ArgAction::Set);
-                if spec.value_optional {
-                    a.num_args(0..=1).default_missing_value("")
-                } else {
-                    a
-                }
-            }
-            tui::CliFlagKind::Integer => {
-                let a = arg
-                    .action(ArgAction::Set)
-                    .value_parser(clap::value_parser!(i64));
-                if spec.value_optional {
-                    a.num_args(0..=1).default_missing_value("0")
-                } else {
-                    a
-                }
-            }
-        };
-        cmd = cmd.arg(arg);
+        cmd = cmd.arg(spec.arg());
     }
     for spec in commands {
-        let mut sub = clap::Command::new(leak(&spec.name));
-        if let Some(ref desc) = spec.description {
-            sub = sub.about(leak(desc));
-        }
-        if let Some(ref name) = spec.args {
-            sub = sub.arg(Arg::new("args").value_name(leak(name)).num_args(0..));
-        }
-        cmd = cmd.subcommand(sub);
+        cmd = cmd.subcommand(spec.clap());
     }
     cmd
 }
 
 fn from_lua_matches(
-    mut matches: clap::ArgMatches,
-    specs: &[tui::CliFlagSpec],
-    commands: &[tui::CliCommandSpec],
+    matches: clap::ArgMatches,
+    specs: &[tui::FlagSpec],
+    commands: &[tui::CommandSpec],
 ) -> (
     Args,
-    std::collections::HashMap<String, tui::CliFlagValue>,
-    Option<tui::CliCommand>,
+    std::collections::HashMap<String, tui::FlagValue>,
+    Option<tui::CommandArgs>,
 ) {
     use clap::FromArgMatches;
 
-    let command = match matches.subcommand_name() {
-        Some(name) if commands.iter().any(|spec| spec.name == name) => matches
-            .remove_subcommand()
-            .map(|(name, sub)| tui::CliCommand {
-                name,
-                args: sub
-                    .try_get_many::<String>("args")
-                    .ok()
-                    .flatten()
-                    .map(|values| values.cloned().collect())
-                    .unwrap_or_default(),
-            }),
-        _ => None,
-    };
+    let command = matches.subcommand().and_then(|(name, sub)| {
+        let spec = commands.iter().find(|spec| spec.name == name)?;
+        Some(spec.read(sub))
+    });
     let args = <Args as FromArgMatches>::from_arg_matches(&matches)
         .expect("Args parser must succeed after clap match");
 
-    let mut values = std::collections::HashMap::with_capacity(specs.len());
-    for spec in specs {
-        let key = spec.name.as_str();
-        let val = match spec.kind {
-            tui::CliFlagKind::Boolean => tui::CliFlagValue::Boolean(matches.get_flag(key)),
-            tui::CliFlagKind::String => matches
-                .get_one::<String>(key)
-                .cloned()
-                .map(tui::CliFlagValue::String)
-                .unwrap_or_else(|| spec.default.clone()),
-            tui::CliFlagKind::Integer => matches
-                .get_one::<i64>(key)
-                .copied()
-                .map(tui::CliFlagValue::Integer)
-                .unwrap_or_else(|| spec.default.clone()),
-        };
-        values.insert(spec.name.clone(), val);
-    }
-
+    let values = specs
+        .iter()
+        .map(|spec| (spec.name.clone(), spec.value(&matches)))
+        .collect();
     (args, values, command)
 }
 
@@ -1427,12 +1371,50 @@ impl Drop for StderrRedirect {
 mod tests {
     use super::*;
 
-    fn command(name: &str) -> tui::CliCommandSpec {
-        tui::CliCommandSpec {
+    fn command(name: &str) -> tui::CommandSpec {
+        tui::CommandSpec {
             name: name.into(),
             description: None,
-            args: Some("ARGS".into()),
+            args: Some(tui::Operand {
+                name: "ARGS".into(),
+                description: None,
+            }),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn lua_subcommand_reads_its_flags_around_its_args() {
+        let commands = [tui::CommandSpec {
+            flags: vec![tui::FlagSpec {
+                name: "regex".into(),
+                kind: tui::FlagKind::Boolean,
+                default: tui::FlagValue::Boolean(false),
+                description: None,
+                short: Some('e'),
+                long: None,
+                value_optional: false,
+            }],
+            ..command("search")
+        }];
+        let parse = |argv: &[&str]| {
+            let argv = std::iter::once("smelt").chain(argv.iter().copied());
+            let (_, _, command) = parse_lua_cli(argv.map(Into::into).collect(), &[], &commands);
+            let command = command.expect("a Lua subcommand");
+            (command.args, command.flags["regex"].clone())
+        };
+        let on = tui::FlagValue::Boolean(true);
+        let off = tui::FlagValue::Boolean(false);
+        assert_eq!(parse(&["search", "foo"]), (vec!["foo".into()], off.clone()));
+        assert_eq!(
+            parse(&["search", "-e", "fo+"]),
+            (vec!["fo+".into()], on.clone())
+        );
+        assert_eq!(
+            parse(&["search", "fo+", "--regex"]),
+            (vec!["fo+".into()], on)
+        );
+        assert_eq!(parse(&["search", "--", "-e"]), (vec!["-e".into()], off));
     }
 
     #[test]
@@ -1450,9 +1432,10 @@ mod tests {
         assert!(args.command.is_none());
         assert_eq!(
             lua,
-            Some(tui::CliCommand {
+            Some(tui::CommandArgs {
                 name: "diff".into(),
                 args: vec!["branch".into()],
+                ..Default::default()
             })
         );
     }

@@ -130,6 +130,10 @@ local function summary(text)
   return display(first ~= "" and first or "git failed")
 end
 
+-- `opts.view` is the view to start in, `opts.base` the branch view's
+-- comparison base and `opts.head` the ref it reviews instead of HEAD.
+-- `opts.revision` shows one revision in the history view. `opts.paths`
+-- limits every view to those Git pathspecs.
 function M.open(opts)
   opts = opts or {}
   if active then active.close() end
@@ -138,7 +142,9 @@ function M.open(opts)
   local standalone = surface.standalone
   local closed = false
   local current = opts.view or "status"
-  local base = opts.base
+  local base, head = opts.base, opts.head
+  local paths = opts.paths or {}
+  local scope = #paths > 0 and ("-- " .. table.concat(paths, " ")) or nil
   local views = {}
   local overlay, message, pending, query
   -- The Git operation in progress: `{ label, job }`.
@@ -314,7 +320,7 @@ function M.open(opts)
   -- `on_diff` gets the diff unless the preview showed something else first.
   local function load_preview(v, loading, opts, on_diff)
     notice(v, "Loading")
-    opts.cwd = cwd
+    opts.cwd, opts.paths = cwd, paths
     v.loading = loading
     v.preview_job = smelt.spawn(function()
       local result, err = smelt.git.diff(opts)
@@ -444,7 +450,7 @@ function M.open(opts)
     status.busy = status.diff and "refreshing" or "loading"
     render_header()
     status.job = smelt.spawn(function()
-      local result, err = smelt.git.diff({ cwd = cwd })
+      local result, err = smelt.git.diff({ cwd = cwd, paths = paths })
       if closed then return end
       status.job, status.busy = nil, nil
       if not result then
@@ -717,7 +723,7 @@ function M.open(opts)
     if #ids == 0 then return end
     if v.stats_job then v.stats_job:remove() end
     v.stats_job = smelt.spawn(function()
-      local result = smelt.git.stats({ cwd = cwd, commits = ids })
+      local result = smelt.git.stats({ cwd = cwd, commits = ids, paths = paths })
       if closed then return end
       v.stats_job = nil
       -- Totals only decorate the list, which stays usable without them.
@@ -730,7 +736,7 @@ function M.open(opts)
   local function entry_info(v, entry)
     if entry.combined then
       local count = #v.commits .. (v.more and "+ commits" or (#v.commits == 1 and " commit" or " commits"))
-      return { "Branch changes vs " .. display(v.base), "Committed changes only", count }
+      return { (head and display(head) or "Branch") .. " changes vs " .. display(v.base), "Committed changes only", count }
     end
     local lines = { entry.id:sub(1, 8) .. " | " .. display(entry.author) .. " | " .. display(entry.age) }
     for line in (entry.message .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = display(line) end
@@ -752,7 +758,7 @@ function M.open(opts)
       if v.name == current then render_header() end
       return
     end
-    v.caption = entry.combined and (display(v.base) .. "..." .. v.head:sub(1, 8))
+    v.caption = entry.combined and (display(v.base) .. "..." .. (head and display(head) or v.head:sub(1, 8)))
       or (entry.id:sub(1, 8) .. " - first parent")
     v.info_buf:lines(entry_info(v, entry))
     v.info:scroll(0)
@@ -778,7 +784,8 @@ function M.open(opts)
     v.job = smelt.spawn(function()
       local page, err = smelt.git.history({ cwd = cwd, branch = v.name == "branch",
         base = append and v.base_id or (v.name == "branch" and base or nil),
-        head = append and v.head or nil, skip = append and #v.commits or 0 })
+        head = append and v.head or (v.name == "branch" and head or nil), skip = append and #v.commits or 0,
+        paths = paths })
       if closed then return end
       v.job, v.busy = nil, nil
       if not page then
@@ -1061,8 +1068,9 @@ function M.open(opts)
     local busy = change and change.label or v.busy
     if busy then return busy, "Comment" end
     if v.stale then return "stale - r refresh", "ErrorMsg" end
-    if v.name == "status" then return v.caption or tracking_caption(), "Comment" end
-    return v.caption, "Comment"
+    local text = v.name == "status" and (v.caption or tracking_caption()) or v.caption
+    if scope then text = text and (text .. "  " .. scope) or scope end
+    return text, "Comment"
   end
 
   -- The column of the split divider within the header, when both panes show.
@@ -1366,22 +1374,40 @@ function M.open(opts)
   if current ~= "status" and not opts.revision then load_list(view(), false) end
 end
 
--- "status", "branch [base]", "history" or a revision.
-local function parse(arg)
-  local word, value = (arg or ""):match("^(%S+)%s*(.-)%s*$")
-  if not word or word == "status" then return {} end
-  if word == "branch" then return { view = "branch", base = value ~= "" and value or nil } end
-  if word == "history" then return { view = "history" } end
-  return { view = "history", revision = arg:match("^%s*(.-)%s*$") }
+local SPEC = require("smelt.subcommands.diff")
+
+-- The options of `M.open` from the arguments `SPEC` reads, or nil and why
+-- they do not go together.
+local function options(args, flags, rest)
+  if #args > 1 then return nil, "takes one revision or range" end
+  local branch = flags.branch or flags.base ~= nil
+  if flags.history and branch then return nil, "--history and --branch do not go together" end
+  local o = { paths = rest }
+  local target = args[1]
+  local from, to = (target or ""):match("^(.-)%.%.%.?(.*)$")
+  if from then
+    if flags.history or branch then return nil, "a range takes no --branch, --base or --history" end
+    o.view, o.base, o.head = "branch", from ~= "" and from or nil, to ~= "" and to or nil
+  elseif target then
+    if branch then return nil, "a revision takes no --branch or --base" end
+    o.view, o.revision = "history", target
+  elseif branch then
+    o.view, o.base = "branch", flags.base
+  elseif flags.history then
+    o.view = "history"
+  end
+  return o
 end
 
-smelt.cmd.register("diff", function(arg) M.open(parse(arg)) end, {
-  desc = "review status, branch commits, history, or one revision",
-  args = { "[status|branch [base]|history|revision]" }, busy = "run",
-})
+smelt.cmd.register("diff", function(_, args, flags, rest)
+  local o, err = options(args, flags, rest)
+  if not o then return smelt.notify.error("/diff: " .. err) end
+  M.open(o)
+end, { desc = "review status, branch commits, history, or one revision", spec = SPEC, busy = "run" })
 
-smelt.cli.on_command("diff", function(args)
-  local o = parse(table.concat(args, " "))
+smelt.cli.on_command("diff", function(args, flags, rest)
+  local o, err = options(args, flags, rest)
+  if not o then return smelt.quit({ code = 1, message = "smelt diff: " .. err }) end
   o.standalone = true
   M.open(o)
 end)

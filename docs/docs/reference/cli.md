@@ -48,15 +48,45 @@ use a neutral filename.
 | -------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `smelt auth`                     | Provider picker for login/logout flows and API-key provider snippets                                |
 | `smelt config default`           | Print a default `init.lua` template with built-in setting values and commented examples             |
+| `smelt diff [VIEW]`              | Review, stage, commit and push Git changes without an agent session                                 |
 | `smelt export history`           | Export semantic history rows for a saved session as JSONL                                           |
 | `smelt export requests`          | Export request audit entries for a saved session as JSONL                                           |
+| `smelt files [QUERY]`            | Find files by name and open them in your editor                                                     |
 | `smelt inspect`                  | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
+| `smelt search [QUERY]`           | Search file contents and open matches in your editor                                                |
 | `smelt session doctor`           | Check session database integrity and storage sizes without changing data                            |
 | `smelt session backup`           | Copy every saved session into a new consistent database file                                        |
 | `smelt status`                   | Read the public status of one or all running smelt processes                                        |
 | `smelt upgrade`                  | Check for and install the newest smelt build                                                        |
 | `smelt upgrade check`            | Check for updates without installing                                                                |
 | `smelt upgrade status`           | Show installation progress or the last result                                                        |
+
+`smelt diff`, `smelt files` and `smelt search` open the same tools as
+[`/diff`, `/files` and `/search`](commands.md), filling the terminal. They start
+no agent session, and smelt quits when you close the tool. Each one also takes
+`-C <PATH>`.
+
+`smelt diff` and `/diff` options:
+
+| Flag              | Description                                                                         |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| `[REVISION]`      | A revision to show in the history, or `BASE..HEAD` to review `HEAD` against `BASE` |
+| `-b, --branch`    | Review the branch against its base, by default `main` or `master`                   |
+| `--base <BASE>`   | Review the branch against `BASE`                                                    |
+| `--history`       | Open the commit history                                                             |
+| `-- <PATH>...`    | Show only changes to these paths, in every view                                     |
+
+`smelt diff main..feature` reviews the `feature` branch against `main` without
+a checkout. Either side of a range may be left out, and `...` works the same.
+`smelt diff -- crates/tui` shows only the changes under `crates/tui`.
+
+`smelt files` and `smelt search` options:
+
+| Flag          | Description                                                      |
+| ------------- | ---------------------------------------------------------------- |
+| `[QUERY]`     | Query to start with. Put a query that starts with `-` after `--` |
+| `-g, --git`   | Look in Git-tracked files only                                   |
+| `-e, --regex` | `smelt search` only. Read the query as a regular expression      |
 
 `smelt export history` and `smelt export requests` options:
 

@@ -28,12 +28,13 @@ local function previewer(preview, preview_buf)
   end
   local function show(path, opts)
     opts = opts or {}
-    local next_key = path and table.concat({ path, opts.line or 0, opts.query or "" }, "\0") or false
+    local next_key = path and table.concat({ path, opts.line or 0, opts.query or "", tostring(opts.regex) }, "\0")
+      or false
     if next_key == key then return end
     key = next_key
     if not path then return notice("(no file selected)") end
     if not smelt.fs.is_file(path) then return notice("(file unavailable)") end
-    local doc, err = smelt.document.file(path, { query = opts.query, line = opts.line })
+    local doc, err = smelt.document.file(path, { query = opts.query, regex = opts.regex, line = opts.line })
     if not doc then
       return notice(err == "binary" and "(binary file)" or ("Preview unavailable: " .. (err or "cannot read file")))
     end
@@ -240,7 +241,7 @@ local function open_files(opts)
 
   ui = shell({
     name = "smelt.files",
-    placeholder = "find files…",
+    placeholder = tracked and "find tracked files…" or "find files…",
     surface = opts.surface,
     text = query,
     query = function(text) query = text; refilter(true) end,
@@ -259,7 +260,8 @@ local function open_files(opts)
   refilter(true)
 end
 
--- Takes the options of `open_files`.
+-- Takes the options of `open_files`, and `opts.regex` to read the query as
+-- a regular expression.
 local function open_search(opts)
   local cwd = smelt.session.cwd()
   local source = opts.tracked and "git" or "workspace"
@@ -282,7 +284,8 @@ local function open_search(opts)
   local function show_selected()
     local item = selected_item()
     if item then selected = item.index end
-    ui.preview(item and smelt.path.join(shown:root(), item.path), item and { query = query, line = item.line })
+    ui.preview(item and smelt.path.join(shown:root(), item.path),
+      item and { query = query, regex = opts.regex, line = item.line })
   end
 
   -- The message the list shows instead of matches, if any.
@@ -316,7 +319,7 @@ local function open_search(opts)
     end
     local err
     search, err = smelt.files.grep(query, {
-      cwd = cwd, source = source, reverse = true,
+      cwd = cwd, source = source, regex = opts.regex, reverse = true,
       icons = smelt.settings.file_icons
         and { colors = smelt.settings.file_icon_colors, light = smelt.theme.is_light() } or nil,
     })
@@ -378,7 +381,7 @@ local function open_search(opts)
 
   ui = shell({
     name = "smelt.search",
-    placeholder = "search files…",
+    placeholder = (opts.regex and "regex search " or "search ") .. (opts.tracked and "tracked files…" or "files…"),
     surface = opts.surface,
     text = query,
     list_width = "55%",
@@ -404,11 +407,9 @@ local function open_search(opts)
   start()
 end
 
--- `[all|git] [query]`: the files to look in, then the query to start with.
-local function parse(args)
-  local source, rest = args:match("^%s*(%S*)%s*(.-)%s*$")
-  if source == "git" or source == "all" then return { tracked = source == "git", query = rest } end
-  return { tracked = false, query = args:match("^%s*(.-)%s*$") }
+-- The options of a picker from its query and flag values.
+local function options(query, flags)
+  return { tracked = flags.git, regex = flags.regex, query = query }
 end
 
 local function opener(open)
@@ -421,9 +422,9 @@ local function opener(open)
 end
 local files, search = opener(open_files), opener(open_search)
 
-smelt.cmd.register("files", function(arg) files(parse(arg or "")) end,
-  { desc = "find workspace or Git-tracked file", args = { "[all|git] [query]" }, busy = "run" })
-smelt.cmd.register("search", function(arg) search(parse(arg or "")) end,
-  { desc = "search workspace or Git-tracked file contents", args = { "[all|git] [query]" }, busy = "run" })
-smelt.cli.on_command("files", function(args) files(parse(table.concat(args, " ")), true) end)
-smelt.cli.on_command("search", function(args) search(parse(table.concat(args, " ")), true) end)
+smelt.cmd.register("files", function(_, args, flags) files(options(args[1], flags)) end,
+  { desc = "find workspace or Git-tracked files", spec = require("smelt.subcommands.files"), busy = "run" })
+smelt.cmd.register("search", function(_, args, flags) search(options(args[1], flags)) end,
+  { desc = "search workspace or Git-tracked file contents", spec = require("smelt.subcommands.search"), busy = "run" })
+smelt.cli.on_command("files", function(args, flags) files(options(args[1], flags), true) end)
+smelt.cli.on_command("search", function(args, flags) search(options(args[1], flags), true) end)

@@ -12,8 +12,9 @@ local cmd = {}
 ---@type fun(): table
 cmd.list = nil
 
---- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `busy_fn` (synchronous argument-aware busy policy; nil uses `busy`, errors reject), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
----@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
+--- Register a slash command `name` whose `handler` is invoked when the user runs it, with the text after the name. With `opts.spec`, a `smelt.cli.CommandSpec`, the handler is called as `handler(text, args, flags, rest)` with the arguments parsed as `smelt <name>` parses them; a parse error is shown as `/name: error` instead. `opts` accepts `spec`, `desc`, `args` (defaults to the usage of `spec`), `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `busy_fn` (synchronous argument-aware busy policy; nil uses `busy`, errors reject), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
+---@see smelt.cli.CommandSpec
+---@type fun(name: string, handler: fun(text: string?, args: string[]?, flags: table<string, any>?, rest: string[]?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 cmd.register = nil
 
 --- Register a slash command `name` that opens a prompt-docked picker when

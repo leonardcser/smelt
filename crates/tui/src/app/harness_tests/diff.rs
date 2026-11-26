@@ -124,7 +124,7 @@ async fn git_tabs_switch_by_title_click_and_tab_and_branch_is_up_to_date_on_main
     git(&["commit", "-qm", "initial version"]);
     let mut app = TestApp::builder().with_cwd(dir.path()).build();
     app.set_terminal_size(140, 40);
-    app.type_text("/diff branch");
+    app.type_text("/diff --branch");
     app.press(KeyCode::Enter);
     wait_for_diff(&mut app, |app| {
         app.render_to_frame()
@@ -151,6 +151,84 @@ async fn git_tabs_switch_by_title_click_and_tab_and_branch_is_up_to_date_on_main
     paint_diff(&mut app);
     let frame = app.render_to_frame().text();
     assert!(frame.contains("Up to date with main"), "{frame}");
+    assert!(!frame.contains("initial version"), "{frame}");
+}
+
+/// `/diff -- PATH` shows only changes there and names the paths in the
+/// header; flags that pick two views report an error and open nothing.
+#[tokio::test]
+async fn diff_paths_limit_the_view_and_conflicting_views_are_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    };
+    git(&["init", "-qb", "main"]);
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/kept.rs"), "kept\n").unwrap();
+    std::fs::write(dir.path().join("away.rs"), "away\n").unwrap();
+
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(140, 30);
+    app.run_lua_result("smelt.cmd.run('diff --history --branch')")
+        .unwrap();
+    app.settle_lua();
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("/diff: --history and --branch do not go together"),
+        "{frame}"
+    );
+    assert!(diff_win(&app, "files").is_none());
+
+    app.run_lua_result("smelt.cmd.run('diff -- src')").unwrap();
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("kept.rs")
+    })
+    .await;
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("-- src"), "{frame}");
+    assert!(!frame.contains("away.rs"), "{frame}");
+}
+
+/// `/diff main..feature` reviews a branch that is not checked out.
+#[tokio::test]
+async fn diff_range_reviews_a_branch_against_a_base_without_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    };
+    git(&["init", "-qb", "main"]);
+    git(&["config", "user.name", "review tester"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    std::fs::write(dir.path().join("file.rs"), "base\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial version"]);
+    git(&["switch", "-qc", "feature"]);
+    std::fs::write(dir.path().join("file.rs"), "feature\n").unwrap();
+    git(&["commit", "-qam", "feature work"]);
+    git(&["switch", "-q", "main"]);
+
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(140, 40);
+    app.type_text("/diff main..feature");
+    app.press(KeyCode::Enter);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("main...feature")
+    })
+    .await;
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("Combined changes vs main"), "{frame}");
+    assert!(frame.contains("feature work"), "{frame}");
+    assert!(frame.contains("feature changes vs main"), "{frame}");
     assert!(!frame.contains("initial version"), "{frame}");
 }
 

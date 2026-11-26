@@ -385,6 +385,9 @@ pub struct EngineHandle {
     event_tx: EngineEventSender,
     output_rx: mpsc::UnboundedReceiver<EngineOutput>,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// The command receiver of an [`Self::idle`] handle, held so the
+    /// channel stays open while no engine reads it.
+    _idle_rx: Option<mpsc::UnboundedReceiver<UiCommand>>,
 }
 
 /// How long [`EngineHandle::shutdown`] waits: Claude Code has two seconds to
@@ -455,6 +458,21 @@ impl EngineHandle {
         }
     }
 
+    /// A handle with no engine behind it, for a frontend that runs no agent
+    /// session. It stays connected, but nothing reads its commands and no
+    /// output arrives.
+    pub fn idle() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, _, output_rx) = output_channel(HostCallbacks::Disabled);
+        EngineHandle {
+            cmd_tx,
+            event_tx,
+            output_rx,
+            task: None,
+            _idle_rx: Some(cmd_rx),
+        }
+    }
+
     /// Build a handle backed by caller-owned channels, with no agent task.
     /// Used by the storybook harness to drive UI state without a real engine.
     pub fn for_test() -> (
@@ -469,6 +487,7 @@ impl EngineHandle {
             event_tx: event_tx.clone(),
             output_rx,
             task: None,
+            _idle_rx: None,
         };
         (handle, cmd_rx, EngineOutputInjector { event_tx, host_tx })
     }
@@ -526,6 +545,7 @@ pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -
         event_tx,
         output_rx,
         task: Some(task),
+        _idle_rx: None,
     }
 }
 

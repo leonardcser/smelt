@@ -51,6 +51,9 @@ pub(crate) mod z {
     /// Floating windows and dialogs (a Lua overlay, a game, a picker), the
     /// engine's default.
     pub(crate) const FLOATING: u16 = crate::smelt_edit::Overlay::DEFAULT_Z;
+    /// A Lua subcommand's notifications, over the view that fills the
+    /// terminal and its dialogs.
+    pub(crate) const TOOL_NOTIFICATION: u16 = FLOATING + 1;
     /// The picture of the prompt attachment under the cursor, over everything.
     pub(crate) const ATTACHMENT_PREVIEW: u16 = u16::MAX;
 }

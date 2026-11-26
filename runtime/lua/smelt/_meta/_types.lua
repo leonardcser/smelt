@@ -180,12 +180,17 @@
 ---@field dialogs? string[] Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`).
 ---@field modules? string[] Fully-qualified `smelt.<dotted>` module names, passed through verbatim.
 
---- Subcommand specification accepted by `smelt.cli.register_command`.
+--- The arguments of a command, accepted by `smelt.cli.register_command` for `smelt <name>` and by `smelt.cmd.register` as `opts.spec` for `/name`. Both read them with one parser: flags go anywhere, `--name=value` and `-s value` work, and an argument that starts with `-` goes after `--`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.cli.RegisterCommandOpts
----@field name string Subcommand name, as typed after `smelt`.
+---@class smelt.cli.CommandSpec
+---@field name? string Subcommand name, as typed after `smelt`. `register_command` needs it; `smelt.cmd.register` names the command itself, so one spec serves its aliases.
 ---@field description? string One-line description for `--help`.
----@field args? string Name of the free arguments in `--help`, such as `"VIEW"`. Without it the subcommand takes none.
+---@field args? string Name of the free arguments in `--help` and hints, such as `"QUERY"`. Without it the command takes none.
+---@field args_description? string Help for the free arguments in `--help`.
+---@field raw? boolean If true, the free arguments are one text, the first of `args`. A slash command keeps it as typed, quotes and spacing included, so its flags go before it. Defaults to `false`.
+---@field rest? string Name of the arguments after `--`, such as `"PATH"`, which the handler gets apart from the free ones as `rest`. Without it, arguments after `--` are free ones too.
+---@field rest_description? string Help for the arguments after `--` in `--help`.
+---@field flags? smelt.cli.RegisterFlagOpts[] Flags of this command only, with the fields of `register_flag`, read by name from the handler's `flags`. `-C`/`--cwd` and `-h`/`--help` are taken.
 
 --- Flag specification accepted by `smelt.cli.register_flag`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -202,7 +207,8 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.cmd.RegisterOpts
 ---@field desc? string Human-readable description shown in `/help` and the slash-command picker.
----@field args? string[] Positional argument labels used for help text and completion hints.
+---@field args? string[] Positional argument labels used for help text and completion hints. Defaults to the usage of `spec`.
+---@field spec? smelt.cli.CommandSpec How the command reads its arguments, the table `smelt.cli.register_command` takes; its `name` is ignored, so one spec serves every alias. The handler then also gets the parsed `args`, `flags` and `rest`, and a parse error is shown instead of running it.
 ---@field args_fn? fun(): string[] Return live argument labels for this command's hint. Overrides `args`; errors or invalid results fall back to `args`.
 ---@field busy? string Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`.
 ---@field busy_fn? fun(value: string?): string? Synchronously choose busy behavior from the trailing command arguments. Returning nil uses `busy`; errors or invalid results reject the command.

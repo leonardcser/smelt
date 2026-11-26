@@ -102,8 +102,9 @@ To change the colors, set `SmeltPlotZero`, `SmeltPlotPos1` to `SmeltPlotPos5`, a
 ## File finder
 
 [Find a file and open it in your editor](../guide/workflows.md#review-changes-and-open-files)
-with `/files` or `/files git`, or search file contents with `/search` or
-`/search git`.
+with `/files` or `/files --git`, or search file contents with `/search`,
+`/search --git` or `/search --regex`. The same tools run without a session as
+`smelt files` and `smelt search`.
 
 No global keybindings are installed. To add your own:
 
@@ -113,7 +114,7 @@ smelt.keymap.set("n", "<leader>ff", function()
 end, { desc = "find workspace file" })
 
 smelt.keymap.set("n", "<leader>fg", function()
-  smelt.cmd.run("files git")
+  smelt.cmd.run("files --git")
 end, { desc = "find Git-tracked file" })
 
 smelt.keymap.set("n", "<leader>fs", function()

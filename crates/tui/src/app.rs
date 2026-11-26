@@ -334,7 +334,7 @@ pub struct TuiApp {
     pub(crate) quit_exit: Option<QuitExit>,
     /// The Lua subcommand, such as `smelt diff`, that the app runs instead
     /// of an agent session. The Lua launch inputs name it.
-    pub(crate) standalone: Option<smelt_core::lua::CliCommand>,
+    pub(crate) standalone: Option<smelt_core::lua::CommandArgs>,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     pub(crate) paint_timeline: crate::lua::paint::PaintTimeline,
     /// Leaf under the pointer while hover events are subscribed.
@@ -2091,16 +2091,22 @@ impl TuiApp {
                     w.set_vim_mode(crate::smelt_edit::VimMode::Insert);
                 }
             }
-            // Seed a minimal splits tree (transcript + prompt) so overlay
-            // anchors resolve before the first render frame. The Lua
-            // composer (registered by `runtime/lua/smelt/layout.lua`)
-            // replaces this on the next render once `bring_up_lua` runs
-            // and `prompt_chrome.lua` / `statusline.lua` have allocated
-            // their windows.
-            ui.set_layout(crate::content::layout::seed_layout_tree(
-                /* prompt_input_rows */ 1,
-            ));
-            ui.set_focus(crate::app::PROMPT_WIN);
+            if agent_session {
+                // Seed a minimal splits tree (transcript + prompt) so overlay
+                // anchors resolve before the first render frame. The Lua
+                // composer (registered by `runtime/lua/smelt/layout.lua`)
+                // replaces this on the next render once `bring_up_lua` runs
+                // and `prompt_chrome.lua` / `statusline.lua` have allocated
+                // their windows.
+                ui.set_layout(crate::content::layout::seed_layout_tree(
+                    /* prompt_input_rows */ 1,
+                ));
+                ui.set_focus(crate::app::PROMPT_WIN);
+            } else {
+                // A Lua subcommand's view is its whole screen: the root holds
+                // none of the session's windows.
+                ui.set_layout(crate::smelt_edit::LayoutTree::vbox(Vec::new()));
+            }
             (
                 ui,
                 WellKnown {
@@ -3317,15 +3323,26 @@ impl TuiApp {
         // on cold start, before Lua has allocated it), as wide as it.
         // Anchoring against the window keeps the toast in place when queued
         // or stash rows grow the prompt block, and inside the prompt's column
-        // when a layout puts a sidebar beside it.
-        let anchor = crate::content::layout::anchor_for_prompt_toast(&self.ui);
+        // when a layout puts a sidebar beside it. Under every floating
+        // window, so a toast never obscures a dialog asking for input or a
+        // game in play. A Lua subcommand has no prompt: its toast sits on
+        // the bottom row, over the view that fills the terminal.
+        let (anchor, z) = if self.agent_session() {
+            (
+                crate::content::layout::anchor_for_prompt_toast(&self.ui),
+                crate::content::layout::z::NOTIFICATION,
+            )
+        } else {
+            (
+                crate::smelt_edit::Anchor::ScreenBottom { above_rows: 0 },
+                crate::content::layout::z::TOOL_NOTIFICATION,
+            )
+        };
         let _overlay_id = self.ui.overlay_open(
             crate::smelt_edit::Overlay::new(layout, anchor)
                 .with_width(crate::smelt_edit::Constraint::Percentage(100))
                 .with_anchor_width(true)
-                // Under every floating window, so a toast never obscures a
-                // dialog asking for input or a game in play.
-                .with_z(crate::content::layout::z::NOTIFICATION),
+                .with_z(z),
         );
         self.overlays.install_notification(Notification {
             win,
@@ -3714,13 +3731,19 @@ impl TuiApp {
         });
     }
 
-    /// Once a Lua subcommand's view closes, quit rather than reveal the
-    /// empty agent session behind it. The main loop checks before it waits
-    /// for the next event, so the event that closed the view ends the run.
+    /// Once a Lua subcommand's view closes, quit: it was the only UI. The
+    /// main loop checks before it waits for the next event, so the event
+    /// that closed the view ends the run.
     pub(crate) fn quit_closed_standalone(&mut self) {
-        if self.standalone.is_some() && self.ui.active_modal().is_none() {
+        if self.standalone_without_view() {
             self.pending_quit = true;
         }
+    }
+
+    /// Whether a Lua subcommand runs and no view of it shows: before its
+    /// view opens, or after it closes.
+    pub(crate) fn standalone_without_view(&self) -> bool {
+        self.standalone.is_some() && self.ui.active_modal().is_none()
     }
 
     /// Exit status and message requested by `smelt.quit(opts)`, if any.

@@ -24,14 +24,14 @@ Return every registered slash command as a Lua array of `{ name, desc, args, arg
 ## `smelt.cmd.register`
 
 ```lua
-fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
+fun(name: string, handler: fun(text: string?, args: string[]?, flags: table<string, any>?, rest: string[]?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 ```
 
 Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts), [`smelt.Reg`](types.md#smeltreg)
 
 **Availability:** Everywhere, including headless mode.
 
-Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `busy_fn` (synchronous argument-aware busy policy; nil uses `busy`, errors reject), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
+Register a slash command `name` whose `handler` is invoked when the user runs it, with the text after the name. With `opts.spec`, a `smelt.cli.CommandSpec`, the handler is called as `handler(text, args, flags, rest)` with the arguments parsed as `smelt <name>` parses them; a parse error is shown as `/name: error` instead. `opts` accepts `spec`, `desc`, `args` (defaults to the usage of `spec`), `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `busy_fn` (synchronous argument-aware busy policy; nil uses `busy`, errors reject), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 
 ## `smelt.cmd.register_picker`
 

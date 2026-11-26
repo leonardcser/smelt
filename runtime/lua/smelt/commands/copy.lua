@@ -1,5 +1,6 @@
 -- Built-in /copy command. Copies recent conversation messages to the system clipboard.
 
+
 local notify_handle = nil
 
 local function get_notify()
@@ -23,44 +24,21 @@ local function usage()
   return "usage: /copy [--role user|assistant] [--headers] [N]"
 end
 
-local function parse_args(arg)
-  local opts = { count = 1, role = nil, headers = false }
-  local tokens = {}
-  for token in tostring(arg or ""):gmatch("%S+") do
-    tokens[#tokens + 1] = token
-  end
+local SPEC = {
+  args = "N",
+  flags = { { name = "role", short = "r", kind = "string" }, { name = "headers", kind = "boolean" } },
+}
 
-  local i = 1
-  while i <= #tokens do
-    local token = tokens[i]
-    if token == "--headers" then
-      opts.headers = true
-    elseif token == "--role" or token == "-r" then
-      i = i + 1
-      local role = tokens[i]
-      if role ~= "user" and role ~= "assistant" then
-        return nil, usage()
-      end
-      opts.role = role
-    elseif token:match("^%-%-role=") then
-      local role = token:match("^%-%-role=(.*)$")
-      if role ~= "user" and role ~= "assistant" then
-        return nil, usage()
-      end
-      opts.role = role
-    elseif token:match("^%d+$") then
-      local count = tonumber(token)
-      if not count or count < 1 then
-        return nil, usage()
-      end
-      opts.count = count
-    else
-      return nil, usage()
-    end
-    i = i + 1
+local function parse_args(args, flags)
+  if #args > 1 or not (flags.role == nil or flags.role == "user" or flags.role == "assistant") then
+    return nil, usage()
   end
-
-  return opts, nil
+  local count = 1
+  if args[1] then
+    count = args[1]:match("^%d+$") and tonumber(args[1])
+    if not count or count < 1 then return nil, usage() end
+  end
+  return { count = count, role = flags.role, headers = flags.headers }, nil
 end
 
 local function select_messages(opts)
@@ -103,8 +81,8 @@ local function format_messages(rows, headers)
   return table.concat(parts, "\n\n")
 end
 
-local function copy_messages(arg)
-  local opts, err = parse_args(arg)
+local function copy_messages(_, args, flags)
+  local opts, err = parse_args(args, flags)
   if not opts then
     get_notify().error(err)
     return
@@ -142,11 +120,13 @@ end
 smelt.cmd.register("copy", copy_messages, {
   desc = "copy recent conversation message(s) to clipboard",
   args = { "[--role user|assistant]", "[--headers]", "[N]" },
+  spec = SPEC,
 })
 
 smelt.cmd.register("yank", copy_messages, {
   desc = "alias for /copy",
   args = { "[--role user|assistant]", "[--headers]", "[N]" },
+  spec = SPEC,
 })
 
 return {

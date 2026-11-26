@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod ask;
+pub mod command_line;
 pub mod doc;
 pub mod hooks;
 pub mod keymaps;
@@ -18,6 +19,7 @@ pub mod watchers;
 
 pub use reg::LuaReg;
 
+pub use command_line::{CommandArgs, CommandSpec, FlagKind, FlagSpec, FlagValue, Operand};
 pub use hooks::{HookEntry, HookRegistry};
 pub use runtime::{
     args_summary, autoload_modules, autoload_modules_filtered, ensure_builtins_extracted,
@@ -25,9 +27,8 @@ pub use runtime::{
     PermissionTarget, ShutdownHookContext, ToolVisibility, OPTIONAL_PLUGINS,
 };
 pub use shared::{
-    AskCallbacks, CliCommand, CliCommandSpec, CliFlagKind, CliFlagSpec, CliFlagValue,
-    CommandBusyBehavior, DefaultShell, Hooks, LuaHostServices, LuaResumeSink, LuaShared,
-    LuaWorkGuard, Phase, RegisteredCommand, RegisteredWinRenderer, ToolHandles,
+    AskCallbacks, CommandBusyBehavior, DefaultShell, Hooks, LuaHostServices, LuaResumeSink,
+    LuaShared, LuaWorkGuard, Phase, RegisteredCommand, RegisteredWinRenderer, ToolHandles,
     TranscriptGroupBucket, TranscriptGroupFieldMatch, TranscriptGroupSelector, TranscriptGroupSpec,
     LUA_BUF_ID_BASE, LUA_WORK_BATCH, MAX_LUA_WORK_PER_PUMP,
 };

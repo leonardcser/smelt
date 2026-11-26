@@ -17,6 +17,8 @@ pub mod review;
 
 pub struct DiffSnapshot {
     pub root: PathBuf,
+    /// The paths the snapshot is limited to; a refresh keeps them.
+    pub paths: Pathspec,
     pub view: Arc<DiffView>,
     /// Branch state of a working-tree snapshot; comparisons have none.
     pub tracking: Option<Tracking>,
@@ -106,24 +108,21 @@ fn file_status(file: &smelt_transcript::diff::File, status: &Status) -> (char, c
 /// and a deletion, however the diff pairs them.
 async fn read_status(
     root: &Path,
+    paths: &Pathspec,
     cancel: &CancellationToken,
 ) -> Result<(Status, Tracking), String> {
-    let output = checked(
-        git(
-            root,
-            &args(&[
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "--no-renames",
-                "-z",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
-            ]),
-            cancel,
-        )
-        .await?,
-    )?;
+    let mut argv = args(&[
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "--no-renames",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+        "--",
+    ]);
+    argv.extend(paths.args_or(&[]));
+    let output = checked(git(root, &argv, cancel).await?)?;
     parse_status(&output)
 }
 
@@ -225,7 +224,7 @@ pub(crate) async fn update_index(
     if files.iter().any(|file| file.section != first.section) {
         return Err("index selection must belong to one section".into());
     }
-    let (status, tracking) = read_status(&root, &cancel).await?;
+    let (status, tracking) = read_status(&root, &Pathspec::default(), &cancel).await?;
     let stage = match action {
         IndexAction::Stage => true,
         IndexAction::Unstage => false,
@@ -318,7 +317,7 @@ pub(crate) async fn discard(
     {
         return Err("only unstaged changes can be discarded".into());
     }
-    let (status, _) = read_status(&root, &cancel).await?;
+    let (status, _) = read_status(&root, &Pathspec::default(), &cancel).await?;
     let (mut tracked, mut intended, mut untracked) = (Vec::new(), Vec::new(), Vec::new());
     for file in files {
         let path = file.raw_path.clone();
@@ -548,8 +547,56 @@ fn operation(git_dir: &Path) -> Option<&'static str> {
     .map(|(_, name)| name)
 }
 
+/// Options that decide which lines a diff counts as changed. Every patch and
+/// every line total passes them, so a commit's totals match its patch.
+const LINE_OPTIONS: &[&str] = &[
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--diff-algorithm=histogram",
+];
+
+/// Options of a patch that is indexed once with full context, then folded
+/// without loading source blobs or running Git again. Scrolling and
+/// expanding never shell out or reparse it.
+const PATCH_OPTIONS: &[&str] = &[
+    "--patch",
+    "--no-relative",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--unified=2147483647",
+    "--submodule=short",
+    "--ignore-submodules=none",
+];
+
 fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
+}
+
+/// Paths a Git read is limited to, in Git pathspec syntax, so globs such as
+/// `*.rs` work. Each is absolute, so it means the same in whichever directory
+/// Git runs. Empty covers the whole repository.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pathspec(Vec<PathBuf>);
+
+impl Pathspec {
+    /// `paths` relative to `base`, unless absolute. `base` is resolved to its
+    /// real path, the one Git compares against its worktree.
+    pub fn resolve(base: &Path, paths: &[String]) -> Self {
+        let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+        Self(paths.iter().map(|path| base.join(path)).collect())
+    }
+
+    /// The arguments after `--`: these paths, or `fallback` when there are none.
+    fn args_or(&self, fallback: &[&str]) -> Vec<OsString> {
+        if self.0.is_empty() {
+            return args(fallback);
+        }
+        self.0
+            .iter()
+            .map(|path| path.as_os_str().to_owned())
+            .collect()
+    }
 }
 
 fn checked(output: std::process::Output) -> Result<Vec<u8>, String> {
@@ -636,14 +683,16 @@ impl PrivateIndex {
     }
 }
 
+/// Unstaged and staged changes of the repository at `cwd`, limited to `paths`.
 pub async fn working_diff(
     cwd: PathBuf,
+    paths: Pathspec,
     context: usize,
     cancel: CancellationToken,
 ) -> Result<DiffSnapshot, String> {
     tokio::time::timeout(
         Duration::from_secs(120),
-        load_working_diff(cwd, context, cancel),
+        load_working_diff(cwd, paths, context, cancel),
     )
     .await
     .map_err(|_| "git diff timed out after 120 seconds".to_string())?
@@ -651,6 +700,7 @@ pub async fn working_diff(
 
 async fn load_working_diff(
     cwd: PathBuf,
+    paths: Pathspec,
     context: usize,
     cancel: CancellationToken,
 ) -> Result<DiffSnapshot, String> {
@@ -672,7 +722,7 @@ async fn load_working_diff(
     let git_dir = PathBuf::from(path_bytes(dirs.split_off(split + 1)));
     dirs.pop();
     let root = PathBuf::from(path_bytes(dirs));
-    let (status, mut tracking) = read_status(&root, &cancel).await?;
+    let (status, mut tracking) = read_status(&root, &paths, &cancel).await?;
     tracking.operation = operation(&git_dir);
     let base = if tracking.head.is_some() {
         "HEAD".to_string()
@@ -680,42 +730,23 @@ async fn load_working_diff(
         empty_tree(&root, &cancel).await?
     };
 
-    // Full context is indexed once, then folded without loading source blobs or
-    // running Git again. Scrolling/expanding never shells out or reparses a patch.
-    let options = [
-        "--patch",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-relative",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        "--unified=2147483647",
-        "--diff-algorithm=histogram",
-        "--submodule=short",
-        "--ignore-submodules=none",
-    ];
+    let options = [LINE_OPTIONS, PATCH_OPTIONS].concat();
     let mut diff_args = args(&["diff", "--ours"]);
     diff_args.extend(args(&options));
     diff_args.push("--".into());
+    diff_args.extend(paths.args_or(&[]));
     let mut staged_args = args(&["diff", "--cached"]);
     staged_args.extend(args(&options));
     staged_args.extend(args(&[&base, "--"]));
+    staged_args.extend(paths.args_or(&[]));
     let index = if status.values().any(|state| state.worktree == '?') {
         let index = PrivateIndex::new(&root, &cancel).await?;
         // One root pathspec avoids all-pairs matching between untracked paths
         // and directory entries. Intent-to-add honors ignore rules without
         // hashing tracked contents; all writes stay inside the private index.
-        checked(
-            git_input(
-                &root,
-                &args(&["add", "--intent-to-add", "--ignore-removal", "--", "."]),
-                None,
-                Some(&index),
-                &cancel,
-            )
-            .await?,
-        )?;
+        let mut argv = args(&["add", "--intent-to-add", "--ignore-removal", "--"]);
+        argv.extend(paths.args_or(&["."]));
+        checked(git_input(&root, &argv, None, Some(&index), &cancel).await?)?;
         // With every untracked file listed, only embedded repositories show
         // as directories. Their contents are not this repository's, and one
         // without a commit has nothing to diff, so drop them again.
@@ -748,6 +779,7 @@ async fn load_working_diff(
         let mut argv = args(&["diff", "--diff-filter=A", "--no-renames"]);
         argv.extend(args(&options));
         argv.push("--".into());
+        argv.extend(paths.args_or(&[]));
         checked(git_input(&root, &argv, None, Some(index), &cancel).await?)
     };
     // Tracked changes always use the real index. Adding an untracked directory
@@ -759,7 +791,10 @@ async fn load_working_diff(
             if count == 0 {
                 return Ok(Vec::new());
             }
-            Ok(review::log(root, range, 0, cancel).await?.0)
+            // The commit lists describe the branch, so they cover every path.
+            Ok(review::log(root, range, 0, &Pathspec::default(), cancel)
+                .await?
+                .0)
         }
     };
     let (unstaged, untracked, staged, unpushed, unpulled) = tokio::try_join!(
@@ -836,6 +871,7 @@ async fn load_working_diff(
     };
     Ok(DiffSnapshot {
         root,
+        paths,
         view,
         tracking: Some(tracking),
     })
@@ -861,7 +897,7 @@ mod tests {
     }
 
     async fn file_states(root: &Path) -> Status {
-        read_status(root, &CancellationToken::new())
+        read_status(root, &Pathspec::default(), &CancellationToken::new())
             .await
             .unwrap()
             .0
@@ -879,7 +915,7 @@ mod tests {
     }
 
     async fn tracking(root: PathBuf) -> Tracking {
-        working_diff(root, 3, CancellationToken::new())
+        working_diff(root, Pathspec::default(), 3, CancellationToken::new())
             .await
             .unwrap()
             .tracking
@@ -1019,9 +1055,14 @@ mod tests {
         std::fs::write(root.join("new\t界"), "untracked\n").unwrap();
         std::fs::create_dir(root.join("space b")).unwrap();
         std::fs::write(root.join("space b/binary"), [0u8, 1, 2]).unwrap();
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(snapshot.view.diff.files.len(), 5);
         assert!(snapshot
             .view
@@ -1078,9 +1119,14 @@ mod tests {
                 "nested",
             ],
         );
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let paths: Vec<_> = snapshot.view.diff.files.iter().map(|f| &f.path).collect();
         assert_eq!(paths, ["new"]);
     }
@@ -1105,9 +1151,14 @@ mod tests {
         run(root, &["add", "-N", "intended"]);
         std::fs::rename(root.join("moved"), root.join("renamed")).unwrap();
         run(root, &["add", "-N", "renamed"]);
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let files = &snapshot.view.diff.files;
         let unstaged = |path: &str| {
             files
@@ -1165,9 +1216,14 @@ mod tests {
         .unwrap();
         symlink("missing", root.join("link")).unwrap();
         std::fs::write(root.join("empty"), "").unwrap();
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let files = &snapshot.view.diff.files;
         assert_eq!(files.len(), 4, "{files:?}");
         assert!(files
@@ -1275,9 +1331,14 @@ mod tests {
         }
         symlink("missing\n界", root.join("link")).unwrap();
         let before = repository_files(&root.join(".git"));
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(before, repository_files(&root.join(".git")));
         assert_eq!(snapshot.view.diff.files.len(), cases.len() + 2);
         for (path, _) in cases {
@@ -1318,9 +1379,14 @@ mod tests {
         run(&worktree, &["config", "core.splitIndex", "true"]);
         run(&worktree, &["update-index", "--split-index"]);
         let before = repository_files(&root.join(".git"));
-        let snapshot = working_diff(worktree.clone(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            worktree.clone(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(before, repository_files(&root.join(".git")));
         assert_eq!(snapshot.root, worktree);
         assert_eq!(snapshot.tracking.unwrap().branch.as_deref(), Some("linked"));
@@ -1358,9 +1424,14 @@ mod tests {
         run(root, &["config", "user.name", "test"]);
         run(root, &["config", "user.email", "test@example.invalid"]);
         std::fs::write(root.join("new"), "new\n").unwrap();
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let file = snapshot.view.diff.files[0].clone();
         update_index(
             root.to_owned(),
@@ -1386,9 +1457,14 @@ mod tests {
         run(root, &["add", "."]);
         run(root, &["commit", "-qm", "base"]);
         run(root, &["mv", "new", "renamed"]);
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let file = snapshot.view.diff.files[0].clone();
         assert_eq!(file.status, "R");
         update_index(
@@ -1419,9 +1495,14 @@ mod tests {
         );
         run(root, &["commit", "-qm", "rename"]);
         std::fs::remove_file(root.join("renamed")).unwrap();
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let file = snapshot.view.diff.files[0].clone();
         let before = repository_files(&root.join(".git"));
         let cancel = CancellationToken::new();
@@ -1445,9 +1526,14 @@ mod tests {
         .unwrap();
         let status = file_states(root).await;
         assert_eq!(file_status(&file, &status), ('D', ' '));
-        let staged = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let staged = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         update_index(
             root.to_owned(),
             &staged.view.diff.files[..1],
@@ -1483,9 +1569,14 @@ mod tests {
         run(root, &["add", "."]);
         run(root, &["commit", "-qm", "base"]);
         run(root, &["mv", "old", "renamed"]);
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let renamed = snapshot
             .view
             .diff
@@ -1527,9 +1618,14 @@ mod tests {
             std::fs::write(root.join("zero"), "staged\n").unwrap();
             run(root, &["add", "zero"]);
             std::fs::write(root.join("zero"), "base\n").unwrap();
-            let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-                .await
-                .unwrap();
+            let snapshot = working_diff(
+                root.to_owned(),
+                Pathspec::default(),
+                3,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
             let file = snapshot
                 .view
                 .diff
@@ -1560,9 +1656,14 @@ mod tests {
         }
         run(root, &["rm", "-q", "zero"]);
         std::fs::write(root.join("zero"), "replacement\n").unwrap();
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let file = snapshot
             .view
             .diff
@@ -1597,9 +1698,14 @@ mod tests {
         std::fs::remove_file(root.join("zero")).unwrap();
         std::fs::create_dir(root.join("zero")).unwrap();
         std::fs::write(root.join("zero/child"), "unrelated\n").unwrap();
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let file = snapshot
             .view
             .diff
@@ -1668,9 +1774,14 @@ mod tests {
             std::fs::write(root.join(new_path), "replacement\n").unwrap();
             std::fs::write(root.join("src/ab"), "changed\n").unwrap();
             run(root, &["add", "."]);
-            let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-                .await
-                .unwrap();
+            let snapshot = working_diff(
+                root.to_owned(),
+                Pathspec::default(),
+                3,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
             let files = &snapshot.view.diff.files;
             assert_eq!(files.len(), 3);
             let removed = files.iter().find(|file| file.path == old_path).unwrap();
@@ -1740,9 +1851,14 @@ mod tests {
         for path in &paths {
             std::fs::write(root.join(path_bytes(path.clone())), b"source\n").unwrap();
         }
-        let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         for path in &paths {
             let file = snapshot
                 .view
@@ -1785,9 +1901,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let staged = working_diff(root.to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let staged = working_diff(
+            root.to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(staged.view.diff.files.len(), paths.len());
         assert!(staged
             .view
@@ -1810,34 +1931,54 @@ mod tests {
     #[tokio::test]
     async fn unborn_clean_non_repository_and_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(
-            working_diff(dir.path().to_owned(), 3, CancellationToken::new())
-                .await
-                .is_err()
-        );
+        assert!(working_diff(
+            dir.path().to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new()
+        )
+        .await
+        .is_err());
         run(dir.path(), &["init", "-q"]);
-        let snapshot = working_diff(dir.path().to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            dir.path().to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(snapshot.view.diff.files.is_empty());
         std::fs::write(dir.path().join("new"), "new\n").unwrap();
-        let snapshot = working_diff(dir.path().to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            dir.path().to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(snapshot.view.diff.files[0].status, "?");
         assert_eq!(
             snapshot.view.diff.files[0].section,
             smelt_transcript::diff::Section::Unstaged
         );
         run(dir.path(), &["add", "."]);
-        let snapshot = working_diff(dir.path().to_owned(), 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let snapshot = working_diff(
+            dir.path().to_owned(),
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(snapshot.view.diff.files[0].status, "A");
         let cancel = CancellationToken::new();
         cancel.cancel();
-        assert!(working_diff(dir.path().to_owned(), 3, cancel)
-            .await
-            .is_err());
+        assert!(
+            working_diff(dir.path().to_owned(), Pathspec::default(), 3, cancel)
+                .await
+                .is_err()
+        );
     }
 }

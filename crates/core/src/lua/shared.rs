@@ -1,5 +1,6 @@
 //! Shared Lua state: the `Arc<LuaShared>` that outlives callbacks and lets tokio tasks post resume payloads.
 
+use super::command_line::{CommandArgs, CommandSpec, FlagSpec, FlagValue};
 use super::hooks::HookRegistry;
 use super::{LuaHandle, LuaHandleLedger, LuaTaskRuntime, TaskEvent};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -89,6 +90,9 @@ pub struct RegisteredCommand {
     pub startup_ok: bool,
     /// If true, hidden from the completer but still dispatchable by name.
     pub hidden: bool,
+    /// How the handler reads its arguments. With a spec, the handler gets
+    /// them parsed, as `(args, flags, rest)`; without, the text as typed.
+    pub spec: Option<CommandSpec>,
 }
 
 pub struct RegisteredWinRenderer {
@@ -291,15 +295,15 @@ pub struct LuaShared {
     /// CLI flag specs registered from `early.lua` via `smelt.cli.register_flag`.
     /// The main binary reads this after the early phase and re-runs clap with
     /// the merged surface.
-    pub cli_flag_specs: Mutex<Vec<CliFlagSpec>>,
+    pub cli_flag_specs: Mutex<Vec<FlagSpec>>,
     /// CLI flag *values* parsed from argv after `early.lua` declared them.
     /// Populated by the main binary; read by `smelt.cli.get(name)`.
-    pub cli_flag_values: Mutex<HashMap<String, CliFlagValue>>,
+    pub cli_flag_values: Mutex<HashMap<String, FlagValue>>,
     /// Subcommands registered from `early.lua` via `smelt.cli.register_command`.
-    pub cli_command_specs: Mutex<Vec<CliCommandSpec>>,
+    pub cli_command_specs: Mutex<Vec<CommandSpec>>,
     /// The Lua subcommand this process was launched for. Populated by the
     /// main binary; read by `smelt.cli.command()`.
-    pub cli_command: Mutex<Option<CliCommand>>,
+    pub cli_command: Mutex<Option<CommandArgs>>,
     /// Every callback-list surface, grouped under one struct so registration
     /// and cleanup use one shared pattern.
     pub hooks: Hooks,
@@ -365,53 +369,6 @@ pub struct Hooks {
     /// hook fires at most once per launch. `name` is the event name
     /// (currently only `"ready"`).
     pub lifecycle: Arc<HookRegistry>,
-}
-
-/// Spec for a Lua-declared subcommand, such as `smelt diff`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CliCommandSpec {
-    pub name: String,
-    pub description: Option<String>,
-    /// Name of the free arguments in `--help`, such as `VIEW`.
-    pub args: Option<String>,
-}
-
-/// The Lua subcommand on the command line and its free arguments.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CliCommand {
-    pub name: String,
-    pub args: Vec<String>,
-}
-
-/// Spec for a Lua-declared CLI flag. Mirrors the subset of clap we need.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CliFlagSpec {
-    pub name: String,
-    pub kind: CliFlagKind,
-    pub default: CliFlagValue,
-    pub description: Option<String>,
-    pub short: Option<char>,
-    pub long: Option<String>,
-    /// String/Integer flags only. When true, the flag may appear without a
-    /// value (`smelt -r` valid alongside `smelt -r abc`); the absent-value
-    /// form yields `""` for String and `0` for Integer. Maps to clap's
-    /// `num_args(0..=1).default_missing_value(...)`. Ignored for Boolean.
-    pub value_optional: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CliFlagKind {
-    Boolean,
-    String,
-    Integer,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CliFlagValue {
-    Boolean(bool),
-    String(String),
-    Integer(i64),
-    None,
 }
 
 /// Default shell used by `smelt.process.run`/`run_streaming` when no

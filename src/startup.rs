@@ -599,10 +599,14 @@ mod tests {
 
     #[test]
     fn lua_subcommands_parse_free_args_and_cwd() {
-        let commands = [tui::CliCommandSpec {
+        let commands = [tui::CommandSpec {
             name: "diff".into(),
             description: Some("Review changes".into()),
-            args: Some("VIEW".into()),
+            args: Some(tui::Operand {
+                name: "VIEW".into(),
+                description: None,
+            }),
+            ..Default::default()
         }];
         for argv in [
             &["smelt", "-C", "repo", "diff", "branch", "main"][..],

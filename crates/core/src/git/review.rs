@@ -65,12 +65,15 @@ async fn base_ref(
 /// Commits per history page.
 const PAGE_SIZE: usize = 50;
 
+/// One page of commits that touch `paths`: those on `head`, by default HEAD,
+/// or with `branch`, those on `head` that its base lacks.
 pub async fn history(
     root: PathBuf,
     base: Option<String>,
     branch: bool,
     head: Option<String>,
     skip: usize,
+    paths: Pathspec,
     cancel: CancellationToken,
 ) -> Result<Page, String> {
     tokio::time::timeout(Duration::from_secs(120), async {
@@ -105,7 +108,7 @@ pub async fn history(
         let range = base_id
             .as_ref()
             .map_or_else(|| head.clone(), |base| format!("{base}..{head}"));
-        let (commits, more) = log(&root, &range, skip, &cancel).await?;
+        let (commits, more) = log(&root, &range, skip, &paths, &cancel).await?;
         Ok(Page {
             commits,
             base,
@@ -118,31 +121,28 @@ pub async fn history(
     .map_err(|_| "git history timed out after 120 seconds".to_string())?
 }
 
-/// One page of commits in `range`, newest first, and whether more follow.
+/// One page of the commits in `range` that touch `paths`, newest first, and
+/// whether more follow.
 pub(crate) async fn log(
     root: &Path,
     range: &str,
     skip: usize,
+    paths: &Pathspec,
     cancel: &CancellationToken,
 ) -> Result<(Vec<Commit>, bool), String> {
-    let output = checked(
-        git(
-            root,
-            &args(&[
-                "log",
-                "--topo-order",
-                "-z",
-                "--no-color",
-                "--format=%H%x00%an%x00%ar%x00%s%x00%B",
-                &format!("--max-count={}", PAGE_SIZE + 1),
-                &format!("--skip={skip}"),
-                range,
-                "--",
-            ]),
-            cancel,
-        )
-        .await?,
-    )?;
+    let mut argv = args(&[
+        "log",
+        "--topo-order",
+        "-z",
+        "--no-color",
+        "--format=%H%x00%an%x00%ar%x00%s%x00%B",
+        &format!("--max-count={}", PAGE_SIZE + 1),
+        &format!("--skip={skip}"),
+        range,
+        "--",
+    ]);
+    argv.extend(paths.args_or(&[]));
+    let output = checked(git(root, &argv, cancel).await?)?;
     let mut commits = parse_log(&output)?;
     let more = commits.len() > PAGE_SIZE;
     commits.truncate(PAGE_SIZE);
@@ -157,11 +157,13 @@ pub struct Stats {
     pub binary: bool,
 }
 
-/// Line totals of each commit in `ids`, against its first parent. Unlike a
-/// commit list, this diffs every commit, so callers load it after the list.
+/// Line totals of each commit in `ids` within `paths`, against its first
+/// parent. Unlike a commit list, this diffs every commit, so callers load it
+/// after the list.
 pub async fn stats(
     root: PathBuf,
     ids: Vec<String>,
+    paths: Pathspec,
     cancel: CancellationToken,
 ) -> Result<HashMap<String, Stats>, String> {
     // Only object IDs are read from stdin, never options or revision syntax.
@@ -175,7 +177,7 @@ pub async fn stats(
         return Ok(HashMap::new());
     }
     let input: String = ids.iter().map(|id| format!("{id}\n")).collect();
-    let argv = args(&[
+    let mut argv = args(&[
         "log",
         "--no-walk=unsorted",
         "--stdin",
@@ -183,12 +185,11 @@ pub async fn stats(
         "--root",
         "--numstat",
         "--find-renames",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
         "--format=%x01%H",
-        "--",
     ]);
+    argv.extend(args(LINE_OPTIONS));
+    argv.push("--".into());
+    argv.extend(paths.args_or(&[]));
     let output = tokio::time::timeout(
         Duration::from_secs(120),
         git_input(&root, &argv, Some(input.as_bytes()), None, &cancel),
@@ -244,11 +245,13 @@ fn parse_log(output: &[u8]) -> Result<Vec<Commit>, String> {
     Ok(commits)
 }
 
-/// A commit is compared to its first parent; a branch is compared to its merge base.
+/// A commit is compared to its first parent; a branch is compared to its
+/// merge base. Only changes within `paths` show.
 pub async fn comparison(
     root: PathBuf,
     revision: String,
     base: Option<String>,
+    paths: Pathspec,
     context: usize,
     cancel: CancellationToken,
 ) -> Result<DiffSnapshot, String> {
@@ -274,31 +277,12 @@ pub async fn comparison(
                 None => empty_tree(&root, &cancel).await?,
             }
         };
-        let patch = checked(
-            git(
-                &root,
-                &args(&[
-                    "diff",
-                    "--patch",
-                    "--no-color",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-relative",
-                    "--src-prefix=a/",
-                    "--dst-prefix=b/",
-                    "--unified=2147483647",
-                    "--diff-algorithm=histogram",
-                    "--find-renames",
-                    "--submodule=short",
-                    "--ignore-submodules=none",
-                    &before,
-                    &revision,
-                    "--",
-                ]),
-                &cancel,
-            )
-            .await?,
-        )?;
+        let mut argv = args(&["diff", "--find-renames"]);
+        argv.extend(args(LINE_OPTIONS));
+        argv.extend(args(PATCH_OPTIONS));
+        argv.extend(args(&[&before, &revision, "--"]));
+        argv.extend(paths.args_or(&[]));
+        let patch = checked(git(&root, &argv, &cancel).await?)?;
         let worker_cancel = cancel.clone();
         let view = tokio::task::spawn_blocking(move || {
             let diff = Diff::parse_comparison(String::from_utf8_lossy(&patch).into_owned(), || {
@@ -313,6 +297,7 @@ pub async fn comparison(
         };
         Ok(DiffSnapshot {
             root,
+            paths,
             view,
             tracking: None,
         })
@@ -351,6 +336,88 @@ mod tests {
         dir
     }
 
+    /// Paths resolve from the directory a read runs in and limit every read:
+    /// staged, unstaged and untracked files, commits, their totals and patches.
+    #[tokio::test]
+    async fn pathspecs_limit_every_read_from_the_working_directory() {
+        let dir = repo();
+        let root = dir.path();
+        for path in ["src/kept", "src/other", "docs/away"] {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), "base\n").unwrap();
+        }
+        run(root, &["add", "."]);
+        run(root, &["commit", "-qm", "base"]);
+        std::fs::write(root.join("src/kept"), "kept\n").unwrap();
+        std::fs::write(root.join("docs/away"), "away\n").unwrap();
+        run(root, &["commit", "-qam", "both"]);
+        std::fs::write(root.join("docs/away"), "docs only\n").unwrap();
+        run(root, &["commit", "-qam", "docs only"]);
+        std::fs::write(root.join("src/kept"), "staged\n").unwrap();
+        run(root, &["add", "src/kept"]);
+        std::fs::write(root.join("src/other"), "unstaged\n").unwrap();
+        std::fs::write(root.join("src/new"), "untracked\n").unwrap();
+        std::fs::write(root.join("docs/away"), "unstaged\n").unwrap();
+
+        let cwd = root.join("src");
+        let paths = || Pathspec::resolve(&cwd, &["kept".into(), "new".into()]);
+        let snapshot = working_diff(cwd.clone(), paths(), 3, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut files: Vec<&str> = snapshot
+            .view
+            .diff
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        files.sort();
+        assert_eq!(files, ["src/kept", "src/new"]);
+        assert_eq!(snapshot.paths, paths());
+
+        let page = history(
+            cwd.clone(),
+            None,
+            false,
+            None,
+            0,
+            paths(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["both", "base"]);
+        let both = page.commits[0].id.clone();
+        let totals = stats(
+            cwd.clone(),
+            vec![both.clone()],
+            paths(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((totals[&both].additions, totals[&both].deletions), (1, 1));
+        let patch = comparison(
+            cwd.clone(),
+            both,
+            None,
+            paths(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let files: Vec<&str> = patch
+            .view
+            .diff
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(files, ["src/kept"]);
+    }
+
     #[tokio::test]
     async fn branch_review_uses_merge_base_and_excludes_working_changes() {
         let dir = repo();
@@ -373,9 +440,17 @@ mod tests {
         std::fs::write(root.join("untracked"), "untracked\n").unwrap();
         let index = std::fs::read(root.join(".git/index")).unwrap();
         run(root, &["tag", "main", "HEAD"]);
-        let page = history(root.into(), None, true, None, 0, CancellationToken::new())
-            .await
-            .unwrap();
+        let page = history(
+            root.into(),
+            None,
+            true,
+            None,
+            0,
+            Pathspec::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(page.base.as_deref(), Some("main"));
         assert_eq!(page.commits.len(), 1);
         assert_eq!(page.commits[0].id, feature);
@@ -385,6 +460,7 @@ mod tests {
             true,
             None,
             0,
+            Pathspec::default(),
             CancellationToken::new(),
         )
         .await
@@ -398,6 +474,7 @@ mod tests {
             true,
             page.head,
             0,
+            Pathspec::default(),
             CancellationToken::new(),
         )
         .await
@@ -407,6 +484,7 @@ mod tests {
             root.into(),
             feature,
             page.base_id,
+            Pathspec::default(),
             3,
             CancellationToken::new(),
         )
@@ -433,15 +511,23 @@ mod tests {
         );
         assert!(rows[0].text.contains("changes (1)"));
         assert!(!rows.iter().any(|row| row.text.contains("staged")));
-        let root_commit = comparison(root.into(), initial, None, 3, CancellationToken::new())
-            .await
-            .unwrap();
+        let root_commit = comparison(
+            root.into(),
+            initial,
+            None,
+            Pathspec::default(),
+            3,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(root_commit.view.diff.files[0].additions, 1);
         assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), index);
         assert!(comparison(
             root.into(),
             "--all".into(),
             None,
+            Pathspec::default(),
             3,
             CancellationToken::new()
         )
@@ -450,9 +536,14 @@ mod tests {
     }
 
     async fn stats_rejects(root: &Path, id: &str) -> bool {
-        stats(root.into(), vec![id.into()], CancellationToken::new())
-            .await
-            .is_err()
+        stats(
+            root.into(),
+            vec![id.into()],
+            Pathspec::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .is_err()
     }
 
     #[tokio::test]
@@ -472,9 +563,17 @@ mod tests {
         run(root, &["commit", "-qm", "side change"]);
         run(root, &["checkout", "-q", "main"]);
         run(root, &["merge", "--no-ff", "-qm", "merge side", "side"]);
-        let page = history(root.into(), None, false, None, 0, CancellationToken::new())
-            .await
-            .unwrap();
+        let page = history(
+            root.into(),
+            None,
+            false,
+            None,
+            0,
+            Pathspec::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(page.commits.len(), 4);
         assert_eq!(page.commits[0].subject, "merge side");
         assert_eq!(page.commits[1].message, "side change\n");
@@ -483,9 +582,14 @@ mod tests {
             .iter()
             .map(|commit| commit.id.clone())
             .collect();
-        let stats = stats(root.into(), ids.clone(), CancellationToken::new())
-            .await
-            .unwrap();
+        let stats = stats(
+            root.into(),
+            ids.clone(),
+            Pathspec::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let totals = |index: usize| {
             let stats = &stats[&ids[index]];
             (stats.additions, stats.deletions, stats.binary)
@@ -499,9 +603,17 @@ mod tests {
         for _ in 0..PAGE_SIZE - 1 {
             run(root, &["commit", "--allow-empty", "-qm", "empty"]);
         }
-        let page = history(root.into(), None, false, None, 0, CancellationToken::new())
-            .await
-            .unwrap();
+        let page = history(
+            root.into(),
+            None,
+            false,
+            None,
+            0,
+            Pathspec::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(page.commits.len(), PAGE_SIZE);
         assert!(page.more);
         run(root, &["commit", "--allow-empty", "-qm", "new head"]);
@@ -511,6 +623,7 @@ mod tests {
             false,
             page.head,
             PAGE_SIZE,
+            Pathspec::default(),
             CancellationToken::new(),
         )
         .await
@@ -529,6 +642,7 @@ mod tests {
             false,
             None,
             0,
+            Pathspec::default(),
             CancellationToken::new(),
         )
         .await
@@ -542,6 +656,7 @@ mod tests {
             true,
             None,
             0,
+            Pathspec::default(),
             CancellationToken::new()
         )
         .await
@@ -553,6 +668,7 @@ mod tests {
             true,
             None,
             0,
+            Pathspec::default(),
             CancellationToken::new(),
         )
         .await

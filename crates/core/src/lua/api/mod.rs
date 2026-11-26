@@ -12,7 +12,7 @@ macro_rules! host_read {
 pub(crate) mod agent;
 mod auth;
 mod builtins;
-mod cli;
+pub(crate) mod cli;
 mod clipboard;
 mod cmd;
 mod defaults;

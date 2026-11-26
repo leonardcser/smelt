@@ -19,7 +19,10 @@ local git = {}
 --- Its file tree lists up to 50 unpushed and 50 unpulled commits. Reads local refs only; no fetch runs.
 --- With `revision`, load a read-only first-parent commit patch. With `base` too,
 --- compare the merge base of base/revision to revision. Revisions resolve to immutable IDs.
----@type fun(opts: { cwd: string?, context: integer?, revision: string?, base: string? }?): smelt.git.Snapshot?, string?
+--- `paths` limits the snapshot to Git pathspecs relative to `cwd`, such as
+--- `src` or `*.rs`; snapshots refreshed after `smelt.git.index` keep them.
+---@see smelt.git.index
+---@type fun(opts: { cwd: string?, context: integer?, revision: string?, base: string?, paths: string[]? }?): smelt.git.Snapshot?, string?
 git.diff = nil
 
 --- Throw away unstaged changes to files of a Git snapshot: tracked files
@@ -43,7 +46,8 @@ git.discard_hunks = nil
 --- `branch` restricts history to base..HEAD; base defaults to main, then master.
 --- Pass returned `head`, `base_id` as `base`, and an accumulated `skip` for stable pagination.
 --- `more` indicates another page. No network operations are performed.
----@type fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer? }?): { commits: smelt.git.Commit[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
+--- `paths` keeps only commits that touch those pathspecs, relative to `cwd`.
+---@type fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer?, paths: string[]? }?): { commits: smelt.git.Commit[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
 git.history = nil
 
 --- Stage, unstage, or toggle files from a Git snapshot. File indices are
@@ -77,8 +81,9 @@ git.index_hunks = nil
 --- Line totals of commits against their first parent, keyed by full commit ID:
 --- `{ [id] = { additions, deletions, binary } }`. Git diffs every listed commit,
 --- so load a history page first and its totals after. `commits` are full or
---- abbreviated hexadecimal IDs; revision syntax is rejected.
----@type fun(opts: { cwd: string?, commits: string[] }): table<string, { additions: integer, deletions: integer, binary: boolean }>?, string?
+--- abbreviated hexadecimal IDs; revision syntax is rejected. `paths` counts
+--- only lines within those pathspecs, relative to `cwd`.
+---@type fun(opts: { cwd: string?, commits: string[], paths: string[]? }): table<string, { additions: integer, deletions: integer, binary: boolean }>?, string?
 git.stats = nil
 
 return git

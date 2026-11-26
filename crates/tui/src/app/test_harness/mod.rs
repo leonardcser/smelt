@@ -244,7 +244,8 @@ pub struct TestAppBuilder {
     cwd: Option<std::path::PathBuf>,
     ephemeral: bool,
     model_available: bool,
-    cli_command: Option<smelt_core::lua::CliCommand>,
+    /// The name and words of `smelt <name> <words>`.
+    cli_command: Option<(String, Vec<String>)>,
     wall_time: Option<SystemTime>,
     engine: Option<EngineHandle>,
 }
@@ -326,11 +327,12 @@ impl TestAppBuilder {
 
     /// Launch as `smelt <name> <args>`, a Lua subcommand such as `smelt diff`,
     /// instead of an agent session.
-    pub fn with_cli_command(mut self, name: &str, args: &[&str]) -> Self {
-        self.cli_command = Some(smelt_core::lua::CliCommand {
-            name: name.into(),
-            args: args.iter().map(|arg| (*arg).into()).collect(),
-        });
+    /// The words, flags among them, are read by the spec `name` registered
+    /// in `early.lua`, as on the command line. Without one, they are its
+    /// free arguments.
+    pub fn with_cli_command(mut self, name: &str, words: &[&str]) -> Self {
+        let words = words.iter().map(|word| (*word).to_string()).collect();
+        self.cli_command = Some((name.to_string(), words));
         self
     }
 
@@ -520,7 +522,18 @@ impl TestAppBuilder {
         }
         lua.load_early_init();
         lua.load_project_early_init(&cwd);
-        *lua.core_shared().cli_command.lock().unwrap() = self.cli_command.clone();
+        let command = self.cli_command.clone().map(|(name, words)| {
+            let specs = lua.core_shared().cli_command_specs.lock().unwrap().clone();
+            match specs.into_iter().find(|spec| spec.name == name) {
+                Some(spec) => spec.parse_words(words).expect("valid command line"),
+                None => smelt_core::lua::CommandArgs {
+                    name,
+                    args: words,
+                    ..Default::default()
+                },
+            }
+        });
+        *lua.core_shared().cli_command.lock().unwrap() = command;
         lua.freeze_launch_inputs();
 
         let session_persistence = if self.ephemeral {

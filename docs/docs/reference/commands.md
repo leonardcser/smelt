@@ -16,7 +16,7 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/clear`, `/new`                         | Start a new conversation |
 | `/rewind`                                | Rewind to a previous turn (same as `Esc Esc`) |
 | `/resume`                                | Resume a saved session |
-| `/diff [branch [base]\|history\|revision]` | Review working changes, branch commits, history, or one revision |
+| `/diff [--branch] [--base <base>] [--history] [revision] [-- path...]` | Review working changes, branch commits, history, or one revision |
 | `/session`                               | Show session, worktree, model, usage, and history metadata |
 | `/compact [instructions]`                | Summarize older history now and choose what to keep (smelt also does this automatically) |
 | `/fork`, `/branch`                       | Fork the current session |
@@ -112,10 +112,12 @@ narrow pane, the other views shorten to their initials.
 - **Changes** shows staged, unstaged, and untracked files, with staging controls.
 - **Branch** lists commits reachable from `HEAD` but not from the comparison
   base (`base..HEAD`). The base defaults to `main`, then `master`. Use `Alt-b`
-  to enter a different base, or `/diff branch <base>`. The upstream/push target
+  to enter a different base, or `/diff --base <base>`. `/diff <base>..<head>`
+  reviews another branch or ref instead of `HEAD`, with no checkout; either side
+  may be left out, and `...` works the same. The upstream/push target
   is not used. No fetch runs in the background. With no such commits, Branch
   shows **Up to date with &lt;base&gt;**.
-- **History** lists commits reachable from `HEAD` (`/diff history`). Select
+- **History** lists commits reachable from `HEAD` (`/diff --history`). Select
   **Load older commits** and press `Enter` to load another page. Pages stay
   pinned to the loaded HEAD until refresh.
 
@@ -133,6 +135,12 @@ cancels without closing the viewer. Commit patches compare against the
 first parent, including merge commits. Root commits compare against the empty
 tree. Historical comparisons are read-only; staging shortcuts cannot modify
 the index there.
+
+`/diff -- <path>...` limits every view to changes under those paths: the
+changed files, the commits that touch them, their line totals and their
+patches. The header shows the paths. Paths are Git pathspecs relative to the
+working directory, so `'*.rs'` works too. Committing still commits everything
+staged.
 
 Changes uses two panes: a file tree on the left
 and one continuous, syntax-highlighted diff on the right. The tree has two

@@ -263,17 +263,22 @@ Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of 
 | `dialogs` | `string[]` |  | Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`). |
 | `modules` | `string[]` |  | Fully-qualified `smelt.<dotted>` module names, passed through verbatim. |
 
-### `smelt.cli.RegisterCommandOpts`
+### `smelt.cli.CommandSpec`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Subcommand specification accepted by `smelt.cli.register_command`.
+The arguments of a command, accepted by `smelt.cli.register_command` for `smelt <name>` and by `smelt.cmd.register` as `opts.spec` for `/name`. Both read them with one parser: flags go anywhere, `--name=value` and `-s value` work, and an argument that starts with `-` goes after `--`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | `string` | yes | Subcommand name, as typed after `smelt`. |
+| `name` | `string` |  | Subcommand name, as typed after `smelt`. `register_command` needs it; `smelt.cmd.register` names the command itself, so one spec serves its aliases. |
 | `description` | `string` |  | One-line description for `--help`. |
-| `args` | `string` |  | Name of the free arguments in `--help`, such as `"VIEW"`. Without it the subcommand takes none. |
+| `args` | `string` |  | Name of the free arguments in `--help` and hints, such as `"QUERY"`. Without it the command takes none. |
+| `args_description` | `string` |  | Help for the free arguments in `--help`. |
+| `raw` | `boolean` |  | If true, the free arguments are one text, the first of `args`. A slash command keeps it as typed, quotes and spacing included, so its flags go before it. Defaults to `false`. |
+| `rest` | `string` |  | Name of the arguments after `--`, such as `"PATH"`, which the handler gets apart from the free ones as `rest`. Without it, arguments after `--` are free ones too. |
+| `rest_description` | `string` |  | Help for the arguments after `--` in `--help`. |
+| `flags` | [smelt.cli.RegisterFlagOpts[]](types.md#smeltcliregisterflagopts) |  | Flags of this command only, with the fields of `register_flag`, read by name from the handler's `flags`. `-C`/`--cwd` and `-h`/`--help` are taken. |
 
 ### `smelt.cli.RegisterFlagOpts`
 
@@ -300,7 +305,8 @@ Options accepted by `smelt.cmd.register`.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `desc` | `string` |  | Human-readable description shown in `/help` and the slash-command picker. |
-| `args` | `string[]` |  | Positional argument labels used for help text and completion hints. |
+| `args` | `string[]` |  | Positional argument labels used for help text and completion hints. Defaults to the usage of `spec`. |
+| `spec` | [smelt.cli.CommandSpec](types.md#smeltclicommandspec) |  | How the command reads its arguments, the table `smelt.cli.register_command` takes; its `name` is ignored, so one spec serves every alias. The handler then also gets the parsed `args`, `flags` and `rest`, and a parse error is shown instead of running it. |
 | `args_fn` | `fun(): string[]` |  | Return live argument labels for this command's hint. Overrides `args`; errors or invalid results fall back to `args`. |
 | `busy` | `string` |  | Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`. |
 | `busy_fn` | `fun(value: string?): string?` |  | Synchronously choose busy behavior from the trailing command arguments. Returning nil uses `busy`; errors or invalid results reject the command. |

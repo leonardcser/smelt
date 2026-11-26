@@ -228,7 +228,7 @@ fn mock_pending_file_search(app: &mut TestApp) {
 
 #[test]
 fn file_finder_keeps_stale_results_until_search_completes() {
-    for command in ["files", "files git"] {
+    for command in ["files", "files --git"] {
         let (_dir, mut app) = fixture_app();
         mock_pending_file_search(&mut app);
         app.run_lua_result(&format!("smelt.cmd.run('{command}')"))
@@ -359,7 +359,7 @@ fn file_finder_git_excludes_untracked_files() {
             .unwrap()
             .success());
     }
-    app.run_lua_result("smelt.cmd.run('files git')").unwrap();
+    app.run_lua_result("smelt.cmd.run('files --git')").unwrap();
     let frame = wait_for_frame(&mut app, "alpha_preview");
     assert!(frame.contains("alpha.rs"), "{frame}");
     assert!(!frame.contains("beta.txt"), "{frame}");
@@ -385,7 +385,7 @@ fn file_finder_uses_search_root_from_repository_subdirectory() {
             .unwrap()
             .success());
     }
-    for source in ["all", "git"] {
+    for source in ["", "--git"] {
         let mut app = TestApp::builder().with_cwd(&sub).build();
         app.set_terminal_size(120, 30);
         app.run_lua_result(&format!(
@@ -421,14 +421,14 @@ fn file_finder_search_errors_close_overlay_without_poll_leak() {
             calls = calls + 1
             return { items = {}, status = 'error', message = 'fixture Git error' }
         end
-        smelt.cmd.run('files git')
+        smelt.cmd.run('files --git')
     "#,
     )
     .unwrap();
     assert!(!app.render_to_frame().text().contains(" preview "));
     app.advance_animation(1000);
     app.run_lua_result("assert(calls == 1)").unwrap();
-    app.run_lua_result("smelt.cmd.run('files git')").unwrap();
+    app.run_lua_result("smelt.cmd.run('files --git')").unwrap();
     drive_lua_tasks(&mut app);
     app.run_lua_result("assert(calls == 2)").unwrap();
 }
@@ -798,7 +798,7 @@ fn search_git_covers_tracked_files_and_reports_no_matches() {
             .unwrap()
             .success());
     }
-    app.run_lua_result("smelt.cmd.run('search git')").unwrap();
+    app.run_lua_result("smelt.cmd.run('search --git')").unwrap();
     wait_for_frame(&mut app, "(no file selected)");
     app.type_text("task");
     let frame = wait_for_frame(&mut app, "2 matches");
@@ -809,6 +809,33 @@ fn search_git_covers_tracked_files_and_reports_no_matches() {
     assert!(frame.contains("(no file selected)"), "{frame}");
     app.press(KeyCode::Esc);
     assert!(!app.render_to_frame().text().contains(" preview "));
+}
+
+/// A mistyped flag reports an error instead of becoming the query.
+#[test]
+fn search_rejects_unknown_flags() {
+    let (_dir, mut app) = fixture_app();
+    app.run_lua_result("smelt.cmd.run('search --regx alpha')")
+        .unwrap();
+    let frame = wait_for_frame(&mut app, "/search: unexpected argument '--regx' found");
+    assert!(!frame.contains(" preview "), "{frame}");
+}
+
+/// `smelt search --regex`: the query is a regular expression in the
+/// results and the preview.
+#[test]
+fn standalone_search_regex_flag_reads_query_as_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("alpha.rs"), "fn alpha_preview() {}\n").unwrap();
+    let mut app = TestApp::builder()
+        .with_cwd(dir.path())
+        .with_cli_command("search", &["--regex", "alpha_pre+view"])
+        .build();
+    app.set_terminal_size(120, 20);
+    app.render_silent();
+    app.dispatch_ui_window_events(false);
+    let frame = wait_for_frame(&mut app, "1 match");
+    assert!(frame.contains("alpha.rs:1:4"), "{frame}");
 }
 
 /// The list box's highlighted row and the row just above its bottom edge.

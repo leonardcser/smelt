@@ -2,7 +2,6 @@
 -- enters a smelt-managed worktree and switches the session into it.
 
 local label_value = smelt.label_value
-local argv = require("smelt.argv")
 local worktree = require("smelt.worktree")
 
 smelt.keymap.scope("worktree.status", {
@@ -24,37 +23,7 @@ local function usage()
   return "usage: /worktree <name> [--base <ref>]"
 end
 
-local function parse_args(arg)
-  local tokens, err = argv.split(arg or "")
-  if not tokens then return nil, err end
-
-  local base
-  local name = {}
-  local i = 1
-  while i <= #tokens do
-    local token = tokens[i]
-    if token == "--base" or token == "-b" then
-      i = i + 1
-      if not tokens[i] or tokens[i] == "" then return nil, "base ref is required after " .. token end
-      base = tokens[i]
-    elseif token:sub(1, 7) == "--base=" then
-      base = token:sub(8)
-      if base == "" then return nil, "base ref is required after --base" end
-    elseif token == "--" then
-      for j = i + 1, #tokens do name[#name + 1] = tokens[j] end
-      break
-    elseif token:sub(1, 1) == "-" then
-      return nil, "unknown option: " .. token
-    else
-      name[#name + 1] = token
-    end
-    i = i + 1
-  end
-
-  local text = trim(table.concat(name, " "))
-  if text == "" then return nil, "worktree name is required" end
-  return { name = text, base = base }, nil
-end
+local SPEC = { args = "NAME", flags = { { name = "base", short = "b", kind = "string" } } }
 
 local function notify_entered(info)
   local name = info.name or info.branch or info.path or "worktree"
@@ -171,27 +140,28 @@ local function open_picker()
   end
 end
 
-local function command(arg)
-  arg = trim(arg or "")
-  if arg == "" then
+local function command(text, args, flags)
+  if trim(text) == "" then
     open_picker()
     return
   end
-  local spec, err = parse_args(arg)
-  if not spec then
-    smelt.notify.error(err .. "\n" .. usage())
+  local name = trim(table.concat(args, " "))
+  if name == "" then
+    smelt.notify.error("worktree name is required\n" .. usage())
     return
   end
-  enter(spec)
+  enter({ name = name, base = flags.base })
 end
 
 smelt.cmd.register("worktree", command, {
   desc = "create or enter a managed git worktree",
   args = { "<name> [--base <ref>]" },
+  spec = SPEC,
 })
 
 smelt.cmd.register("wt", command, {
   desc = "create or enter a managed git worktree",
   args = { "<name> [-b <ref>]" },
+  spec = SPEC,
 })
 

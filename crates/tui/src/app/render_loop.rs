@@ -981,7 +981,12 @@ impl TuiApp {
         ctx.win.layout().visual_count().clamp(1, u16::MAX as usize) as u16
     }
 
+    /// Mount the session's root layout. A Lua subcommand has no session
+    /// screen, so its root stays empty.
     fn ensure_main_layout(&mut self) -> (layout::Rect, u16) {
+        if !self.agent_session() {
+            return (self.layout.prompt, self.layout.viewport_rows());
+        }
         if smelt_core::host::host_access_active() {
             self.lua.shared().request_layout_refresh();
             return (self.layout.prompt, self.layout.viewport_rows());
@@ -1091,6 +1096,11 @@ impl TuiApp {
 
     fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W, compose: bool) {
         self.drive_woken_lua_tasks();
+        // A Lua subcommand shows nothing but its view. Before the view opens
+        // and after it closes, the last frame stays until smelt quits.
+        if self.standalone_without_view() {
+            return;
+        }
         smelt_view::display_layout::update_kitty_geometry();
         let frame_trace = self
             .frame_scheduler
@@ -1135,58 +1145,16 @@ impl TuiApp {
         self.ui.resolve_tail_scrolls();
         self.ui.sync_scroll_links();
 
-        let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
-
         // Hidden is the right baseline; sync paths below set Block when focus owns the caret.
         self.ui
             .set_cursor_shape(crate::smelt_edit::CursorShape::Hidden);
 
-        // Resolve widths before retained renderers run, then measure their
-        // updated content before preparing the transcript or painting a frame.
-        let (prompt_rect, _) = {
-            let _p = smelt_perf::perf::begin("compositor:layout");
-            self.ensure_main_layout()
+        let prepared_transcript = if self.agent_session() {
+            self.compose_session_layout()
+        } else {
+            self.compose_tool_layout();
+            None
         };
-
-        // Freeze timer/spinner while a blocking dialog is up. Done before
-        // Lua renderers run so the prompt top-bar indicator they paint
-        // this frame already reflects the pause.
-        self.set_agent_blocked_paused(self.ui.active_modal_blocks_agent());
-        self.sync_tool_calls_in_background();
-        let now = self.core.clock.instant_now();
-        self.conversation.sync_active_tool_elapsed(now);
-        self.sync_transcript_renderer_generation();
-
-        let prepared_transcript =
-            self.reconcile_main_layout(prompt_rect, has_prompt_cursor, has_transcript_cursor);
-        let notified = {
-            let _perf = smelt_perf::perf::begin("compositor:dispatch_committed_transcript_view");
-            self.dispatch_committed_transcript_view()
-        };
-        if notified {
-            // Observers can populate overlay renderers for this frame. Root
-            // geometry changes apply next frame, not to the view just delivered.
-            self.drain_signals_pending();
-            let dirty = self
-                .lua
-                .shared()
-                .win_renderers
-                .lock()
-                .is_ok_and(|renderers| renderers.values().any(|renderer| renderer.dirty));
-            if dirty {
-                self.dispatch_lua_renderers(None);
-            }
-            if self.lua.shared().layout_refresh_pending() {
-                self.request_continuation_render();
-            }
-        }
-        if has_transcript_cursor {
-            self.ui
-                .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
-        }
-
-        self.finalize_layer_rects();
-        self.sync_attachment_preview(has_prompt_cursor);
 
         // Late cursor-shape fill-ins. Each sync layer above sets `cursor_shape` for
         // the focus context it owns (transcript / prompt). Two cross-cutting cases
@@ -1286,6 +1254,96 @@ impl TuiApp {
             self.ui.recycle_frame(previous);
         }
         clock
+    }
+
+    /// Lay out the session's screen: the transcript, the prompt and the
+    /// chrome Lua composes around them. Returns the transcript prepared for
+    /// this frame.
+    fn compose_session_layout(&mut self) -> Option<crate::smelt_edit::PreparedWindowRequest> {
+        let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
+
+        // Resolve widths before retained renderers run, then measure their
+        // updated content before preparing the transcript or painting a frame.
+        let (prompt_rect, _) = {
+            let _p = smelt_perf::perf::begin("compositor:layout");
+            self.ensure_main_layout()
+        };
+
+        // Freeze timer/spinner while a blocking dialog is up. Done before
+        // Lua renderers run so the prompt top-bar indicator they paint
+        // this frame already reflects the pause.
+        self.set_agent_blocked_paused(self.ui.active_modal_blocks_agent());
+        self.sync_tool_calls_in_background();
+        let now = self.core.clock.instant_now();
+        self.conversation.sync_active_tool_elapsed(now);
+        self.sync_transcript_renderer_generation();
+
+        let prepared_transcript =
+            self.reconcile_main_layout(prompt_rect, has_prompt_cursor, has_transcript_cursor);
+        let notified = {
+            let _perf = smelt_perf::perf::begin("compositor:dispatch_committed_transcript_view");
+            self.dispatch_committed_transcript_view()
+        };
+        if notified {
+            // Observers can populate overlay renderers for this frame. Root
+            // geometry changes apply next frame, not to the view just delivered.
+            self.drain_signals_pending();
+            let dirty = self
+                .lua
+                .shared()
+                .win_renderers
+                .lock()
+                .is_ok_and(|renderers| renderers.values().any(|renderer| renderer.dirty));
+            if dirty {
+                self.dispatch_lua_renderers(None);
+            }
+            if self.lua.shared().layout_refresh_pending() {
+                self.request_continuation_render();
+            }
+        }
+        if has_transcript_cursor {
+            self.ui
+                .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
+        }
+
+        self.finalize_layer_rects();
+        self.sync_attachment_preview(has_prompt_cursor);
+        prepared_transcript
+    }
+
+    /// Lay out a Lua subcommand's screen. Its view, a modal overlay that
+    /// fills the terminal, is all there is, so only window renderers run.
+    fn compose_tool_layout(&mut self) {
+        self.settle_layout(|app, _| {
+            app.lua.shared().take_layout_refresh();
+            if let Some(focus) = app.lua.shared().take_focus_after_layout() {
+                app.focus_window(focus);
+            }
+            {
+                let _perf = smelt_perf::perf::begin("compositor:lua_renderers");
+                app.dispatch_lua_renderers(None);
+            }
+            app.drain_signals_pending();
+        });
+    }
+
+    /// Run `pass` until window renderers stop asking for a new layout. Each
+    /// pass lays out the frame and runs the renderers; `pass` learns whether
+    /// it is the first. After `MAX_LAYOUT_PASSES` passes the last result
+    /// stands and the loop is reported as a Lua error.
+    fn settle_layout<T>(&mut self, mut pass: impl FnMut(&mut Self, bool) -> T) -> T {
+        const MAX_LAYOUT_PASSES: usize = 8;
+        let mut result = pass(self, true);
+        for _ in 1..MAX_LAYOUT_PASSES {
+            if !self.lua.shared().layout_refresh_pending() {
+                return result;
+            }
+            result = pass(self, false);
+        }
+        if self.lua.shared().take_layout_refresh() {
+            self.record_lua_error(format!("UI layout did not settle after {MAX_LAYOUT_PASSES} passes; check layout composer and window renderers"));
+        }
+        result
     }
 
     /// Count what each stream reveal gained on the frame just composed.
@@ -1671,7 +1729,6 @@ impl TuiApp {
         has_prompt_cursor: bool,
         has_transcript_cursor: bool,
     ) -> Option<crate::smelt_edit::PreparedWindowRequest> {
-        const MAX_LAYOUT_PASSES: usize = 8;
         let dialog_windows = self.active_docked_dialog().and_then(|id| {
             let modal = self.ui.docked_surface(id)?.modal();
             self.ui.modal_leaves(modal).map(<[_]>::to_vec)
@@ -1681,33 +1738,24 @@ impl TuiApp {
             self.dispatch_lua_renderers(Some(&windows));
             (prompt_rect, _) = self.ensure_main_layout();
         }
-        let mut passes = 0;
-        loop {
-            passes += 1;
+        self.settle_layout(|app, first| {
+            if !first {
+                (prompt_rect, _) = app.ensure_main_layout();
+            }
             {
                 let _perf = smelt_perf::perf::begin("compositor:input");
-                self.sync_input_layer(prompt_rect, has_prompt_cursor);
+                app.sync_input_layer(prompt_rect, has_prompt_cursor);
             }
             let prepared = {
                 let _perf = smelt_perf::perf::begin("compositor:prepare_committed_transcript_view");
-                self.prepare_committed_transcript_view(has_transcript_cursor)
+                app.prepare_committed_transcript_view(has_transcript_cursor)
             };
-            self.publish_view_signals();
-            self.drain_signals_pending();
-            {
-                let _perf = smelt_perf::perf::begin("compositor:lua_renderers");
-                self.dispatch_lua_renderers(None);
-            }
-            if !self.lua.shared().layout_refresh_pending() {
-                return prepared;
-            }
-            if passes == MAX_LAYOUT_PASSES {
-                self.lua.shared().take_layout_refresh();
-                self.record_lua_error(format!("UI layout did not settle after {MAX_LAYOUT_PASSES} passes; check layout composer and window renderers"));
-                return prepared;
-            }
-            (prompt_rect, _) = self.ensure_main_layout();
-        }
+            app.publish_view_signals();
+            app.drain_signals_pending();
+            let _perf = smelt_perf::perf::begin("compositor:lua_renderers");
+            app.dispatch_lua_renderers(None);
+            prepared
+        })
     }
 
     /// Invoke dirty Lua renderers registered via `Win:set_renderer(fn)`.

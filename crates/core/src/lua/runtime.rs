@@ -146,6 +146,12 @@ const CUSTOM_COMMANDS_MODULE: &str = "smelt.commands.custom_commands";
 /// (`smelt.builtins.disable{}`).
 const EARLY_DIRS: &[&str] = &["early"];
 
+/// Subdirectory of bundled subcommands, such as `smelt diff`. Each file
+/// returns one `smelt.cli.CommandSpec`, which smelt registers in the Early
+/// phase, after the bundled early files. Its plugin opens it with
+/// `smelt.cli.on_command` and passes the same spec to `smelt.cmd.register`.
+const SUBCOMMAND_DIRS: &[&str] = &["subcommands"];
+
 /// Bundled plugins that ship with smelt but are NOT autoloaded. Users opt in by
 /// calling `require("smelt.plugins.<name>")` from their `init.lua`. Exposed
 /// so the `gen-lua-docs` xtask can emit an opt-in vs autoload table in the
@@ -242,10 +248,10 @@ pub fn args_summary(args: &HashMap<String, serde_json::Value>) -> protocol::Styl
 #[derive(Clone)]
 struct LuaLaunchInputs {
     disabled_modules: std::collections::HashSet<String>,
-    cli_flag_specs: Vec<crate::lua::CliFlagSpec>,
-    cli_flag_values: HashMap<String, crate::lua::CliFlagValue>,
-    cli_command_specs: Vec<crate::lua::CliCommandSpec>,
-    cli_command: Option<crate::lua::CliCommand>,
+    cli_flag_specs: Vec<crate::lua::FlagSpec>,
+    cli_flag_values: HashMap<String, crate::lua::FlagValue>,
+    cli_command_specs: Vec<crate::lua::CommandSpec>,
+    cli_command: Option<crate::lua::CommandArgs>,
 }
 
 #[derive(Clone)]
@@ -764,20 +770,27 @@ impl LuaRuntime {
     /// shipped with smelt that want to declare a CLI flag via
     /// `smelt.cli.register_flag{}` (so argv parsing picks it up) without
     /// forcing every user to edit their `early.lua`. Runs BEFORE
-    /// [`Self::load_early_init`] so user code can override.
+    /// [`Self::load_early_init`] so user code can override. Then registers
+    /// every bundled `runtime/lua/smelt/subcommands/*.lua` spec.
     pub fn load_bundled_early(&mut self) {
         if self.load_error.is_some() {
             return;
         }
-        let modules = early_modules();
+        let modules = early_modules()
+            .into_iter()
+            .map(|name| (format!("require('{name}')"), name))
+            .chain(subcommand_modules().into_iter().map(|name| {
+                let code = format!("smelt.cli.register_command(require('{name}'))");
+                (code, name)
+            }))
+            .collect::<Vec<_>>();
         if modules.is_empty() {
             return;
         }
         let result = self.with_early_smelt(|this| {
-            for name in &modules {
-                let code = format!("require('{name}')");
+            for (code, name) in &modules {
                 this.lua
-                    .load(&code)
+                    .load(code.as_str())
                     .set_name(name.as_str())
                     .exec()
                     .map_err(|e| LuaError::RuntimeError(format!("bundled early {name}: {e}")))?;
@@ -1553,7 +1566,7 @@ impl LuaRuntime {
         queue_target: crate::lua::CommandQueueTarget,
         sent_at_ms: Option<u64>,
     ) -> bool {
-        let func = {
+        let (func, spec) = {
             let Ok(map) = self.shared.commands.lock() else {
                 return false;
             };
@@ -1563,20 +1576,25 @@ impl LuaRuntime {
             let Ok(f) = self.lua.registry_value::<mlua::Function>(&entry.handle.key) else {
                 return false;
             };
-            f
+            (f, entry.spec.clone())
         };
         let _perf = smelt_perf::perf::begin("lua:cmd");
 
-        let mut initial_args = mlua::MultiValue::new();
-        if let Some(a) = arg {
-            match self.lua.create_string(&a) {
-                Ok(s) => initial_args.push_back(mlua::Value::String(s)),
-                Err(e) => {
-                    self.record_error(format!("cmd `{name}`: {e}"));
-                    return true;
-                }
+        let parsed = match spec.map(|spec| spec.parse(arg.as_deref().unwrap_or_default())) {
+            Some(Err(error)) => {
+                self.record_error(format!("/{name}: {error}"));
+                return true;
             }
-        }
+            Some(Ok(parsed)) => Some(parsed),
+            None => None,
+        };
+        let initial_args = match self.command_handler_args(arg, parsed) {
+            Ok(args) => args,
+            Err(e) => {
+                self.record_error(format!("cmd `{name}`: {e}"));
+                return true;
+            }
+        };
 
         // Start only this command's coroutine. Yielding handlers park for the
         // next task tick; unrelated ready tasks keep their queue position.
@@ -1749,6 +1767,26 @@ impl LuaRuntime {
         if let Ok(mut messages) = shared.messages.lock() {
             messages.append(crate::messages::MessageKind::Error, "lua".to_string(), msg);
         }
+    }
+
+    /// The arguments of a command handler: the text after its name, then
+    /// the free arguments, flag values and arguments after `--` that its
+    /// spec parsed.
+    fn command_handler_args(
+        &self,
+        text: Option<String>,
+        parsed: Option<crate::lua::CommandArgs>,
+    ) -> LuaResult<mlua::MultiValue> {
+        let mut args = mlua::MultiValue::new();
+        args.push_back(match text {
+            Some(text) => mlua::Value::String(self.lua.create_string(&text)?),
+            None => mlua::Value::Nil,
+        });
+        if let Some(parsed) = parsed {
+            let (free, flags, rest) = super::api::cli::command_to_lua(&self.lua, &parsed)?;
+            args.extend([free, flags, rest].map(mlua::Value::Table));
+        }
+        Ok(args)
     }
 
     pub fn has_command(&self, name: &str) -> bool {
@@ -4397,8 +4435,18 @@ pub fn autoload_modules() -> Vec<String> {
 /// Bundled `runtime/lua/smelt/early/*.lua` modules to `require` during the
 /// Early phase. Sorted lex order for deterministic registration.
 pub fn early_modules() -> Vec<String> {
+    embedded_modules(EARLY_DIRS)
+}
+
+/// Bundled `runtime/lua/smelt/subcommands/*.lua` specs, in lex order.
+pub fn subcommand_modules() -> Vec<String> {
+    embedded_modules(SUBCOMMAND_DIRS)
+}
+
+/// The modules in the bundled directories `dirs`, sorted per directory.
+fn embedded_modules(dirs: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
-    for dir_name in EARLY_DIRS {
+    for dir_name in dirs {
         let Some(dir) = EMBEDDED_LUA.get_dir(*dir_name) else {
             continue;
         };
@@ -4574,12 +4622,12 @@ mod tests {
     fn embedded_bytecode_keeps_chunk_name_for_tracebacks() {
         let lua = Lua::new();
         let loader = lua
-            .load(embedded_bytecode("argv.lua").unwrap())
+            .load(embedded_bytecode("worktree.lua").unwrap())
             .into_function()
             .unwrap();
         assert_eq!(
             loader.info().short_src.as_deref(),
-            Some("[string \"smelt/argv.lua\"]")
+            Some("[string \"smelt/worktree.lua\"]")
         );
         assert!(loader.info().line_defined.is_some());
     }
