@@ -302,7 +302,7 @@ impl<K: Hash + Eq> StreamReveal<K> {
                 segment.glyphs = glyphs;
             }
             interrupted |= gained < peak;
-            if interrupted || gained > fresh_tail as i64 || (arrived.is_none() && gained != 0) {
+            if interrupted {
                 stream.pace.cap(0);
             }
             // Offscreen growth estimates set the pace, not which glyphs may hide.
