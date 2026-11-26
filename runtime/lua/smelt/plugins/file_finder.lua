@@ -18,13 +18,15 @@ smelt.keymap.scope("file_finder", {
 
 -- Shows one file in the preview pane. Previews are native documents that
 -- build only visible rows, so every selection change renders immediately.
+-- Returns the show function and one that makes the next show read the file
+-- again, for after an editor changed it.
 local function previewer(preview, preview_buf)
   local key
   local function notice(text)
     preview:document(nil)
     preview_buf:lines({ "  " .. text })
   end
-  return function(path, opts)
+  local function show(path, opts)
     opts = opts or {}
     local next_key = path and table.concat({ path, opts.line or 0, opts.query or "" }, "\0") or false
     if next_key == key then return end
@@ -44,19 +46,21 @@ local function previewer(preview, preview_buf)
     end
     preview:scroll(top)
   end
+  return show, function() key = nil end
 end
 
 -- The overlay both pickers share: results above a query input, and a preview
 -- pane on terminals wide enough for one. `spec` supplies the behaviour:
 -- `query(text)`, `move(delta)`, `selected()`, `submit()`, `close()` and an
 -- optional `layout()` run before the list paints at a new height, plus the
--- `list_width` beside the preview.
+-- `list_width` beside the preview, the `surface` it shows on and the
+-- initial query `text`.
 local function shell(spec)
   local layout = smelt.ui.layout
   local ui = { closed = false }
 
   local input_buf = smelt.buf.new()
-  input_buf:lines({ "" })
+  input_buf:lines({ spec.text or "" })
   local input = smelt.win.new(input_buf, {
     surface = "editable_text", kind = "input", placeholder = spec.placeholder,
     pad_left = 1, pad_right = 1, wrap = false, scrollbar = false,
@@ -83,7 +87,7 @@ local function shell(spec)
   local preview = smelt.win.new(preview_buf, {
     name = spec.name .. ".preview", surface = "selectable_text", wrap = false, scrollbar = true, gutter = "line_numbers",
   })
-  local show = previewer(preview, preview_buf)
+  local show, forget = previewer(preview, preview_buf)
   -- The preview needs room beside the list; narrower terminals show the list alone.
   local function wants_preview() return (smelt.ui.size().width or 80) >= 100 end
   local show_preview = wants_preview()
@@ -93,12 +97,30 @@ local function shell(spec)
     if show_preview then show(path, opts) end
   end
 
+  -- Open `path` in the editor. A standalone picker stays open for the next
+  -- file and shows what the editor saved; an overlay hands back to the
+  -- session.
+  function ui.edit(path, line)
+    if not spec.surface.standalone then ui.close() end
+    local ok, err = smelt.terminal.open_editor(path, { line = line })
+    if not ok then smelt.notify.error(err or "could not open editor") end
+    if ui.closed then return end
+    forget()
+    ui.preview(shown[1], shown[2])
+  end
+
   local overlay
   function ui.close()
     if ui.closed then return end
     ui.closed, active = true, false
     spec.close()
     if overlay then overlay:close() end
+  end
+
+  -- End the picker because it cannot run, saying why.
+  function ui.fail(reason)
+    spec.surface:fail(reason)
+    ui.close()
   end
 
   input:scope("list.nav", smelt.list.nav(spec.move))
@@ -115,29 +137,31 @@ local function shell(spec)
   local function mount()
     -- Results and input share one frame: the input's top edge is the
     -- separator. With a preview, the split divider is the shared right edge.
-    local list_edge = { top = "Comment", left = "Comment" }
-    local input_edge = { top = "Comment", left = "Comment", bottom = "Comment" }
+    -- Filling the terminal, the picker keeps only those inner lines.
+    local framed = not spec.surface.standalone
+    local edge = framed and "Comment" or nil
+    local list_edge = { top = edge, left = edge }
+    local input_edge = { top = "Comment", left = edge, bottom = edge }
     if not show_preview then
-      list_edge.right = "Comment"
-      input_edge.right = "Comment"
+      list_edge.right = edge
+      input_edge.right = edge
     end
     local left = layout.vbox({
       { layout.leaf(ui.list_win, { border = list_edge }), height = "fill" },
       { layout.hbox({
         { layout.leaf(input), width = "fill" },
         { layout.leaf(count_win, { measure = count_size }), width = "fit" },
-      }, { border = input_edge, gap = 0 }), height = 3 },
+      }, { border = input_edge, gap = 0 }), height = framed and 3 or 2 },
     }, { gap = 0 })
     local root = left
     if show_preview then
-      root = split:layout(left, layout.leaf(preview, {
+      root = split:layout(left, layout.leaf(preview, framed and {
         border = { top = "Comment", bottom = "Comment", right = "Comment" },
         title = smelt.dialog.title(" preview "),
-      }))
+      } or {}))
     end
-    overlay = smelt.overlay.new({
-      name = spec.name, anchor = "center", border = "none", modal = true,
-      width = "85%", height = "75%", layout = root,
+    overlay = spec.surface:overlay({
+      name = spec.name, anchor = "center", border = "none", layout = root,
       scope = "file_finder", actions = actions,
     })
   end
@@ -157,11 +181,14 @@ local function shell(spec)
   return ui
 end
 
-local function open_files(tracked)
+-- `opts.tracked` lists Git-tracked files only, `opts.query` starts the
+-- search and `opts.surface` is where the picker shows.
+local function open_files(opts)
+  local tracked = opts.tracked
   local cwd = smelt.session.cwd()
   local result_root = cwd
   local source = tracked and "git" or "workspace"
-  local query, displayed_query = ""
+  local query, displayed_query = opts.query or ""
   local ui, list, poll
 
   local function show_selected()
@@ -173,10 +200,8 @@ local function open_files(tracked)
   local function submit()
     local item = list:selected()
     if not item then return end
-    ui.close()
     if not tracked then smelt.files.accept(item, { cwd = result_root }) end
-    local ok, err = smelt.terminal.open_editor(smelt.path.join(result_root, item.path))
-    if not ok then smelt.notify.error(err or "could not open editor") end
+    ui.edit(smelt.path.join(result_root, item.path))
   end
 
   local function show(ranked, reset)
@@ -203,8 +228,7 @@ local function open_files(tracked)
   local function refilter(reset)
     local result = smelt.files.search(query, { cwd = cwd, source = source, limit = FILE_LIMIT, include_dirs = false })
     if result.status == "error" then
-      smelt.notify.error(result.message or "cannot search files")
-      ui.close()
+      ui.fail(result.message or "cannot search files")
       return
     end
     if __smelt_internal.provider.should_keep_stale_rows(result, result.items, list:visible()) then return end
@@ -217,6 +241,8 @@ local function open_files(tracked)
   ui = shell({
     name = "smelt.files",
     placeholder = "find files…",
+    surface = opts.surface,
+    text = query,
     query = function(text) query = text; refilter(true) end,
     move = function(delta) list:move_cursor(delta); show_selected() end,
     selected = show_selected,
@@ -233,10 +259,11 @@ local function open_files(tracked)
   refilter(true)
 end
 
-local function open_search(tracked)
+-- Takes the options of `open_files`.
+local function open_search(opts)
   local cwd = smelt.session.cwd()
-  local source = tracked and "git" or "workspace"
-  local query = ""
+  local source = opts.tracked and "git" or "workspace"
+  local query = opts.query or ""
   -- The search being typed, and the one whose rows the list shows. They
   -- differ until the new search finds a row or finishes, so typing never
   -- flashes an empty list. Rows are reversed: match 1 sits above the input.
@@ -346,15 +373,14 @@ local function open_search(tracked)
   local function submit()
     local item = selected_item()
     if not item then return end
-    local path = smelt.path.join(shown:root(), item.path)
-    ui.close()
-    local ok, err = smelt.terminal.open_editor(path, { line = item.line })
-    if not ok then smelt.notify.error(err or "could not open editor") end
+    ui.edit(smelt.path.join(shown:root(), item.path), item.line)
   end
 
   ui = shell({
     name = "smelt.search",
     placeholder = "search files…",
+    surface = opts.surface,
+    text = query,
     list_width = "55%",
     query = function(text) query = text; start(); update() end,
     move = move,
@@ -378,23 +404,26 @@ local function open_search(tracked)
   start()
 end
 
-local function command(name, open)
-  return function(arg)
-    local source = (arg or ""):match("^%s*(.-)%s*$")
-    if active then return end
-    if source == "" or source == "all" then
-      active = true
-      open(false)
-    elseif source == "git" then
-      active = true
-      open(true)
-    else
-      smelt.notify.error("usage: /" .. name .. " [all|git]")
-    end
-  end
+-- `[all|git] [query]`: the files to look in, then the query to start with.
+local function parse(args)
+  local source, rest = args:match("^%s*(%S*)%s*(.-)%s*$")
+  if source == "git" or source == "all" then return { tracked = source == "git", query = rest } end
+  return { tracked = false, query = args:match("^%s*(.-)%s*$") }
 end
 
-smelt.cmd.register("files", command("files", open_files),
-  { desc = "find workspace or Git-tracked file", args = { "[all|git]" }, busy = "run" })
-smelt.cmd.register("search", command("search", open_search),
-  { desc = "search workspace or Git-tracked file contents", args = { "[all|git]" }, busy = "run" })
+local function opener(open)
+  return function(opts, standalone)
+    if active then return end
+    active = true
+    opts.surface = require("smelt.surface").new({ standalone = standalone, width = 0.85, height = 0.75 })
+    open(opts)
+  end
+end
+local files, search = opener(open_files), opener(open_search)
+
+smelt.cmd.register("files", function(arg) files(parse(arg or "")) end,
+  { desc = "find workspace or Git-tracked file", args = { "[all|git] [query]" }, busy = "run" })
+smelt.cmd.register("search", function(arg) search(parse(arg or "")) end,
+  { desc = "search workspace or Git-tracked file contents", args = { "[all|git] [query]" }, busy = "run" })
+smelt.cli.on_command("files", function(args) files(parse(table.concat(args, " ")), true) end)
+smelt.cli.on_command("search", function(args) search(parse(table.concat(args, " ")), true) end)

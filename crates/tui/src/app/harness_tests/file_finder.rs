@@ -128,23 +128,65 @@ fn file_finder_search_preview_accept_and_dismiss() {
 }
 
 #[test]
-fn file_finder_has_no_default_bindings_and_validates_source() {
+fn file_finder_has_no_default_bindings_and_starts_with_a_query() {
     let (_dir, mut app) = fixture_app();
     app.drain_launch_ready_hooks();
     app.run_lua_result(
         r#"
         assert(#smelt.keymap.prefixes('<leader>f', 'n') == 0)
-        smelt.cmd.run('files invalid')
+        smelt.cmd.run('files beta')
     "#,
     )
     .unwrap();
-    assert!(!app.render_to_frame().text().contains(" preview "));
-    assert!(app
-        .render_to_frame()
-        .text()
-        .contains("usage: /files [all|git]"));
-    app.run_lua_result("smelt.cmd.run('files all')").unwrap();
-    wait_for_frame(&mut app, "alpha_preview");
+    let frame = wait_for_frame(&mut app, "beta preview");
+    assert!(!frame.contains("alpha.rs"), "{frame}");
+    assert!(!frame.contains("find files"), "{frame}");
+    // Typing continues the query.
+    app.type_text(".txt");
+    let frame = wait_for_frame(&mut app, "beta.txt");
+    assert!(frame.contains("beta.txt"), "{frame}");
+}
+
+/// `smelt search alpha`: the picker fills the terminal without an outer
+/// frame, Enter edits a match and comes back to it, and Esc ends the process.
+#[test]
+fn standalone_search_edits_matches_and_quits_when_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("alpha.rs"), "fn alpha_preview() {}\n").unwrap();
+    let mut app = TestApp::builder()
+        .with_cwd(dir.path())
+        .with_cli_command("search", &["alpha"])
+        .build();
+    app.set_terminal_size(120, 20);
+    app.render_silent();
+    app.dispatch_ui_window_events(false);
+    app.run_lua_result(
+        r#"
+        smelt.terminal.open_editor = function(path, opts)
+          opened = { path, opts.line }
+          local file = io.open(path, "a")
+          file:write("-- saved in the editor\n")
+          file:close()
+          return true
+        end
+        "#,
+    )
+    .unwrap();
+    let frame = wait_for_frame(&mut app, "alpha_preview");
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(!rows[0].contains('─') && !frame.contains('┌'), "{frame}");
+
+    app.press(KeyCode::Enter);
+    app.run_lua_result("assert(opened[1]:match('alpha.rs$') and opened[2] == 1)")
+        .unwrap();
+    let frame = wait_for_frame(&mut app, "saved in the editor");
+    assert!(frame.contains("alpha.rs:1"), "{frame}");
+    assert!(!app.tui.pending_quit);
+
+    app.press(KeyCode::Esc);
+    app.settle_frame();
+    assert!(app.tui.pending_quit);
+    assert_eq!(app.tui.quit_exit().map(|exit| exit.code), None);
 }
 
 #[test]
@@ -756,11 +798,6 @@ fn search_git_covers_tracked_files_and_reports_no_matches() {
             .unwrap()
             .success());
     }
-    app.run_lua_result("smelt.cmd.run('search bogus')").unwrap();
-    assert!(app
-        .render_to_frame()
-        .text()
-        .contains("usage: /search [all|git]"));
     app.run_lua_result("smelt.cmd.run('search git')").unwrap();
     wait_for_frame(&mut app, "(no file selected)");
     app.type_text("task");

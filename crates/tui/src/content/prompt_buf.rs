@@ -5,10 +5,13 @@ use crate::smelt_edit::{Buffer, ExtmarkOpts, ExtmarkPayload};
 /// suggestion when the buffer is empty.
 pub(crate) const PLACEHOLDER_NS: &str = "placeholder";
 
+/// Show `text` as the placeholder of `buf`, or none. A buffer with text
+/// shows none, whichever path filled it.
 pub(crate) fn set_placeholder_extmark(buf: &mut Buffer, text: Option<String>) {
     let ns = buf.create_namespace(PLACEHOLDER_NS);
     buf.clear_namespace(ns, 0, usize::MAX);
-    if let Some(text) = text.filter(|s| !s.is_empty()) {
+    let empty = buf.line_count() <= 1 && buf.get_line(0).is_none_or(str::is_empty);
+    if let Some(text) = text.filter(|s| empty && !s.is_empty()) {
         buf.set_extmark(
             ns,
             0,
