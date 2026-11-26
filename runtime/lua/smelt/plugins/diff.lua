@@ -234,6 +234,8 @@ function M.open(opts)
     return v.opened
   end
 
+  -- Show a file of the preview's diff from its start: its header row at
+  -- the top and the left edge in view.
   local function show_file(v, files, index)
     cancel_preview(v)
     if v.shown ~= files or v.shown_diff ~= files.diff then
@@ -244,6 +246,7 @@ function M.open(opts)
     local row = files.diff:file_row(index)
     v.preview:scroll(row)
     v.preview:cursor(row)
+    v.preview:pan(-((v.preview:scroll() or {}).left or 0))
   end
 
   -- ── lifecycle ────────────────────────────────────────────────────────

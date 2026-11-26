@@ -254,13 +254,14 @@ impl mlua::UserData for LuaWin {
 
         methods.add_function(
             "pan",
-            |_, (this_ud, delta): (mlua::AnyUserData, i16)| -> LuaResult<mlua::AnyUserData> {
+            |_, (this_ud, delta): (mlua::AnyUserData, i32)| -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 crate::lua::with_ui_host(|host| {
                     host.with_ui(|ui| {
                         if let Some(win) = ui.win_mut(this.id) {
                             if !win.wrap {
-                                win.scroll_left = win.scroll_left.saturating_add_signed(delta);
+                                let columns = win.viewport.map_or(0, |v| v.content_width);
+                                win.pan_by_columns(delta as isize, columns);
                             }
                         }
                     })
@@ -966,7 +967,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "equalize" => fn() -> bool, "Balance all enclosing hsplit/vsplit panes, respecting their minimum sizes. Does not change focus or document state. Returns false if the window is not in a resizable split.",
             "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone.",
             "document" => fn(source: Option<smelt_core::lua::api::document::LuaDocument>) -> LuaWin, "Attach a native indexed row source to a plugin window, or detach with nil. Each window owns private viewport-sized scratch storage and an independent highlighting subscription; the original backing buffer is retained unchanged and may be shared. Attachment resets view position, disables wrapping and makes text windows read-only, preserving list interaction. Detachment restores the original buffer, input state, surface, wrapping and scroll position. Navigation, selection and copy resolve against the entire source in bounded row batches; copying does not request highlighting. Built-in windows reject this call.",
-            "pan" => fn(delta: i16) -> LuaWin, "Pan an unwrapped window horizontally by delta terminal cells. Negative pans left; clamps to the supported column range. Returns the handle.",
+            "pan" => fn(delta: i32) -> LuaWin, "Pan an unwrapped window horizontally by delta terminal cells, as Vim `zl` and `zh` do. Negative pans left. The left column stays between 0 and the point where the widest row in view ends at the right edge. Does nothing before the window's first layout. Returns the handle.",
             "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ x, y, width, height }`, or `nil` until the first render lays it out.",
             "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
             "decorate" => fn(opts: mlua::Table) -> LuaDecoration, "Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.",

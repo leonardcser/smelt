@@ -522,6 +522,8 @@ fn diff_split_drag_preserves_selection_and_scroll() {
     let cursor = app.ui_probe().win(win).unwrap().cursor_abs_row();
     let scroll = app.ui_probe().win(win).unwrap().scroll_top();
     let selected = app.ui_probe().win(sidebar).unwrap().cursor_abs_row();
+    let left = app.ui_probe().win(win).unwrap().scroll_left;
+    assert!(left > 0);
     drag_diff_divider(&mut app, 12);
     assert_eq!(
         app.ui_probe()
@@ -537,7 +539,7 @@ fn diff_split_drag_preserves_selection_and_scroll() {
     assert_eq!(app.ui_probe().focus(), Some(win));
     assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), cursor);
     assert_eq!(app.ui_probe().win(win).unwrap().scroll_top(), scroll);
-    assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, 4);
+    assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, left);
     assert_eq!(
         app.ui_probe().win(sidebar).unwrap().cursor_abs_row(),
         selected
@@ -583,7 +585,7 @@ fn diff_split_drag_preserves_selection_and_scroll() {
         );
         assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), cursor);
         assert_eq!(app.ui_probe().win(win).unwrap().scroll_top(), scroll);
-        assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, 4);
+        assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, left);
     }
     app.type_char('r');
     drive_lua_tasks(&mut app);
@@ -599,7 +601,7 @@ fn diff_split_drag_preserves_selection_and_scroll() {
         width + 12
     );
     assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), cursor);
-    assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, 4);
+    assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, left);
 }
 
 #[test]
@@ -1350,6 +1352,9 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
         );
         String::from_utf8(output.stdout).unwrap()
     };
+    // Wider than the preview, so the patch can pan.
+    const NEW: &str =
+        "new file whose only line is wider than the preview pane of this terminal size\n";
     git(&["init", "-q"]);
     git(&["config", "user.name", "test"]);
     git(&["config", "user.email", "test@example.invalid"]);
@@ -1361,7 +1366,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     std::fs::write(dir.path().join("b.rs"), "other staged\n").unwrap();
     git(&["add", "."]);
     std::fs::write(dir.path().join("a.rs"), "working\n").unwrap();
-    std::fs::write(dir.path().join("c.rs"), "new\n").unwrap();
+    std::fs::write(dir.path().join("c.rs"), NEW).unwrap();
     let mut app = TestApp::builder().with_cwd(dir.path()).build();
     app.set_terminal_size(120, 30);
     app.type_text("/diff");
@@ -1383,13 +1388,15 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     focus_pane(&mut app, win);
     app.type_text("4GL");
     paint_diff(&mut app);
+    let left = app.ui_probe().win(win).unwrap().scroll_left;
+    assert!(left > 0);
     app.type_char('-');
     wait_for_diff_section(&mut app, "unstaged (1)").await;
     assert_eq!(git(&["show", ":a.rs"]), "working\n");
     assert_eq!(git(&["show", ":b.rs"]), "other staged\n");
     assert!(selected_header(&app).contains("c.rs"));
     assert!(selected_header(&app).contains("unstaged"));
-    assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, 4);
+    assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, left);
     assert_eq!(app.ui_probe().focus(), Some(win));
     assert!(!Arc::ptr_eq(
         &source,
@@ -1406,7 +1413,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     switch_pane(&mut app);
     app.type_char('s');
     wait_for_diff_section(&mut app, "unstaged (0)").await;
-    assert_eq!(git(&["show", ":c.rs"]), "new\n");
+    assert_eq!(git(&["show", ":c.rs"]), NEW);
     assert!(app
         .render_to_frame()
         .text()
@@ -1463,7 +1470,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     for (path, body) in [
         ("a.rs", "working\n"),
         ("b.rs", "other staged\n"),
-        ("c.rs", "new\n"),
+        ("c.rs", NEW),
     ] {
         assert_eq!(
             std::fs::read_to_string(dir.path().join(path)).unwrap(),
@@ -4439,4 +4446,35 @@ async fn diff_commit_runs_git_commit_on_the_terminal() {
     })
     .await;
     assert!(app.run_lua("assert(ran[1] == 'git commit --amend')"));
+}
+
+#[test]
+fn diff_preview_pan_stops_at_row_end_and_each_file_starts_at_left_edge() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(110, 28);
+    open_fixture(&mut app, 3);
+    let win = preview(&app);
+    focus_pane(&mut app, win);
+    let left = |app: &TestApp| app.ui_probe().win(win).unwrap().scroll_left;
+    for _ in 0..20 {
+        app.type_char('L');
+        app.render_silent();
+    }
+    let end = left(&app);
+    assert!(end > 4, "the patch rows are wider than the pane");
+    app.type_char('L');
+    app.render_silent();
+    assert_eq!(left(&app), end);
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("uvwxyz0123456789"),
+        "row ends stay in view:\n{frame}"
+    );
+    app.type_char('H');
+    app.render_silent();
+    assert_eq!(left(&app), end - 4);
+    app.press_mod(KeyCode::Char('j'), KeyModifiers::CONTROL);
+    paint_diff(&mut app);
+    assert_eq!(left(&app), 0);
+    assert!(app.render_to_frame().text().contains("last change"));
 }
