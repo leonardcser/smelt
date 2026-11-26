@@ -4579,7 +4579,7 @@ fn diff_list_move_while_totals_load_shows_the_new_commit() {
             local path = 'file' .. n .. '.rs'
             return { diff = smelt.diff.parse('diff --git a/' .. path .. ' b/' .. path .. '\n@@ -0,0 +1 @@\n+x\n') }
         end
-        smelt.cmd.run('diff history')
+        smelt.cmd.run('diff --history')
     "#).unwrap();
     app.settle_lua();
     paint_diff(&mut app);
