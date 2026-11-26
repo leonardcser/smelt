@@ -139,6 +139,8 @@ function M.open()
     local win = smelt.win.new(buf, {
       name = "smelt.subagents." .. name, surface = surface, vim_enabled = surface == "readonly_text",
       wrap = false, scrollbar = surface == "readonly_text", pad_left = 1, pad_right = 1,
+      kind = surface == "list_inert" and "list" or nil, initial_cursor = surface == "list_inert" and 0 or nil,
+      hide_cursor = surface == "list_inert",
     })
     return win, buf
   end
