@@ -116,6 +116,8 @@ local function agent_summary(args)
   local spans = { { text = text(args, "description") or "agent" } }
   local kind = text(args, "subagent_type")
   if kind and kind ~= "general-purpose" then spans[#spans + 1] = dim("  " .. kind) end
+  local model = text(args, "model")
+  if model then spans[#spans + 1] = dim("  (" .. model .. ")") end
   return { spans }
 end
 
