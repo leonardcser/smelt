@@ -977,7 +977,7 @@ app_story!(background_calls_show_their_work_state, |ctx| {
         "bash",
         &[
             ("command", json!("cargo build")),
-            ("background", json!(true)),
+            ("run_mode", json!("background")),
         ],
         "started background process proc_1, you'll be notified when it completes",
         json!({"background": true, "background_id": "proc_1"}),
@@ -987,7 +987,7 @@ app_story!(background_calls_show_their_work_state, |ctx| {
         "bash",
         &[
             ("command", json!("cargo test")),
-            ("background", json!(true)),
+            ("run_mode", json!("background")),
         ],
         "started background process proc_2, you'll be notified when it completes",
         json!({"background": true, "background_id": "proc_2"}),
@@ -1029,7 +1029,7 @@ app_story!(background_calls_show_their_work_state, |ctx| {
         "bash",
         &[
             ("command", json!("npm run dev")),
-            ("background", json!(true)),
+            ("run_mode", json!("background")),
         ],
     );
     ctx.advance_time(4_200);

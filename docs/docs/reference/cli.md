@@ -142,8 +142,8 @@ Scheduled continuations remain `busy`. Pending background work or result deliver
 reports `waiting`, unless the session is `completed`. Permissions, questions, and
 turn errors report `needs_attention`.
 
-For servers or watchers, use `background=true` with `notify_on_completion=false`
-to skip waiting and completion-triggered turns.
+For servers or watchers, use `run_mode="background_no_followup"` on `bash`
+so the job does not put the session in `waiting` or trigger a turn on exit.
 
 Status is written only when it changes, so an idle process stays asleep. Each
 process holds a lock on `<pid>.lock` while it runs; records of exited processes

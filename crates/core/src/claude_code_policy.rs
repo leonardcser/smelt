@@ -134,7 +134,7 @@ mod tests {
                     name = "bash",
                     access = "write",
                     summary = function(args)
-                        return "$ " .. args.command .. (args.background and " &" or "")
+                        return "$ " .. args.command .. (args.run_mode == "background" and " &" or "")
                     end,
                     execute = function() return "ok" end,
                 })"#,

@@ -139,10 +139,7 @@ const NATIVE: &[NativeTool] = &[
     NativeTool::shared("NotebookEdit", "edit_notebook"),
     NativeTool::shared("Bash", "bash")
         .access(Full)
-        .renames(&[
-            ("timeout", "timeout_ms"),
-            ("run_in_background", "background"),
-        ])
+        .renames(&[("timeout", "timeout_ms")])
         .background(WhenTask("backgroundTaskId")),
     NativeTool::shared("Glob", "glob"),
     NativeTool::shared("Grep", "grep"),
@@ -247,9 +244,21 @@ impl NativeTool {
                 (key.to_owned(), value.clone())
             })
             .collect();
-        if matches!(self.background, Some(Always(_))) {
-            // The smelt tool runs the call in the background too.
-            args.insert("background".into(), Value::Bool(true));
+        let background = if matches!(self.background, Some(Always(_))) {
+            Some(true)
+        } else if self.name == "Bash" {
+            args.remove("run_in_background")
+                .and_then(|value| value.as_bool())
+        } else {
+            None
+        };
+        if let Some(background) = background {
+            let mode = if background {
+                "background"
+            } else {
+                "foreground"
+            };
+            args.insert("run_mode".into(), Value::from(mode));
         }
         args
     }

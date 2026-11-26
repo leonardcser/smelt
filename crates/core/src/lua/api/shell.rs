@@ -111,7 +111,7 @@ fn check_shell_background_operator(command: &str) -> Option<String> {
     let has = split(command).iter().any(|segment| segment.op == Some("&"));
     if has {
         Some(
-            "shell backgrounding (`&`) is not supported in `bash` commands here; remove `&`, set `background=true` on the tool call, then use `read_process_output` and `stop_process` with the returned job ID"
+            "shell backgrounding (`&`) is not supported in `bash` commands here; remove `&`, set `run_mode` to `background` on the tool call, then use `read_process_output` and `stop_process` with the returned job ID"
                 .to_string(),
         )
     } else {

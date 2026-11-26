@@ -88,17 +88,9 @@ function M.execute(args, ctx)
     return { content = err, is_error = true }
   end
 
-  local background = bool_arg(args.background, false)
-  local background_on_timeout = bool_arg(args.background_on_timeout, DEFAULT_BACKGROUND_ON_TIMEOUT)
-  local notify = bool_arg(args.notify_on_completion, true)
-  if not notify and not background then
-    return { content = "notify_on_completion=false requires background=true", is_error = true }
-  end
-
-  local timeout_ms = timeout_arg(args.timeout_ms)
-  local access = M.access(args, smelt.mode.get(ctx.mode))
-
-  if background then
+  local mode = args.run_mode
+  if mode == "background" or mode == "background_no_followup" then
+    local notify = mode == "background"
     local job_id = smelt.process.spawn_bg(command, { notify_on_completion = notify })
     return {
       content = "started background process " .. job_id
@@ -107,11 +99,15 @@ function M.execute(args, ctx)
       metadata = { background = true, background_id = job_id },
     }
   end
+  if mode ~= nil and mode ~= "foreground" then
+    return { content = "run_mode must be foreground, background, or background_no_followup", is_error = true }
+  end
 
+  local access = M.access(args, smelt.mode.get(ctx.mode))
   local id = smelt.task.alloc()
   smelt.process.run_streaming(id, ctx.call_id or "", command, {
-    timeout_ms = timeout_ms,
-    background_on_timeout = background_on_timeout,
+    timeout_ms = timeout_arg(args.timeout_ms),
+    background_on_timeout = bool_arg(args.background_on_timeout, DEFAULT_BACKGROUND_ON_TIMEOUT),
   })
   local result = smelt.task.wait(id)
   local metadata
@@ -155,18 +151,29 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   access = M.access,
   -- The sandbox confines every write, so the command names no paths.
   paths = function() return {} end,
-  description =
-  "Run non-interactive bash and return output. Commands run in an OS sandbox: with access=read they can write only temp directories; with access=write they can also write the workspace and tool caches; neither can see protected paths such as credentials; access=full runs without a sandbox and may need user approval. Leave access unset to use the most the current mode allows without asking. Background jobs automatically notify on completion by default, even after your turn. Do not sleep or poll just to wait; do other work, or end your turn if nothing is ready. Use read_process_output to inspect output and stop_process to stop jobs. Avoid broad filename-based cleanup with pkill -f or killall: it can kill smelt or unrelated processes. For processes not managed by this tool, identify and verify the exact PID before stopping it. Do not use shell backgrounding (`&`). Pipe long output (e.g. test or build logs) through head, tail, or grep to retain relevant parts and save context. The working directory is not preserved between calls; cd affects only that invocation. Prefer absolute paths. Do not run interactive commands (editors, pagers, interactive rebases): they hang. Ask the user to run them if no non-interactive alternative exists.",
+  description = "Run a non-interactive Bash command. Use a non-interactive alternative to editors, pagers, or interactive rebases, or ask the user to run them. "
+    .. "Each call starts in the session working directory; `cd` does not persist. Prefer absolute paths. Limit long output with `head`, `tail`, or `grep`. "
+    .. "Use `run_mode`, not shell `&`, for background jobs. While waiting for a result, do other work or end the turn instead of sleeping or polling. "
+    .. "Use `read_process_output` and `stop_process` with the job ID. For unmanaged processes, verify the exact PID; avoid broad `pkill -f` or `killall` commands.",
   parameters = {
     type = "object",
     properties = {
       command = { type = "string", description = "Shell command to execute." },
       description = { type = "string", description = "Command summary (max 10 words)." },
-      timeout_ms = { type = "integer", description = "Timeout in milliseconds; default: 120000; max: 600000." },
-      background = { type = "boolean", description = "Start in background; return immediately. Default: false." },
-      notify_on_completion = { type = "boolean", description = "For background=true, notify the agent and keep the session waiting until completion (default: true). Set false for detached servers or watchers." },
-      background_on_timeout = { type = "boolean", description = "On timeout, keep running in background instead of killing. Default: true." },
-      access = { type = "string", enum = { "read", "write", "full" }, description = "Sandbox level to ask for when the command needs more than the current mode allows without asking." },
+      timeout_ms = { type = "integer", description = "Foreground timeout in milliseconds; default: 120000; max: 600000." },
+      run_mode = {
+        type = "string",
+        enum = { "foreground", "background", "background_no_followup" },
+        description = "foreground (default): wait for the result. Both background modes return a job ID immediately. "
+          .. "background delivers the result on exit, even after the turn ends. "
+          .. "background_no_followup neither keeps the session waiting nor delivers a result on exit (use for servers or watchers).",
+      },
+      background_on_timeout = { type = "boolean", description = "Foreground only: on timeout, keep running in background instead of stopping. Default: true." },
+      access = {
+        type = "string",
+        enum = { "read", "write", "full" },
+        description = "Omit unless you need more access than the current mode allows. read: write only to temp directories. write: also write to the workspace and tool caches. Both hide protected paths. full: no sandbox; may require approval.",
+      },
     },
     required = { "command" },
   },
@@ -176,13 +183,15 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   summary = function(args)
     local cmd = args.command or ""
     if cmd == "" then return nil end
+    local mode = args.run_mode
+    local background = mode == "background" or mode == "background_no_followup"
     local timeout_ms = timeout_arg(args.timeout_ms)
     local lines = {}
     for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
       local spans = { { text = line, syntax = "bash" } }
       if #lines == 0 then
         -- The permission dialog says the command will run in the background.
-        spans[#spans + 1] = bool_arg(args.background, false)
+        spans[#spans + 1] = background
             and { text = "background", fg = "SmeltProcess", selectable = false, title_suffix = true }
           or {
             text = "(timeout: " .. format_timeout(timeout_ms) .. ")",

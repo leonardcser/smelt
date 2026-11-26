@@ -1631,7 +1631,7 @@ fn native_tools_start_as_their_smelt_counterpart_and_report_execution_time() {
         .expect("native Bash starts as bash");
     assert_eq!(args.get("command"), Some(&json!("ls")));
     assert_eq!(args.get("timeout_ms"), Some(&json!(5000)));
-    assert_eq!(args.get("background"), Some(&json!(false)));
+    assert_eq!(args.get("run_mode"), Some(&json!("foreground")));
     assert!(events.iter().any(|event| matches!(
         event,
         EngineEvent::ToolFinished {

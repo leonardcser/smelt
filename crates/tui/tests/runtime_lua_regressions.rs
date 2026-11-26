@@ -8,6 +8,7 @@ const LABEL_VALUE_LUA: &str = include_str!("../../../runtime/lua/smelt/label_val
 const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua");
 const BANNER_LUA: &str = include_str!("../../../runtime/lua/smelt/banner.lua");
 const BANNER_PLUGIN_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/banner.lua");
+const BASH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/bash.lua");
 const WEB_FETCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_fetch.lua");
 const WEB_SEARCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_search.lua");
 const TRANSCRIPT_DEFAULTS_LUA: &str =
@@ -104,6 +105,74 @@ fn load_transcript_defaults(lua: &mlua::Lua) {
         .set_environment(environment)
         .exec()
         .expect("load transcript defaults");
+}
+
+#[test]
+fn bash_run_mode_controls_result_delivery() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        package.loaded["smelt.transcript.defaults"] = {}
+        package.loaded["smelt._detach"] = {}
+        __smelt_internal = { tools = { with_watchdog = function(def) return def end } }
+        smelt = {
+          tools = { register = function(def) bash_tool = def end },
+          transcript = { register_tool = function() end },
+          shell = { check_interactive = function() end, check_background_op = function() end },
+          mode = { get = function() return { access = "full" } end },
+          task = { alloc = function() return 1 end, wait = function() return { content = "done" } end },
+          process = {
+            spawn_bg = function(_, opts)
+              launch = { notify = opts.notify_on_completion }
+              return "proc_1"
+            end,
+            run_streaming = function(_, _, _, opts) launch = opts end,
+          },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install bash fixtures");
+    lua.load(BASH_LUA).exec().expect("load bash tool");
+    lua.load(
+        r#"
+        local props = bash_tool.parameters.properties
+        assert(props.run_mode.type == "string")
+        assert(table.concat(props.run_mode.enum, ",") == "foreground,background,background_no_followup")
+        assert(props.background == nil and props.notify_on_completion == nil)
+
+        local function check(args, notify, timeout_ms, background_on_timeout)
+          args.command = "echo ok"
+          launch = nil
+          local summary = bash_tool.summary(args)[1][2].text
+          local result = bash_tool.execute(args, {})
+          assert(not result.is_error, result.content)
+          if notify ~= nil then
+            assert(summary == "background")
+            assert(launch.notify == notify)
+            assert(result.metadata.background and result.metadata.background_id == "proc_1")
+          else
+            assert(summary:match("^%(timeout:"))
+            assert(result.content == "done" and result.metadata == nil)
+            assert(launch.timeout_ms == timeout_ms)
+            assert(launch.background_on_timeout == background_on_timeout)
+          end
+        end
+
+        check({}, nil, 120000, true)
+        check({ run_mode = "foreground", timeout_ms = 2000, background_on_timeout = false }, nil, 2000, false)
+        check({ run_mode = "background" }, true)
+        check({ run_mode = "background_no_followup" }, false)
+
+        for _, invalid in ipairs({ "detached", false }) do
+          launch = nil
+          local result = bash_tool.execute({ command = "echo ok", run_mode = invalid }, {})
+          assert(result.is_error and result.content:find("run_mode") and launch == nil)
+        end
+        "#,
+    )
+    .exec()
+    .expect("check bash run modes");
 }
 
 fn load_web_fetch(lua: &mlua::Lua) {

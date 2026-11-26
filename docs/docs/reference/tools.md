@@ -144,8 +144,8 @@ the next call.
 | ----------------------- | --------------------------------------------------------------------------- |
 | `command`               | Shell command to execute (required)                                         |
 | `description`           | Short (max 10 words) description of what this command does                  |
-| `timeout_ms`            | Timeout in milliseconds (default: 120000, max: 600000)                      |
-| `background`            | Start the command in the background and return immediately (default: false) |
+| `timeout_ms`            | Foreground timeout in milliseconds (default: 120000, max: 600000)           |
+| `run_mode`              | `foreground` (default), `background`, or `background_no_followup`           |
 | `background_on_timeout` | Move a foreground command to the background if it times out (default: true) |
 | `access`                | Sandbox level: `read`, `write` or `full` (default: the current mode's level) |
 
@@ -161,10 +161,15 @@ the next call.
 - The call can be cancelled from the UI while it is still foreground
 - Each job runs in its own systemd scope on supported Linux systems, with a
   process-group fallback on Unix and a Job Object on Windows
-- `background=true` starts the command in the background immediately and returns
-  an opaque job ID such as `proc_123`; the OS PID is tracked separately
-- With `background_on_timeout=true` (default), a foreground command that reaches
-  `timeout_ms` keeps running as the same supervised background job
+- `foreground` waits for the command's result. With `background_on_timeout=true`
+  (default), a command that reaches `timeout_ms` keeps running as the same
+  supervised background job and its result is delivered on exit
+- `background` returns a job ID such as `proc_123` without waiting for exit.
+  smelt delivers the result to the agent on exit and starts a follow-up turn if
+  needed. Use this for long builds or tests
+- `background_no_followup` also returns a job ID, but the job does not make
+  the session wait or deliver a result to the agent on exit. Use this for
+  servers or watchers. You can still inspect their output by job ID
 - Linux cgroup OOM termination is reported separately from an ordinary signal
 - At most 64 shell jobs run concurrently; excess spawns fail instead of allowing
   unbounded process and output growth
