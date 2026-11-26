@@ -9629,3 +9629,48 @@ fn plugin_tool_commands_run_in_the_sandbox_of_their_call() {
     assert!(content.contains("hunter2"), "{content}");
     assert!(written.exists());
 }
+
+#[test]
+fn streamed_summary_parts_keep_earlier_parts_shown_once() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 24);
+    app.start_turn(1);
+    app.render_to_frame();
+    let parts = [
+        ("a", "Checking", "First body."),
+        ("b", "Weighing a much longer second title", "Second body."),
+        ("c", "Deciding", "Third body."),
+    ];
+    for (index, (id, title, body)) in parts.iter().enumerate() {
+        app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartStarted {
+            id: (*id).into(),
+            kind: protocol::ReasoningKind::Summary,
+        }));
+        let text: Vec<char> = format!("**{title}**\n\n{body}").chars().collect();
+        for chunk in text.chunks(5) {
+            app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartDelta {
+                id: (*id).into(),
+                kind: protocol::ReasoningKind::Summary,
+                title: None,
+                delta: chunk.iter().collect(),
+            }));
+            for _ in 0..3 {
+                let frame = app.render_to_frame().text();
+                for (_, _, earlier) in &parts[..index] {
+                    assert_eq!(frame.matches(earlier).count(), 1, "{earlier:?} in\n{frame}");
+                }
+                app.clock.advance(std::time::Duration::from_millis(15));
+            }
+        }
+        app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartFinished {
+            id: (*id).into(),
+            kind: protocol::ReasoningKind::Summary,
+            title: Some((*title).into()),
+            content: (*body).into(),
+        }));
+    }
+    let frame = app.render_to_frame().text();
+    for (_, _, body) in parts {
+        assert_eq!(frame.matches(body).count(), 1, "{body:?} in\n{frame}");
+    }
+}

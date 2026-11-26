@@ -17,7 +17,6 @@ use smelt_view::transcript_buf::TranscriptRowAnchor;
 
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_transcript::content::transcript::Transcript;
-use smelt_transcript::transcript_content::TranscriptContent;
 use smelt_transcript::transcript_model::{
     Block, BlockHistory, BlockId, Status, StoredBlockWithId, ToolOutputRef, ToolStatus,
     TranscriptBlockRecordWithId,
@@ -159,7 +158,7 @@ pub(crate) struct ReasoningSummarySnapshot {
     pub(crate) id: BlockId,
     pub(crate) title: Option<String>,
     pub(crate) summary_titles: Vec<String>,
-    pub(crate) content: TranscriptContent,
+    pub(crate) content: String,
 }
 
 pub(super) fn reasoning_summary_block(
@@ -184,14 +183,14 @@ pub(super) fn reasoning_summary_block(
     }
     if !body.is_empty() {
         if !content.is_empty() {
-            content.push_owned("\n".into());
+            content.push('\n');
         }
-        content.push_owned(body.to_string());
+        content.push_str(body);
     }
     Block::Thinking {
         title: title.or_else(|| previous.and_then(|previous| previous.title.clone())),
         summary_titles,
-        content,
+        content: content.into(),
         kind: protocol::ReasoningKind::Summary,
     }
 }
@@ -1500,7 +1499,7 @@ impl TranscriptDocument {
                 id,
                 title: title.clone(),
                 summary_titles: summary_titles.clone(),
-                content: content.clone(),
+                content: content.snapshot(),
             }),
             _ => None,
         };
