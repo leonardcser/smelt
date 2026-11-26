@@ -219,11 +219,12 @@ function M.open(opts)
     v.preview:cursor(0)
   end
 
-  -- Move the sidebar cursor without treating it as a selection by the user.
+  -- Move the sidebar cursor to a row whose selection the panes already
+  -- show, so its cursor event changes nothing. `v.shown_row` is that row.
   -- Scroll first: setting the scroll keeps the cursor on its screen row.
   local function place_cursor(v, row)
     if not row then return end
-    v.placed = row
+    v.shown_row = row
     v.sidebar:cursor(row)
   end
 
@@ -697,12 +698,14 @@ function M.open(opts)
     v.sidebar_buf:styled(rows)
   end
 
-  -- Draw the list again where it stands, such as when totals arrive.
+  -- Draw the list again where it stands, such as when totals arrive. The
+  -- cursor may have moved since the last selection, so its move still
+  -- selects.
   local function redraw_list(v)
     if v.opened then return end
     local row = v.sidebar:cursor() or 0
     render_list(v)
-    place_cursor(v, row)
+    v.sidebar:cursor(row)
   end
 
   -- Totals need a diff of every commit, so they load after the list.
@@ -734,9 +737,9 @@ function M.open(opts)
     return lines
   end
 
-  local function select_entry(v, force)
+  -- Show the list entry under the cursor.
+  local function select_entry(v)
     local row = v.sidebar:cursor() or 0
-    if not force and row == v.row then return end
     v.row = row
     cancel_preview(v)
     v.selected = nil
@@ -801,7 +804,7 @@ function M.open(opts)
         local row = v.sidebar:cursor() or 0
         render_list(v)
         place_cursor(v, append and math.min(row, #v.entries - 1) or 0)
-        select_entry(v, true)
+        select_entry(v)
       end
       if v.name == current then render_header() end
       load_stats(v)
@@ -835,7 +838,7 @@ function M.open(opts)
     render_list(v)
     v.sidebar:scroll(v.list_top or 0)
     place_cursor(v, v.row or 0)
-    select_entry(v, true)
+    select_entry(v)
     focus_pane(v, "files")
   end
 
@@ -852,22 +855,24 @@ function M.open(opts)
   -- ── sidebar navigation ───────────────────────────────────────────────
 
   local function on_cursor(v, row)
-    -- A move that a later placement already superseded is stale.
-    if row ~= v.sidebar:cursor() then return end
-    local placed = v.placed
-    v.placed = nil
-    if placed == row then v.last_row = row; return end
+    -- A move that a later move already superseded is stale, and the shown
+    -- row needs nothing.
+    if row ~= v.sidebar:cursor() or row == v.shown_row then return end
     -- A question is about the old selection.
     dismiss()
     local files = files_of(v)
-    if not files then select_entry(v); return end
+    if not files then
+      v.shown_row = row
+      select_entry(v)
+      return
+    end
     local last = files.tree:document():row_count() - 1
     if not files.tree:node(row) and row > 0 and row < last then
       -- Vim motions may land on the blank row between sections; step over it.
-      v.sidebar:cursor(row + (row >= (v.last_row or 0) and 1 or -1))
+      v.sidebar:cursor(row + (row >= (v.shown_row or 0) and 1 or -1))
       return
     end
-    v.last_row = row
+    v.shown_row = row
     if v.name == "status" then
       select_status_row(row)
       return
@@ -1026,7 +1031,7 @@ function M.open(opts)
       if node and node.children then v.press = { tree = files.tree, row = row } end
       -- Clicking a file or commit shows it from the top, even when selected.
       if node and (node.index or node.commit) then
-        v.placed = row
+        v.shown_row = row
         if v.name == "status" then select_status_row(row) else show_file(v, files, node.index) end
       end
     end)
@@ -1039,10 +1044,8 @@ function M.open(opts)
       end
     end)
     v.sidebar:on("resized", function()
-      if not files_of(v) and v.loaded then
-        render_list(v)
-        place_cursor(v, v.row or 0)
-      end
+      -- Labels are cut to the width.
+      if v.loaded then redraw_list(v) end
       -- A dragged split moves the divider joint in the header line.
       if v.name == current then render_header() end
     end)

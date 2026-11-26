@@ -4478,3 +4478,52 @@ fn diff_preview_pan_stops_at_row_end_and_each_file_starts_at_left_edge() {
     assert_eq!(left(&app), 0);
     assert!(app.render_to_frame().text().contains("last change"));
 }
+
+#[test]
+fn diff_list_move_while_totals_load_shows_the_new_commit() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(120, 30);
+    app.run_lua_result(r#"
+        local commits = {}
+        for i = 1, 5 do
+            commits[i] = { id = string.rep(tostring(i), 40), subject = 'commit ' .. i,
+                author = 'a', age = 'now', message = 'commit ' .. i }
+        end
+        smelt.git.history = function() return { commits = commits, head = commits[1].id, more = false } end
+        smelt.git.stats = function(o)
+            smelt.sleep(100)
+            local out = {}
+            for _, id in ipairs(o.commits) do out[id] = { additions = 1, deletions = 0 } end
+            return out
+        end
+        smelt.git.diff = function(o)
+            local n = o.revision and o.revision:sub(1, 1) or 'w'
+            local path = 'file' .. n .. '.rs'
+            return { diff = smelt.diff.parse('diff --git a/' .. path .. ' b/' .. path .. '\n@@ -0,0 +1 @@\n+x\n') }
+        end
+        smelt.cmd.run('diff history')
+    "#).unwrap();
+    app.settle_lua();
+    paint_diff(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("file1.rs"), "{frame}");
+    // The totals redraw the list after `j` moves the cursor and before its
+    // cursor event dispatches.
+    app.type_char('j');
+    app.feed_one(SourceEvent::Tick(200));
+    app.tick_timers();
+    app.settle_lua();
+    paint_diff(&mut app);
+    app.settle_lua();
+    paint_diff(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("2222222 commit 2 +1"),
+        "totals arrived:\n{frame}"
+    );
+    assert!(
+        frame.contains("file2.rs"),
+        "the moved-to commit shows:\n{frame}"
+    );
+    assert!(frame.contains("22222222 - first parent"), "{frame}");
+}
