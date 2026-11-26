@@ -98,7 +98,9 @@ impl TuiApp {
         use protocol::NativeCompaction;
         match state {
             NativeCompaction::Started => self.begin_native_compaction(),
-            NativeCompaction::Finished { .. } => self.end_native_compaction(),
+            NativeCompaction::Finished { .. } | NativeCompaction::Stopped => {
+                self.end_native_compaction()
+            }
             NativeCompaction::Failed { message } => {
                 self.end_native_compaction();
                 self.notify_warn(match message {

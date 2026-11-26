@@ -65,6 +65,8 @@ pub enum NativeCompaction {
     Failed {
         message: Option<String>,
     },
+    /// It stopped with no result, such as when interrupted.
+    Stopped,
 }
 
 /// Typed error payload returned alongside `EngineAskResponse` when the

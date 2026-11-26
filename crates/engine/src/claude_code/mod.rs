@@ -1105,13 +1105,23 @@ impl Runtime<'_> {
             return Ok(false);
         }
         let state = match frame["subtype"].as_str() {
-            Some("status") if frame["compact_result"] == "failed" => {
-                protocol::NativeCompaction::Failed {
-                    message: frame["compact_error"].as_str().map(str::to_owned),
+            // Each status says whether Claude Code compacts. A success leaves
+            // the report to its boundary.
+            Some("status") => {
+                let compacting = frame["status"] == "compacting";
+                let was_compacting = self.transcript.compacting();
+                self.transcript.set_compacting(compacting);
+                if compacting {
+                    protocol::NativeCompaction::Started
+                } else if frame["compact_result"] == "failed" {
+                    protocol::NativeCompaction::Failed {
+                        message: frame["compact_error"].as_str().map(str::to_owned),
+                    }
+                } else if was_compacting && frame["compact_result"] != "success" {
+                    protocol::NativeCompaction::Stopped
+                } else {
+                    return Ok(false);
                 }
-            }
-            Some("status") if frame["status"] == "compacting" => {
-                protocol::NativeCompaction::Started
             }
             Some("compact_boundary") => {
                 let tokens = |key: &str| {
@@ -1130,6 +1140,7 @@ impl Runtime<'_> {
                 ))
                 .await?;
                 let before_tokens = tokens("pre_tokens");
+                self.transcript.set_compacting(false);
                 self.transcript
                     .note(HistoryItem::note(protocol::HistoryNote::compaction(
                         before_tokens,

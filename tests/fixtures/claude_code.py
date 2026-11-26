@@ -373,10 +373,13 @@ while True:
             tool_result("steer-tool", "found")
     if SCENARIO == "peer-message":
         peer_message()
-    if SCENARIO in ("compact", "compact-failed"):
+    if SCENARIO in ("compact", "compact-failed", "compact-stopped"):
         send({"type": "assistant", "uuid": "before-compact", "message": {"id": "before-compact", "content": [{"type": "text", "text": "before"}], "usage": {"input_tokens": 27445, "output_tokens": 0}}, "parent_tool_use_id": None})
         send({"type": "system", "subtype": "status", "status": "compacting", "session_id": SESSION, "uuid": "compacting"})
-        if SCENARIO == "compact":
+        peer_message()
+        if SCENARIO == "compact-stopped":
+            send({"type": "system", "subtype": "status", "status": None, "session_id": SESSION, "uuid": "compact-stopped"})
+        elif SCENARIO == "compact":
             send({"type": "system", "subtype": "status", "status": None, "compact_result": "success", "session_id": SESSION, "uuid": "compacted"})
             send({"type": "system", "subtype": "compact_boundary", "session_id": SESSION, "uuid": "boundary", "compact_metadata": {"trigger": "auto", "pre_tokens": 27445, "post_tokens": 1192}})
             recount = receive()

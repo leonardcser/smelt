@@ -36,6 +36,9 @@ pub(super) struct Transcript {
     /// A message streams and has not ended. Notes wait for it like they wait
     /// for a step's tool results.
     streaming: bool,
+    /// Claude Code compacts the conversation. Notes wait for it to end, like
+    /// they wait for a message.
+    compacting: bool,
     reasoning_id: String,
     thinking: HashMap<u64, (String, String)>,
     drafts: HashMap<u64, (String, String, String)>,
@@ -65,6 +68,7 @@ impl Transcript {
             partial_text: String::new(),
             partial_reasoning: String::new(),
             streaming: false,
+            compacting: false,
             reasoning_id: String::new(),
             thinking: HashMap::new(),
             drafts: HashMap::new(),
@@ -173,6 +177,18 @@ impl Transcript {
 
     fn take_notes(&mut self) -> Vec<HistoryItem> {
         protocol::in_arrival_runs(std::mem::take(&mut self.notes), |item| item)
+    }
+
+    /// Whether Claude Code compacts the conversation.
+    pub(super) fn compacting(&self) -> bool {
+        self.compacting
+    }
+
+    /// Holds notes back while Claude Code compacts, and records those that
+    /// waited once it stops.
+    pub(super) fn set_compacting(&mut self, compacting: bool) {
+        self.compacting = compacting;
+        self.flush();
     }
 
     /// Whether every tool call has its result.
@@ -519,7 +535,7 @@ impl Transcript {
                 step.tools,
             )));
         }
-        if !self.pending.is_empty() || self.streaming {
+        if !self.pending.is_empty() || self.streaming || self.compacting {
             return;
         }
         for item in self.take_notes() {
@@ -548,6 +564,7 @@ impl Transcript {
         self.partial_text.clear();
         self.partial_reasoning.clear();
         self.streaming = false;
+        self.compacting = false;
         self.flush();
     }
 
@@ -899,6 +916,28 @@ mod tests {
         assert_eq!(transcript.held_notes(), joining);
         transcript.abandon();
         assert_eq!(transcript.committed, joining.map(HistoryItem::note));
+        assert!(transcript.held_notes().is_empty());
+    }
+
+    #[test]
+    fn a_note_waits_for_the_compaction_to_end() {
+        let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::EngineEventSender {
+            output_tx,
+            route: None,
+        };
+        let mut transcript = Transcript::new(tx, "claude-code".into(), 1, 0);
+        transcript.set_compacting(true);
+        let note = protocol::HistoryNote::notice("done");
+        transcript.note(HistoryItem::note(note.clone()));
+        assert!(
+            transcript.committed.is_empty(),
+            "it waits for the compaction"
+        );
+        assert_eq!(transcript.held_notes(), std::slice::from_ref(&note));
+
+        transcript.set_compacting(false);
+        assert_eq!(transcript.committed, [HistoryItem::note(note)]);
         assert!(transcript.held_notes().is_empty());
     }
 

@@ -2816,25 +2816,67 @@ async fn claude_codes_compaction_is_reported_and_resets_the_context_reading() {
 
 #[tokio::test]
 #[serial(claude_code)]
-async fn claude_codes_failed_compaction_is_reported_with_its_error() {
-    let fixture = Fixture::new("compact-failed");
-    let mut handle = fixture.handle();
-    handle.send(payload(fixture.root.path(), 1, Vec::new()));
-    let events = events_until_complete(&mut handle).await;
-    let compaction: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            EngineEvent::NativeCompaction { state } => Some(state.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        compaction,
-        [
-            protocol::NativeCompaction::Started,
-            protocol::NativeCompaction::Failed {
+async fn notes_wait_for_claude_codes_compaction_however_it_ends() {
+    use protocol::NativeCompaction;
+    let is_message = |note: &protocol::HistoryNote| {
+        matches!(note, protocol::HistoryNote::Delivery {
+            event: protocol::DeliveryEvent::AgentMessage { from },
+            ..
+        } if from == "worker")
+    };
+    for (scenario, end) in [
+        (
+            "compact",
+            NativeCompaction::Finished {
+                before_tokens: Some(27445),
+                after_tokens: Some(1192),
+            },
+        ),
+        (
+            "compact-failed",
+            NativeCompaction::Failed {
                 message: Some("Could not compact.".into()),
             },
-        ]
-    );
+        ),
+        ("compact-stopped", NativeCompaction::Stopped),
+    ] {
+        let fixture = Fixture::new(scenario);
+        let mut handle = fixture.handle();
+        handle.send(payload(fixture.root.path(), 1, Vec::new()));
+        let events = events_until_complete(&mut handle).await;
+        let compaction: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::NativeCompaction { state } => Some(state.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compaction, [NativeCompaction::Started, end], "{scenario}");
+        let started = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    EngineEvent::NativeCompaction {
+                        state: NativeCompaction::Started
+                    }
+                )
+            })
+            .unwrap();
+        let held = events
+            .iter()
+            .position(|event| {
+                matches!(event, EngineEvent::NativeHeldNotes { notes }
+                    if notes.iter().any(is_message))
+            })
+            .unwrap_or_else(|| panic!("{scenario}: the message waits for the compaction"));
+        let joined = events
+            .iter()
+            .position(|event| {
+                matches!(event, EngineEvent::HistoryAppended { delta, .. }
+                    if delta.items.iter().any(|item| item.as_note().is_some_and(is_message)))
+            })
+            .unwrap_or_else(|| panic!("{scenario}: the message joins once it ends"));
+        assert!(started < held && held < joined, "{scenario}");
+    }
 }
