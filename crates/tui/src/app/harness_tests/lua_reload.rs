@@ -1916,6 +1916,20 @@ fn tilde_lua_cwd_change_resolves_from_runtime_home() {
 }
 
 #[test]
+fn cwd_command_switches_the_working_directory() {
+    let environment_guard = test_environment_guard();
+    let target_dir = tempfile::TempDir::new().expect("create cwd command tempdir");
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
+
+    app.type_text(&format!("/cwd {}", target.display()));
+    app.press(KeyCode::Enter);
+    app.wait_for_workspace();
+
+    assert_eq!(app.core_probe().env.cwd(), target);
+}
+
+#[test]
 fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");

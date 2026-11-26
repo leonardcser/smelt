@@ -41,6 +41,7 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/mcp`                                   | Show MCP servers, lifecycle state, and tool names |
 | `/worktree [name] [--base ref]`          | Pick, create, or enter a managed git worktree |
 | `/wt [name] [-b ref]`                    | Alias for `/worktree` |
+| `/cwd [path]`                            | Show or switch the working directory |
 | `/help`                                  | Show keybindings (also `F1`) |
 | `/docs`                                  | Open the smelt documentation in your browser |
 | `/tip`                                   | Show a discovery tip, even when automatic tips are off |
