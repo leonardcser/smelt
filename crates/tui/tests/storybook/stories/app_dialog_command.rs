@@ -156,7 +156,7 @@ app_story!(diff_overlay_grouped, |ctx| {
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    git(&["init", "-q"]);
+    git(&["init", "-qb", "main"]);
     git(&["config", "user.name", "test"]);
     git(&["config", "user.email", "test@example.invalid"]);
     std::fs::write(dir.path().join("parser.rs"), "let strict = false;\n").unwrap();

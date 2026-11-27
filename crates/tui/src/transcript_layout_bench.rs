@@ -275,10 +275,10 @@ fn push_many_tiny_blocks_transcript_fixture(
                 summary: text,
                 kept: Vec::new(),
             }),
-            _ => transcript.push(Block::ProcessStatus {
+            _ => transcript.push(Block::Delivery {
                 text,
-                event: None,
-                output: None,
+                event: protocol::DeliveryEvent::default(),
+                body: None,
             }),
         }
         i += 1;

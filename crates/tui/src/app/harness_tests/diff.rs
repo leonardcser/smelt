@@ -967,7 +967,7 @@ async fn diff_groups_show_distinct_partial_patches_totals_and_file_dividers() {
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    git(&["init", "-q"]);
+    git(&["init", "-qb", "main"]);
     git(&["config", "user.name", "test"]);
     git(&["config", "user.email", "test@example.invalid"]);
     for path in ["a.rs", "b.rs"] {
