@@ -218,6 +218,25 @@ function smelt.process.run(cmd, args, opts)
   return external_or_err(function(id) internal.process.__start_run(id, cmd, args, opts) end)
 end
 
+-- Run `cmd` like `smelt.process.run` and return its stdout without trailing
+-- newlines, the way shell command substitution does. Returns `(nil, err)`
+-- when the command cannot start, times out or exits with a non-zero status;
+-- `err` names the command and ends with its stderr. Accepts the same `opts`
+-- and must run in the same contexts as `smelt.process.run`.
+---@type fun(cmd: string, args: string[]?, opts: table?): string?, string?
+function smelt.process.capture(cmd, args, opts)
+  local result, err = smelt.process.run(cmd, args, opts)
+  if not result then return nil, cmd .. ": " .. err end
+  if result.timed_out then return nil, cmd .. " timed out" end
+  if result.exit_code ~= 0 then
+    local message = cmd .. " exited with status " .. result.exit_code
+    local stderr = result.stderr:gsub("%s+$", "")
+    if stderr ~= "" then message = message .. ": " .. stderr end
+    return nil, message
+  end
+  return (result.stdout:gsub("[\r\n]+$", "")), nil
+end
+
 --- Load separate unstaged (index to worktree) and staged (HEAD to index) changes
 --- without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
 --- defaults to the runtime workspace and `context` to 3. The snapshot is stable

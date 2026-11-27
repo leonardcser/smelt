@@ -1897,6 +1897,39 @@ async fn process_run_happy_path() {
     assert!(err.is_none());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn process_capture_returns_trimmed_stdout_or_failure() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.spawn(function()
+                OUT = smelt.process.capture("sh", { "-c", "printf 'a\nb\n\n'" })
+                local failed, err = smelt.process.capture("sh", { "-c", "echo boom >&2; exit 3" })
+                FAILED = failed == nil
+                ERR = err
+                DONE = true
+            end)
+            "#,
+        )
+        .exec()
+        .expect("spawn capture");
+    assert!(
+        pump_until_async(&rt, 2000, |rt| rt
+            .lua
+            .globals()
+            .get::<bool>("DONE")
+            .unwrap_or(false))
+        .await
+    );
+    assert_eq!(get_global::<String>(&rt, "OUT"), "a\nb");
+    assert!(get_global::<bool>(&rt, "FAILED"));
+    assert_eq!(
+        get_global::<String>(&rt, "ERR"),
+        "sh exited with status 3: boom"
+    );
+}
+
 #[test]
 fn runtime_constructor_defers_bootstrap_until_explicit_load() {
     let root = tempfile::tempdir().expect("runtime root");

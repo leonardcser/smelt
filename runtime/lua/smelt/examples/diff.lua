@@ -11,11 +11,11 @@ local function notify_err(msg)
 end
 
 local function git_root()
-	local res, err = smelt.process.run("git", { "rev-parse", "--show-toplevel" })
-	if err or not res or res.exit_code ~= 0 then
+	local root = smelt.process.capture("git", { "rev-parse", "--show-toplevel" })
+	if not root then
 		return nil, "not in a git repo"
 	end
-	return (res.stdout or ""):gsub("%s+$", ""), nil
+	return root, nil
 end
 
 local function head_blob(root, rel)

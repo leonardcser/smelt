@@ -8,6 +8,16 @@
 ---@class smelt.process
 local process = {}
 
+--- Run `cmd` like `smelt.process.run` and return its stdout without trailing
+--- newlines, the way shell command substitution does. Returns `(nil, err)`
+--- when the command cannot start, times out or exits with a non-zero status;
+--- `err` names the command and ends with its stderr. Accepts the same `opts`
+--- and must run in the same contexts as `smelt.process.run`.
+---@see smelt.process.run
+---@see smelt.process.run
+---@type fun(cmd: string, args: string[]?, opts: table?): string?, string?
+process.capture = nil
+
 --- Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Without one, moves the native agent's foreground shell commands and agents to the background, where their transcript blocks show them at once; they return, with an error notification, when the agent refuses or does not answer. Returns true when a detach request was sent.
 ---@type fun(): boolean
 process.detach_foreground = nil

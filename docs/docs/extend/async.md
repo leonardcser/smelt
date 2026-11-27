@@ -83,7 +83,9 @@ local results = smelt.task.all(
 ## Files, processes and search
 
 `smelt.process.run` and `smelt.grep.run` wait without blocking the UI and must run
-in a coroutine. `smelt.fs.read_async` and `write_async` do the same for large
+in a coroutine. `smelt.process.capture` runs a command the same way and returns
+only its trimmed stdout, or `nil, err` when it fails or exits non-zero.
+`smelt.fs.read_async` and `write_async` also wait without blocking, for large
 files, while `smelt.fs.read` and `write` are synchronous and fine for small
 config-time reads.
 
@@ -95,6 +97,9 @@ smelt.spawn(function()
 
   local out = smelt.process.run("ripgrep", { "TODO", "." })
   if out then print(out.stdout) end
+
+  local root, git_err = smelt.process.capture("git", { "rev-parse", "--show-toplevel" })
+  print(root or git_err)
 
   local matches = smelt.grep.run("TODO", ".", { line_numbers = true })
   if matches then print(matches.stdout) end

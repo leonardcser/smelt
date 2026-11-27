@@ -11,6 +11,18 @@ description: "Run subprocesses and manage contained shell jobs. Lua API referenc
 
 Run subprocesses and manage contained shell jobs. Background jobs are non-blocking; foreground jobs stream bounded output and wait for completion.
 
+## `smelt.process.capture`
+
+```lua
+fun(cmd: string, args: string[]?, opts: table?): string?, string?
+```
+
+Run `cmd` like `smelt.process.run` and return its stdout without trailing
+newlines, the way shell command substitution does. Returns `(nil, err)`
+when the command cannot start, times out or exits with a non-zero status;
+`err` names the command and ends with its stderr. Accepts the same `opts`
+and must run in the same contexts as `smelt.process.run`.
+
 ## `smelt.process.detach_foreground`
 
 ```lua
