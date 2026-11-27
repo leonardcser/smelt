@@ -103,7 +103,7 @@ fn double_esc_can_rewind_after_cancelling_quota_pause() {
 
         app.press(KeyCode::Esc);
         app.press(KeyCode::Esc);
-        drive_lua_tasks(&mut app);
+        app.wait_for_lua_dialog();
 
         assert!(
             app.state().active_modal.is_some(),
