@@ -42,6 +42,7 @@ never both, and passing one to the other API raises an error.
 | event  | `input_submit`    | submitted text                           | You submitted a message |
 | event  | `shutdown`        | none                                     | smelt is about to quit |
 | signal | `agent_mode`      | `"read"`, `"plan"`, `"write"`, `"yolo"` | The mode changed |
+| signal | `cwd_root`        | canonical absolute path (string)         | The workspace root changed: the Git worktree that contains the cwd, or the cwd outside a repository |
 
 The complete lists are the `smelt.events.Name` and `smelt.signal.Name` aliases in
 [Types](../reference/api/types.md).

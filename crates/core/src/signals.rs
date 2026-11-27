@@ -620,6 +620,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("cwd_branch"),
     state("cwd_managed_worktree"),
     state("cwd_project"),
+    state("cwd_root"),
     state("cwd_worktree"),
     state("cwd_worktree_path"),
     state("errors"),
@@ -954,6 +955,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("cwd_branch", String::new());
     signals.declare("cwd_managed_worktree", false);
     signals.declare("cwd_project", String::new());
+    signals.declare("cwd_root", String::new());
     signals.declare("cwd_worktree", String::new());
     signals.declare("cwd_worktree_path", String::new());
     signals.declare("session_epoch", 0u64);

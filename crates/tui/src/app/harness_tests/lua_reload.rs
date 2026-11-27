@@ -2026,6 +2026,13 @@ async fn enter_worktree_tool_changes_the_process_cwd() {
     assert_eq!(app.core_probe().env.cwd(), target);
     assert_eq!(std::env::current_dir().unwrap(), target);
     assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
+    assert_eq!(
+        app.core_probe()
+            .signals
+            .get::<String>("cwd_root")
+            .as_deref(),
+        Some(expected.as_ref())
+    );
     assert!(!app.workspace_probe().has_pending_change());
     assert!(app.actions().iter().any(|action| matches!(
         action,

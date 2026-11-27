@@ -2397,25 +2397,7 @@ impl TuiApp {
         let tps = self.working.display_tps().unwrap_or(0.0);
         self.core.signals.publish_if_changed("tps", tps);
 
-        self.core
-            .signals
-            .publish_if_changed("cwd_project", self.workspace.project().to_owned());
-        self.core
-            .signals
-            .publish_if_changed("cwd_branch", self.workspace.branch().to_owned());
-        self.core
-            .signals
-            .publish_if_changed("branch", self.workspace.branch().to_owned());
-        self.core
-            .signals
-            .publish_if_changed("cwd_worktree", self.workspace.worktree().to_owned());
-        self.core.signals.publish_if_changed(
-            "cwd_worktree_path",
-            self.workspace.worktree_path().to_owned(),
-        );
-        self.core
-            .signals
-            .publish_if_changed("cwd_managed_worktree", self.workspace.is_managed_worktree());
+        self.publish_workspace_signals();
 
         let task_label = self.task_label.clone().unwrap_or_default();
         self.core

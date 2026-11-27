@@ -200,6 +200,12 @@ impl WorkspaceState {
         &self.context.project_name
     }
 
+    /// Canonical root of the workspace: the Git worktree that contains the
+    /// cwd, or the cwd itself outside a repository.
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.context.active_root
+    }
+
     pub(super) fn project_context(&self) -> smelt_worktree::ProjectContext {
         self.context.clone()
     }
@@ -584,13 +590,17 @@ impl TuiApp {
         self.publish_workspace_signals();
     }
 
-    fn publish_workspace_signals(&mut self) {
+    pub(super) fn publish_workspace_signals(&mut self) {
         self.core
             .signals
             .publish_if_changed("cwd", self.workspace.cwd().to_owned());
         self.core
             .signals
             .publish_if_changed("cwd_project", self.workspace.project().to_owned());
+        self.core.signals.publish_if_changed(
+            "cwd_root",
+            self.workspace.root().to_string_lossy().into_owned(),
+        );
         self.core
             .signals
             .publish_if_changed("cwd_branch", self.workspace.branch().to_owned());
