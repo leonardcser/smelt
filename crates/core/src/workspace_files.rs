@@ -969,7 +969,10 @@ fn run_watcher(
     let watch_index = index.clone();
     let watch_root = root.clone();
     let tree_watch = kind.tree_watch();
-    let watches_tree = tree_watch.is_some();
+    let mut coverage = tree_watch.map(|watch| TreeCoverage::new(&root, watch, budget));
+    let recursive = matches!(coverage, Some(TreeCoverage::Recursive));
+    let watches_dirs = matches!(coverage, Some(TreeCoverage::Dirs(_)));
+    let mut tree_events = tree_watch.map(|watch| TreeEvents::new(root.clone(), watch, recursive));
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
@@ -977,10 +980,13 @@ fn run_watcher(
                 && watch_index
                     .as_ref()
                     .is_some_and(|index| event.paths.contains(index));
-            if index_changed || (watches_tree && relevant_event(&watch_root, &event)) {
+            let tree_changed = tree_events
+                .as_mut()
+                .is_some_and(|events| events.relevant(&event));
+            if index_changed || tree_changed {
                 let _ = worker_tx.send(WorkerMsg::Changed);
             }
-            if watches_tree {
+            if watches_dirs {
                 forward_directory_changes(&watch_root, &event, &watch_tx);
             }
         },
@@ -995,31 +1001,50 @@ fn run_watcher(
         .as_ref()
         .and_then(|path| path.parent())
         .is_some_and(|dir| watcher.watch(dir, RecursiveMode::NonRecursive).is_ok());
-    let mut tree = match tree_watch {
-        Some(tree_watch) => {
-            let mut tree = WatchedTree::new(root.clone(), tree_watch, budget);
-            if let Err(reason) = tree.add(&mut watcher, &root) {
-                return stop_watching(&state, &root, &reason);
-            }
-            Some(tree)
-        }
-        None if index_watched => None,
-        None => return stop_watching(&state, &root, "git index is not watchable"),
+    let started = match &mut coverage {
+        Some(TreeCoverage::Recursive) => watcher
+            .watch(&root, RecursiveMode::Recursive)
+            .map_err(|err| err.to_string()),
+        Some(TreeCoverage::Dirs(tree)) => tree.add(&mut watcher, &root),
+        None if index_watched => Ok(()),
+        None => Err("git index is not watchable".to_string()),
     };
+    if let Err(reason) = started {
+        return stop_watching(&state, &root, &reason);
+    }
     if let Ok(mut state) = state.write() {
         state.watch = WatchState::Watching;
     }
 
     while let Ok(command) = watch_rx.recv() {
-        match (command, tree.as_mut()) {
-            (WatcherCommand::WatchDir(path), Some(tree)) => {
+        match (command, coverage.as_mut()) {
+            (WatcherCommand::WatchDir(path), Some(TreeCoverage::Dirs(tree))) => {
                 if let Err(reason) = tree.add(&mut watcher, &path) {
                     return stop_watching(&state, &root, &reason);
                 }
             }
-            (WatcherCommand::Forget(path), Some(tree)) => tree.forget(&path),
+            (WatcherCommand::Forget(path), Some(TreeCoverage::Dirs(tree))) => tree.forget(&path),
             (WatcherCommand::Shutdown, _) => break,
-            (WatcherCommand::WatchDir(_) | WatcherCommand::Forget(_), None) => {}
+            (WatcherCommand::WatchDir(_) | WatcherCommand::Forget(_), _) => {}
+        }
+    }
+}
+
+/// How a watcher follows a project tree. FSEvents follows a whole tree from
+/// one path, and every path costs it file descriptors, so macOS watches the
+/// root recursively. inotify needs a watch per directory, so other platforms
+/// add one per directory, within a budget.
+enum TreeCoverage {
+    Recursive,
+    Dirs(WatchedTree),
+}
+
+impl TreeCoverage {
+    fn new(root: &Path, watch: TreeWatch, budget: usize) -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Recursive
+        } else {
+            Self::Dirs(WatchedTree::new(root.to_path_buf(), watch, budget))
         }
     }
 }
@@ -1838,19 +1863,77 @@ fn kind_rank(kind: ItemKind) -> u8 {
     }
 }
 
-fn relevant_event(root: &Path, event: &notify::Event) -> bool {
-    if matches!(event.kind, EventKind::Access(_)) {
+/// Which events of a watched tree change its index.
+struct TreeEvents {
+    root: PathBuf,
+    watch: TreeWatch,
+    /// Whether each directory is one Git ignores, by path. Set when the watch
+    /// covers the whole tree, so the events of ignored directories arrive and
+    /// are dropped here; a watch per directory never covers them.
+    ignored_dirs: Option<HashMap<PathBuf, bool>>,
+}
+
+impl TreeEvents {
+    fn new(root: PathBuf, watch: TreeWatch, recursive: bool) -> Self {
+        Self {
+            root,
+            watch,
+            ignored_dirs: (recursive && watch.git_ignore).then(HashMap::new),
+        }
+    }
+
+    fn relevant(&mut self, event: &notify::Event) -> bool {
+        match event.kind {
+            EventKind::Access(_) | EventKind::Modify(notify::event::ModifyKind::Metadata(_)) => {
+                return false;
+            }
+            _ => {}
+        }
+        // A changed ignore file changes which files the index holds, and
+        // which directories are ignored.
+        let ignore_changed = self.watch.git_ignore
+            && event.paths.iter().any(|path| {
+                path.file_name().is_some_and(|name| name == ".gitignore")
+                    || path.ends_with(".git/info/exclude")
+            });
+        if ignore_changed {
+            if let Some(ignored_dirs) = &mut self.ignored_dirs {
+                ignored_dirs.clear();
+            }
+            return true;
+        }
+        event.paths.is_empty() || event.paths.iter().any(|path| self.relevant_path(path))
+    }
+
+    fn relevant_path(&mut self, path: &Path) -> bool {
+        let noisy =
+            relative_slash_path(&self.root, path).is_some_and(|path| is_noisy_relative_path(&path));
+        if noisy {
+            return false;
+        }
+        let Some(ignored_dirs) = &mut self.ignored_dirs else {
+            return true;
+        };
+        !path
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| *dir != self.root && dir.starts_with(&self.root))
+            .any(|dir| is_ignored_dir(self.watch, ignored_dirs, dir))
+    }
+}
+
+/// Whether Git ignores the directory `dir`. Only existing directories are
+/// remembered: a removed one may come back without being ignored.
+fn is_ignored_dir(watch: TreeWatch, known: &mut HashMap<PathBuf, bool>, dir: &Path) -> bool {
+    if let Some(&ignored) = known.get(dir) {
+        return ignored;
+    }
+    if !dir.is_dir() {
         return false;
     }
-    if let EventKind::Modify(notify::event::ModifyKind::Metadata(_)) = event.kind {
-        return false;
-    }
-    event.paths.is_empty()
-        || event.paths.iter().any(|path| {
-            relative_slash_path(root, path)
-                .map(|path| !is_noisy_relative_path(&path))
-                .unwrap_or(true)
-        })
+    let ignored = git_ignored(watch, dir);
+    known.insert(dir.to_path_buf(), ignored);
+    ignored
 }
 
 fn is_noisy_relative_path(path: &str) -> bool {
@@ -2180,19 +2263,42 @@ mod tests {
     #[test]
     fn watcher_filters_noisy_paths() {
         let root = PathBuf::from("/workspace");
-        let noisy_event = notify::Event {
-            kind: EventKind::Create(notify::event::CreateKind::File),
-            paths: vec![root.join("target/kept.txt")],
-            attrs: Default::default(),
-        };
-        assert!(!relevant_event(&root, &noisy_event));
+        let mut events = TreeEvents::new(root.clone(), TreeWatch { git_ignore: false }, false);
+        assert!(!events.relevant(&created(root.join("target/kept.txt"))));
+        assert!(events.relevant(&created(root.join("src/main.rs"))));
+    }
 
-        let source_event = notify::Event {
+    fn created(path: PathBuf) -> notify::Event {
+        notify::Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
-            paths: vec![root.join("src/main.rs")],
+            paths: vec![path],
             attrs: Default::default(),
-        };
-        assert!(relevant_event(&root, &source_event));
+        }
+    }
+
+    #[test]
+    fn recursive_git_watch_drops_events_of_ignored_directories() {
+        let project = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(project.path()).unwrap();
+        assert!(init_git(&root));
+        std::fs::write(root.join(".gitignore"), "results/\n").unwrap();
+        std::fs::create_dir_all(root.join("results/run")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let mut events = TreeEvents::new(root.clone(), TreeWatch { git_ignore: true }, true);
+        assert!(!events.relevant(&created(root.join("results/run/log.txt"))));
+        assert!(events.relevant(&created(root.join("src/main.rs"))));
+        // The files of a removed directory still change the index.
+        assert!(events.relevant(&created(root.join("gone/main.rs"))));
+
+        std::fs::write(root.join(".gitignore"), "").unwrap();
+        assert!(events.relevant(&created(root.join(".gitignore"))));
+        assert!(events.relevant(&created(root.join("results/run/log.txt"))));
+
+        let exclude = root.join(".git/info/exclude");
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(&exclude, "results/\n").unwrap();
+        assert!(events.relevant(&created(exclude)));
+        assert!(!events.relevant(&created(root.join("results/run/log.txt"))));
     }
 
     #[test]
@@ -2279,6 +2385,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn project_over_watch_budget_rescans_on_search() {
         let project = tempfile::tempdir().unwrap();
         for dir in ["a", "b", "c"] {
@@ -2308,6 +2415,36 @@ mod tests {
         std::fs::write(project.path().join("a/late.rs"), "").unwrap();
         files.projects[&key].state.write().unwrap().scanned_at =
             Instant::now().checked_sub(UNWATCHED_RESCAN_AFTER);
+        let response = wait_for_search(&mut files, &request, 1);
+        assert_eq!(response.items[0].path, "a/late.rs");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_watches_a_tree_of_any_size_with_one_path() {
+        let project = tempfile::tempdir().unwrap();
+        for dir in ["a", "b", "c"] {
+            std::fs::create_dir(project.path().join(dir)).unwrap();
+        }
+        let mut files = WorkspaceFiles {
+            watch_budget: 2,
+            ..WorkspaceFiles::default()
+        };
+        let request = SearchRequest {
+            query: "late".to_string(),
+            cwd: project.path().to_path_buf(),
+            limit: 20,
+            offset: 0,
+            include_dirs: false,
+            source: SearchSource::Workspace,
+        };
+        wait_for_search(&mut files, &request, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !files.status(project.path()).unwrap().watcher_ready {
+            assert!(Instant::now() < deadline, "watcher did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(project.path().join("a/late.rs"), "").unwrap();
         let response = wait_for_search(&mut files, &request, 1);
         assert_eq!(response.items[0].path, "a/late.rs");
     }
