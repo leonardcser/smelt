@@ -1366,7 +1366,8 @@ mod tests {
         run(&root, &["add", "."]);
         run(&root, &["commit", "-qm", "base"]);
         run(&root, &["worktree", "add", "-qb", "linked", "../linked"]);
-        let worktree = dir.path().join("linked");
+        // Git reports the worktree by its real path, as the snapshot does.
+        let worktree = std::fs::canonicalize(dir.path().join("linked")).unwrap();
         std::fs::write(worktree.join("tracked"), "staged\n").unwrap();
         run(&worktree, &["add", "tracked"]);
         std::fs::write(worktree.join("tracked"), "base\n").unwrap();
